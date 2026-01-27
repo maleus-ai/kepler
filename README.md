@@ -11,6 +11,7 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 - **File Watching**: Automatic service restart on file changes
 - **Lifecycle Hooks**: Run commands at various lifecycle stages (init, start, stop, restart, cleanup)
 - **Environment Variables**: Support for env vars and `.env` files
+- **Privilege Dropping**: Run services and hooks as specific users/groups (Unix only)
 - **Colored Logs**: Real-time log streaming with service-colored output
 - **Persistent Logs**: Logs survive daemon restarts and are stored on disk
 
@@ -113,6 +114,7 @@ hooks:
 services:
   database:
     command: ["docker", "compose", "up", "postgres"]
+    user: postgres              # Run as postgres user
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -123,6 +125,8 @@ services:
   backend:
     working_dir: ./apps/backend
     command: ["npm", "run", "dev"]
+    user: node                  # Run as node user
+    group: developers           # Override group
     depends_on:
       - database
     environment:
@@ -144,10 +148,14 @@ services:
         command: ["echo", "Backend started"]
       on_restart:
         run: echo "Backend restarting..."
+      on_stop:
+        run: ./cleanup.sh
+        user: daemon            # Run cleanup as daemon user (elevated)
 
   frontend:
     working_dir: ./apps/frontend
     command: ["npm", "run", "dev"]
+    user: "1000:1000"           # Run as uid:gid
     depends_on:
       - backend
     environment:
@@ -171,19 +179,55 @@ services:
 
 #### Service Options
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `command` | `string[]` | Command to run (required) |
-| `working_dir` | `string` | Working directory |
-| `depends_on` | `string[]` | Services that must be healthy first |
-| `environment` | `string[]` | Environment variables (`KEY=value`) |
-| `env_file` | `string` | Path to `.env` file |
-| `restart` | `no\|always\|on-failure` | Restart policy (default: `no`) |
-| `watch` | `string[]` | Glob patterns for file watching |
-| `healthcheck` | `object` | Health check configuration |
-| `hooks` | `object` | Service-specific hooks |
-| `logs.timestamp` | `bool` | Include timestamps in logs |
-| `logs.on_stop` | `clear\|retain` | Log retention on stop (default: `clear`) |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `command` | `string[]` | - | Command to run (required) |
+| `working_dir` | `string` | config dir | Working directory for the service |
+| `depends_on` | `string[]` | `[]` | Services that must be healthy first |
+| `environment` | `string[]` | `[]` | Environment variables (`KEY=value`) |
+| `env_file` | `string` | - | Path to `.env` file |
+| `restart` | `no\|always\|on-failure` | `no` | Restart policy |
+| `watch` | `string[]` | `[]` | Glob patterns for file watching |
+| `healthcheck` | `object` | - | Health check configuration |
+| `hooks` | `object` | - | Service-specific hooks |
+| `user` | `string` | - | User to run as (Unix only) |
+| `group` | `string` | - | Group override (Unix only) |
+| `logs.timestamp` | `bool` | `false` | Include timestamps in logs |
+| `logs.on_stop` | `clear\|retain` | `clear` | Log retention on stop |
+
+**User format** (Unix only):
+- `"username"` - resolve user by name (uses user's primary group)
+- `"1000"` - numeric uid (gid defaults to same value)
+- `"1000:1000"` - explicit uid:gid pair
+
+#### Service Hooks
+
+| Hook | Description |
+|------|-------------|
+| `on_init` | Runs once when service is first started |
+| `on_start` | Runs before service starts |
+| `on_stop` | Runs before service stops |
+| `on_restart` | Runs before service restarts |
+| `on_exit` | Runs when service process exits |
+| `on_healthcheck_success` | Runs when service becomes healthy |
+| `on_healthcheck_fail` | Runs when service becomes unhealthy |
+
+**Hook format:**
+```yaml
+hooks:
+  on_start:
+    run: echo "starting"           # Shell script format
+  on_stop:
+    command: ["echo", "stopping"]  # Command array format
+  on_restart:
+    run: ./notify.sh
+    user: admin                    # Run hook as specific user
+```
+
+**Hook user behavior** (Unix only):
+- By default, hooks inherit the service's `user:` setting
+- `user: daemon` runs as the kepler daemon user (for elevated privileges)
+- `user: <name>` runs as a specific user
 
 #### Health Check Options
 
@@ -195,7 +239,11 @@ services:
 | `retries` | `int` | `3` | Failures before unhealthy |
 | `start_period` | `duration` | `0s` | Grace period before checks start |
 
-Duration format: `100ms`, `10s`, `5m`, `1h`
+**Health check test format:**
+- `["CMD-SHELL", "curl -f http://localhost/health"]` - run via shell
+- `["CMD", "pg_isready", "-U", "postgres"]` - run command directly
+
+**Duration format:** `100ms`, `10s`, `5m`, `1h`, `1d`
 
 ## Architecture
 
