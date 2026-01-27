@@ -349,6 +349,22 @@ pub async fn handle_process_exit(
     )
     .await;
 
+    // Clear logs based on on_exit retention policy
+    {
+        let service_retention = service_config.logs.as_ref().map(|l| &l.on_exit);
+        let global_retention = global_log_config.as_ref().map(|l| &l.on_exit);
+
+        let should_clear = match service_retention.or(global_retention) {
+            Some(LogRetention::Retain) => false,
+            _ => true, // Default: clear
+        };
+
+        if should_clear {
+            logs.clear_service(&service_name);
+            logs.clear_service_prefix(&format!("[{}.", service_name));
+        }
+    }
+
     // Determine if we should restart
     let should_restart = match restart_policy {
         RestartPolicy::No => false,

@@ -133,6 +133,8 @@ pub struct LogConfig {
     pub on_restart: LogRetention,
     #[serde(default)]
     pub on_cleanup: LogRetention,
+    #[serde(default)]
+    pub on_exit: LogRetention,
 }
 
 /// Deserialize duration from string like "10s", "5m", "1h"
