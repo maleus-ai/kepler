@@ -1,7 +1,6 @@
 //! Restart policy and file watching tests
 
 use kepler_daemon::config::{RestartConfig, RestartPolicy, ServiceHooks, HookCommand};
-use kepler_daemon::state::ServiceStatus;
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -84,7 +83,7 @@ async fn test_restart_policy_always() {
     // Take the exit receiver to handle process exits
     let mut exit_rx = harness.take_exit_rx().unwrap();
     let state = harness.state().clone();
-    let config_path = harness.config_path().to_path_buf();
+    let _config_path = harness.config_path().to_path_buf();
     let exit_tx = harness.exit_tx();
 
     // Spawn a task to handle process exit events (simulating what the daemon does)

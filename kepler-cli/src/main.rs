@@ -427,7 +427,7 @@ fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>
 
         let uptime_str = info
             .started_at
-            .map(|ts| format_uptime(ts))
+            .map(format_uptime)
             .unwrap_or_else(|| "-".to_string());
 
         let health_str = if info.health_check_failures > 0 {
@@ -528,7 +528,7 @@ fn print_multi_config_table(configs: &[ConfigStatus]) {
 
         let uptime_str = info
             .started_at
-            .map(|ts| format_uptime(ts))
+            .map(format_uptime)
             .unwrap_or_else(|| "-".to_string());
 
         let health_str = if info.health_check_failures > 0 {

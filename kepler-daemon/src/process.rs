@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{parse_memory_limit, resolve_log_store, LogRetention, ResourceLimits, ServiceConfig};
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
-use crate::hooks::{run_service_hook, ServiceHookType};
+use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use crate::logs::{LogStream, SharedLogBuffer};
 use crate::state::{ProcessHandle, ServiceStatus, SharedDaemonState};
 
@@ -463,17 +463,30 @@ pub struct ProcessExitEvent {
 
 use crate::config::LogConfig;
 
+/// Parameters for spawning a service
+pub struct SpawnServiceParams<'a> {
+    pub config_path: &'a Path,
+    pub service_name: &'a str,
+    pub service_config: &'a ServiceConfig,
+    pub config_dir: &'a Path,
+    pub logs: SharedLogBuffer,
+    pub state: SharedDaemonState,
+    pub exit_tx: mpsc::Sender<ProcessExitEvent>,
+    pub global_log_config: Option<&'a LogConfig>,
+}
+
 /// Spawn a service process
-pub async fn spawn_service(
-    config_path: &Path,
-    service_name: &str,
-    service_config: &ServiceConfig,
-    config_dir: &Path,
-    logs: SharedLogBuffer,
-    state: SharedDaemonState,
-    exit_tx: mpsc::Sender<ProcessExitEvent>,
-    global_log_config: Option<&LogConfig>,
-) -> Result<ProcessHandle> {
+pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHandle> {
+    let SpawnServiceParams {
+        config_path,
+        service_name,
+        service_config,
+        config_dir,
+        logs,
+        state,
+        exit_tx,
+        global_log_config,
+    } = params;
     let working_dir = service_config
         .working_dir
         .clone()
@@ -762,17 +775,20 @@ pub async fn handle_process_exit(
         .working_dir
         .clone()
         .unwrap_or_else(|| config_dir.clone());
+    let hook_params = ServiceHookParams {
+        working_dir: &working_dir,
+        env: &env,
+        logs: Some(&logs),
+        service_user: service_config.user.as_deref(),
+        service_group: service_config.group.as_deref(),
+        service_log_config: service_config.logs.as_ref(),
+        global_log_config: global_log_config.as_ref(),
+    };
     let _ = run_service_hook(
         &hooks,
         ServiceHookType::OnExit,
         &service_name,
-        &working_dir,
-        &env,
-        Some(&logs),
-        service_config.user.as_deref(),
-        service_config.group.as_deref(),
-        service_config.logs.as_ref(),
-        global_log_config.as_ref(),
+        &hook_params,
     )
     .await;
 
@@ -819,13 +835,7 @@ pub async fn handle_process_exit(
             &hooks,
             ServiceHookType::OnRestart,
             &service_name,
-            &working_dir,
-            &env,
-            Some(&logs),
-            service_config.user.as_deref(),
-            service_config.group.as_deref(),
-            service_config.logs.as_ref(),
-            global_log_config.as_ref(),
+            &hook_params,
         )
         .await;
 
@@ -848,18 +858,17 @@ pub async fn handle_process_exit(
         }
 
         // Spawn new process
-        match spawn_service(
-            &config_path,
-            &service_name,
-            &service_config,
-            &config_dir,
+        let spawn_params = SpawnServiceParams {
+            config_path: &config_path,
+            service_name: &service_name,
+            service_config: &service_config,
+            config_dir: &config_dir,
             logs,
-            state.clone(),
+            state: state.clone(),
             exit_tx,
-            global_log_config.as_ref(),
-        )
-        .await
-        {
+            global_log_config: global_log_config.as_ref(),
+        };
+        match spawn_service(spawn_params).await {
             Ok(handle) => {
                 let pid = handle.child.id();
                 let mut state = state.write();

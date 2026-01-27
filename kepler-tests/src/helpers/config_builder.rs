@@ -57,7 +57,7 @@ impl TestConfigBuilder {
 
         let path = dir.join("kepler.yaml");
         let contents = serde_yaml::to_string(&config)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(&path, contents)?;
         Ok(path)
     }

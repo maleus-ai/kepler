@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::HealthCheck;
 use crate::env::build_service_env;
-use crate::hooks::{run_service_hook, ServiceHookType};
+use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use crate::state::{ServiceStatus, SharedDaemonState};
 
 /// Spawn a health check monitoring task for a service
@@ -87,14 +87,14 @@ async fn health_check_loop(
                             service_name, consecutive_failures, config.retries
                         );
 
-                        if consecutive_failures >= config.retries {
-                            if service_state.status != ServiceStatus::Unhealthy {
-                                info!(
-                                    "Service {} marked as unhealthy after {} failures",
-                                    service_name, consecutive_failures
-                                );
-                                service_state.status = ServiceStatus::Unhealthy;
-                            }
+                        if consecutive_failures >= config.retries
+                            && service_state.status != ServiceStatus::Unhealthy
+                        {
+                            info!(
+                                "Service {} marked as unhealthy after {} failures",
+                                service_name, consecutive_failures
+                            );
+                            service_state.status = ServiceStatus::Unhealthy;
                         }
                     }
 
@@ -173,17 +173,20 @@ async fn health_check_loop(
                     }
                 };
 
+                let hook_params = ServiceHookParams {
+                    working_dir: &working_dir,
+                    env: &env,
+                    logs: Some(&logs),
+                    service_user: service_user.as_deref(),
+                    service_group: service_group.as_deref(),
+                    service_log_config: service_config.logs.as_ref(),
+                    global_log_config: global_log_config.as_ref(),
+                };
                 if let Err(e) = run_service_hook(
                     &hooks,
                     hook_type,
                     &service_name,
-                    &working_dir,
-                    &env,
-                    Some(&logs),
-                    service_user.as_deref(),
-                    service_group.as_deref(),
-                    service_config.logs.as_ref(),
-                    global_log_config.as_ref(),
+                    &hook_params,
                 )
                 .await
                 {

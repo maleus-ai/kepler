@@ -29,7 +29,7 @@ fn find_daemon_binary() -> Option<PathBuf> {
             paths
                 .iter()
                 .find(|p| std::path::Path::new(p).exists())
-                .map(|p| PathBuf::from(p))
+                .map(PathBuf::from)
         })
 }
 
@@ -98,6 +98,7 @@ fn test_root_with_allow_flag() {
     // Wait briefly then kill
     std::thread::sleep(std::time::Duration::from_millis(500));
     let _ = child.kill();
+    let _ = child.wait();
 
     // Should have started successfully (not failed due to root check)
 }

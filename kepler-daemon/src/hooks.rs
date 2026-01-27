@@ -8,6 +8,29 @@ use crate::errors::{DaemonError, Result};
 use crate::logs::SharedLogBuffer;
 use crate::process::{spawn_command, CommandSpec, SpawnMode, SpawnResult};
 
+/// Context for running a hook
+pub struct HookRunContext<'a> {
+    pub base_working_dir: &'a Path,
+    pub env: &'a HashMap<String, String>,
+    pub logs: Option<&'a SharedLogBuffer>,
+    pub service_name: &'a str,
+    pub service_user: Option<&'a str>,
+    pub service_group: Option<&'a str>,
+    pub store_stdout: bool,
+    pub store_stderr: bool,
+}
+
+/// Parameters for running a service hook
+pub struct ServiceHookParams<'a> {
+    pub working_dir: &'a Path,
+    pub env: &'a HashMap<String, String>,
+    pub logs: Option<&'a SharedLogBuffer>,
+    pub service_user: Option<&'a str>,
+    pub service_group: Option<&'a str>,
+    pub service_log_config: Option<&'a LogConfig>,
+    pub global_log_config: Option<&'a LogConfig>,
+}
+
 /// Types of global hooks
 #[derive(Debug, Clone, Copy)]
 pub enum GlobalHookType {
@@ -55,17 +78,7 @@ impl ServiceHookType {
 }
 
 /// Execute a hook command
-pub async fn run_hook(
-    hook: &HookCommand,
-    base_working_dir: &Path,
-    env: &HashMap<String, String>,
-    logs: Option<&SharedLogBuffer>,
-    service_name: &str,
-    service_user: Option<&str>,
-    service_group: Option<&str>,
-    store_stdout: bool,
-    store_stderr: bool,
-) -> Result<()> {
+pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>) -> Result<()> {
     // Convert hook to program and args
     let program_and_args = match hook {
         HookCommand::Script { run, .. } => {
@@ -87,21 +100,21 @@ pub async fn run_hook(
             if dir.is_absolute() {
                 dir.to_path_buf()
             } else {
-                base_working_dir.join(dir)
+                ctx.base_working_dir.join(dir)
             }
         }
-        None => base_working_dir.to_path_buf(),
+        None => ctx.base_working_dir.to_path_buf(),
     };
 
     // Build hook-specific environment (merges with base env)
-    let hook_env = build_hook_env(hook, env, &effective_working_dir)?;
+    let hook_env = build_hook_env(hook, ctx.env, &effective_working_dir)?;
 
     // Determine effective user
     // Priority: hook user > service user > daemon user
     let effective_user = match hook.user() {
         Some("daemon") => None, // Run as daemon user (no change)
         Some(user) => Some(user.to_string()), // Hook specifies explicit user
-        None => service_user.map(|s| s.to_string()), // Inherit from service
+        None => ctx.service_user.map(|s| s.to_string()), // Inherit from service
     };
 
     // Determine effective group
@@ -109,7 +122,7 @@ pub async fn run_hook(
     let effective_group = hook
         .group()
         .map(|s| s.to_string())
-        .or_else(|| service_group.map(|s| s.to_string()));
+        .or_else(|| ctx.service_group.map(|s| s.to_string()));
 
     debug!(
         "Running hook: {} {:?}",
@@ -128,10 +141,10 @@ pub async fn run_hook(
 
     // Spawn using unified function with logging
     let mode = SpawnMode::SynchronousWithLogging {
-        logs: logs.cloned(),
-        log_service_name: service_name.to_string(),
-        store_stdout,
-        store_stderr,
+        logs: ctx.logs.cloned(),
+        log_service_name: ctx.service_name.to_string(),
+        store_stdout: ctx.store_stdout,
+        store_stderr: ctx.store_stderr,
     };
 
     match spawn_command(spec, mode).await? {
@@ -187,7 +200,17 @@ pub async fn run_global_hook(
         // Resolve store settings from global config
         let (store_stdout, store_stderr) = resolve_log_store(None, global_log_config);
         // Global hooks run as daemon user (no service user to inherit)
-        run_hook(hook, working_dir, env, logs, &service_name, None, None, store_stdout, store_stderr).await?;
+        let ctx = HookRunContext {
+            base_working_dir: working_dir,
+            env,
+            logs,
+            service_name: &service_name,
+            service_user: None,
+            service_group: None,
+            store_stdout,
+            store_stderr,
+        };
+        run_hook(hook, &ctx).await?;
     }
 
     Ok(())
@@ -203,13 +226,7 @@ pub async fn run_service_hook(
     hooks: &Option<ServiceHooks>,
     hook_type: ServiceHookType,
     service_name: &str,
-    working_dir: &Path,
-    env: &HashMap<String, String>,
-    logs: Option<&SharedLogBuffer>,
-    service_user: Option<&str>,
-    service_group: Option<&str>,
-    service_log_config: Option<&LogConfig>,
-    global_log_config: Option<&LogConfig>,
+    params: &ServiceHookParams<'_>,
 ) -> Result<()> {
     let hooks = match hooks {
         Some(h) => h,
@@ -234,20 +251,18 @@ pub async fn run_service_hook(
         );
         let log_name = service_hook_log_name(service_name, hook_type);
         // Resolve store settings: service config > global config > default
-        let (store_stdout, store_stderr) = resolve_log_store(service_log_config, global_log_config);
-        match run_hook(
-            hook,
-            working_dir,
-            env,
-            logs,
-            &log_name,
-            service_user,
-            service_group,
+        let (store_stdout, store_stderr) = resolve_log_store(params.service_log_config, params.global_log_config);
+        let ctx = HookRunContext {
+            base_working_dir: params.working_dir,
+            env: params.env,
+            logs: params.logs,
+            service_name: &log_name,
+            service_user: params.service_user,
+            service_group: params.service_group,
             store_stdout,
             store_stderr,
-        )
-        .await
-        {
+        };
+        match run_hook(hook, &ctx).await {
             Ok(()) => {}
             Err(e) => {
                 error!(

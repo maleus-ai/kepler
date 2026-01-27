@@ -4,9 +4,9 @@ use chrono::Utc;
 use kepler_daemon::config::{KeplerConfig, LogRetention};
 use kepler_daemon::env::build_service_env;
 use kepler_daemon::health::spawn_health_checker;
-use kepler_daemon::hooks::{run_service_hook, ServiceHookType};
+use kepler_daemon::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use kepler_daemon::logs::SharedLogBuffer;
-use kepler_daemon::process::{spawn_service, stop_service, ProcessExitEvent};
+use kepler_daemon::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
 use kepler_daemon::state::{new_shared_state, ServiceStatus, SharedDaemonState};
 use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ impl TestDaemonHarness {
         // Write config to file
         let config_path = config_dir.join("kepler.yaml");
         let config_yaml = serde_yaml::to_string(&config)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(&config_path, config_yaml)?;
 
         let state = new_shared_state();
@@ -40,7 +40,7 @@ impl TestDaemonHarness {
         {
             let mut state = state.write();
             state.load_config(config_path.clone()).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                std::io::Error::other(e.to_string())
             })?;
         }
 
@@ -71,7 +71,7 @@ impl TestDaemonHarness {
         {
             let mut state = state.write();
             state.load_config(config_path.clone()).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                std::io::Error::other(e.to_string())
             })?;
         }
 
@@ -157,24 +157,27 @@ impl TestDaemonHarness {
             }
         };
 
-        if should_run_init {
-            let working_dir = service_config
-                .working_dir
-                .clone()
-                .unwrap_or_else(|| self.config_dir.clone());
-            let env = build_service_env(&service_config, &self.config_dir)?;
+        let working_dir = service_config
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| self.config_dir.clone());
+        let env = build_service_env(&service_config, &self.config_dir)?;
+        let hook_params = ServiceHookParams {
+            working_dir: &working_dir,
+            env: &env,
+            logs: Some(&logs),
+            service_user: service_config.user.as_deref(),
+            service_group: service_config.group.as_deref(),
+            service_log_config: service_config.logs.as_ref(),
+            global_log_config: global_log_config.as_ref(),
+        };
 
+        if should_run_init {
             run_service_hook(
                 &service_config.hooks,
                 ServiceHookType::OnInit,
                 service_name,
-                &working_dir,
-                &env,
-                Some(&logs),
-                service_config.user.as_deref(),
-                service_config.group.as_deref(),
-                service_config.logs.as_ref(),
-                global_log_config.as_ref(),
+                &hook_params,
             )
             .await?;
 
@@ -188,40 +191,26 @@ impl TestDaemonHarness {
         }
 
         // Run on_start hook
-        {
-            let working_dir = service_config
-                .working_dir
-                .clone()
-                .unwrap_or_else(|| self.config_dir.clone());
-            let env = build_service_env(&service_config, &self.config_dir)?;
-
-            run_service_hook(
-                &service_config.hooks,
-                ServiceHookType::OnStart,
-                service_name,
-                &working_dir,
-                &env,
-                Some(&logs),
-                service_config.user.as_deref(),
-                service_config.group.as_deref(),
-                service_config.logs.as_ref(),
-                global_log_config.as_ref(),
-            )
-            .await?;
-        }
-
-        // Spawn the process
-        let handle = spawn_service(
-            &self.config_path,
+        run_service_hook(
+            &service_config.hooks,
+            ServiceHookType::OnStart,
             service_name,
-            &service_config,
-            &self.config_dir,
-            logs.clone(),
-            self.state.clone(),
-            self.exit_tx.clone(),
-            global_log_config.as_ref(),
+            &hook_params,
         )
         .await?;
+
+        // Spawn the process
+        let spawn_params = SpawnServiceParams {
+            config_path: &self.config_path,
+            service_name,
+            service_config: &service_config,
+            config_dir: &self.config_dir,
+            logs: logs.clone(),
+            state: self.state.clone(),
+            exit_tx: self.exit_tx.clone(),
+            global_log_config: global_log_config.as_ref(),
+        };
+        let handle = spawn_service(spawn_params).await?;
 
         let pid = handle.child.id();
 
@@ -323,18 +312,21 @@ impl TestDaemonHarness {
             .clone()
             .unwrap_or_else(|| self.config_dir.clone());
         let env = build_service_env(&service_config, &self.config_dir)?;
+        let hook_params = ServiceHookParams {
+            working_dir: &working_dir,
+            env: &env,
+            logs: Some(&logs),
+            service_user: service_config.user.as_deref(),
+            service_group: service_config.group.as_deref(),
+            service_log_config: service_config.logs.as_ref(),
+            global_log_config: global_log_config.as_ref(),
+        };
 
         run_service_hook(
             &service_config.hooks,
             ServiceHookType::OnStop,
             service_name,
-            &working_dir,
-            &env,
-            Some(&logs),
-            service_config.user.as_deref(),
-            service_config.group.as_deref(),
-            service_config.logs.as_ref(),
-            global_log_config.as_ref(),
+            &hook_params,
         )
         .await?;
 
@@ -429,18 +421,21 @@ impl TestDaemonHarness {
                         .clone()
                         .unwrap_or_else(|| config_dir.clone());
                     let env = build_service_env(&config, &config_dir).unwrap_or_default();
+                    let hook_params = ServiceHookParams {
+                        working_dir: &working_dir,
+                        env: &env,
+                        logs: Some(&logs),
+                        service_user: config.user.as_deref(),
+                        service_group: config.group.as_deref(),
+                        service_log_config: config.logs.as_ref(),
+                        global_log_config: global_log_config.as_ref(),
+                    };
 
                     let _ = run_service_hook(
                         &config.hooks,
                         ServiceHookType::OnRestart,
                         &event.service_name,
-                        &working_dir,
-                        &env,
-                        Some(&logs),
-                        config.user.as_deref(),
-                        config.group.as_deref(),
-                        config.logs.as_ref(),
-                        global_log_config.as_ref(),
+                        &hook_params,
                     )
                     .await;
 
@@ -463,7 +458,7 @@ impl TestDaemonHarness {
                     }
 
                     // Stop the service
-                    if let Err(_) = stop_service(&event.config_path, &event.service_name, state.clone()).await {
+                    if stop_service(&event.config_path, &event.service_name, state.clone()).await.is_err() {
                         continue;
                     }
 
@@ -471,35 +466,31 @@ impl TestDaemonHarness {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                     // Restart the service
-                    match spawn_service(
-                        &event.config_path,
-                        &event.service_name,
-                        &config,
-                        &config_dir,
+                    let spawn_params = SpawnServiceParams {
+                        config_path: &event.config_path,
+                        service_name: &event.service_name,
+                        service_config: &config,
+                        config_dir: &config_dir,
                         logs,
-                        state.clone(),
-                        exit_tx.clone(),
-                        global_log_config.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(handle) => {
-                            let pid = handle.child.id();
-                            let mut state = state.write();
-                            state.processes.insert(
-                                (event.config_path.clone(), event.service_name.clone()),
-                                handle,
-                            );
-                            if let Some(cs) = state.configs.get_mut(&event.config_path) {
-                                if let Some(ss) = cs.services.get_mut(&event.service_name) {
-                                    ss.status = ServiceStatus::Running;
-                                    ss.pid = pid;
-                                    ss.started_at = Some(Utc::now());
-                                    ss.restart_count += 1;
-                                }
+                        state: state.clone(),
+                        exit_tx: exit_tx.clone(),
+                        global_log_config: global_log_config.as_ref(),
+                    };
+                    if let Ok(handle) = spawn_service(spawn_params).await {
+                        let pid = handle.child.id();
+                        let mut state = state.write();
+                        state.processes.insert(
+                            (event.config_path.clone(), event.service_name.clone()),
+                            handle,
+                        );
+                        if let Some(cs) = state.configs.get_mut(&event.config_path) {
+                            if let Some(ss) = cs.services.get_mut(&event.service_name) {
+                                ss.status = ServiceStatus::Running;
+                                ss.pid = pid;
+                                ss.started_at = Some(Utc::now());
+                                ss.restart_count += 1;
                             }
                         }
-                        Err(_) => {}
                     }
                 }
             }

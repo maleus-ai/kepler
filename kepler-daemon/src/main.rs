@@ -7,10 +7,10 @@ use kepler_daemon::errors::DaemonError;
 use kepler_daemon::health::spawn_health_checker;
 use kepler_daemon::config::LogRetention;
 use kepler_daemon::hooks::{
-    run_global_hook, run_service_hook, GlobalHookType, ServiceHookType, GLOBAL_HOOK_PREFIX,
+    run_global_hook, run_service_hook, GlobalHookType, ServiceHookParams, ServiceHookType, GLOBAL_HOOK_PREFIX,
 };
 use kepler_daemon::process::{
-    handle_process_exit, spawn_service, stop_service, ProcessExitEvent,
+    handle_process_exit, spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams,
 };
 use kepler_daemon::state::{new_shared_state, ServiceStatus, SharedDaemonState};
 use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
@@ -210,17 +210,20 @@ async fn main() -> Result<()> {
                     .unwrap_or_else(|| config_dir.clone());
                 let env = build_service_env(&config, &config_dir).unwrap_or_default();
 
+                let hook_params = ServiceHookParams {
+                    working_dir: &working_dir,
+                    env: &env,
+                    logs: Some(&logs),
+                    service_user: config.user.as_deref(),
+                    service_group: config.group.as_deref(),
+                    service_log_config: config.logs.as_ref(),
+                    global_log_config: global_log_config.as_ref(),
+                };
                 let _ = run_service_hook(
                     &config.hooks,
                     ServiceHookType::OnRestart,
                     &event.service_name,
-                    &working_dir,
-                    &env,
-                    Some(&logs),
-                    config.user.as_deref(),
-                    config.group.as_deref(),
-                    config.logs.as_ref(),
-                    global_log_config.as_ref(),
+                    &hook_params,
                 )
                 .await;
 
@@ -252,18 +255,17 @@ async fn main() -> Result<()> {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                 // Restart the service
-                match spawn_service(
-                    &event.config_path,
-                    &event.service_name,
-                    &config,
-                    &config_dir,
+                let spawn_params = SpawnServiceParams {
+                    config_path: &event.config_path,
+                    service_name: &event.service_name,
+                    service_config: &config,
+                    config_dir: &config_dir,
                     logs,
-                    state.clone(),
+                    state: state.clone(),
                     exit_tx,
-                    global_log_config.as_ref(),
-                )
-                .await
-                {
+                    global_log_config: global_log_config.as_ref(),
+                };
+                match spawn_service(spawn_params).await {
                     Ok(handle) => {
                         let pid = handle.child.id();
                         let mut state = state.write();
@@ -331,7 +333,7 @@ async fn handle_request(
             config_path,
             service,
         } => {
-            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+            let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
@@ -354,7 +356,7 @@ async fn handle_request(
             service,
             clean,
         } => {
-            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+            let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
@@ -368,7 +370,7 @@ async fn handle_request(
             config_path,
             service,
         } => {
-            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+            let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
@@ -391,7 +393,6 @@ async fn handle_request(
 
             match config_path {
                 Some(path) => {
-                    let path = PathBuf::from(path);
                     if let Some(config_state) = state.configs.get(&path) {
                         let services: HashMap<String, ServiceInfo> = config_state
                             .services
@@ -430,7 +431,7 @@ async fn handle_request(
             follow: _,
             lines,
         } => {
-            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+            let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
@@ -469,7 +470,7 @@ async fn handle_request(
         }
 
         Request::UnloadConfig { config_path } => {
-            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+            let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
@@ -490,7 +491,7 @@ async fn handle_request(
         } => {
             use kepler_protocol::protocol::LogChunkData;
 
-            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+            let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
@@ -639,18 +640,22 @@ async fn start_services(
             .unwrap_or_else(|| config_dir.clone());
         let env = build_service_env(service_config, &config_dir)?;
 
+        let hook_params = ServiceHookParams {
+            working_dir: &working_dir,
+            env: &env,
+            logs: Some(&logs),
+            service_user: service_config.user.as_deref(),
+            service_group: service_config.group.as_deref(),
+            service_log_config: service_config.logs.as_ref(),
+            global_log_config: global_log_config.as_ref(),
+        };
+
         if !service_initialized {
             run_service_hook(
                 &service_config.hooks,
                 ServiceHookType::OnInit,
                 service_name,
-                &working_dir,
-                &env,
-                Some(&logs),
-                service_config.user.as_deref(),
-                service_config.group.as_deref(),
-                service_config.logs.as_ref(),
-                global_log_config.as_ref(),
+                &hook_params,
             )
             .await?;
 
@@ -667,13 +672,7 @@ async fn start_services(
             &service_config.hooks,
             ServiceHookType::OnStart,
             service_name,
-            &working_dir,
-            &env,
-            Some(&logs),
-            service_config.user.as_deref(),
-            service_config.group.as_deref(),
-            service_config.logs.as_ref(),
-            global_log_config.as_ref(),
+            &hook_params,
         )
         .await?;
 
@@ -696,17 +695,17 @@ async fn start_services(
         }
 
         // Spawn process
-        let handle = spawn_service(
+        let spawn_params = SpawnServiceParams {
             config_path,
             service_name,
             service_config,
-            &config_dir,
-            logs.clone(),
-            state.clone(),
-            exit_tx.clone(),
-            config.logs.as_ref(),
-        )
-        .await?;
+            config_dir: &config_dir,
+            logs: logs.clone(),
+            state: state.clone(),
+            exit_tx: exit_tx.clone(),
+            global_log_config: config.logs.as_ref(),
+        };
+        let handle = spawn_service(spawn_params).await?;
 
         let pid = handle.child.id();
 
@@ -839,17 +838,20 @@ async fn stop_services(
                 .unwrap_or_else(|| config_dir.clone());
             let env = build_service_env(service_config, &config_dir).unwrap_or_default();
 
+            let hook_params = ServiceHookParams {
+                working_dir: &working_dir,
+                env: &env,
+                logs: Some(&logs),
+                service_user: service_config.user.as_deref(),
+                service_group: service_config.group.as_deref(),
+                service_log_config: service_config.logs.as_ref(),
+                global_log_config: global_log_config.as_ref(),
+            };
             let _ = run_service_hook(
                 &service_config.hooks,
                 ServiceHookType::OnStop,
                 service_name,
-                &working_dir,
-                &env,
-                Some(&logs),
-                service_config.user.as_deref(),
-                service_config.group.as_deref(),
-                service_config.logs.as_ref(),
-                global_log_config.as_ref(),
+                &hook_params,
             )
             .await;
         }
@@ -1005,17 +1007,20 @@ async fn restart_services(
                 .unwrap_or_else(|| config_dir.clone());
             let env = build_service_env(config, &config_dir).unwrap_or_default();
 
+            let hook_params = ServiceHookParams {
+                working_dir: &working_dir,
+                env: &env,
+                logs: logs.as_ref(),
+                service_user: config.user.as_deref(),
+                service_group: config.group.as_deref(),
+                service_log_config: config.logs.as_ref(),
+                global_log_config: global_log_config.as_ref(),
+            };
             let _ = run_service_hook(
                 &config.hooks,
                 ServiceHookType::OnRestart,
                 service_name,
-                &working_dir,
-                &env,
-                logs.as_ref(),
-                config.user.as_deref(),
-                config.group.as_deref(),
-                config.logs.as_ref(),
-                global_log_config.as_ref(),
+                &hook_params,
             )
             .await;
         }

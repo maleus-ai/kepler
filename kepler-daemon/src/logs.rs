@@ -29,7 +29,7 @@ impl LogStream {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "stdout" => Some(LogStream::Stdout),
             "stderr" => Some(LogStream::Stderr),
@@ -74,7 +74,7 @@ impl LogBuffer {
         if let Ok(entries) = fs::read_dir(logs_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "log") {
+                if path.extension().is_some_and(|ext| ext == "log") {
                     if let Ok(file) = File::open(&path) {
                         count += BufReader::new(file).lines().count() as u64;
                     }
@@ -87,12 +87,7 @@ impl LogBuffer {
     /// Get the log file path for a service
     fn log_file_path(&self, service: &str) -> PathBuf {
         // Sanitize service name for filename (replace special chars)
-        let safe_name = service
-            .replace('/', "_")
-            .replace('\\', "_")
-            .replace(':', "_")
-            .replace('[', "_")
-            .replace(']', "_");
+        let safe_name = service.replace(['/', '\\', ':', '[', ']'], "_");
         self.logs_dir.join(format!("{}.log", safe_name))
     }
 
@@ -142,7 +137,7 @@ impl LogBuffer {
         if let Ok(entries) = fs::read_dir(&self.logs_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "log") {
+                if path.extension().is_some_and(|ext| ext == "log") {
                     files.push(path);
                 }
             }
@@ -154,7 +149,7 @@ impl LogBuffer {
     fn read_log_file(&self, path: &PathBuf) -> Vec<LogLine> {
         let mut entries = Vec::new();
         if let Ok(file) = File::open(path) {
-            for line in BufReader::new(file).lines().flatten() {
+            for line in BufReader::new(file).lines().map_while(Result::ok) {
                 if let Some(entry) = Self::parse_log_line(&line) {
                     entries.push(entry);
                 }
@@ -171,7 +166,7 @@ impl LogBuffer {
         }
 
         let timestamp = parts[0].parse::<i64>().ok()?;
-        let stream = LogStream::from_str(parts[1])?;
+        let stream = LogStream::parse(parts[1])?;
         let service = parts[2].to_string();
         let content = parts[3].to_string();
 
@@ -286,12 +281,7 @@ impl LogBuffer {
     /// Clear entries for services matching a prefix (e.g., "[global" clears all global hooks)
     pub fn clear_service_prefix(&mut self, prefix: &str) {
         // Sanitize prefix for matching filenames
-        let safe_prefix = prefix
-            .replace('/', "_")
-            .replace('\\', "_")
-            .replace(':', "_")
-            .replace('[', "_")
-            .replace(']', "_");
+        let safe_prefix = prefix.replace(['/', '\\', ':', '[', ']'], "_");
 
         if let Ok(entries) = fs::read_dir(&self.logs_dir) {
             for entry in entries.flatten() {

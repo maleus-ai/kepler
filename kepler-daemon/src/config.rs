@@ -239,17 +239,12 @@ impl RestartConfig {
     /// Validate the restart configuration
     pub fn validate(&self) -> std::result::Result<(), String> {
         // watch requires policy to be always or on-failure
-        if !self.watch_patterns().is_empty() {
-            match self.policy() {
-                RestartPolicy::No => {
-                    return Err(
-                        "watch patterns require restart to be enabled \
-                         (policy: always or on-failure)"
-                            .to_string(),
-                    );
-                }
-                _ => {}
-            }
+        if !self.watch_patterns().is_empty() && self.policy() == &RestartPolicy::No {
+            return Err(
+                "watch patterns require restart to be enabled \
+                 (policy: always or on-failure)"
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -411,8 +406,8 @@ pub fn resolve_log_retention(
     default: LogRetention,
 ) -> LogRetention {
     service_logs
-        .and_then(|l| get_field(l))
-        .or_else(|| global_logs.and_then(|l| get_field(l)))
+        .and_then(&get_field)
+        .or_else(|| global_logs.and_then(get_field))
         .unwrap_or(default)
 }
 

@@ -847,8 +847,6 @@ services:
 /// Log store config parses correctly (extended form)
 #[test]
 fn test_log_store_extended_parsing() {
-    use kepler_daemon::config::LogStoreConfig;
-
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("kepler.yaml");
 

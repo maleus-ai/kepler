@@ -189,7 +189,7 @@ impl MarkerFileHelper {
         if let Ok(entries) = std::fs::read_dir(&self.base_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "marker") {
+                if path.extension().is_some_and(|ext| ext == "marker") {
                     let _ = std::fs::remove_file(path);
                 }
             }
