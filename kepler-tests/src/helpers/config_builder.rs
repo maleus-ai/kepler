@@ -1,8 +1,8 @@
 //! Programmatic config creation with builder pattern
 
 use kepler_daemon::config::{
-    GlobalHooks, HealthCheck, HookCommand, KeplerConfig, LogConfig, RestartPolicy, ServiceConfig,
-    ServiceHooks,
+    GlobalHooks, HealthCheck, HookCommand, KeplerConfig, LogConfig, RestartConfig, RestartPolicy,
+    ServiceConfig, ServiceHooks,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -75,10 +75,9 @@ pub struct TestServiceBuilder {
     working_dir: Option<PathBuf>,
     environment: Vec<String>,
     env_file: Option<PathBuf>,
-    restart: RestartPolicy,
+    restart: RestartConfig,
     depends_on: Vec<String>,
     healthcheck: Option<HealthCheck>,
-    watch: Vec<String>,
     hooks: Option<ServiceHooks>,
     logs: Option<LogConfig>,
 }
@@ -90,10 +89,9 @@ impl TestServiceBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            restart: RestartPolicy::No,
+            restart: RestartConfig::default(),
             depends_on: Vec::new(),
             healthcheck: None,
-            watch: Vec::new(),
             hooks: None,
             logs: None,
         }
@@ -153,8 +151,21 @@ impl TestServiceBuilder {
         self
     }
 
+    /// Set restart policy (simple form)
     pub fn with_restart(mut self, policy: RestartPolicy) -> Self {
-        self.restart = policy;
+        self.restart = RestartConfig::Simple(policy);
+        self
+    }
+
+    /// Set restart config (extended form with optional watch patterns)
+    pub fn with_restart_config(mut self, config: RestartConfig) -> Self {
+        self.restart = config;
+        self
+    }
+
+    /// Set restart policy with watch patterns
+    pub fn with_restart_and_watch(mut self, policy: RestartPolicy, watch: Vec<String>) -> Self {
+        self.restart = RestartConfig::Extended { policy, watch };
         self
     }
 
@@ -178,11 +189,6 @@ impl TestServiceBuilder {
         self
     }
 
-    pub fn with_watch(mut self, patterns: Vec<String>) -> Self {
-        self.watch = patterns;
-        self
-    }
-
     pub fn build(self) -> ServiceConfig {
         ServiceConfig {
             command: self.command,
@@ -192,7 +198,6 @@ impl TestServiceBuilder {
             restart: self.restart,
             depends_on: self.depends_on,
             healthcheck: self.healthcheck,
-            watch: self.watch,
             hooks: self.hooks,
             logs: self.logs,
             user: None,

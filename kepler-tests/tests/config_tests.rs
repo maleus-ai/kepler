@@ -250,7 +250,7 @@ services:
     assert!(hooks.on_cleanup.is_some());
 }
 
-/// Restart policy parsing
+/// Restart policy parsing (simple form)
 #[test]
 fn test_restart_policy_parsing() {
     let temp_dir = TempDir::new().unwrap();
@@ -274,15 +274,45 @@ services:
 
     use kepler_daemon::config::RestartPolicy;
 
-    assert_eq!(config.services["no_restart"].restart, RestartPolicy::No);
+    // Simple form uses policy() accessor
+    assert_eq!(config.services["no_restart"].restart.policy(), &RestartPolicy::No);
     assert_eq!(
-        config.services["always_restart"].restart,
-        RestartPolicy::Always
+        config.services["always_restart"].restart.policy(),
+        &RestartPolicy::Always
     );
     assert_eq!(
-        config.services["on_failure"].restart,
-        RestartPolicy::OnFailure
+        config.services["on_failure"].restart.policy(),
+        &RestartPolicy::OnFailure
     );
+
+    // Simple form has no watch patterns
+    assert!(config.services["no_restart"].restart.watch_patterns().is_empty());
+    assert!(config.services["always_restart"].restart.watch_patterns().is_empty());
+    assert!(config.services["on_failure"].restart.watch_patterns().is_empty());
+}
+
+/// Restart policy parsing (extended form with just policy)
+#[test]
+fn test_restart_policy_extended_form() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  always_restart:
+    command: ["echo", "1"]
+    restart:
+      policy: always
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load(&config_path).unwrap();
+
+    use kepler_daemon::config::RestartPolicy;
+
+    // Extended form with just policy (no watch)
+    assert_eq!(config.services["always_restart"].restart.policy(), &RestartPolicy::Always);
+    assert!(config.services["always_restart"].restart.watch_patterns().is_empty());
 }
 
 /// Environment variable parsing
@@ -398,7 +428,7 @@ services:
     assert!(config.services["database"].depends_on.is_empty());
 }
 
-/// Watch patterns parse correctly
+/// Watch patterns parse correctly (now under restart.watch)
 #[test]
 fn test_watch_patterns() {
     let temp_dir = TempDir::new().unwrap();
@@ -408,20 +438,76 @@ fn test_watch_patterns() {
 services:
   test:
     command: ["echo", "1"]
-    watch:
-      - "src/**/*.rs"
-      - "Cargo.toml"
-      - "!target/**"
+    restart:
+      policy: always
+      watch:
+        - "src/**/*.rs"
+        - "Cargo.toml"
+        - "!target/**"
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load(&config_path).unwrap();
 
-    let watch = &config.services["test"].watch;
+    let watch = config.services["test"].restart.watch_patterns();
     assert_eq!(watch.len(), 3);
     assert!(watch.contains(&"src/**/*.rs".to_string()));
     assert!(watch.contains(&"Cargo.toml".to_string()));
     assert!(watch.contains(&"!target/**".to_string()));
+}
+
+/// Extended restart config with watch patterns
+#[test]
+fn test_restart_config_extended() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    command: ["echo", "1"]
+    restart:
+      policy: on-failure
+      watch:
+        - "*.ts"
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load(&config_path).unwrap();
+
+    use kepler_daemon::config::RestartPolicy;
+
+    assert_eq!(config.services["test"].restart.policy(), &RestartPolicy::OnFailure);
+    assert_eq!(config.services["test"].restart.watch_patterns(), &["*.ts".to_string()]);
+    assert!(config.services["test"].restart.should_restart_on_file_change());
+}
+
+/// Restart config with watch but policy: no should fail validation
+#[test]
+fn test_restart_config_invalid_watch_with_no_policy() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    command: ["echo", "1"]
+    restart:
+      policy: no
+      watch:
+        - "*.ts"
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let result = KeplerConfig::load(&config_path);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("watch patterns require restart to be enabled"),
+        "Error should mention watch patterns require restart: {}",
+        err
+    );
 }
 
 /// All service hooks parse

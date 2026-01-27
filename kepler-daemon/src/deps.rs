@@ -147,7 +147,7 @@ fn collect_deps(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::RestartPolicy;
+    use crate::config::RestartConfig;
 
     fn make_service(deps: Vec<&str>) -> ServiceConfig {
         ServiceConfig {
@@ -155,10 +155,9 @@ mod tests {
             working_dir: None,
             environment: vec![],
             env_file: None,
-            restart: RestartPolicy::No,
+            restart: RestartConfig::default(),
             depends_on: deps.into_iter().map(String::from).collect(),
             healthcheck: None,
-            watch: vec![],
             hooks: None,
             logs: None,
             user: None,

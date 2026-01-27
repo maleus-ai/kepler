@@ -25,10 +25,11 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
-    restart: always
-    # Restart on file changes
-    watch:
-      - "**/*.ts"
+    # Restart on crashes AND file changes
+    restart:
+      policy: always
+      watch:
+        - "**/*.ts"
     hooks:
       on_init:
         command: ["echo", "First run of the backend"]
@@ -44,10 +45,11 @@ services:
     environment:
       # Inject the VITE_API_URL env variable copied from ${BACKEND_URL}
       - VITE_API_URL=${BACKEND_URL}
-    restart: always
-    # Restart on file changes
-    watch:
-      - "**/*.ts"
+    # Restart on crashes AND file changes
+    restart:
+      policy: always
+      watch:
+        - "**/*.ts"
   snivel:
     logs:
       timestamp: true

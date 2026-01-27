@@ -7,7 +7,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{LogRetention, RestartPolicy, ServiceConfig};
+use crate::config::{LogRetention, ServiceConfig};
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
 use crate::hooks::{run_service_hook, ServiceHookType};
@@ -593,7 +593,7 @@ pub async fn handle_process_exit(
     exit_tx: mpsc::Sender<ProcessExitEvent>,
 ) {
     // Get service config and state info
-    let (restart_policy, service_config, config_dir, logs, hooks, global_log_config) = {
+    let (service_config, config_dir, logs, hooks, global_log_config) = {
         let state = state.read();
         let config_state = match state.configs.get(&config_path) {
             Some(cs) => cs,
@@ -606,7 +606,6 @@ pub async fn handle_process_exit(
         };
 
         (
-            service_config.restart.clone(),
             service_config.clone(),
             config_state
                 .config_path
@@ -670,11 +669,7 @@ pub async fn handle_process_exit(
     }
 
     // Determine if we should restart
-    let should_restart = match restart_policy {
-        RestartPolicy::No => false,
-        RestartPolicy::Always => true,
-        RestartPolicy::OnFailure => exit_code != Some(0),
-    };
+    let should_restart = service_config.restart.should_restart_on_exit(exit_code);
 
     if should_restart {
         // Update status to starting
@@ -691,7 +686,7 @@ pub async fn handle_process_exit(
         // Small delay before restart
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-        info!("Restarting service {} (policy: {:?})", service_name, restart_policy);
+        info!("Restarting service {} (policy: {:?})", service_name, service_config.restart.policy());
 
         // Run on_restart hook
         let _ = run_service_hook(

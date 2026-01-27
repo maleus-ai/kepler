@@ -112,25 +112,18 @@ async fn main() -> Result<()> {
             let state = restart_state.clone();
             let exit_tx = restart_exit_tx.clone();
 
-            // Get service config before stopping
-            let service_config = {
+            // Get service config and global log config before stopping
+            let (service_config, global_log_config) = {
                 let state = state.read();
-                state.configs.get(&event.config_path).and_then(|cs| {
-                    cs.config.services.get(&event.service_name).cloned()
-                })
+                let config_state = state.configs.get(&event.config_path);
+                (
+                    config_state.and_then(|cs| cs.config.services.get(&event.service_name).cloned()),
+                    config_state.and_then(|cs| cs.config.logs.clone()),
+                )
             };
 
             if let Some(config) = service_config {
-                // Stop the service
-                if let Err(e) = stop_service(&event.config_path, &event.service_name, state.clone()).await {
-                    error!("Failed to stop service for restart: {}", e);
-                    continue;
-                }
-
-                // Small delay
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-                // Restart the service
+                // Get config_dir and logs for hooks
                 let (config_dir, logs) = {
                     let state = state.read();
                     if let Some(cs) = state.configs.get(&event.config_path) {
@@ -143,6 +136,49 @@ async fn main() -> Result<()> {
                     }
                 };
 
+                // Run on_restart hook (same as process-exit restarts)
+                let working_dir = config
+                    .working_dir
+                    .clone()
+                    .unwrap_or_else(|| config_dir.clone());
+                let env = build_service_env(&config, &config_dir).unwrap_or_default();
+
+                let _ = run_service_hook(
+                    &config.hooks,
+                    ServiceHookType::OnRestart,
+                    &event.service_name,
+                    &working_dir,
+                    &env,
+                    Some(&logs),
+                    config.user.as_deref(),
+                    config.group.as_deref(),
+                )
+                .await;
+
+                // Apply on_restart log retention policy
+                let service_retention = config.logs.as_ref().map(|l| &l.on_restart);
+                let global_retention = global_log_config.as_ref().map(|l| &l.on_restart);
+
+                let should_clear = match service_retention.or(global_retention) {
+                    Some(LogRetention::Retain) => false,
+                    _ => true, // Default: clear
+                };
+
+                if should_clear {
+                    logs.clear_service(&event.service_name);
+                    logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                }
+
+                // Stop the service
+                if let Err(e) = stop_service(&event.config_path, &event.service_name, state.clone()).await {
+                    error!("Failed to stop service for restart: {}", e);
+                    continue;
+                }
+
+                // Small delay
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                // Restart the service
                 match spawn_service(
                     &event.config_path,
                     &event.service_name,
@@ -166,6 +202,7 @@ async fn main() -> Result<()> {
                                 ss.status = ServiceStatus::Running;
                                 ss.pid = pid;
                                 ss.started_at = Some(Utc::now());
+                                ss.restart_count += 1;
                             }
                         }
                     }
@@ -558,11 +595,11 @@ async fn start_services(
         }
 
         // Start file watcher if configured
-        if !service_config.watch.is_empty() {
+        if !service_config.restart.watch_patterns().is_empty() {
             let handle = spawn_file_watcher(
                 config_path.clone(),
                 service_name.clone(),
-                service_config.watch.clone(),
+                service_config.restart.watch_patterns().to_vec(),
                 working_dir,
                 restart_tx.clone(),
             );

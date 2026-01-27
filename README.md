@@ -132,10 +132,11 @@ services:
     environment:
       - DATABASE_URL=postgres://localhost:5432/app
     env_file: .env
-    restart: on-failure
-    watch:
-      - "**/*.ts"
-      - "**/*.json"
+    restart:
+      policy: on-failure
+      watch:
+        - "**/*.ts"
+        - "**/*.json"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:4000/health"]
       interval: 10s
@@ -186,13 +187,84 @@ services:
 | `depends_on` | `string[]` | `[]` | Services that must be healthy first |
 | `environment` | `string[]` | `[]` | Environment variables (`KEY=value`) |
 | `env_file` | `string` | - | Path to `.env` file |
-| `restart` | `no\|always\|on-failure` | `no` | Restart policy |
-| `watch` | `string[]` | `[]` | Glob patterns for file watching |
+| `restart` | `string\|object` | `no` | Restart configuration (see below) |
 | `healthcheck` | `object` | - | Health check configuration |
 | `hooks` | `object` | - | Service-specific hooks |
 | `user` | `string` | - | User to run as (Unix only) |
 | `group` | `string` | - | Group override (Unix only) |
 | `logs` | `object` | - | Log configuration (see below) |
+
+#### Restart Configuration
+
+The restart configuration supports two forms:
+
+**Simple form** (just the policy):
+```yaml
+restart: always
+# or
+restart: no
+# or
+restart: on-failure
+```
+
+**Extended form** (policy + optional file watching):
+```yaml
+restart:
+  policy: always      # Required: no | always | on-failure
+  watch:              # Optional: glob patterns for file watching
+    - "src/**/*.ts"
+    - "**/*.json"
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `policy` | `no\|always\|on-failure` | `no` | Restart policy when process exits |
+| `watch` | `string[]` | `[]` | Glob patterns for file watching |
+
+**Restart policy values:**
+- `no` (default): Never restart the service when it exits
+- `always`: Always restart the service when it exits
+- `on-failure`: Restart only if the service exits with a non-zero code
+
+**File watching:**
+- When `watch` patterns are specified, the service restarts when matching files change
+- The `on_restart` hook runs before file-change restarts (same as process-exit restarts)
+- The `on_restart` log retention policy applies to file-change restarts
+
+**Important:** File watching requires restart to be enabled (`policy: always` or `policy: on-failure`). Combining `policy: no` with `watch` patterns will result in a validation error:
+```
+watch patterns require restart to be enabled (policy: always or on-failure)
+```
+
+**Examples:**
+```yaml
+services:
+  # Development: restart on crashes AND file changes
+  frontend:
+    command: ["npm", "run", "dev"]
+    restart:
+      policy: always
+      watch:
+        - "src/**/*.tsx"
+
+  # Production: restart on crashes only (simple form)
+  api:
+    command: ["./api-server"]
+    restart: always
+
+  # Restart on failure OR file changes
+  backend:
+    command: ["cargo", "run"]
+    restart:
+      policy: on-failure
+      watch:
+        - "src/**/*.rs"
+
+  # Never restart (default behavior)
+  one-shot:
+    command: ["./migrate.sh"]
+    # No restart config = no restarts
+```
 
 **User format** (Unix only):
 - `"username"` - resolve user by name (uses user's primary group)
