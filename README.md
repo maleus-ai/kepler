@@ -73,12 +73,6 @@ sudo useradd -r -s /bin/false kepler
 sudo -u kepler kepler daemon start -d
 ```
 
-**Protect your configuration files:**
-```bash
-# Ensure config files are owned by you and not world-writable
-chmod 600 kepler.yaml
-```
-
 **Avoid running as root:**
 The daemon will warn if started as root. Instead, use the `user:` option in your config to run specific services with elevated privileges when needed.
 
@@ -490,10 +484,28 @@ hooks:
 
 **Duration format:** `100ms`, `10s`, `5m`, `1h`, `1d`
 
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KEPLER_DAEMON_PATH` | `~/.kepler` | Override the global state directory where the daemon stores its socket, PID file, and per-config state |
+
+**Example:**
+```bash
+# Use a custom state directory
+export KEPLER_DAEMON_PATH=/var/run/kepler
+kepler daemon start -d
+```
+
+This is useful for:
+- Running multiple isolated daemon instances
+- Storing state in a different location (e.g., `/var/run` for system services)
+- Testing without affecting the default daemon
+
 ## Architecture
 
 ```
-~/.kepler/
+~/.kepler/                 # Or $KEPLER_DAEMON_PATH if set
 ├── kepler.sock            # Global daemon socket
 ├── kepler.pid             # Global daemon PID
 └── configs/               # Per-config state (hash-based)
