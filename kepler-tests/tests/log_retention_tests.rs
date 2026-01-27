@@ -51,7 +51,7 @@ async fn test_retain_logs_on_stop() {
     let temp_dir = TempDir::new().unwrap();
 
     let log_config = LogConfig {
-        on_stop: LogRetention::Retain,
+        on_stop: Some(LogRetention::Retain),
         ..Default::default()
     };
 
@@ -95,13 +95,13 @@ async fn test_service_log_config_overrides_global() {
 
     // Global config says clear on stop
     let global_log_config = LogConfig {
-        on_stop: LogRetention::Clear,
+        on_stop: Some(LogRetention::Clear),
         ..Default::default()
     };
 
     // Service config says retain on stop
     let service_log_config = LogConfig {
-        on_stop: LogRetention::Retain,
+        on_stop: Some(LogRetention::Retain),
         ..Default::default()
     };
 
@@ -126,7 +126,7 @@ async fn test_service_log_config_overrides_global() {
     // Check global config
     assert_eq!(
         config_state.config.logs.as_ref().unwrap().on_stop,
-        LogRetention::Clear
+        Some(LogRetention::Clear)
     );
 
     // Check service config overrides
@@ -136,7 +136,7 @@ async fn test_service_log_config_overrides_global() {
             .as_ref()
             .unwrap()
             .on_stop,
-        LogRetention::Retain
+        Some(LogRetention::Retain)
     );
 }
 
@@ -146,12 +146,12 @@ async fn test_all_log_retention_events() {
     let temp_dir = TempDir::new().unwrap();
 
     let log_config = LogConfig {
-        timestamp: true,
-        on_stop: LogRetention::Retain,
-        on_start: LogRetention::Clear,
-        on_restart: LogRetention::Retain,
-        on_cleanup: LogRetention::Clear,
-        on_exit: LogRetention::Retain,
+        timestamp: Some(true),
+        on_stop: Some(LogRetention::Retain),
+        on_start: Some(LogRetention::Clear),
+        on_restart: Some(LogRetention::Retain),
+        on_cleanup: Some(LogRetention::Clear),
+        on_exit: Some(LogRetention::Retain),
     };
 
     let config = TestConfigBuilder::new()
@@ -171,12 +171,12 @@ async fn test_all_log_retention_events() {
     let config_state = state.configs.get(harness.config_path()).unwrap();
     let service_logs = config_state.config.services["test"].logs.as_ref().unwrap();
 
-    assert!(service_logs.timestamp);
-    assert_eq!(service_logs.on_stop, LogRetention::Retain);
-    assert_eq!(service_logs.on_start, LogRetention::Clear);
-    assert_eq!(service_logs.on_restart, LogRetention::Retain);
-    assert_eq!(service_logs.on_cleanup, LogRetention::Clear);
-    assert_eq!(service_logs.on_exit, LogRetention::Retain);
+    assert_eq!(service_logs.timestamp, Some(true));
+    assert_eq!(service_logs.on_stop, Some(LogRetention::Retain));
+    assert_eq!(service_logs.on_start, Some(LogRetention::Clear));
+    assert_eq!(service_logs.on_restart, Some(LogRetention::Retain));
+    assert_eq!(service_logs.on_cleanup, Some(LogRetention::Clear));
+    assert_eq!(service_logs.on_exit, Some(LogRetention::Retain));
 }
 
 /// Log buffer operations work correctly
@@ -467,28 +467,131 @@ services:
 
     // Check global config
     let global_logs = config.logs.as_ref().unwrap();
-    assert!(global_logs.timestamp);
-    assert_eq!(global_logs.on_stop, LogRetention::Retain);
-    assert_eq!(global_logs.on_start, LogRetention::Clear);
-    assert_eq!(global_logs.on_restart, LogRetention::Retain);
-    assert_eq!(global_logs.on_cleanup, LogRetention::Clear);
-    assert_eq!(global_logs.on_exit, LogRetention::Retain);
+    assert_eq!(global_logs.timestamp, Some(true));
+    assert_eq!(global_logs.on_stop, Some(LogRetention::Retain));
+    assert_eq!(global_logs.on_start, Some(LogRetention::Clear));
+    assert_eq!(global_logs.on_restart, Some(LogRetention::Retain));
+    assert_eq!(global_logs.on_cleanup, Some(LogRetention::Clear));
+    assert_eq!(global_logs.on_exit, Some(LogRetention::Retain));
 
     // Check service config overrides
     let service_logs = config.services["test"].logs.as_ref().unwrap();
-    assert_eq!(service_logs.on_stop, LogRetention::Clear);
-    assert_eq!(service_logs.on_exit, LogRetention::Clear);
+    assert_eq!(service_logs.on_stop, Some(LogRetention::Clear));
+    assert_eq!(service_logs.on_exit, Some(LogRetention::Clear));
 }
 
-/// Default log retention is Clear
+/// Default LogConfig fields are None (unset)
 #[test]
-fn test_default_log_retention() {
+fn test_default_log_config_is_none() {
     let log_config = LogConfig::default();
 
-    assert_eq!(log_config.on_stop, LogRetention::Clear);
-    assert_eq!(log_config.on_start, LogRetention::Clear);
-    assert_eq!(log_config.on_restart, LogRetention::Clear);
-    assert_eq!(log_config.on_cleanup, LogRetention::Clear);
-    assert_eq!(log_config.on_exit, LogRetention::Clear);
-    assert!(!log_config.timestamp);
+    // All fields should be None (unset) by default
+    assert_eq!(log_config.on_stop, None);
+    assert_eq!(log_config.on_start, None);
+    assert_eq!(log_config.on_restart, None);
+    assert_eq!(log_config.on_cleanup, None);
+    assert_eq!(log_config.on_exit, None);
+    assert_eq!(log_config.timestamp, None);
+}
+
+/// Test resolve_log_retention inheritance behavior
+#[test]
+fn test_resolve_log_retention_inheritance() {
+    use kepler_daemon::config::resolve_log_retention;
+
+    // Test 1: No config at all → use default
+    let retention = resolve_log_retention(
+        None,
+        None,
+        |l| l.on_start.clone(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Retain, "Should use built-in default when no config");
+
+    // Test 2: Global config set, no service config → use global
+    let global_logs = LogConfig {
+        on_start: Some(LogRetention::Clear),
+        ..Default::default()
+    };
+    let retention = resolve_log_retention(
+        None,
+        Some(&global_logs),
+        |l| l.on_start.clone(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Clear, "Should use global config when service not set");
+
+    // Test 3: Service config set, no global → use service
+    let service_logs = LogConfig {
+        on_start: Some(LogRetention::Clear),
+        ..Default::default()
+    };
+    let retention = resolve_log_retention(
+        Some(&service_logs),
+        None,
+        |l| l.on_start.clone(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Clear, "Should use service config when global not set");
+
+    // Test 4: Both set → service wins
+    let global_logs = LogConfig {
+        on_start: Some(LogRetention::Clear),
+        ..Default::default()
+    };
+    let service_logs = LogConfig {
+        on_start: Some(LogRetention::Retain),
+        ..Default::default()
+    };
+    let retention = resolve_log_retention(
+        Some(&service_logs),
+        Some(&global_logs),
+        |l| l.on_start.clone(),
+        LogRetention::Clear,
+    );
+    assert_eq!(retention, LogRetention::Retain, "Service config should override global config");
+
+    // Test 5: Service config exists but field is None → fall back to global
+    let global_logs = LogConfig {
+        on_start: Some(LogRetention::Clear),
+        ..Default::default()
+    };
+    let service_logs = LogConfig {
+        on_start: None, // Not set
+        on_stop: Some(LogRetention::Retain), // Other field set
+        ..Default::default()
+    };
+    let retention = resolve_log_retention(
+        Some(&service_logs),
+        Some(&global_logs),
+        |l| l.on_start.clone(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Clear, "Should fall back to global when service field is None");
+}
+
+/// Test the new default values for each event
+#[test]
+fn test_new_default_values() {
+    use kepler_daemon::config::resolve_log_retention;
+
+    // on_start defaults to retain
+    let retention = resolve_log_retention(None, None, |l| l.on_start.clone(), LogRetention::Retain);
+    assert_eq!(retention, LogRetention::Retain);
+
+    // on_restart defaults to retain
+    let retention = resolve_log_retention(None, None, |l| l.on_restart.clone(), LogRetention::Retain);
+    assert_eq!(retention, LogRetention::Retain);
+
+    // on_exit defaults to retain
+    let retention = resolve_log_retention(None, None, |l| l.on_exit.clone(), LogRetention::Retain);
+    assert_eq!(retention, LogRetention::Retain);
+
+    // on_stop defaults to clear
+    let retention = resolve_log_retention(None, None, |l| l.on_stop.clone(), LogRetention::Clear);
+    assert_eq!(retention, LogRetention::Clear);
+
+    // on_cleanup defaults to clear
+    let retention = resolve_log_retention(None, None, |l| l.on_cleanup.clone(), LogRetention::Clear);
+    assert_eq!(retention, LogRetention::Clear);
 }

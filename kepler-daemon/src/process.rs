@@ -654,13 +654,15 @@ pub async fn handle_process_exit(
 
     // Clear logs based on on_exit retention policy
     {
-        let service_retention = service_config.logs.as_ref().map(|l| &l.on_exit);
-        let global_retention = global_log_config.as_ref().map(|l| &l.on_exit);
+        use crate::config::resolve_log_retention;
 
-        let should_clear = match service_retention.or(global_retention) {
-            Some(LogRetention::Retain) => false,
-            _ => true, // Default: clear
-        };
+        let retention = resolve_log_retention(
+            service_config.logs.as_ref(),
+            global_log_config.as_ref(),
+            |l| l.on_exit.clone(),
+            LogRetention::Retain, // New default for on_exit
+        );
+        let should_clear = retention == LogRetention::Clear;
 
         if should_clear {
             logs.clear_service(&service_name);
@@ -702,17 +704,21 @@ pub async fn handle_process_exit(
         .await;
 
         // Clear logs based on on_restart retention policy
-        let service_retention = service_config.logs.as_ref().map(|l| &l.on_restart);
-        let global_retention = global_log_config.as_ref().map(|l| &l.on_restart);
+        {
+            use crate::config::resolve_log_retention;
 
-        let should_clear = match service_retention.or(global_retention) {
-            Some(LogRetention::Retain) => false,
-            _ => true, // Default: clear
-        };
+            let retention = resolve_log_retention(
+                service_config.logs.as_ref(),
+                global_log_config.as_ref(),
+                |l| l.on_restart.clone(),
+                LogRetention::Retain, // New default for on_restart
+            );
+            let should_clear = retention == LogRetention::Clear;
 
-        if should_clear {
-            logs.clear_service(&service_name);
-            logs.clear_service_prefix(&format!("[{}.", service_name));
+            if should_clear {
+                logs.clear_service(&service_name);
+                logs.clear_service_prefix(&format!("[{}.", service_name));
+            }
         }
 
         // Spawn new process

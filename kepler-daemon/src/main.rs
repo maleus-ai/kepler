@@ -156,17 +156,21 @@ async fn main() -> Result<()> {
                 .await;
 
                 // Apply on_restart log retention policy
-                let service_retention = config.logs.as_ref().map(|l| &l.on_restart);
-                let global_retention = global_log_config.as_ref().map(|l| &l.on_restart);
+                {
+                    use kepler_daemon::config::resolve_log_retention;
 
-                let should_clear = match service_retention.or(global_retention) {
-                    Some(LogRetention::Retain) => false,
-                    _ => true, // Default: clear
-                };
+                    let retention = resolve_log_retention(
+                        config.logs.as_ref(),
+                        global_log_config.as_ref(),
+                        |l| l.on_restart.clone(),
+                        LogRetention::Retain, // New default for on_restart
+                    );
+                    let should_clear = retention == LogRetention::Clear;
 
-                if should_clear {
-                    logs.clear_service(&event.service_name);
-                    logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                    if should_clear {
+                        logs.clear_service(&event.service_name);
+                        logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                    }
                 }
 
                 // Stop the service
@@ -537,17 +541,21 @@ async fn start_services(
         .await?;
 
         // Clear logs based on on_start retention policy
-        let service_retention = service_config.logs.as_ref().map(|l| &l.on_start);
-        let global_retention = config.logs.as_ref().map(|l| &l.on_start);
+        {
+            use kepler_daemon::config::resolve_log_retention;
 
-        let should_clear = match service_retention.or(global_retention) {
-            Some(LogRetention::Retain) => false,
-            _ => true, // Default: clear
-        };
+            let retention = resolve_log_retention(
+                service_config.logs.as_ref(),
+                config.logs.as_ref(),
+                |l| l.on_start.clone(),
+                LogRetention::Retain, // New default for on_start
+            );
+            let should_clear = retention == LogRetention::Clear;
 
-        if should_clear {
-            logs.clear_service(service_name);
-            logs.clear_service_prefix(&format!("[{}.", service_name));
+            if should_clear {
+                logs.clear_service(service_name);
+                logs.clear_service_prefix(&format!("[{}.", service_name));
+            }
         }
 
         // Spawn process
@@ -730,28 +738,30 @@ async fn stop_services(
     // Clear logs based on retention policy
     // When clean=true, use on_cleanup retention; otherwise use on_stop
     for service_name in &stopped {
-        // Check service-level config, fall back to global
-        let service_retention = if clean {
-            service_configs
-                .get(service_name)
-                .and_then(|c| c.logs.as_ref())
-                .map(|l| &l.on_cleanup)
-        } else {
-            service_configs
-                .get(service_name)
-                .and_then(|c| c.logs.as_ref())
-                .map(|l| &l.on_stop)
-        };
-        let global_retention = if clean {
-            global_log_config.as_ref().map(|l| &l.on_cleanup)
-        } else {
-            global_log_config.as_ref().map(|l| &l.on_stop)
-        };
+        use kepler_daemon::config::resolve_log_retention;
 
-        let should_clear = match service_retention.or(global_retention) {
-            Some(LogRetention::Retain) => false,
-            _ => true, // Default: clear
+        let service_logs = service_configs
+            .get(service_name)
+            .and_then(|c| c.logs.as_ref());
+
+        let retention = if clean {
+            // on_cleanup defaults to Clear
+            resolve_log_retention(
+                service_logs,
+                global_log_config.as_ref(),
+                |l| l.on_cleanup.clone(),
+                LogRetention::Clear,
+            )
+        } else {
+            // on_stop defaults to Clear
+            resolve_log_retention(
+                service_logs,
+                global_log_config.as_ref(),
+                |l| l.on_stop.clone(),
+                LogRetention::Clear,
+            )
         };
+        let should_clear = retention == LogRetention::Clear;
 
         if should_clear {
             // Clear service logs and all its hook logs (e.g., "backend" and "[backend.*]")
@@ -763,15 +773,19 @@ async fn stop_services(
     // For global hooks logs, check global config when stopping all or cleaning
     if service.is_none() && (!stopped.is_empty() || clean) {
         let should_clear_global = if clean {
-            match &global_log_config {
-                Some(config) if config.on_cleanup == LogRetention::Retain => false,
-                _ => true,
-            }
+            // on_cleanup defaults to Clear
+            global_log_config
+                .as_ref()
+                .and_then(|c| c.on_cleanup.clone())
+                .unwrap_or(LogRetention::Clear)
+                == LogRetention::Clear
         } else {
-            match &global_log_config {
-                Some(config) if config.on_stop == LogRetention::Retain => false,
-                _ => true,
-            }
+            // on_stop defaults to Clear
+            global_log_config
+                .as_ref()
+                .and_then(|c| c.on_stop.clone())
+                .unwrap_or(LogRetention::Clear)
+                == LogRetention::Clear
         };
         if should_clear_global {
             // Clear all global hook logs using prefix
@@ -867,17 +881,20 @@ async fn restart_services(
 
     // Clear logs based on on_restart retention policy
     if let Some(logs) = &logs {
-        for service_name in &services_to_restart {
-            let service_retention = service_configs
-                .get(service_name)
-                .and_then(|c| c.logs.as_ref())
-                .map(|l| &l.on_restart);
-            let global_retention = global_log_config.as_ref().map(|l| &l.on_restart);
+        use kepler_daemon::config::resolve_log_retention;
 
-            let should_clear = match service_retention.or(global_retention) {
-                Some(LogRetention::Retain) => false,
-                _ => true, // Default: clear
-            };
+        for service_name in &services_to_restart {
+            let service_logs = service_configs
+                .get(service_name)
+                .and_then(|c| c.logs.as_ref());
+
+            let retention = resolve_log_retention(
+                service_logs,
+                global_log_config.as_ref(),
+                |l| l.on_restart.clone(),
+                LogRetention::Retain, // New default for on_restart
+            );
+            let should_clear = retention == LogRetention::Clear;
 
             if should_clear {
                 logs.clear_service(service_name);

@@ -291,39 +291,48 @@ services:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `timestamp` | `bool` | `false` | Include timestamps in log output |
-| `on_start` | `clear\|retain` | `clear` | Log retention when service starts |
+| `on_start` | `clear\|retain` | `retain` | Log retention when service starts |
 | `on_stop` | `clear\|retain` | `clear` | Log retention when service stops |
-| `on_restart` | `clear\|retain` | `clear` | Log retention when service restarts |
-| `on_exit` | `clear\|retain` | `clear` | Log retention when service process exits |
+| `on_restart` | `clear\|retain` | `retain` | Log retention when service restarts |
+| `on_exit` | `clear\|retain` | `retain` | Log retention when service process exits |
 | `on_cleanup` | `clear\|retain` | `clear` | Log retention on cleanup |
 
 **Log retention values:**
-- `clear` (default): Clear logs when the event occurs
-- `retain`: Keep logs when the event occurs
+- `retain`: Keep logs when the event occurs (default for `on_start`, `on_restart`, `on_exit`)
+- `clear`: Clear logs when the event occurs (default for `on_stop`, `on_cleanup`)
+
+**Inheritance priority** (highest to lowest):
+1. **Service-level setting** - Explicit setting in the service's `logs:` block
+2. **Global-level setting** - Setting in the top-level `logs:` block
+3. **Built-in default** - The default value shown in the table above
+
+When a log retention event occurs, Kepler checks each level in order and uses the first explicitly set value it finds. If no value is set at any level, it falls back to the built-in default.
 
 **Example:**
 ```yaml
-services:
-  backend:
-    command: ["npm", "run", "dev"]
-    logs:
-      timestamp: true
-      on_stop: retain    # Keep logs when stopped
-      on_restart: clear  # Clear logs on restart
-      on_exit: retain    # Keep logs when process exits
-```
-
-Log configuration can also be set globally at the top level to apply defaults to all services:
-```yaml
+# Global log settings (level 2)
 logs:
-  timestamp: true
-  on_stop: retain
+  on_start: clear      # Override default retain → clear for all services
+  on_stop: retain      # Override default clear → retain for all services
 
 services:
   backend:
     command: ["npm", "run", "dev"]
     logs:
-      on_stop: clear  # Override global setting for this service
+      on_stop: clear   # Service override (level 1): clear instead of global retain
+      # on_start: not set → inherits global "clear"
+      # on_restart: not set → inherits built-in default "retain"
+      # on_exit: not set → inherits built-in default "retain"
+      # on_cleanup: not set → inherits built-in default "clear"
+
+  frontend:
+    command: ["npm", "run", "start"]
+    # No logs config → inherits all from global, then built-in defaults
+    # on_start: global "clear"
+    # on_stop: global "retain"
+    # on_restart: built-in "retain"
+    # on_exit: built-in "retain"
+    # on_cleanup: built-in "clear"
 ```
 
 #### Service Hooks

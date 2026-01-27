@@ -261,18 +261,32 @@ pub enum LogRetention {
 /// Log configuration
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct LogConfig {
-    #[serde(default)]
-    pub timestamp: bool,
-    #[serde(default)]
-    pub on_stop: LogRetention,
-    #[serde(default)]
-    pub on_start: LogRetention,
-    #[serde(default)]
-    pub on_restart: LogRetention,
-    #[serde(default)]
-    pub on_cleanup: LogRetention,
-    #[serde(default)]
-    pub on_exit: LogRetention,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_stop: Option<LogRetention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_start: Option<LogRetention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_restart: Option<LogRetention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_cleanup: Option<LogRetention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_exit: Option<LogRetention>,
+}
+
+/// Resolve log retention for a specific event.
+/// Priority: service setting > global setting > default
+pub fn resolve_log_retention(
+    service_logs: Option<&LogConfig>,
+    global_logs: Option<&LogConfig>,
+    get_field: impl Fn(&LogConfig) -> Option<LogRetention>,
+    default: LogRetention,
+) -> LogRetention {
+    service_logs
+        .and_then(|l| get_field(l))
+        .or_else(|| global_logs.and_then(|l| get_field(l)))
+        .unwrap_or(default)
 }
 
 /// Deserialize duration from string like "10s", "5m", "1h"

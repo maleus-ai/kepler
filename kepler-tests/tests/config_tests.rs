@@ -366,13 +366,13 @@ services:
     use kepler_daemon::config::LogRetention;
 
     let global_logs = config.logs.as_ref().unwrap();
-    assert!(global_logs.timestamp);
-    assert_eq!(global_logs.on_stop, LogRetention::Retain);
-    assert_eq!(global_logs.on_start, LogRetention::Clear);
+    assert_eq!(global_logs.timestamp, Some(true));
+    assert_eq!(global_logs.on_stop, Some(LogRetention::Retain));
+    assert_eq!(global_logs.on_start, Some(LogRetention::Clear));
 
     let service_logs = config.services["test"].logs.as_ref().unwrap();
-    assert!(!service_logs.timestamp);
-    assert_eq!(service_logs.on_restart, LogRetention::Retain);
+    assert_eq!(service_logs.timestamp, Some(false)); // Explicitly set to false
+    assert_eq!(service_logs.on_restart, Some(LogRetention::Retain));
 }
 
 /// Working directory parsing

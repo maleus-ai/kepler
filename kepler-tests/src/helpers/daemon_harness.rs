@@ -436,17 +436,21 @@ impl TestDaemonHarness {
                     .await;
 
                     // Apply on_restart log retention policy
-                    let service_retention = config.logs.as_ref().map(|l| &l.on_restart);
-                    let global_retention = global_log_config.as_ref().map(|l| &l.on_restart);
+                    {
+                        use kepler_daemon::config::resolve_log_retention;
 
-                    let should_clear = match service_retention.or(global_retention) {
-                        Some(LogRetention::Retain) => false,
-                        _ => true,
-                    };
+                        let retention = resolve_log_retention(
+                            config.logs.as_ref(),
+                            global_log_config.as_ref(),
+                            |l| l.on_restart.clone(),
+                            LogRetention::Retain, // New default for on_restart
+                        );
+                        let should_clear = retention == LogRetention::Clear;
 
-                    if should_clear {
-                        logs.clear_service(&event.service_name);
-                        logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                        if should_clear {
+                            logs.clear_service(&event.service_name);
+                            logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                        }
                     }
 
                     // Stop the service
