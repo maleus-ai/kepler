@@ -17,6 +17,8 @@ async fn test_script_format_hook() {
         on_start: Some(HookCommand::Script {
             run: format!("touch {}", marker.marker_path("script").display()),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }),
         ..Default::default()
     };
@@ -60,6 +62,8 @@ async fn test_command_format_hook() {
                 marker_path.to_string_lossy().to_string(),
             ],
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }),
         ..Default::default()
     };
@@ -100,6 +104,8 @@ async fn test_hook_environment_variables() {
         on_start: Some(HookCommand::Script {
             run: format!("echo \"TEST_VAR=$TEST_VAR\" >> {}", marker_path.display()),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }),
         ..Default::default()
     };
@@ -150,6 +156,8 @@ async fn test_hook_working_directory() {
         on_start: Some(HookCommand::Script {
             run: format!("pwd >> {}", marker_path.display()),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }),
         ..Default::default()
     };
@@ -317,6 +325,8 @@ async fn test_hook_failure_doesnt_block_service() {
         on_start: Some(HookCommand::Script {
             run: "exit 1".to_string(), // Always fails
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }),
         ..Default::default()
     };
@@ -353,10 +363,14 @@ async fn test_hook_execution_order() {
         on_init: Some(HookCommand::Script {
             run: format!("echo 'init' >> {}", order_file.display()),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }),
         on_start: Some(HookCommand::Script {
             run: format!("echo 'start' >> {}", order_file.display()),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }),
         ..Default::default()
     };
@@ -385,6 +399,282 @@ async fn test_hook_execution_order() {
     assert!(lines.len() >= 2, "Both hooks should have executed");
     assert_eq!(lines[0], "init", "on_init should run first");
     assert_eq!(lines[1], "start", "on_start should run second");
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Hook's own environment variables work
+#[tokio::test]
+async fn test_hook_own_environment_variables() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("hook_env");
+
+    let hooks = ServiceHooks {
+        on_start: Some(HookCommand::Script {
+            run: format!("echo \"HOOK_VAR=$HOOK_VAR\" >> {}", marker_path.display()),
+            user: None,
+            environment: vec!["HOOK_VAR=from_hook".to_string()],
+            env_file: None,
+        }),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    // Wait for marker content
+    let content = marker
+        .wait_for_marker_content("hook_env", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Hook environment capture should execute");
+    let content = content.unwrap();
+    assert!(
+        content.contains("HOOK_VAR=from_hook"),
+        "Hook should have access to its own env vars. Got: {}",
+        content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Hook's env_file loads variables
+#[tokio::test]
+async fn test_hook_env_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("hook_env_file");
+
+    // Create an env file for the hook
+    let env_file_path = temp_dir.path().join(".env.hook");
+    std::fs::write(&env_file_path, "HOOK_FILE_VAR=from_env_file\n").unwrap();
+
+    let hooks = ServiceHooks {
+        on_start: Some(HookCommand::Script {
+            run: format!("echo \"HOOK_FILE_VAR=$HOOK_FILE_VAR\" >> {}", marker_path.display()),
+            user: None,
+            environment: Vec::new(),
+            env_file: Some(env_file_path),
+        }),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    // Wait for marker content
+    let content = marker
+        .wait_for_marker_content("hook_env_file", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Hook env_file capture should execute");
+    let content = content.unwrap();
+    assert!(
+        content.contains("HOOK_FILE_VAR=from_env_file"),
+        "Hook should have access to env_file vars. Got: {}",
+        content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Hook's environment overrides service environment
+#[tokio::test]
+async fn test_hook_env_overrides_service_env() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("override_test");
+
+    let hooks = ServiceHooks {
+        on_start: Some(HookCommand::Script {
+            run: format!("echo \"SHARED_VAR=$SHARED_VAR\" >> {}", marker_path.display()),
+            user: None,
+            environment: vec!["SHARED_VAR=from_hook".to_string()],
+            env_file: None,
+        }),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_environment(vec!["SHARED_VAR=from_service".to_string()])
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    // Wait for marker content
+    let content = marker
+        .wait_for_marker_content("override_test", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Override test hook should execute");
+    let content = content.unwrap();
+    assert!(
+        content.contains("SHARED_VAR=from_hook"),
+        "Hook env should override service env. Got: {}",
+        content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Hook's environment can reference service environment variables
+#[tokio::test]
+async fn test_hook_env_expansion_with_service_env() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("expansion_test");
+
+    let hooks = ServiceHooks {
+        on_start: Some(HookCommand::Script {
+            run: format!("echo \"COMBINED=$COMBINED\" >> {}", marker_path.display()),
+            user: None,
+            environment: vec!["COMBINED=${SERVICE_VAR}_plus_hook".to_string()],
+            env_file: None,
+        }),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_environment(vec!["SERVICE_VAR=base_value".to_string()])
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    // Wait for marker content
+    let content = marker
+        .wait_for_marker_content("expansion_test", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Expansion test hook should execute");
+    let content = content.unwrap();
+    assert!(
+        content.contains("COMBINED=base_value_plus_hook"),
+        "Hook env should expand service env vars. Got: {}",
+        content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Hook's env_file overrides service env_file but is overridden by hook's environment
+#[tokio::test]
+async fn test_hook_env_priority() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("priority_test");
+
+    // Create service env file
+    let service_env_file = temp_dir.path().join(".env.service");
+    std::fs::write(&service_env_file, "VAR1=service_file\nVAR2=service_file\nVAR3=service_file\n").unwrap();
+
+    // Create hook env file
+    let hook_env_file = temp_dir.path().join(".env.hook");
+    std::fs::write(&hook_env_file, "VAR2=hook_file\nVAR3=hook_file\n").unwrap();
+
+    let hooks = ServiceHooks {
+        on_start: Some(HookCommand::Script {
+            run: format!(
+                "echo \"VAR1=$VAR1\" >> {} && echo \"VAR2=$VAR2\" >> {} && echo \"VAR3=$VAR3\" >> {}",
+                marker_path.display(),
+                marker_path.display(),
+                marker_path.display()
+            ),
+            user: None,
+            environment: vec!["VAR3=hook_env".to_string()],
+            env_file: Some(hook_env_file),
+        }),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_env_file(service_env_file)
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    // Wait for marker content
+    let content = marker
+        .wait_for_marker_content("priority_test", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Priority test hook should execute");
+    let content = content.unwrap();
+
+    // VAR1 should come from service env_file (only place it's defined)
+    assert!(
+        content.contains("VAR1=service_file"),
+        "VAR1 should come from service env_file. Got: {}",
+        content
+    );
+
+    // VAR2 should come from hook env_file (overrides service env_file)
+    assert!(
+        content.contains("VAR2=hook_file"),
+        "VAR2 should come from hook env_file. Got: {}",
+        content
+    );
+
+    // VAR3 should come from hook environment (highest priority)
+    assert!(
+        content.contains("VAR3=hook_env"),
+        "VAR3 should come from hook environment. Got: {}",
+        content
+    );
 
     harness.stop_service("test").await.unwrap();
 }

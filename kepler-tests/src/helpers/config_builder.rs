@@ -302,6 +302,8 @@ impl TestHookBuilder {
         HookCommand::Script {
             run: script.to_string(),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }
     }
 
@@ -310,6 +312,8 @@ impl TestHookBuilder {
         HookCommand::Command {
             command: cmd.iter().map(|s| s.to_string()).collect(),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }
     }
 
@@ -318,6 +322,8 @@ impl TestHookBuilder {
         HookCommand::Script {
             run: format!("touch {}", path.display()),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }
     }
 
@@ -326,6 +332,28 @@ impl TestHookBuilder {
         HookCommand::Script {
             run: format!("echo '{}' >> {}", message, path.display()),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
+        }
+    }
+
+    /// Create a script hook with environment variables
+    pub fn script_with_env(script: &str, environment: Vec<String>) -> HookCommand {
+        HookCommand::Script {
+            run: script.to_string(),
+            user: None,
+            environment,
+            env_file: None,
+        }
+    }
+
+    /// Create a script hook with an env_file
+    pub fn script_with_env_file(script: &str, env_file: PathBuf) -> HookCommand {
+        HookCommand::Script {
+            run: script.to_string(),
+            user: None,
+            environment: Vec::new(),
+            env_file: Some(env_file),
         }
     }
 }

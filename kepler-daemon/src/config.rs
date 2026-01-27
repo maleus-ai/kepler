@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serializer};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::errors::{DaemonError, Result};
@@ -33,11 +33,19 @@ pub enum HookCommand {
         run: String,
         #[serde(default)]
         user: Option<String>,
+        #[serde(default)]
+        environment: Vec<String>,
+        #[serde(default)]
+        env_file: Option<PathBuf>,
     },
     Command {
         command: Vec<String>,
         #[serde(default)]
         user: Option<String>,
+        #[serde(default)]
+        environment: Vec<String>,
+        #[serde(default)]
+        env_file: Option<PathBuf>,
     },
 }
 
@@ -46,6 +54,20 @@ impl HookCommand {
         match self {
             HookCommand::Script { user, .. } => user.as_deref(),
             HookCommand::Command { user, .. } => user.as_deref(),
+        }
+    }
+
+    pub fn environment(&self) -> &[String] {
+        match self {
+            HookCommand::Script { environment, .. } => environment,
+            HookCommand::Command { environment, .. } => environment,
+        }
+    }
+
+    pub fn env_file(&self) -> Option<&Path> {
+        match self {
+            HookCommand::Script { env_file, .. } => env_file.as_deref(),
+            HookCommand::Command { env_file, .. } => env_file.as_deref(),
         }
     }
 }

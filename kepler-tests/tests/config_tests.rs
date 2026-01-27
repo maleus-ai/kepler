@@ -558,3 +558,53 @@ services:
         _ => panic!("Expected Command hook"),
     }
 }
+
+/// Hook environment and env_file parse correctly from YAML
+#[test]
+fn test_hook_environment_parsing() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    command: ["sleep", "3600"]
+    hooks:
+      on_start:
+        run: echo "starting"
+        environment:
+          - HOOK_VAR=hook_value
+          - DEBUG=true
+        env_file: .env.hooks
+      on_stop:
+        command: ["echo", "stopping"]
+        environment:
+          - CLEANUP=deep
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load(&config_path).unwrap();
+
+    let hooks = config.services["test"].hooks.as_ref().unwrap();
+
+    // on_start has environment and env_file
+    match hooks.on_start.as_ref().unwrap() {
+        HookCommand::Script { environment, env_file, .. } => {
+            assert_eq!(environment.len(), 2);
+            assert_eq!(environment[0], "HOOK_VAR=hook_value");
+            assert_eq!(environment[1], "DEBUG=true");
+            assert_eq!(env_file.as_ref().unwrap().to_str().unwrap(), ".env.hooks");
+        }
+        _ => panic!("Expected Script hook"),
+    }
+
+    // on_stop has environment but no env_file
+    match hooks.on_stop.as_ref().unwrap() {
+        HookCommand::Command { environment, env_file, .. } => {
+            assert_eq!(environment.len(), 1);
+            assert_eq!(environment[0], "CLEANUP=deep");
+            assert!(env_file.is_none());
+        }
+        _ => panic!("Expected Command hook"),
+    }
+}

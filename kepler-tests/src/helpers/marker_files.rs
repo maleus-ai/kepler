@@ -30,6 +30,8 @@ impl MarkerFileHelper {
         HookCommand::Script {
             run: format!("touch {}", marker_path.display()),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }
     }
 
@@ -39,6 +41,8 @@ impl MarkerFileHelper {
         HookCommand::Script {
             run: format!("date +%s >> {}", marker_path.display()),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }
     }
 
@@ -48,6 +52,8 @@ impl MarkerFileHelper {
         HookCommand::Script {
             run: format!("echo '{}' >> {}", value, marker_path.display()),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
         }
     }
 
@@ -61,6 +67,28 @@ impl MarkerFileHelper {
         HookCommand::Script {
             run: capture_commands.join(" && "),
             user: None,
+            environment: Vec::new(),
+            env_file: None,
+        }
+    }
+
+    /// Create a hook with environment variables that writes them to a marker file
+    pub fn create_env_capture_hook_with_env(
+        &self,
+        name: &str,
+        env_vars: &[&str],
+        environment: Vec<String>,
+    ) -> HookCommand {
+        let marker_path = self.marker_path(name);
+        let capture_commands: Vec<String> = env_vars
+            .iter()
+            .map(|var| format!("echo \"{}=${{{}}}\" >> {}", var, var, marker_path.display()))
+            .collect();
+        HookCommand::Script {
+            run: capture_commands.join(" && "),
+            user: None,
+            environment,
+            env_file: None,
         }
     }
 

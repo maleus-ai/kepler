@@ -2,7 +2,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::config::ServiceConfig;
+use crate::config::{HookCommand, ServiceConfig};
 use crate::errors::{DaemonError, Result};
 
 /// Expand ${VAR} references in a string using environment variables and extra env
@@ -94,6 +94,56 @@ pub fn build_service_env(
         if let Some((key, value)) = entry.split_once('=') {
             let expanded_value = expand_env(value, &env);
             env.insert(key.to_string(), expanded_value);
+        }
+    }
+
+    Ok(env)
+}
+
+/// Build environment for a hook, merging hook-specific env with base service env
+///
+/// Priority (highest to lowest):
+/// 1. Hook's environment variables
+/// 2. Hook's env_file variables
+/// 3. Base service environment (already includes service env and system env)
+pub fn build_hook_env(
+    hook: &HookCommand,
+    base_env: &HashMap<String, String>,
+    working_dir: &Path,
+) -> Result<HashMap<String, String>> {
+    let mut env = base_env.clone();
+
+    // Load from hook's env_file if specified
+    if let Some(env_file_path) = hook.env_file() {
+        let resolved_path = if env_file_path.is_relative() {
+            working_dir.join(env_file_path)
+        } else {
+            env_file_path.to_path_buf()
+        };
+
+        if resolved_path.exists() {
+            let iter = dotenvy::from_path_iter(&resolved_path).map_err(|e| {
+                DaemonError::EnvFileParse {
+                    path: resolved_path.clone(),
+                    source: e,
+                }
+            })?;
+
+            for item in iter {
+                let (key, value) = item.map_err(|e| DaemonError::EnvFileParse {
+                    path: resolved_path.clone(),
+                    source: e,
+                })?;
+                env.insert(key, value);
+            }
+        }
+    }
+
+    // Apply hook's environment (highest priority)
+    for var in hook.environment() {
+        if let Some((key, value)) = var.split_once('=') {
+            let expanded = expand_env(value, &env);
+            env.insert(key.to_string(), expanded);
         }
     }
 

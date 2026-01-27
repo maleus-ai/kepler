@@ -222,7 +222,24 @@ hooks:
   on_restart:
     run: ./notify.sh
     user: admin                    # Run hook as specific user
+  on_init:
+    run: ./setup.sh
+    environment:                   # Hook-specific environment variables
+      - SETUP_MODE=full
+      - DEBUG=true
+    env_file: .env.hooks           # Hook-specific env file
 ```
+
+**Hook environment variables:**
+- Hooks inherit the service's environment (including system env and service env_file)
+- `environment:` defines hook-specific variables that override inherited ones
+- `env_file:` loads additional variables from a file (relative to working_dir)
+- Environment merging priority (highest to lowest):
+  1. Hook's `environment` array
+  2. Hook's `env_file` variables
+  3. Service's `environment` array
+  4. Service's `env_file` variables
+  5. System environment variables
 
 **Hook user behavior** (Unix only):
 - By default, hooks inherit the service's `user:` setting

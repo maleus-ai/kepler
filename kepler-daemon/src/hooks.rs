@@ -6,6 +6,7 @@ use tokio::process::Command;
 use tracing::{debug, error, info};
 
 use crate::config::{GlobalHooks, HookCommand, ServiceHooks};
+use crate::env::build_hook_env;
 use crate::errors::{DaemonError, Result};
 use crate::logs::{LogStream, SharedLogBuffer};
 
@@ -65,6 +66,9 @@ pub async fn run_hook(
     service_user: Option<&str>,
     service_group: Option<&str>,
 ) -> Result<()> {
+    // Build hook-specific environment (merges with base env)
+    let hook_env = build_hook_env(hook, env, working_dir)?;
+
     let (program, args) = match hook {
         HookCommand::Script { run, .. } => {
             // Run script through shell
@@ -86,7 +90,7 @@ pub async fn run_hook(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .envs(env);
+        .envs(&hook_env);
 
     // Determine effective user (Unix only)
     #[cfg(unix)]
