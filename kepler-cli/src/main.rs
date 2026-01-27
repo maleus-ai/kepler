@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 
@@ -8,6 +9,7 @@ use crate::{commands::Commands, commands::DaemonCommands, config::Config};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use clap::Parser;
+use colored::{Color, Colorize};
 use kepler_daemon::Daemon;
 use kepler_protocol::{
     client::Client,
@@ -591,13 +593,15 @@ async fn handle_logs(
         .logs(config_path.clone(), service.clone(), follow, lines)
         .await?;
 
+    let mut color_map: HashMap<String, Color> = HashMap::new();
+
     match response {
         Response::Ok {
             data: Some(ResponseData::Logs(entries)),
             ..
         } => {
             for entry in &entries {
-                print_log_entry(entry);
+                print_log_entry(entry, &mut color_map);
             }
 
             if follow {
@@ -629,7 +633,7 @@ async fn handle_logs(
                         for entry in entries {
                             if let Some(ts) = entry.timestamp {
                                 if ts > last_timestamp {
-                                    print_log_entry(&entry);
+                                    print_log_entry(&entry, &mut color_map);
                                     last_timestamp = ts;
                                 }
                             }
@@ -652,7 +656,52 @@ async fn handle_logs(
     Ok(())
 }
 
-fn print_log_entry(entry: &kepler_protocol::protocol::LogEntry) {
+const SERVICE_COLORS: &[Color] = &[
+    Color::Cyan,
+    Color::Green,
+    Color::Yellow,
+    Color::Blue,
+    Color::Magenta,
+    Color::BrightCyan,
+    Color::BrightGreen,
+    Color::BrightYellow,
+    Color::BrightBlue,
+    Color::BrightMagenta,
+];
+
+fn get_base_service_name(service: &str) -> &str {
+    // Extract base service name from hook patterns like "[backend.on_start]"
+    if service.starts_with('[') && service.ends_with(']') {
+        let inner = &service[1..service.len() - 1];
+        if let Some(dot_pos) = inner.find('.') {
+            return &inner[..dot_pos];
+        }
+    }
+    service
+}
+
+fn get_service_color(service: &str, color_map: &mut HashMap<String, Color>) -> Color {
+    let base_name = get_base_service_name(service);
+
+    // Return existing color if already assigned
+    if let Some(&color) = color_map.get(base_name) {
+        return color;
+    }
+
+    // Start from hash-based index and find first unused color
+    let hash: usize = base_name.bytes().fold(0, |acc, b| acc.wrapping_add(b as usize));
+    let start_idx = hash % SERVICE_COLORS.len();
+
+    let color = (0..SERVICE_COLORS.len())
+        .map(|offset| SERVICE_COLORS[(start_idx + offset) % SERVICE_COLORS.len()])
+        .find(|c| !color_map.values().any(|used| used == c))
+        .unwrap_or(SERVICE_COLORS[start_idx]); // Fallback if all colors used
+
+    color_map.insert(base_name.to_string(), color);
+    color
+}
+
+fn print_log_entry(entry: &kepler_protocol::protocol::LogEntry, color_map: &mut HashMap<String, Color>) {
     let timestamp_str = entry
         .timestamp
         .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
@@ -668,12 +717,15 @@ fn print_log_entry(entry: &kepler_protocol::protocol::LogEntry) {
         " "
     };
 
+    let color = get_service_color(&entry.service, color_map);
+    let colored_service = entry.service.color(color);
+
     if timestamp_str.is_empty() {
-        println!("{}{} | {}", stream_indicator, entry.service, entry.line);
+        println!("{}{} | {}", stream_indicator, colored_service, entry.line);
     } else {
         println!(
             "{} {}{} | {}",
-            timestamp_str, stream_indicator, entry.service, entry.line
+            timestamp_str, stream_indicator, colored_service, entry.line
         );
     }
 }

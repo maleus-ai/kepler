@@ -20,3 +20,4 @@ anyhow = "1.0.100"
 tokio = { version = "1.49.0", features = ["full", "process"] }
 chrono = "0.4"
 which = "6.0"
+colored = "2"
