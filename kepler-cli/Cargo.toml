@@ -1,0 +1,22 @@
+[package]
+name = "kepler-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "kepler"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5.54", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+kepler-protocol = { path = "../kepler-protocol" }
+kepler-daemon = { path = "../kepler-daemon" }
+anyhow = "1.0.100"
+tokio = { version = "1.49.0", features = ["full", "process"] }
+chrono = "0.4"
+which = "6.0"

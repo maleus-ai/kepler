@@ -1,0 +1,29 @@
+hooks:
+  on_init:
+    run: |
+      echo "First run of kepler.yaml"
+  on_start:
+    run: |
+      echo "Kepler started"
+  on_stop:
+    run: |
+      echo "Kepler stopped"
+  on_cleanup:
+    command: ["echo", "Cleanup of resources"]
+
+logs:
+  on_stop: retain
+
+services:
+  backend:
+    command: ["sh", "-c", "echo Hello && sleep 1000"]
+    restart: no
+    hooks:
+      on_init:
+        command: ["echo", "First run of the backend"]
+      on_restart:
+        command: ["echo", "Backend restarted"]
+      on_exit:
+        command: ["echo", "Backend exited"]
+      on_start:
+        command: ["echo", "Backend started"]

@@ -1,0 +1,57 @@
+hooks:
+  on_init:
+    run: |
+      echo "First run of kepler.yaml"
+  on_start:
+    run: |
+      echo "Kepler started"
+  on_stop:
+    run: |
+      echo "Kepler stopped"
+  on_cleanup:
+    command: ["echo", "Cleanup of resources"]
+
+services:
+  backend:
+    working_dir: /repository/apps/backend
+    command: ["pnpm", "server:start"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -f http://localhost:4000/server/health-check || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: always
+    # Restart on file changes
+    watch:
+      - "**/*.ts"
+    hooks:
+      on_init:
+        command: ["echo", "First run of the backend"]
+      on_restart:
+        command: ["echo", "Backend restarted"]
+      on_exit:
+        command: ["echo", "Backend exited"]
+      on_start:
+        command: ["echo", "Backend started"]
+  frontend:
+    working_dir: /repository/apps/frontend
+    command: ["pnpm", "server:start"]
+    environment:
+      # Inject the VITE_API_URL env variable copied from ${BACKEND_URL}
+      - VITE_API_URL=${BACKEND_URL}
+    restart: always
+    # Restart on file changes
+    watch:
+      - "**/*.ts"
+  snivel:
+    logs:
+      timestamp: true
+    working_dir: /snivel
+    command: ["pnpm", "server:snivel"]
+    restart: always
+    env_file: ./.env
