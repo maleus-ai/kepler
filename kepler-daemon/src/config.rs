@@ -41,6 +41,9 @@ pub enum HookCommand {
         environment: Vec<String>,
         #[serde(default)]
         env_file: Option<PathBuf>,
+        /// Per-hook log level override
+        #[serde(default)]
+        log_level: Option<HookLogLevel>,
     },
     Command {
         command: Vec<String>,
@@ -54,6 +57,9 @@ pub enum HookCommand {
         environment: Vec<String>,
         #[serde(default)]
         env_file: Option<PathBuf>,
+        /// Per-hook log level override
+        #[serde(default)]
+        log_level: Option<HookLogLevel>,
     },
 }
 
@@ -92,6 +98,58 @@ impl HookCommand {
             HookCommand::Command { env_file, .. } => env_file.as_deref(),
         }
     }
+
+    pub fn log_level(&self) -> Option<&HookLogLevel> {
+        match self {
+            HookCommand::Script { log_level, .. } => log_level.as_ref(),
+            HookCommand::Command { log_level, .. } => log_level.as_ref(),
+        }
+    }
+}
+
+/// Resource limits for a service process
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+pub struct ResourceLimits {
+    /// Memory limit (e.g., "512M", "1G", "2048K")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    /// CPU time limit in seconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time: Option<u64>,
+    /// Maximum number of open file descriptors
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fds: Option<u64>,
+}
+
+/// Parse memory limit string (e.g., "512M", "1G") to bytes
+pub fn parse_memory_limit(s: &str) -> std::result::Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("Empty memory limit string".to_string());
+    }
+
+    let (num_str, unit) = s
+        .find(|c: char| !c.is_ascii_digit())
+        .map(|i| s.split_at(i))
+        .unwrap_or((s, "B"));
+
+    if num_str.is_empty() {
+        return Err(format!("Invalid number in memory limit: {}", s));
+    }
+
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| format!("Invalid number in memory limit: {}", num_str))?;
+
+    let multiplier = match unit.to_uppercase().as_str() {
+        "B" | "" => 1,
+        "K" | "KB" => 1024,
+        "M" | "MB" => 1024 * 1024,
+        "G" | "GB" => 1024 * 1024 * 1024,
+        _ => return Err(format!("Unknown memory unit: {}", unit)),
+    };
+
+    Ok(num * multiplier)
 }
 
 /// Service configuration
@@ -118,6 +176,9 @@ pub struct ServiceConfig {
     pub user: Option<String>,
     #[serde(default)]
     pub group: Option<String>,
+    /// Resource limits for the process
+    #[serde(default)]
+    pub limits: Option<ResourceLimits>,
 }
 
 /// Restart policy for services
@@ -258,11 +319,33 @@ pub enum LogRetention {
     Retain, // Keep logs after stop
 }
 
-/// Log configuration
+/// Log level for hook output
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HookLogLevel {
+    /// Disable hook logging
+    No,
+    /// Log only errors
+    Error,
+    /// Log warnings and above
+    Warn,
+    /// Log info and above (default)
+    Info,
+    /// Log debug and above
+    Debug,
+    /// Log everything
+    Trace,
+}
+
+impl Default for HookLogLevel {
+    fn default() -> Self {
+        HookLogLevel::Info
+    }
+}
+
+/// Log retention settings for different lifecycle events
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
-pub struct LogConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<bool>,
+pub struct LogRetentionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_stop: Option<LogRetention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,6 +356,46 @@ pub struct LogConfig {
     pub on_cleanup: Option<LogRetention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_exit: Option<LogRetention>,
+}
+
+/// Log configuration
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+pub struct LogConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<bool>,
+    /// Nested log retention settings
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<LogRetentionConfig>,
+    /// Hook output log level
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HookLogLevel>,
+}
+
+impl LogConfig {
+    /// Get on_stop retention from nested retention config
+    pub fn get_on_stop(&self) -> Option<LogRetention> {
+        self.retention.as_ref().and_then(|r| r.on_stop.clone())
+    }
+
+    /// Get on_start retention from nested retention config
+    pub fn get_on_start(&self) -> Option<LogRetention> {
+        self.retention.as_ref().and_then(|r| r.on_start.clone())
+    }
+
+    /// Get on_restart retention from nested retention config
+    pub fn get_on_restart(&self) -> Option<LogRetention> {
+        self.retention.as_ref().and_then(|r| r.on_restart.clone())
+    }
+
+    /// Get on_cleanup retention from nested retention config
+    pub fn get_on_cleanup(&self) -> Option<LogRetention> {
+        self.retention.as_ref().and_then(|r| r.on_cleanup.clone())
+    }
+
+    /// Get on_exit retention from nested retention config
+    pub fn get_on_exit(&self) -> Option<LogRetention> {
+        self.retention.as_ref().and_then(|r| r.on_exit.clone())
+    }
 }
 
 /// Resolve log retention for a specific event.
@@ -287,6 +410,18 @@ pub fn resolve_log_retention(
         .and_then(|l| get_field(l))
         .or_else(|| global_logs.and_then(|l| get_field(l)))
         .unwrap_or(default)
+}
+
+/// Resolve hook log level.
+/// Priority: service setting > global setting > default (Info)
+pub fn resolve_hook_log_level(
+    service_logs: Option<&LogConfig>,
+    global_logs: Option<&LogConfig>,
+) -> HookLogLevel {
+    service_logs
+        .and_then(|l| l.hooks.clone())
+        .or_else(|| global_logs.and_then(|l| l.hooks.clone()))
+        .unwrap_or_default()
 }
 
 /// Deserialize duration from string like "10s", "5m", "1h"
@@ -357,6 +492,26 @@ pub fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
     Ok(Duration::from_millis(num * multiplier))
 }
 
+/// Validate service name format
+///
+/// Service names must contain only:
+/// - lowercase letters (a-z)
+/// - digits (0-9)
+/// - underscores (_)
+/// - hyphens (-)
+fn validate_service_name(name: &str) -> std::result::Result<(), String> {
+    if name.is_empty() {
+        return Err("Service name cannot be empty".to_string());
+    }
+    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+        return Err(format!(
+            "Service name '{}' contains invalid characters. Only lowercase letters (a-z), digits (0-9), underscores (_), and hyphens (-) are allowed.",
+            name
+        ));
+    }
+    Ok(())
+}
+
 impl KeplerConfig {
     /// Load configuration from a YAML file
     pub fn load(path: &std::path::Path) -> Result<Self> {
@@ -386,6 +541,11 @@ impl KeplerConfig {
 
         // Check each service
         for (name, service) in &self.services {
+            // Validate service name format
+            if let Err(e) = validate_service_name(name) {
+                errors.push(e);
+            }
+
             // Check command is not empty
             if service.command.is_empty() {
                 errors.push(format!(
@@ -421,13 +581,6 @@ impl KeplerConfig {
         Ok(())
     }
 
-    /// Compute a hash of the config file contents
-    pub fn compute_hash(path: &std::path::Path) -> Result<String> {
-        use sha2::{Digest, Sha256};
-        let contents = std::fs::read(path)?;
-        let hash = Sha256::digest(&contents);
-        Ok(hex::encode(hash))
-    }
 }
 
 #[cfg(test)]

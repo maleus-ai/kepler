@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 use crate::errors::ProtocolError;
 
+/// Maximum message size (1MB)
+pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
 /// Request sent from CLI to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -46,6 +49,17 @@ pub enum Request {
         follow: bool,
         /// Number of lines to retrieve
         lines: usize,
+    },
+    /// Get logs with pagination (for large log responses)
+    LogsChunk {
+        /// Path to the config file
+        config_path: PathBuf,
+        /// Service name (None = all services)
+        service: Option<String>,
+        /// Offset for pagination
+        offset: usize,
+        /// Maximum number of entries to return
+        limit: usize,
     },
     /// Shutdown the daemon
     Shutdown,
@@ -126,8 +140,23 @@ pub enum ResponseData {
     ConfigList(Vec<LoadedConfigInfo>),
     /// Log entries
     Logs(Vec<LogEntry>),
+    /// Log entries chunk (for large log responses)
+    LogChunk(LogChunkData),
     /// Daemon info
     DaemonInfo(DaemonInfo),
+}
+
+/// Chunked log entries for large log responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogChunkData {
+    /// Log entries in this chunk
+    pub entries: Vec<LogEntry>,
+    /// Whether there are more entries after this chunk
+    pub has_more: bool,
+    /// Offset for next chunk request
+    pub next_offset: usize,
+    /// Total number of entries (if known)
+    pub total: Option<usize>,
 }
 
 /// Status information for a single config

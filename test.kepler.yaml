@@ -12,7 +12,8 @@ hooks:
     command: ["echo", "Cleanup of resources"]
 
 logs:
-  on_stop: retain
+  retention:
+    on_stop: retain
 
 services:
   backend:

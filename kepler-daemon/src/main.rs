@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
+use clap::Parser;
 use kepler_daemon::deps::{get_service_with_deps, get_start_order, get_stop_order};
 use kepler_daemon::env::build_service_env;
 use kepler_daemon::errors::DaemonError;
@@ -24,8 +25,31 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
+/// Canonicalize a config path, returning an error if the path doesn't exist
+fn canonicalize_config_path(path: PathBuf) -> std::result::Result<PathBuf, DaemonError> {
+    std::fs::canonicalize(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            DaemonError::ConfigNotFound(path)
+        } else {
+            DaemonError::Io(e)
+        }
+    })
+}
+
+/// Kepler daemon - process orchestrator
+#[derive(Parser)]
+#[command(name = "kepler-daemon", about = "Kepler daemon for process orchestration")]
+struct Args {
+    /// Allow running as root (not recommended for security reasons)
+    #[arg(long)]
+    allow_root: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parse CLI arguments
+    let args = Args::parse();
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -36,14 +60,19 @@ async fn main() -> Result<()> {
 
     info!("Starting Kepler daemon");
 
-    // Warn if running as root
+    // Block root execution by default (security measure)
     #[cfg(unix)]
     {
         // SAFETY: getuid() is always safe to call
         if unsafe { libc::getuid() } == 0 {
+            if !args.allow_root {
+                eprintln!("Error: Running as root is not allowed for security reasons.");
+                eprintln!("Use --allow-root to override (not recommended).");
+                std::process::exit(1);
+            }
             tracing::warn!(
-                "WARNING: Running the Kepler daemon as root is not recommended. \
-                Consider running as a non-privileged user for better security."
+                "WARNING: Running as root with --allow-root flag. \
+                This is not recommended for security reasons."
             );
         }
     }
@@ -190,6 +219,8 @@ async fn main() -> Result<()> {
                     Some(&logs),
                     config.user.as_deref(),
                     config.group.as_deref(),
+                    config.logs.as_ref(),
+                    global_log_config.as_ref(),
                 )
                 .await;
 
@@ -200,7 +231,7 @@ async fn main() -> Result<()> {
                     let retention = resolve_log_retention(
                         config.logs.as_ref(),
                         global_log_config.as_ref(),
-                        |l| l.on_restart.clone(),
+                        |l| l.get_on_restart(),
                         LogRetention::Retain, // New default for on_restart
                     );
                     let should_clear = retention == LogRetention::Clear;
@@ -299,7 +330,10 @@ async fn handle_request(
             config_path,
             service,
         } => {
-            let config_path = PathBuf::from(config_path);
+            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
             match start_services(
                 &config_path,
                 service.as_deref(),
@@ -319,7 +353,10 @@ async fn handle_request(
             service,
             clean,
         } => {
-            let config_path = PathBuf::from(config_path);
+            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
             match stop_services(&config_path, service.as_deref(), state.clone(), clean).await {
                 Ok(msg) => Response::ok_with_message(msg),
                 Err(e) => Response::error(e.to_string()),
@@ -330,7 +367,10 @@ async fn handle_request(
             config_path,
             service,
         } => {
-            let config_path = PathBuf::from(config_path);
+            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
             match restart_services(
                 &config_path,
                 service.as_deref(),
@@ -389,7 +429,10 @@ async fn handle_request(
             follow: _,
             lines,
         } => {
-            let config_path = PathBuf::from(config_path);
+            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
             let state = state.read();
 
             if let Some(config_state) = state.configs.get(&config_path) {
@@ -425,7 +468,10 @@ async fn handle_request(
         }
 
         Request::UnloadConfig { config_path } => {
-            let config_path = PathBuf::from(config_path);
+            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
             // Stop all services first
             if let Err(e) = stop_all_services(&config_path, state.clone(), false).await {
                 return Response::error(format!("Failed to stop services: {}", e));
@@ -434,6 +480,53 @@ async fn handle_request(
             // Unload config
             state.write().unload_config(&config_path);
             Response::ok_with_message(format!("Unloaded config: {}", config_path.display()))
+        }
+        Request::LogsChunk {
+            config_path,
+            service,
+            offset,
+            limit,
+        } => {
+            use kepler_protocol::protocol::LogChunkData;
+
+            let config_path = match canonicalize_config_path(PathBuf::from(config_path)) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+            let state = state.read();
+
+            if let Some(config_state) = state.configs.get(&config_path) {
+                let all_entries: Vec<LogEntry> = config_state
+                    .logs
+                    .tail(usize::MAX, service.as_deref())
+                    .into_iter()
+                    .map(|l| l.into())
+                    .collect();
+
+                let total = all_entries.len();
+                let entries: Vec<LogEntry> = all_entries
+                    .into_iter()
+                    .skip(offset)
+                    .take(limit)
+                    .collect();
+
+                let has_more = offset + entries.len() < total;
+                let next_offset = offset + entries.len();
+
+                Response::ok_with_data(ResponseData::LogChunk(LogChunkData {
+                    entries,
+                    has_more,
+                    next_offset,
+                    total: Some(total),
+                }))
+            } else {
+                Response::ok_with_data(ResponseData::LogChunk(LogChunkData {
+                    entries: Vec::new(),
+                    has_more: false,
+                    next_offset: 0,
+                    total: Some(0),
+                }))
+            }
         }
     }
 }
@@ -457,7 +550,7 @@ async fn start_services(
         .unwrap_or_else(|| PathBuf::from("."));
 
     // Get config and determine services to start
-    let (config, services_to_start, logs, global_hooks, initialized) = {
+    let (config, services_to_start, logs, global_hooks, global_log_config, initialized) = {
         let state = state.read();
         let config_state = state
             .configs
@@ -474,6 +567,7 @@ async fn start_services(
             services_to_start,
             config_state.logs.clone(),
             config_state.config.hooks.clone(),
+            config_state.config.logs.clone(),
             config_state.initialized,
         )
     };
@@ -481,7 +575,7 @@ async fn start_services(
     // Run global on_init hook if first time
     if !initialized {
         let env = std::env::vars().collect();
-        run_global_hook(&global_hooks, GlobalHookType::OnInit, &config_dir, &env, Some(&logs)).await?;
+        run_global_hook(&global_hooks, GlobalHookType::OnInit, &config_dir, &env, Some(&logs), global_log_config.as_ref()).await?;
 
         let mut state = state.write();
         if let Some(config_state) = state.configs.get_mut(config_path) {
@@ -491,7 +585,7 @@ async fn start_services(
 
     // Run global on_start hook
     let env = std::env::vars().collect();
-    run_global_hook(&global_hooks, GlobalHookType::OnStart, &config_dir, &env, Some(&logs)).await?;
+    run_global_hook(&global_hooks, GlobalHookType::OnStart, &config_dir, &env, Some(&logs), global_log_config.as_ref()).await?;
 
     let mut started = Vec::new();
 
@@ -554,6 +648,8 @@ async fn start_services(
                 Some(&logs),
                 service_config.user.as_deref(),
                 service_config.group.as_deref(),
+                service_config.logs.as_ref(),
+                global_log_config.as_ref(),
             )
             .await?;
 
@@ -575,6 +671,8 @@ async fn start_services(
             Some(&logs),
             service_config.user.as_deref(),
             service_config.group.as_deref(),
+            service_config.logs.as_ref(),
+            global_log_config.as_ref(),
         )
         .await?;
 
@@ -585,7 +683,7 @@ async fn start_services(
             let retention = resolve_log_retention(
                 service_config.logs.as_ref(),
                 config.logs.as_ref(),
-                |l| l.on_start.clone(),
+                |l| l.get_on_start(),
                 LogRetention::Retain, // New default for on_start
             );
             let should_clear = retention == LogRetention::Clear;
@@ -748,6 +846,8 @@ async fn stop_services(
                 Some(&logs),
                 service_config.user.as_deref(),
                 service_config.group.as_deref(),
+                service_config.logs.as_ref(),
+                global_log_config.as_ref(),
             )
             .await;
         }
@@ -759,14 +859,14 @@ async fn stop_services(
     // Run global on_stop hook if stopping all and services were stopped
     if service.is_none() && !stopped.is_empty() {
         let env = std::env::vars().collect();
-        let _ = run_global_hook(&global_hooks, GlobalHookType::OnStop, &config_dir, &env, Some(&logs)).await;
+        let _ = run_global_hook(&global_hooks, GlobalHookType::OnStop, &config_dir, &env, Some(&logs), global_log_config.as_ref()).await;
     }
 
     // Run on_cleanup if requested (even if no services were running)
     if service.is_none() && clean {
         info!("Running cleanup hooks");
         let env = std::env::vars().collect();
-        if let Err(e) = run_global_hook(&global_hooks, GlobalHookType::OnCleanup, &config_dir, &env, Some(&logs))
+        if let Err(e) = run_global_hook(&global_hooks, GlobalHookType::OnCleanup, &config_dir, &env, Some(&logs), global_log_config.as_ref())
             .await
         {
             error!("Cleanup hook failed: {}", e);
@@ -787,7 +887,7 @@ async fn stop_services(
             resolve_log_retention(
                 service_logs,
                 global_log_config.as_ref(),
-                |l| l.on_cleanup.clone(),
+                |l| l.get_on_cleanup(),
                 LogRetention::Clear,
             )
         } else {
@@ -795,7 +895,7 @@ async fn stop_services(
             resolve_log_retention(
                 service_logs,
                 global_log_config.as_ref(),
-                |l| l.on_stop.clone(),
+                |l| l.get_on_stop(),
                 LogRetention::Clear,
             )
         };
@@ -814,14 +914,14 @@ async fn stop_services(
             // on_cleanup defaults to Clear
             global_log_config
                 .as_ref()
-                .and_then(|c| c.on_cleanup.clone())
+                .and_then(|c| c.get_on_cleanup())
                 .unwrap_or(LogRetention::Clear)
                 == LogRetention::Clear
         } else {
             // on_stop defaults to Clear
             global_log_config
                 .as_ref()
-                .and_then(|c| c.on_stop.clone())
+                .and_then(|c| c.get_on_stop())
                 .unwrap_or(LogRetention::Clear)
                 == LogRetention::Clear
         };
@@ -912,6 +1012,8 @@ async fn restart_services(
                 logs.as_ref(),
                 config.user.as_deref(),
                 config.group.as_deref(),
+                config.logs.as_ref(),
+                global_log_config.as_ref(),
             )
             .await;
         }
@@ -929,7 +1031,7 @@ async fn restart_services(
             let retention = resolve_log_retention(
                 service_logs,
                 global_log_config.as_ref(),
-                |l| l.on_restart.clone(),
+                |l| l.get_on_restart(),
                 LogRetention::Retain, // New default for on_restart
             );
             let should_clear = retention == LogRetention::Clear;

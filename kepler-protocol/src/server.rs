@@ -9,7 +9,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     errors::ServerError,
-    protocol::{FRAME_DELIMITER, Request, Response, decode_request, encode_response},
+    protocol::{FRAME_DELIMITER, MAX_MESSAGE_SIZE, Request, Response, decode_request, encode_response},
 };
 
 pub type Result<T> = std::result::Result<T, ServerError>;
@@ -141,11 +141,34 @@ where
         let mut reader = BufReader::new(&mut stream);
         let mut line = Vec::new();
 
-        // Read request
-        reader
-            .read_until(FRAME_DELIMITER, &mut line)
-            .await
-            .map_err(ServerError::Receive)?;
+        // Read request with size limit
+        loop {
+            let byte_read = reader
+                .read_until(FRAME_DELIMITER, &mut line)
+                .await
+                .map_err(ServerError::Receive)?;
+
+            if byte_read == 0 {
+                break; // EOF
+            }
+
+            // Check message size limit
+            if line.len() > MAX_MESSAGE_SIZE {
+                debug!("Request exceeds maximum message size: {} bytes", line.len());
+                let response = Response::error(format!(
+                    "Request exceeds maximum message size of {} bytes",
+                    MAX_MESSAGE_SIZE
+                ));
+                let bytes = encode_response(&response)?;
+                stream.write_all(&bytes).await.map_err(ServerError::Send)?;
+                return Err(ServerError::MessageTooLarge);
+            }
+
+            // Check if we found the delimiter
+            if line.last() == Some(&FRAME_DELIMITER) {
+                break;
+            }
+        }
 
         // Remove delimiter
         if line.last() == Some(&FRAME_DELIMITER) {

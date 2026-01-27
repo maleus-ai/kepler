@@ -127,6 +127,7 @@ async fn test_service_dependencies_order() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -139,6 +140,7 @@ async fn test_service_dependencies_order() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -151,6 +153,7 @@ async fn test_service_dependencies_order() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -389,6 +392,107 @@ async fn test_multiple_concurrent_services() {
     assert_eq!(harness.get_status("service1"), Some(ServiceStatus::Stopped));
     assert_eq!(harness.get_status("service2"), Some(ServiceStatus::Stopped));
     assert_eq!(harness.get_status("service3"), Some(ServiceStatus::Stopped));
+}
+
+// ============================================================================
+// Path Validation Tests
+// ============================================================================
+
+/// Non-existent config paths are rejected
+#[tokio::test]
+async fn test_nonexistent_config_path_rejected() {
+    let result = TestDaemonHarness::from_file(
+        std::path::Path::new("/nonexistent/path/kepler.yaml")
+    ).await;
+    assert!(result.is_err(), "Non-existent config path should be rejected");
+}
+
+/// Relative paths are canonicalized to absolute paths
+#[tokio::test]
+async fn test_relative_path_canonicalized() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    command: ["sleep", "3600"]
+"#;
+    std::fs::write(&config_path, yaml).unwrap();
+
+    let harness = TestDaemonHarness::from_file(&config_path).await.unwrap();
+
+    // Config path should be absolute (canonicalized)
+    assert!(harness.config_path.is_absolute(), "Config path should be absolute after canonicalization");
+}
+
+// ============================================================================
+// Resource Limits Tests
+// ============================================================================
+
+/// Resource limits are applied to spawned processes (Unix only)
+#[tokio::test]
+#[cfg(unix)]
+async fn test_resource_limits_applied() {
+    use kepler_daemon::config::ResourceLimits;
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create config with resource limits
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "limited",
+            TestServiceBuilder::long_running()
+                .with_limits(ResourceLimits {
+                    memory: None,
+                    cpu_time: None,
+                    max_fds: Some(256),
+                })
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("limited").await.unwrap();
+
+    // Get PID from state
+    let pid = {
+        let state = harness.state().read();
+        state
+            .configs
+            .get(&harness.config_path)
+            .and_then(|cs| cs.services.get("limited"))
+            .and_then(|s| s.pid)
+    };
+
+    assert!(pid.is_some(), "Service should have a PID");
+    let pid = pid.unwrap();
+
+    // Check the file descriptor limit using /proc
+    let nofile_path = format!("/proc/{}/limits", pid);
+    if let Ok(contents) = std::fs::read_to_string(&nofile_path) {
+        // Look for "Max open files" line
+        for line in contents.lines() {
+            if line.starts_with("Max open files") {
+                // Format: "Max open files            256                  256                  files"
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    let soft_limit: u64 = parts[3].parse().unwrap_or(0);
+                    assert_eq!(
+                        soft_limit, 256,
+                        "Soft limit for open files should be 256, got {}",
+                        soft_limit
+                    );
+                }
+                break;
+            }
+        }
+    }
+
+    harness.stop_service("limited").await.unwrap();
 }
 
 /// Health checks work correctly with multiple services

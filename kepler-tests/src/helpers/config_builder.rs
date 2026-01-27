@@ -1,8 +1,8 @@
 //! Programmatic config creation with builder pattern
 
 use kepler_daemon::config::{
-    GlobalHooks, HealthCheck, HookCommand, KeplerConfig, LogConfig, RestartConfig, RestartPolicy,
-    ServiceConfig, ServiceHooks,
+    GlobalHooks, HealthCheck, HookCommand, KeplerConfig, LogConfig, ResourceLimits, RestartConfig,
+    RestartPolicy, ServiceConfig, ServiceHooks,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -80,6 +80,7 @@ pub struct TestServiceBuilder {
     healthcheck: Option<HealthCheck>,
     hooks: Option<ServiceHooks>,
     logs: Option<LogConfig>,
+    limits: Option<ResourceLimits>,
 }
 
 impl TestServiceBuilder {
@@ -94,6 +95,7 @@ impl TestServiceBuilder {
             healthcheck: None,
             hooks: None,
             logs: None,
+            limits: None,
         }
     }
 
@@ -189,6 +191,11 @@ impl TestServiceBuilder {
         self
     }
 
+    pub fn with_limits(mut self, limits: ResourceLimits) -> Self {
+        self.limits = Some(limits);
+        self
+    }
+
     pub fn build(self) -> ServiceConfig {
         ServiceConfig {
             command: self.command,
@@ -202,6 +209,7 @@ impl TestServiceBuilder {
             logs: self.logs,
             user: None,
             group: None,
+            limits: self.limits,
         }
     }
 }
@@ -311,6 +319,7 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }
     }
 
@@ -323,6 +332,7 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }
     }
 
@@ -335,6 +345,7 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }
     }
 
@@ -347,6 +358,7 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }
     }
 
@@ -359,6 +371,7 @@ impl TestHookBuilder {
             working_dir: None,
             environment,
             env_file: None,
+            log_level: None,
         }
     }
 
@@ -371,6 +384,7 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: Some(env_file),
+            log_level: None,
         }
     }
 
@@ -383,6 +397,7 @@ impl TestHookBuilder {
             working_dir: Some(working_dir),
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }
     }
 
@@ -395,6 +410,7 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }
     }
 }

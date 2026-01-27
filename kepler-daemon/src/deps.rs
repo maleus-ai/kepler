@@ -162,6 +162,7 @@ mod tests {
             logs: None,
             user: None,
             group: None,
+            limits: None,
         }
     }
 

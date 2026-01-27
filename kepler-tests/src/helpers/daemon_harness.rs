@@ -118,7 +118,7 @@ impl TestDaemonHarness {
 
     /// Start a specific service
     pub async fn start_service(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let (service_config, logs) = {
+        let (service_config, logs, global_log_config) = {
             let state = self.state.read();
             let config_state = state
                 .configs
@@ -130,7 +130,7 @@ impl TestDaemonHarness {
                 .get(service_name)
                 .ok_or("Service not found")?
                 .clone();
-            (service_config, config_state.logs.clone())
+            (service_config, config_state.logs.clone(), config_state.config.logs.clone())
         };
 
         // Update status to starting
@@ -173,6 +173,8 @@ impl TestDaemonHarness {
                 Some(&logs),
                 service_config.user.as_deref(),
                 service_config.group.as_deref(),
+                service_config.logs.as_ref(),
+                global_log_config.as_ref(),
             )
             .await?;
 
@@ -202,6 +204,8 @@ impl TestDaemonHarness {
                 Some(&logs),
                 service_config.user.as_deref(),
                 service_config.group.as_deref(),
+                service_config.logs.as_ref(),
+                global_log_config.as_ref(),
             )
             .await?;
         }
@@ -297,7 +301,7 @@ impl TestDaemonHarness {
     /// Stop a specific service
     pub async fn stop_service(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Get service config for hooks
-        let (service_config, logs) = {
+        let (service_config, logs, global_log_config) = {
             let state = self.state.read();
             let config_state = state
                 .configs
@@ -309,7 +313,7 @@ impl TestDaemonHarness {
                 .get(service_name)
                 .ok_or("Service not found")?
                 .clone();
-            (service_config, config_state.logs.clone())
+            (service_config, config_state.logs.clone(), config_state.config.logs.clone())
         };
 
         // Run on_stop hook
@@ -328,6 +332,8 @@ impl TestDaemonHarness {
             Some(&logs),
             service_config.user.as_deref(),
             service_config.group.as_deref(),
+            service_config.logs.as_ref(),
+            global_log_config.as_ref(),
         )
         .await?;
 
@@ -387,7 +393,7 @@ impl TestDaemonHarness {
     /// Must be called after taking restart_rx with take_restart_rx()
     pub fn spawn_file_change_handler(&self, mut restart_rx: mpsc::Receiver<FileChangeEvent>) {
         let state = self.state.clone();
-        let config_path = self.config_path.clone();
+        let _config_path = self.config_path.clone();
         let exit_tx = self.exit_tx.clone();
 
         tokio::spawn(async move {
@@ -432,6 +438,8 @@ impl TestDaemonHarness {
                         Some(&logs),
                         config.user.as_deref(),
                         config.group.as_deref(),
+                        config.logs.as_ref(),
+                        global_log_config.as_ref(),
                     )
                     .await;
 
@@ -442,7 +450,7 @@ impl TestDaemonHarness {
                         let retention = resolve_log_retention(
                             config.logs.as_ref(),
                             global_log_config.as_ref(),
-                            |l| l.on_restart.clone(),
+                            |l| l.get_on_restart(),
                             LogRetention::Retain, // New default for on_restart
                         );
                         let should_clear = retention == LogRetention::Clear;

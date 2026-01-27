@@ -350,14 +350,16 @@ fn test_log_config_parsing() {
     let yaml = r#"
 logs:
   timestamp: true
-  on_stop: retain
-  on_start: clear
+  retention:
+    on_stop: retain
+    on_start: clear
 services:
   test:
     command: ["sleep", "3600"]
     logs:
       timestamp: false
-      on_restart: retain
+      retention:
+        on_restart: retain
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
@@ -367,12 +369,12 @@ services:
 
     let global_logs = config.logs.as_ref().unwrap();
     assert_eq!(global_logs.timestamp, Some(true));
-    assert_eq!(global_logs.on_stop, Some(LogRetention::Retain));
-    assert_eq!(global_logs.on_start, Some(LogRetention::Clear));
+    assert_eq!(global_logs.get_on_stop(), Some(LogRetention::Retain));
+    assert_eq!(global_logs.get_on_start(), Some(LogRetention::Clear));
 
     let service_logs = config.services["test"].logs.as_ref().unwrap();
     assert_eq!(service_logs.timestamp, Some(false)); // Explicitly set to false
-    assert_eq!(service_logs.on_restart, Some(LogRetention::Retain));
+    assert_eq!(service_logs.get_on_restart(), Some(LogRetention::Retain));
 }
 
 /// Working directory parsing
@@ -693,4 +695,237 @@ services:
         }
         _ => panic!("Expected Command hook"),
     }
+}
+
+// ============================================================================
+// Service Name Validation Tests
+// ============================================================================
+
+/// Valid service names are accepted
+#[test]
+fn test_valid_service_names() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  valid-name:
+    command: ["sleep", "3600"]
+  another_valid_123:
+    command: ["sleep", "3600"]
+  lowercase:
+    command: ["sleep", "3600"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let result = KeplerConfig::load(&config_path);
+    assert!(result.is_ok());
+}
+
+/// Invalid service names are rejected (uppercase)
+#[test]
+fn test_invalid_service_name_uppercase() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  MyService:
+    command: ["sleep", "3600"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let result = KeplerConfig::load(&config_path);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("invalid characters"), "Error: {}", err);
+}
+
+/// Invalid service names are rejected (special chars)
+#[test]
+fn test_invalid_service_name_special_chars() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  "my service!":
+    command: ["sleep", "3600"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let result = KeplerConfig::load(&config_path);
+    assert!(result.is_err());
+}
+
+/// Empty service names are rejected
+#[test]
+fn test_empty_service_name() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  "":
+    command: ["sleep", "3600"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let result = KeplerConfig::load(&config_path);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("empty"), "Error: {}", err);
+}
+
+// ============================================================================
+// Log Config Restructure Tests
+// ============================================================================
+
+/// New log retention nested structure parses correctly
+#[test]
+fn test_log_retention_nested_structure() {
+    use kepler_daemon::config::LogRetention;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+logs:
+  retention:
+    on_start: retain
+    on_stop: clear
+    on_restart: retain
+services:
+  test:
+    command: ["sleep", "3600"]
+    logs:
+      retention:
+        on_stop: retain
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load(&config_path).unwrap();
+
+    // Global retention via getter
+    let global_logs = config.logs.as_ref().unwrap();
+    assert_eq!(global_logs.get_on_start(), Some(LogRetention::Retain));
+    assert_eq!(global_logs.get_on_stop(), Some(LogRetention::Clear));
+
+    // Service retention via getter
+    let service_logs = config.services["test"].logs.as_ref().unwrap();
+    assert_eq!(service_logs.get_on_stop(), Some(LogRetention::Retain));
+}
+
+/// Hook log level parses correctly
+#[test]
+fn test_hook_log_level_parsing() {
+    use kepler_daemon::config::HookLogLevel;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+logs:
+  hooks: no
+services:
+  test:
+    command: ["sleep", "3600"]
+    logs:
+      hooks: info
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load(&config_path).unwrap();
+
+    assert_eq!(config.logs.as_ref().unwrap().hooks, Some(HookLogLevel::No));
+    assert_eq!(
+        config.services["test"].logs.as_ref().unwrap().hooks,
+        Some(HookLogLevel::Info)
+    );
+}
+
+/// All hook log levels are valid
+#[test]
+fn test_all_hook_log_levels() {
+    for level in ["no", "error", "warn", "info", "debug", "trace"] {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("kepler.yaml");
+
+        let yaml = format!(r#"
+logs:
+  hooks: {}
+services:
+  test:
+    command: ["sleep", "3600"]
+"#, level);
+
+        std::fs::write(&config_path, &yaml).unwrap();
+        let result = KeplerConfig::load(&config_path);
+        assert!(result.is_ok(), "Failed for level: {}", level);
+    }
+}
+
+// ============================================================================
+// Resource Limits Tests
+// ============================================================================
+
+/// Resource limits parse correctly
+#[test]
+fn test_resource_limits_parsing() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    command: ["sleep", "3600"]
+    limits:
+      memory: "512M"
+      cpu_time: 60
+      max_fds: 1024
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load(&config_path).unwrap();
+
+    let limits = config.services["test"].limits.as_ref().unwrap();
+    assert_eq!(limits.memory.as_deref(), Some("512M"));
+    assert_eq!(limits.cpu_time, Some(60));
+    assert_eq!(limits.max_fds, Some(1024));
+}
+
+/// Memory limit string parsing
+#[test]
+fn test_parse_memory_limit() {
+    use kepler_daemon::config::parse_memory_limit;
+
+    assert_eq!(parse_memory_limit("512").unwrap(), 512);
+    assert_eq!(parse_memory_limit("512B").unwrap(), 512);
+    assert_eq!(parse_memory_limit("1K").unwrap(), 1024);
+    assert_eq!(parse_memory_limit("1KB").unwrap(), 1024);
+    assert_eq!(parse_memory_limit("512M").unwrap(), 512 * 1024 * 1024);
+    assert_eq!(parse_memory_limit("512MB").unwrap(), 512 * 1024 * 1024);
+    assert_eq!(parse_memory_limit("1G").unwrap(), 1024 * 1024 * 1024);
+    assert_eq!(parse_memory_limit("1GB").unwrap(), 1024 * 1024 * 1024);
+}
+
+/// Invalid memory limits return errors
+#[test]
+fn test_invalid_memory_limit() {
+    use kepler_daemon::config::parse_memory_limit;
+
+    assert!(parse_memory_limit("").is_err());
+    assert!(parse_memory_limit("abc").is_err());
+    assert!(parse_memory_limit("512X").is_err());
+}
+
+// ============================================================================
+// Protocol Message Size Tests
+// ============================================================================
+
+/// MAX_MESSAGE_SIZE constant is 1MB
+#[test]
+fn test_max_message_size_constant() {
+    use kepler_protocol::protocol::MAX_MESSAGE_SIZE;
+    assert_eq!(MAX_MESSAGE_SIZE, 1024 * 1024); // 1MB
 }

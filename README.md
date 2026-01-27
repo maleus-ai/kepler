@@ -17,11 +17,93 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 
 ## Installation
 
+### Prerequisites
+
+- **Rust toolchain** (1.85+): Install via [rustup](https://rustup.rs/)
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+
+### Building from Source
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/your-org/kepler.git
+   cd kepler
+   ```
+
+2. Build the release binaries:
+   ```bash
+   cargo build --release
+   ```
+
+3. Install the binaries (optional):
+   ```bash
+   # Install to ~/.cargo/bin (ensure it's in your PATH)
+   cargo install --path kepler-cli
+
+   # Or copy manually to a location in your PATH
+   sudo cp target/release/kepler /usr/local/bin/
+   sudo cp target/release/kepler-daemon /usr/local/bin/
+   ```
+
+### Verifying Installation
+
 ```bash
-cargo build --release
+kepler --version
+kepler daemon start -d
+kepler daemon status
+kepler daemon stop
 ```
 
-The binary will be at `target/release/kepler`.
+### Running Tests
+
+```bash
+cargo test --workspace
+```
+
+### Best Practices for Setup
+
+**Run as a dedicated user (recommended for production):**
+```bash
+# Create a dedicated user
+sudo useradd -r -s /bin/false kepler
+
+# Run the daemon as that user
+sudo -u kepler kepler daemon start -d
+```
+
+**Protect your configuration files:**
+```bash
+# Ensure config files are owned by you and not world-writable
+chmod 600 kepler.yaml
+```
+
+**Avoid running as root:**
+The daemon will warn if started as root. Instead, use the `user:` option in your config to run specific services with elevated privileges when needed.
+
+**Using systemd (recommended for production):**
+```ini
+# /etc/systemd/system/kepler.service
+[Unit]
+Description=Kepler Process Orchestrator
+After=network.target
+
+[Service]
+Type=simple
+User=kepler
+ExecStart=/usr/local/bin/kepler daemon start
+ExecStop=/usr/local/bin/kepler daemon stop
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable kepler
+sudo systemctl start kepler
+```
 
 ## Quick Start
 
@@ -164,7 +246,8 @@ services:
     restart: always
     logs:
       timestamp: true
-      on_stop: retain  # Keep logs after stopping (default: clear)
+      retention:
+        on_stop: retain  # Keep logs after stopping (default: clear)
 ```
 
 ### Configuration Reference
@@ -291,11 +374,11 @@ services:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `timestamp` | `bool` | `false` | Include timestamps in log output |
-| `on_start` | `clear\|retain` | `retain` | Log retention when service starts |
-| `on_stop` | `clear\|retain` | `clear` | Log retention when service stops |
-| `on_restart` | `clear\|retain` | `retain` | Log retention when service restarts |
-| `on_exit` | `clear\|retain` | `retain` | Log retention when service process exits |
-| `on_cleanup` | `clear\|retain` | `clear` | Log retention on cleanup |
+| `retention.on_start` | `clear\|retain` | `retain` | Log retention when service starts |
+| `retention.on_stop` | `clear\|retain` | `clear` | Log retention when service stops |
+| `retention.on_restart` | `clear\|retain` | `retain` | Log retention when service restarts |
+| `retention.on_exit` | `clear\|retain` | `retain` | Log retention when service process exits |
+| `retention.on_cleanup` | `clear\|retain` | `clear` | Log retention on cleanup |
 
 **Log retention values:**
 - `retain`: Keep logs when the event occurs (default for `on_start`, `on_restart`, `on_exit`)
@@ -312,18 +395,20 @@ Each level overrides the previous one. Service settings override global settings
 ```yaml
 # Global log settings (level 2)
 logs:
-  on_start: clear      # Override default retain → clear for all services
-  on_stop: retain      # Override default clear → retain for all services
+  retention:
+    on_start: clear      # Override default retain → clear for all services
+    on_stop: retain      # Override default clear → retain for all services
 
 services:
   backend:
     command: ["npm", "run", "dev"]
     logs:
-      on_stop: clear   # Service override (level 1): clear instead of global retain
-      # on_start: not set → inherits global "clear"
-      # on_restart: not set → inherits built-in default "retain"
-      # on_exit: not set → inherits built-in default "retain"
-      # on_cleanup: not set → inherits built-in default "clear"
+      retention:
+        on_stop: clear   # Service override (level 1): clear instead of global retain
+        # on_start: not set → inherits global "clear"
+        # on_restart: not set → inherits built-in default "retain"
+        # on_exit: not set → inherits built-in default "retain"
+        # on_cleanup: not set → inherits built-in default "clear"
 
   frontend:
     command: ["npm", "run", "start"]

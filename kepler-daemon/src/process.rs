@@ -7,7 +7,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{LogRetention, ServiceConfig};
+use crate::config::{parse_memory_limit, HookLogLevel, LogRetention, ResourceLimits, ServiceConfig};
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
 use crate::hooks::{run_service_hook, ServiceHookType};
@@ -27,6 +27,8 @@ pub struct CommandSpec {
     pub user: Option<String>,
     /// Group to run the command as (Unix only)
     pub group: Option<String>,
+    /// Resource limits (Unix only)
+    pub limits: Option<ResourceLimits>,
 }
 
 impl CommandSpec {
@@ -44,6 +46,26 @@ impl CommandSpec {
             environment,
             user,
             group,
+            limits: None,
+        }
+    }
+
+    /// Create a new CommandSpec with resource limits
+    pub fn with_limits(
+        program_and_args: Vec<String>,
+        working_dir: PathBuf,
+        environment: HashMap<String, String>,
+        user: Option<String>,
+        group: Option<String>,
+        limits: Option<ResourceLimits>,
+    ) -> Self {
+        Self {
+            program_and_args,
+            working_dir,
+            environment,
+            user,
+            group,
+            limits,
         }
     }
 
@@ -61,6 +83,7 @@ pub struct CommandSpecBuilder {
     environment: HashMap<String, String>,
     user: Option<String>,
     group: Option<String>,
+    limits: Option<ResourceLimits>,
 }
 
 impl CommandSpecBuilder {
@@ -72,6 +95,7 @@ impl CommandSpecBuilder {
             environment: HashMap::new(),
             user: None,
             group: None,
+            limits: None,
         }
     }
 
@@ -99,6 +123,12 @@ impl CommandSpecBuilder {
         self
     }
 
+    /// Set resource limits
+    pub fn limits(mut self, limits: Option<ResourceLimits>) -> Self {
+        self.limits = limits;
+        self
+    }
+
     /// Build the CommandSpec (panics if working_dir not set)
     pub fn build(self) -> CommandSpec {
         CommandSpec {
@@ -107,6 +137,7 @@ impl CommandSpecBuilder {
             environment: self.environment,
             user: self.user,
             group: self.group,
+            limits: self.limits,
         }
     }
 
@@ -118,8 +149,52 @@ impl CommandSpecBuilder {
             environment: self.environment,
             user: self.user,
             group: self.group,
+            limits: self.limits,
         }
     }
+}
+
+/// Apply resource limits using setrlimit (Unix only)
+#[cfg(unix)]
+fn apply_resource_limits(limits: &ResourceLimits) -> std::io::Result<()> {
+    use libc::{rlimit, setrlimit, RLIMIT_AS, RLIMIT_CPU, RLIMIT_NOFILE};
+
+    if let Some(ref mem_str) = limits.memory {
+        if let Ok(bytes) = parse_memory_limit(mem_str) {
+            let rlim = rlimit {
+                rlim_cur: bytes,
+                rlim_max: bytes,
+            };
+            // SAFETY: setrlimit is safe to call with valid arguments
+            if unsafe { setrlimit(RLIMIT_AS, &rlim) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+
+    if let Some(cpu_secs) = limits.cpu_time {
+        let rlim = rlimit {
+            rlim_cur: cpu_secs,
+            rlim_max: cpu_secs,
+        };
+        // SAFETY: setrlimit is safe to call with valid arguments
+        if unsafe { setrlimit(RLIMIT_CPU, &rlim) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    if let Some(max_fds) = limits.max_fds {
+        let rlim = rlimit {
+            rlim_cur: max_fds,
+            rlim_max: max_fds,
+        };
+        // SAFETY: setrlimit is safe to call with valid arguments
+        if unsafe { setrlimit(RLIMIT_NOFILE, &rlim) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    Ok(())
 }
 
 /// Mode for spawning commands
@@ -131,6 +206,8 @@ pub enum SpawnMode {
     SynchronousWithLogging {
         logs: Option<SharedLogBuffer>,
         log_service_name: String,
+        /// Hook log level - if No, output won't be logged
+        hook_log_level: HookLogLevel,
     },
     /// Return a handle for async monitoring (for services)
     Asynchronous {
@@ -190,6 +267,17 @@ pub async fn spawn_command(spec: CommandSpec, mode: SpawnMode) -> Result<SpawnRe
         debug!("Command will run as uid={}, gid={}", uid, gid);
     }
 
+    // Apply resource limits via pre_exec (Unix only)
+    #[cfg(unix)]
+    if let Some(ref limits) = spec.limits {
+        let limits = limits.clone();
+        // SAFETY: pre_exec runs in a forked child process before exec.
+        // apply_resource_limits only calls setrlimit which is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(move || apply_resource_limits(&limits));
+        }
+    }
+
     let mut child = cmd.spawn().map_err(|e| DaemonError::ProcessSpawn {
         service: program.clone(),
         source: e,
@@ -245,40 +333,50 @@ pub async fn spawn_command(spec: CommandSpec, mode: SpawnMode) -> Result<SpawnRe
         SpawnMode::SynchronousWithLogging {
             logs,
             log_service_name,
+            hook_log_level,
         } => {
-            // Capture stdout with logging
+            // Check if logging is enabled
+            let should_log = hook_log_level != HookLogLevel::No;
+
+            // Capture stdout with conditional logging
             let stdout = child.stdout.take();
-            let logs_for_stdout = logs.clone();
+            let logs_for_stdout = if should_log { logs.clone() } else { None };
             let service_name_stdout = log_service_name.clone();
+            let should_log_stdout = should_log;
             let stdout_handle = tokio::spawn(async move {
                 if let Some(stdout) = stdout {
                     let reader = BufReader::new(stdout);
                     let mut lines = reader.lines();
                     while let Ok(Some(line)) = lines.next_line().await {
-                        // Log to daemon's log output
-                        info!(target: "hook", "[{}] {}", service_name_stdout, line);
-                        // Also capture in log buffer
-                        if let Some(ref logs) = logs_for_stdout {
-                            logs.push(service_name_stdout.clone(), line, LogStream::Stdout);
+                        if should_log_stdout {
+                            // Log to daemon's log output
+                            info!(target: "hook", "[{}] {}", service_name_stdout, line);
+                            // Also capture in log buffer
+                            if let Some(ref logs) = logs_for_stdout {
+                                logs.push(service_name_stdout.clone(), line, LogStream::Stdout);
+                            }
                         }
                     }
                 }
             });
 
-            // Capture stderr with logging
+            // Capture stderr with conditional logging
             let stderr = child.stderr.take();
-            let logs_for_stderr = logs.clone();
+            let logs_for_stderr = if should_log { logs.clone() } else { None };
             let service_name_stderr = log_service_name.clone();
+            let should_log_stderr = should_log;
             let stderr_handle = tokio::spawn(async move {
                 if let Some(stderr) = stderr {
                     let reader = BufReader::new(stderr);
                     let mut lines = reader.lines();
                     while let Ok(Some(line)) = lines.next_line().await {
-                        // Log to daemon's log output
-                        info!(target: "hook", "[{}] {}", service_name_stderr, line);
-                        // Also capture in log buffer
-                        if let Some(ref logs) = logs_for_stderr {
-                            logs.push(service_name_stderr.clone(), line, LogStream::Stderr);
+                        if should_log_stderr {
+                            // Log to daemon's log output
+                            info!(target: "hook", "[{}] {}", service_name_stderr, line);
+                            // Also capture in log buffer
+                            if let Some(ref logs) = logs_for_stderr {
+                                logs.push(service_name_stderr.clone(), line, LogStream::Stderr);
+                            }
                         }
                     }
                 }
@@ -384,13 +482,14 @@ pub async fn spawn_service(
         &service_config.command[1..]
     );
 
-    // Build CommandSpec
-    let spec = CommandSpec::new(
+    // Build CommandSpec with resource limits
+    let spec = CommandSpec::with_limits(
         service_config.command.clone(),
         working_dir,
         env,
         service_config.user.clone(),
         service_config.group.clone(),
+        service_config.limits.clone(),
     );
 
     // Spawn using unified function
@@ -649,6 +748,8 @@ pub async fn handle_process_exit(
         Some(&logs),
         service_config.user.as_deref(),
         service_config.group.as_deref(),
+        service_config.logs.as_ref(),
+        global_log_config.as_ref(),
     )
     .await;
 
@@ -659,7 +760,7 @@ pub async fn handle_process_exit(
         let retention = resolve_log_retention(
             service_config.logs.as_ref(),
             global_log_config.as_ref(),
-            |l| l.on_exit.clone(),
+            |l| l.get_on_exit(),
             LogRetention::Retain, // New default for on_exit
         );
         let should_clear = retention == LogRetention::Clear;
@@ -700,6 +801,8 @@ pub async fn handle_process_exit(
             Some(&logs),
             service_config.user.as_deref(),
             service_config.group.as_deref(),
+            service_config.logs.as_ref(),
+            global_log_config.as_ref(),
         )
         .await;
 
@@ -710,7 +813,7 @@ pub async fn handle_process_exit(
             let retention = resolve_log_retention(
                 service_config.logs.as_ref(),
                 global_log_config.as_ref(),
-                |l| l.on_restart.clone(),
+                |l| l.get_on_restart(),
                 LogRetention::Retain, // New default for on_restart
             );
             let should_clear = retention == LogRetention::Clear;

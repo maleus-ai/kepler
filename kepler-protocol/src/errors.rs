@@ -4,6 +4,9 @@ use thiserror::Error;
 
 use crate::protocol::Request;
 
+/// Maximum message size (1MB)
+pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
 #[derive(Debug, Error)]
 pub enum ProtocolError {
     #[error("failed to encode message: {0}")]
@@ -14,6 +17,9 @@ pub enum ProtocolError {
 
     #[error("invalid UTF-8 in message: {0}")]
     InvalidUtf8(#[from] std::str::Utf8Error),
+
+    #[error("message exceeds maximum size of {MAX_MESSAGE_SIZE} bytes")]
+    MessageTooLarge,
 }
 
 #[derive(Debug, Error)]
@@ -34,6 +40,9 @@ pub enum ClientError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("response message exceeds maximum size of {MAX_MESSAGE_SIZE} bytes")]
+    MessageTooLarge,
 
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
@@ -73,6 +82,9 @@ pub enum ServerError {
 
     #[error("failed to receive request: {0}")]
     Receive(#[source] std::io::Error),
+
+    #[error("request message exceeds maximum size of {MAX_MESSAGE_SIZE} bytes")]
+    MessageTooLarge,
 
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),

@@ -7,7 +7,7 @@ use tokio::{
 
 use crate::{
     errors::ClientError,
-    protocol::{FRAME_DELIMITER, Request, Response, decode_response, encode_request},
+    protocol::{FRAME_DELIMITER, MAX_MESSAGE_SIZE, Request, Response, decode_response, encode_request},
 };
 
 pub type Result<T> = std::result::Result<T, ClientError>;
@@ -58,13 +58,31 @@ impl Client {
         let line = {
             let mut reader = BufReader::new(&mut self.stream);
             let mut line: Vec<u8> = Vec::new();
-            reader
-                .read_until(FRAME_DELIMITER, &mut line)
-                .await
-                .map_err(|e| ClientError::Receive {
-                    request: request.clone(),
-                    source: e,
-                })?;
+
+            // Read response with size limit
+            loop {
+                let bytes_read = reader
+                    .read_until(FRAME_DELIMITER, &mut line)
+                    .await
+                    .map_err(|e| ClientError::Receive {
+                        request: request.clone(),
+                        source: e,
+                    })?;
+
+                if bytes_read == 0 {
+                    break; // EOF
+                }
+
+                // Check message size limit
+                if line.len() > MAX_MESSAGE_SIZE {
+                    return Err(ClientError::MessageTooLarge);
+                }
+
+                // Check if we found the delimiter
+                if line.last() == Some(&FRAME_DELIMITER) {
+                    break;
+                }
+            }
 
             if line.last() == Some(&FRAME_DELIMITER) {
                 line.pop();
@@ -146,6 +164,23 @@ impl Client {
             service,
             follow,
             lines,
+        })
+        .await
+    }
+
+    /// Get logs with pagination (for large log responses)
+    pub async fn logs_chunk(
+        &mut self,
+        config_path: PathBuf,
+        service: Option<String>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Response> {
+        self.send_request(&Request::LogsChunk {
+            config_path,
+            service,
+            offset,
+            limit,
         })
         .await
     }

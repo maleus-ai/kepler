@@ -253,6 +253,7 @@ async fn test_on_restart_hook_fires() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -585,6 +586,7 @@ async fn test_watch_restart_fires_on_restart_hook() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };

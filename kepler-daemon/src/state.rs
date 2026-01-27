@@ -184,16 +184,31 @@ impl DaemonState {
     /// Security model: The config file is copied to a secure location (~/.kepler/configs/<hash>/config.yaml)
     /// before being parsed. This prevents privilege escalation even if someone modifies the original
     /// file after loading, since the daemon uses the secure copy.
+    ///
+    /// The hash is computed from the canonicalized path, ensuring stable directory names
+    /// regardless of how the path is specified (relative, symlinks, etc.).
     pub fn load_config(&mut self, path: PathBuf) -> crate::errors::Result<()> {
-        // Read original file contents and compute hash
-        let contents = std::fs::read(&path)?;
+        // Canonicalize path first (resolves symlinks and relative paths)
+        let canonical_path = std::fs::canonicalize(&path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                DaemonError::ConfigNotFound(path.clone())
+            } else {
+                DaemonError::Io(e)
+            }
+        })?;
+
+        // Read original file contents
+        let contents = std::fs::read(&canonical_path)?;
+
+        // Compute hash from the canonical path (not content) for stable directory names
         let hash = {
             use sha2::{Digest, Sha256};
-            hex::encode(Sha256::digest(&contents))
+            hex::encode(Sha256::digest(canonical_path.to_string_lossy().as_bytes()))
         };
 
         // Check if config already loaded with same hash
-        if let Some(existing) = self.configs.get(&path) {
+        // Use canonical_path as the key for consistent lookups
+        if let Some(existing) = self.configs.get(&canonical_path) {
             if existing.config_hash == hash {
                 return Ok(());
             }
@@ -240,13 +255,13 @@ impl DaemonState {
 
         // Preserve initialized state when reloading (logs are now on disk)
         let (existing_initialized, existing_service_states) =
-            if let Some(existing) = self.configs.remove(&path) {
+            if let Some(existing) = self.configs.remove(&canonical_path) {
                 (existing.initialized, Some(existing.services))
             } else {
                 (false, None)
             };
 
-        let mut state = ConfigState::new(path.clone(), hash, config);
+        let mut state = ConfigState::new(canonical_path.clone(), hash, config);
 
         // Restore initialized flag
         state.initialized = existing_initialized;
@@ -260,7 +275,7 @@ impl DaemonState {
             }
         }
 
-        self.configs.insert(path, state);
+        self.configs.insert(canonical_path, state);
         Ok(())
     }
 

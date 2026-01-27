@@ -21,6 +21,7 @@ async fn test_script_format_hook() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -68,6 +69,7 @@ async fn test_command_format_hook() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -112,6 +114,7 @@ async fn test_hook_environment_variables() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -166,6 +169,7 @@ async fn test_hook_working_directory() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -337,6 +341,7 @@ async fn test_hook_failure_doesnt_block_service() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -377,6 +382,7 @@ async fn test_hook_execution_order() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         on_start: Some(HookCommand::Script {
             run: format!("echo 'start' >> {}", order_file.display()),
@@ -385,6 +391,7 @@ async fn test_hook_execution_order() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -432,6 +439,7 @@ async fn test_hook_own_environment_variables() {
             working_dir: None,
             environment: vec!["HOOK_VAR=from_hook".to_string()],
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -486,6 +494,7 @@ async fn test_hook_env_file() {
             working_dir: None,
             environment: Vec::new(),
             env_file: Some(env_file_path),
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -536,6 +545,7 @@ async fn test_hook_env_overrides_service_env() {
             working_dir: None,
             environment: vec!["SHARED_VAR=from_hook".to_string()],
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -587,6 +597,7 @@ async fn test_hook_env_expansion_with_service_env() {
             working_dir: None,
             environment: vec!["COMBINED=${SERVICE_VAR}_plus_hook".to_string()],
             env_file: None,
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -651,6 +662,7 @@ async fn test_hook_env_priority() {
             working_dir: None,
             environment: vec!["VAR3=hook_env".to_string()],
             env_file: Some(hook_env_file),
+            log_level: None,
         }),
         ..Default::default()
     };
@@ -699,6 +711,139 @@ async fn test_hook_env_priority() {
         "VAR3 should come from hook environment. Got: {}",
         content
     );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+// ============================================================================
+// Hook Log Level Tests
+// ============================================================================
+
+/// Hook output is NOT logged when hooks log level is "no"
+#[tokio::test]
+async fn test_hook_output_disabled() {
+    use kepler_daemon::config::{HookLogLevel, LogConfig};
+
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+
+    let hooks = ServiceHooks {
+        on_start: Some(HookCommand::Script {
+            run: format!(
+                "echo 'HOOK_SECRET_OUTPUT' && touch {}",
+                marker.marker_path("hook_done").display()
+            ),
+            user: None,
+            group: None,
+            working_dir: None,
+            environment: Vec::new(),
+            env_file: None,
+            log_level: None,
+        }),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .with_logs(LogConfig {
+            timestamp: None,
+            retention: None,
+            hooks: Some(HookLogLevel::No),
+        })
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    // Wait for hook to complete
+    assert!(
+        marker.wait_for_marker("hook_done", Duration::from_secs(5)).await,
+        "Hook should complete and create marker"
+    );
+
+    // Check logs - hook output should NOT be present
+    if let Some(logs) = harness.logs() {
+        let entries = logs.tail(100, None);
+        let hook_output_logged = entries.iter().any(|e| e.line.contains("HOOK_SECRET_OUTPUT"));
+        assert!(
+            !hook_output_logged,
+            "Hook output should not be logged when hooks: no"
+        );
+    }
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Hook output IS logged when hooks log level is "info"
+#[tokio::test]
+async fn test_hook_output_enabled() {
+    use kepler_daemon::config::{HookLogLevel, LogConfig};
+
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+
+    let hooks = ServiceHooks {
+        on_start: Some(HookCommand::Script {
+            run: format!(
+                "echo 'HOOK_VISIBLE_OUTPUT' && touch {}",
+                marker.marker_path("hook_done").display()
+            ),
+            user: None,
+            group: None,
+            working_dir: None,
+            environment: Vec::new(),
+            env_file: None,
+            log_level: None,
+        }),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .with_logs(LogConfig {
+            timestamp: None,
+            retention: None,
+            hooks: Some(HookLogLevel::Info),
+        })
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    // Wait for hook to complete
+    assert!(
+        marker.wait_for_marker("hook_done", Duration::from_secs(5)).await,
+        "Hook should complete and create marker"
+    );
+
+    // Give a little time for logs to be written
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Check logs - hook output SHOULD be present
+    if let Some(logs) = harness.logs() {
+        let entries = logs.tail(100, None);
+        let hook_output_logged = entries.iter().any(|e| e.line.contains("HOOK_VISIBLE_OUTPUT"));
+        assert!(
+            hook_output_logged,
+            "Hook output should be logged when hooks: info"
+        );
+    }
 
     harness.stop_service("test").await.unwrap();
 }

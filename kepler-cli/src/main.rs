@@ -595,53 +595,16 @@ async fn handle_logs(
 
     let mut color_map: HashMap<String, Color> = HashMap::new();
 
-    match response {
+    // Extract entries from response (handles both Logs and LogChunk variants)
+    let entries = match response {
         Response::Ok {
             data: Some(ResponseData::Logs(entries)),
             ..
-        } => {
-            for entry in &entries {
-                print_log_entry(entry, &mut color_map);
-            }
-
-            if follow {
-                // Enter follow mode - poll for new logs
-                let mut last_timestamp = entries.last().and_then(|e| e.timestamp).unwrap_or(0);
-
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-                    // Re-connect for each request (simple approach)
-                    let daemon_socket = Daemon::get_socket_path();
-                    let mut client = match Client::connect(&daemon_socket).await {
-                        Ok(c) => c,
-                        Err(_) => {
-                            eprintln!("\nDaemon disconnected");
-                            break;
-                        }
-                    };
-
-                    let response = client
-                        .logs(config_path.clone(), service.clone(), true, 1000)
-                        .await?;
-
-                    if let Response::Ok {
-                        data: Some(ResponseData::Logs(entries)),
-                        ..
-                    } = response
-                    {
-                        for entry in entries {
-                            if let Some(ts) = entry.timestamp {
-                                if ts > last_timestamp {
-                                    print_log_entry(&entry, &mut color_map);
-                                    last_timestamp = ts;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        } => entries,
+        Response::Ok {
+            data: Some(ResponseData::LogChunk(chunk)),
+            ..
+        } => chunk.entries,
         Response::Error { message } => {
             eprintln!("Error: {}", message);
             std::process::exit(1);
@@ -649,6 +612,55 @@ async fn handle_logs(
         _ => {
             if !follow {
                 println!("No logs available");
+            }
+            return Ok(());
+        }
+    };
+
+    for entry in &entries {
+        print_log_entry(entry, &mut color_map);
+    }
+
+    if follow {
+        // Enter follow mode - poll for new logs
+        let mut last_timestamp = entries.last().and_then(|e| e.timestamp).unwrap_or(0);
+
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // Re-connect for each request (simple approach)
+            let daemon_socket = Daemon::get_socket_path();
+            let mut client = match Client::connect(&daemon_socket).await {
+                Ok(c) => c,
+                Err(_) => {
+                    eprintln!("\nDaemon disconnected");
+                    break;
+                }
+            };
+
+            let response = client
+                .logs(config_path.clone(), service.clone(), true, 1000)
+                .await?;
+
+            let new_entries = match response {
+                Response::Ok {
+                    data: Some(ResponseData::Logs(entries)),
+                    ..
+                } => entries,
+                Response::Ok {
+                    data: Some(ResponseData::LogChunk(chunk)),
+                    ..
+                } => chunk.entries,
+                _ => continue,
+            };
+
+            for entry in new_entries {
+                if let Some(ts) = entry.timestamp {
+                    if ts > last_timestamp {
+                        print_log_entry(&entry, &mut color_map);
+                        last_timestamp = ts;
+                    }
+                }
             }
         }
     }
