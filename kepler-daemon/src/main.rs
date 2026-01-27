@@ -495,6 +495,20 @@ async fn start_services(
         )
         .await?;
 
+        // Clear logs based on on_start retention policy
+        let service_retention = service_config.logs.as_ref().map(|l| &l.on_start);
+        let global_retention = config.logs.as_ref().map(|l| &l.on_start);
+
+        let should_clear = match service_retention.or(global_retention) {
+            Some(LogRetention::Retain) => false,
+            _ => true, // Default: clear
+        };
+
+        if should_clear {
+            logs.clear_service(service_name);
+            logs.clear_service_prefix(&format!("[{}.", service_name));
+        }
+
         // Spawn process
         let handle = spawn_service(
             config_path,
@@ -671,13 +685,25 @@ async fn stop_services(
     }
 
     // Clear logs based on retention policy
+    // When clean=true, use on_cleanup retention; otherwise use on_stop
     for service_name in &stopped {
         // Check service-level config, fall back to global
-        let service_retention = service_configs
-            .get(service_name)
-            .and_then(|c| c.logs.as_ref())
-            .map(|l| &l.on_stop);
-        let global_retention = global_log_config.as_ref().map(|l| &l.on_stop);
+        let service_retention = if clean {
+            service_configs
+                .get(service_name)
+                .and_then(|c| c.logs.as_ref())
+                .map(|l| &l.on_cleanup)
+        } else {
+            service_configs
+                .get(service_name)
+                .and_then(|c| c.logs.as_ref())
+                .map(|l| &l.on_stop)
+        };
+        let global_retention = if clean {
+            global_log_config.as_ref().map(|l| &l.on_cleanup)
+        } else {
+            global_log_config.as_ref().map(|l| &l.on_stop)
+        };
 
         let should_clear = match service_retention.or(global_retention) {
             Some(LogRetention::Retain) => false,
@@ -693,9 +719,16 @@ async fn stop_services(
 
     // For global hooks logs, check global config when stopping all or cleaning
     if service.is_none() && (!stopped.is_empty() || clean) {
-        let should_clear_global = match &global_log_config {
-            Some(config) if config.on_stop == LogRetention::Retain => false,
-            _ => true,
+        let should_clear_global = if clean {
+            match &global_log_config {
+                Some(config) if config.on_cleanup == LogRetention::Retain => false,
+                _ => true,
+            }
+        } else {
+            match &global_log_config {
+                Some(config) if config.on_stop == LogRetention::Retain => false,
+                _ => true,
+            }
         };
         if should_clear_global {
             // Clear all global hook logs using prefix
@@ -755,23 +788,25 @@ async fn restart_services(
         }
     };
 
+    // Get service configs, logs, and global log config for restart
+    let (service_configs, logs, global_log_config) = {
+        let state = state.read();
+        let config_state = state.configs.get(config_path);
+        (
+            config_state.map(|cs| cs.config.services.clone()).unwrap_or_default(),
+            config_state.map(|cs| cs.logs.clone()),
+            config_state.and_then(|cs| cs.config.logs.clone()),
+        )
+    };
+
     // Run on_restart hooks
     for service_name in &services_to_restart {
-        let (service_config, logs) = {
-            let state = state.read();
-            let config_state = state.configs.get(config_path);
-            (
-                config_state.and_then(|cs| cs.config.services.get(service_name).cloned()),
-                config_state.map(|cs| cs.logs.clone()),
-            )
-        };
-
-        if let Some(config) = service_config {
+        if let Some(config) = service_configs.get(service_name) {
             let working_dir = config
                 .working_dir
                 .clone()
                 .unwrap_or_else(|| config_dir.clone());
-            let env = build_service_env(&config, &config_dir).unwrap_or_default();
+            let env = build_service_env(config, &config_dir).unwrap_or_default();
 
             let _ = run_service_hook(
                 &config.hooks,
@@ -782,6 +817,27 @@ async fn restart_services(
                 logs.as_ref(),
             )
             .await;
+        }
+    }
+
+    // Clear logs based on on_restart retention policy
+    if let Some(logs) = &logs {
+        for service_name in &services_to_restart {
+            let service_retention = service_configs
+                .get(service_name)
+                .and_then(|c| c.logs.as_ref())
+                .map(|l| &l.on_restart);
+            let global_retention = global_log_config.as_ref().map(|l| &l.on_restart);
+
+            let should_clear = match service_retention.or(global_retention) {
+                Some(LogRetention::Retain) => false,
+                _ => true, // Default: clear
+            };
+
+            if should_clear {
+                logs.clear_service(service_name);
+                logs.clear_service_prefix(&format!("[{}.", service_name));
+            }
         }
     }
 

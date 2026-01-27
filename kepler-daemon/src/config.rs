@@ -127,6 +127,12 @@ pub struct LogConfig {
     pub timestamp: bool,
     #[serde(default)]
     pub on_stop: LogRetention,
+    #[serde(default)]
+    pub on_start: LogRetention,
+    #[serde(default)]
+    pub on_restart: LogRetention,
+    #[serde(default)]
+    pub on_cleanup: LogRetention,
 }
 
 /// Deserialize duration from string like "10s", "5m", "1h"

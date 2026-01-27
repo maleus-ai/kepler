@@ -6,7 +6,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{RestartPolicy, ServiceConfig};
+use crate::config::{LogRetention, RestartPolicy, ServiceConfig};
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
 use crate::hooks::{run_service_hook, ServiceHookType};
@@ -291,7 +291,7 @@ pub async fn handle_process_exit(
     exit_tx: mpsc::Sender<ProcessExitEvent>,
 ) {
     // Get service config and state info
-    let (restart_policy, service_config, config_dir, logs, hooks) = {
+    let (restart_policy, service_config, config_dir, logs, hooks, global_log_config) = {
         let state = state.read();
         let config_state = match state.configs.get(&config_path) {
             Some(cs) => cs,
@@ -313,6 +313,7 @@ pub async fn handle_process_exit(
                 .unwrap_or_else(|| PathBuf::from(".")),
             config_state.logs.clone(),
             service_config.hooks.clone(),
+            config_state.config.logs.clone(),
         )
     };
 
@@ -382,6 +383,20 @@ pub async fn handle_process_exit(
             Some(&logs),
         )
         .await;
+
+        // Clear logs based on on_restart retention policy
+        let service_retention = service_config.logs.as_ref().map(|l| &l.on_restart);
+        let global_retention = global_log_config.as_ref().map(|l| &l.on_restart);
+
+        let should_clear = match service_retention.or(global_retention) {
+            Some(LogRetention::Retain) => false,
+            _ => true, // Default: clear
+        };
+
+        if should_clear {
+            logs.clear_service(&service_name);
+            logs.clear_service_prefix(&format!("[{}.", service_name));
+        }
 
         // Spawn new process
         match spawn_service(
