@@ -9,6 +9,8 @@ pub mod hooks;
 pub mod logs;
 pub mod process;
 pub mod state;
+#[cfg(unix)]
+pub mod user;
 pub mod watcher;
 
 const GLOBAL_STATE_DIR: &str = ".kepler";

@@ -161,6 +161,8 @@ mod tests {
             watch: vec![],
             hooks: None,
             logs: None,
+            user: None,
+            group: None,
         }
     }
 

@@ -60,6 +60,20 @@ pub async fn spawn_service(
         .stderr(Stdio::piped())
         .envs(&env);
 
+    // Apply user/group if configured (Unix only)
+    #[cfg(unix)]
+    if let Some(ref user) = service_config.user {
+        use crate::user::resolve_user;
+
+        let (uid, gid) = resolve_user(user, service_config.group.as_deref())?;
+        cmd.uid(uid);
+        cmd.gid(gid);
+        info!(
+            "Service {} will run as uid={}, gid={}",
+            service_name, uid, gid
+        );
+    }
+
     let mut child = cmd.spawn().map_err(|e| DaemonError::ProcessSpawn {
         service: service_name.to_string(),
         source: e,
@@ -346,6 +360,8 @@ pub async fn handle_process_exit(
         &working_dir,
         &env,
         Some(&logs),
+        service_config.user.as_deref(),
+        service_config.group.as_deref(),
     )
     .await;
 
@@ -397,6 +413,8 @@ pub async fn handle_process_exit(
             &working_dir,
             &env,
             Some(&logs),
+            service_config.user.as_deref(),
+            service_config.group.as_deref(),
         )
         .await;
 

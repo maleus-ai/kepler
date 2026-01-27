@@ -62,13 +62,15 @@ pub async fn run_hook(
     env: &HashMap<String, String>,
     logs: Option<&SharedLogBuffer>,
     service_name: &str,
+    service_user: Option<&str>,
+    service_group: Option<&str>,
 ) -> Result<()> {
     let (program, args) = match hook {
-        HookCommand::Script { run } => {
+        HookCommand::Script { run, .. } => {
             // Run script through shell
             ("sh".to_string(), vec!["-c".to_string(), run.clone()])
         }
-        HookCommand::Command { command } => {
+        HookCommand::Command { command, .. } => {
             if command.is_empty() {
                 return Ok(());
             }
@@ -85,6 +87,26 @@ pub async fn run_hook(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .envs(env);
+
+    // Determine effective user (Unix only)
+    #[cfg(unix)]
+    {
+        use crate::user::resolve_user;
+
+        // Priority: hook user > service user > daemon user
+        let effective_user = match hook.user() {
+            Some("daemon") => None, // Run as daemon user (no change)
+            Some(user) => Some(user), // Hook specifies explicit user
+            None => service_user, // Inherit from service
+        };
+
+        if let Some(user) = effective_user {
+            let (uid, gid) = resolve_user(user, service_group)?;
+            cmd.uid(uid);
+            cmd.gid(gid);
+            debug!("Hook will run as uid={}, gid={}", uid, gid);
+        }
+    }
 
     let mut child = cmd.spawn().map_err(|e| DaemonError::HookFailed {
         hook_type: format!("{} {:?}", program, args),
@@ -157,6 +179,8 @@ pub fn global_hook_service_name(hook_type: GlobalHookType) -> String {
 }
 
 /// Run a global hook if it exists
+///
+/// Note: Global hooks always run as the daemon user (no service user to inherit).
 pub async fn run_global_hook(
     hooks: &Option<GlobalHooks>,
     hook_type: GlobalHookType,
@@ -179,7 +203,8 @@ pub async fn run_global_hook(
     if let Some(hook) = hook {
         info!("Running global {} hook", hook_type.as_str());
         let service_name = global_hook_service_name(hook_type);
-        run_hook(hook, working_dir, env, logs, &service_name).await?;
+        // Global hooks run as daemon user (no service user to inherit)
+        run_hook(hook, working_dir, env, logs, &service_name, None, None).await?;
     }
 
     Ok(())
@@ -198,6 +223,8 @@ pub async fn run_service_hook(
     working_dir: &Path,
     env: &HashMap<String, String>,
     logs: Option<&SharedLogBuffer>,
+    service_user: Option<&str>,
+    service_group: Option<&str>,
 ) -> Result<()> {
     let hooks = match hooks {
         Some(h) => h,
@@ -221,7 +248,17 @@ pub async fn run_service_hook(
             service_name
         );
         let log_name = service_hook_log_name(service_name, hook_type);
-        match run_hook(hook, working_dir, env, logs, &log_name).await {
+        match run_hook(
+            hook,
+            working_dir,
+            env,
+            logs,
+            &log_name,
+            service_user,
+            service_group,
+        )
+        .await
+        {
             Ok(()) => {}
             Err(e) => {
                 error!(

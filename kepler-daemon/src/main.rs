@@ -473,6 +473,8 @@ async fn start_services(
                 &working_dir,
                 &env,
                 Some(&logs),
+                service_config.user.as_deref(),
+                service_config.group.as_deref(),
             )
             .await?;
 
@@ -492,6 +494,8 @@ async fn start_services(
             &working_dir,
             &env,
             Some(&logs),
+            service_config.user.as_deref(),
+            service_config.group.as_deref(),
         )
         .await?;
 
@@ -659,6 +663,8 @@ async fn stop_services(
                 &working_dir,
                 &env,
                 Some(&logs),
+                service_config.user.as_deref(),
+                service_config.group.as_deref(),
             )
             .await;
         }
@@ -815,6 +821,8 @@ async fn restart_services(
                 &working_dir,
                 &env,
                 logs.as_ref(),
+                config.user.as_deref(),
+                config.group.as_deref(),
             )
             .await;
         }

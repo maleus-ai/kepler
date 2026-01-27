@@ -31,10 +31,23 @@ pub struct GlobalHooks {
 pub enum HookCommand {
     Script {
         run: String,
+        #[serde(default)]
+        user: Option<String>,
     },
     Command {
         command: Vec<String>,
+        #[serde(default)]
+        user: Option<String>,
     },
+}
+
+impl HookCommand {
+    pub fn user(&self) -> Option<&str> {
+        match self {
+            HookCommand::Script { user, .. } => user.as_deref(),
+            HookCommand::Command { user, .. } => user.as_deref(),
+        }
+    }
 }
 
 /// Service configuration
@@ -59,6 +72,10 @@ pub struct ServiceConfig {
     pub hooks: Option<ServiceHooks>,
     #[serde(default)]
     pub logs: Option<LogConfig>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 /// Restart policy for services

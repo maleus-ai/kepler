@@ -29,6 +29,7 @@ impl MarkerFileHelper {
         let marker_path = self.marker_path(name);
         HookCommand::Script {
             run: format!("touch {}", marker_path.display()),
+            user: None,
         }
     }
 
@@ -37,6 +38,7 @@ impl MarkerFileHelper {
         let marker_path = self.marker_path(name);
         HookCommand::Script {
             run: format!("date +%s >> {}", marker_path.display()),
+            user: None,
         }
     }
 
@@ -45,6 +47,7 @@ impl MarkerFileHelper {
         let marker_path = self.marker_path(name);
         HookCommand::Script {
             run: format!("echo '{}' >> {}", value, marker_path.display()),
+            user: None,
         }
     }
 
@@ -57,6 +60,7 @@ impl MarkerFileHelper {
             .collect();
         HookCommand::Script {
             run: capture_commands.join(" && "),
+            user: None,
         }
     }
 

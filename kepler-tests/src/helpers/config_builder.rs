@@ -195,6 +195,8 @@ impl TestServiceBuilder {
             watch: self.watch,
             hooks: self.hooks,
             logs: self.logs,
+            user: None,
+            group: None,
         }
     }
 }
@@ -299,6 +301,7 @@ impl TestHookBuilder {
     pub fn script(script: &str) -> HookCommand {
         HookCommand::Script {
             run: script.to_string(),
+            user: None,
         }
     }
 
@@ -306,6 +309,7 @@ impl TestHookBuilder {
     pub fn command(cmd: &[&str]) -> HookCommand {
         HookCommand::Command {
             command: cmd.iter().map(|s| s.to_string()).collect(),
+            user: None,
         }
     }
 
@@ -313,6 +317,7 @@ impl TestHookBuilder {
     pub fn touch_marker(path: &std::path::Path) -> HookCommand {
         HookCommand::Script {
             run: format!("touch {}", path.display()),
+            user: None,
         }
     }
 
@@ -320,6 +325,7 @@ impl TestHookBuilder {
     pub fn echo_to_file(message: &str, path: &std::path::Path) -> HookCommand {
         HookCommand::Script {
             run: format!("echo '{}' >> {}", message, path.display()),
+            user: None,
         }
     }
 }

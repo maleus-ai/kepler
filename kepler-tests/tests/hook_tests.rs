@@ -16,6 +16,7 @@ async fn test_script_format_hook() {
     let hooks = ServiceHooks {
         on_start: Some(HookCommand::Script {
             run: format!("touch {}", marker.marker_path("script").display()),
+            user: None,
         }),
         ..Default::default()
     };
@@ -58,6 +59,7 @@ async fn test_command_format_hook() {
                 "touch".to_string(),
                 marker_path.to_string_lossy().to_string(),
             ],
+            user: None,
         }),
         ..Default::default()
     };
@@ -97,6 +99,7 @@ async fn test_hook_environment_variables() {
     let hooks = ServiceHooks {
         on_start: Some(HookCommand::Script {
             run: format!("echo \"TEST_VAR=$TEST_VAR\" >> {}", marker_path.display()),
+            user: None,
         }),
         ..Default::default()
     };
@@ -146,6 +149,7 @@ async fn test_hook_working_directory() {
     let hooks = ServiceHooks {
         on_start: Some(HookCommand::Script {
             run: format!("pwd >> {}", marker_path.display()),
+            user: None,
         }),
         ..Default::default()
     };
@@ -312,6 +316,7 @@ async fn test_hook_failure_doesnt_block_service() {
     let hooks = ServiceHooks {
         on_start: Some(HookCommand::Script {
             run: "exit 1".to_string(), // Always fails
+            user: None,
         }),
         ..Default::default()
     };
@@ -347,9 +352,11 @@ async fn test_hook_execution_order() {
     let hooks = ServiceHooks {
         on_init: Some(HookCommand::Script {
             run: format!("echo 'init' >> {}", order_file.display()),
+            user: None,
         }),
         on_start: Some(HookCommand::Script {
             run: format!("echo 'start' >> {}", order_file.display()),
+            user: None,
         }),
         ..Default::default()
     };

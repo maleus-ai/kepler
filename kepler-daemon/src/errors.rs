@@ -73,6 +73,12 @@ pub enum DaemonError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("User not found: {0}")]
+    UserNotFound(String),
+
+    #[error("Group not found: {0}")]
+    GroupNotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, DaemonError>;

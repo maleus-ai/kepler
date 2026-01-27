@@ -105,12 +105,12 @@ services:
     assert!(hooks.on_healthcheck_fail.is_some());
 
     match hooks.on_healthcheck_success.as_ref().unwrap() {
-        HookCommand::Script { run } => assert_eq!(run, "echo healthy"),
+        HookCommand::Script { run, .. } => assert_eq!(run, "echo healthy"),
         _ => panic!("Expected Script hook"),
     }
 
     match hooks.on_healthcheck_fail.as_ref().unwrap() {
-        HookCommand::Script { run } => assert_eq!(run, "echo unhealthy"),
+        HookCommand::Script { run, .. } => assert_eq!(run, "echo unhealthy"),
         _ => panic!("Expected Script hook"),
     }
 }
@@ -185,7 +185,7 @@ services:
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
     match hooks.on_start.as_ref().unwrap() {
-        HookCommand::Script { run } => {
+        HookCommand::Script { run, .. } => {
             assert_eq!(run, "echo hello && echo world");
         }
         _ => panic!("Expected Script hook"),
@@ -212,7 +212,7 @@ services:
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
     match hooks.on_start.as_ref().unwrap() {
-        HookCommand::Command { command } => {
+        HookCommand::Command { command, .. } => {
             assert_eq!(command, &vec!["echo", "hello", "world"]);
         }
         _ => panic!("Expected Command hook"),
@@ -462,4 +462,99 @@ services:
     assert!(hooks.on_exit.is_some());
     assert!(hooks.on_healthcheck_success.is_some());
     assert!(hooks.on_healthcheck_fail.is_some());
+}
+
+/// User/group configuration parsing
+#[test]
+fn test_user_group_parsing() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  web:
+    command: ["nginx"]
+    user: www-data
+  worker:
+    command: ["python", "worker.py"]
+    user: "1000"
+  database:
+    command: ["postgres"]
+    user: "999:999"
+  app:
+    command: ["node", "server.js"]
+    user: node
+    group: docker
+  no_user:
+    command: ["echo", "hi"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load(&config_path).unwrap();
+
+    // User by name
+    assert_eq!(config.services["web"].user.as_deref(), Some("www-data"));
+    assert!(config.services["web"].group.is_none());
+
+    // User by numeric uid
+    assert_eq!(config.services["worker"].user.as_deref(), Some("1000"));
+    assert!(config.services["worker"].group.is_none());
+
+    // User with explicit uid:gid
+    assert_eq!(config.services["database"].user.as_deref(), Some("999:999"));
+    assert!(config.services["database"].group.is_none());
+
+    // User with group override
+    assert_eq!(config.services["app"].user.as_deref(), Some("node"));
+    assert_eq!(config.services["app"].group.as_deref(), Some("docker"));
+
+    // No user specified
+    assert!(config.services["no_user"].user.is_none());
+    assert!(config.services["no_user"].group.is_none());
+}
+
+/// Hook user configuration parsing
+#[test]
+fn test_hook_user_parsing() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    command: ["sleep", "3600"]
+    user: appuser
+    hooks:
+      on_start:
+        run: echo starting
+      on_stop:
+        run: echo stopping
+        user: daemon
+      on_restart:
+        command: ["echo", "restarting"]
+        user: root
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load(&config_path).unwrap();
+
+    let hooks = config.services["test"].hooks.as_ref().unwrap();
+
+    // on_start has no user override (inherits from service)
+    match hooks.on_start.as_ref().unwrap() {
+        HookCommand::Script { user, .. } => assert!(user.is_none()),
+        _ => panic!("Expected Script hook"),
+    }
+
+    // on_stop has user: daemon
+    match hooks.on_stop.as_ref().unwrap() {
+        HookCommand::Script { user, .. } => assert_eq!(user.as_deref(), Some("daemon")),
+        _ => panic!("Expected Script hook"),
+    }
+
+    // on_restart has user: root
+    match hooks.on_restart.as_ref().unwrap() {
+        HookCommand::Command { user, .. } => assert_eq!(user.as_deref(), Some("root")),
+        _ => panic!("Expected Command hook"),
+    }
 }

@@ -121,6 +121,8 @@ async fn health_check_loop(
                                 config_state.logs.clone(),
                                 config_dir,
                                 service_config.clone(),
+                                service_config.user.clone(),
+                                service_config.group.clone(),
                             ))
                         } else {
                             None
@@ -137,7 +139,7 @@ async fn health_check_loop(
         };
 
         // Call hooks outside the lock
-        if let Some((previous_status, new_status, hooks, working_dir, logs, config_dir, service_config)) =
+        if let Some((previous_status, new_status, hooks, working_dir, logs, config_dir, service_config, service_user, service_group)) =
             hook_info
         {
             let hook_type = match new_status {
@@ -177,6 +179,8 @@ async fn health_check_loop(
                     &working_dir,
                     &env,
                     Some(&logs),
+                    service_user.as_deref(),
+                    service_group.as_deref(),
                 )
                 .await
                 {

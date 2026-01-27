@@ -122,6 +122,7 @@ async fn test_service_dependencies_order() {
     let frontend_hooks = ServiceHooks {
         on_start: Some(kepler_daemon::config::HookCommand::Script {
             run: format!("echo 'frontend' >> {}", order_file.display()),
+            user: None,
         }),
         ..Default::default()
     };
@@ -129,6 +130,7 @@ async fn test_service_dependencies_order() {
     let backend_hooks = ServiceHooks {
         on_start: Some(kepler_daemon::config::HookCommand::Script {
             run: format!("echo 'backend' >> {}", order_file.display()),
+            user: None,
         }),
         ..Default::default()
     };
@@ -136,6 +138,7 @@ async fn test_service_dependencies_order() {
     let database_hooks = ServiceHooks {
         on_start: Some(kepler_daemon::config::HookCommand::Script {
             run: format!("echo 'database' >> {}", order_file.display()),
+            user: None,
         }),
         ..Default::default()
     };

@@ -152,6 +152,8 @@ impl TestDaemonHarness {
                 &working_dir,
                 &env,
                 Some(&logs),
+                service_config.user.as_deref(),
+                service_config.group.as_deref(),
             )
             .await?;
 
@@ -179,6 +181,8 @@ impl TestDaemonHarness {
                 &working_dir,
                 &env,
                 Some(&logs),
+                service_config.user.as_deref(),
+                service_config.group.as_deref(),
             )
             .await?;
         }
@@ -283,6 +287,8 @@ impl TestDaemonHarness {
             &working_dir,
             &env,
             Some(&logs),
+            service_config.user.as_deref(),
+            service_config.group.as_deref(),
         )
         .await?;
 
