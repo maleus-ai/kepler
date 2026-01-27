@@ -1,7 +1,7 @@
 //! User and group resolution for privilege dropping (Unix only)
 
 use crate::errors::{DaemonError, Result};
-use std::ffi::CString;
+use nix::unistd::{Group, User};
 
 /// Resolve a user specification to (uid, gid)
 ///
@@ -23,7 +23,7 @@ pub fn resolve_user(user: &str, group: Option<&str>) -> Result<(u32, u32)> {
         // Numeric uid - use same for gid
         (uid, uid)
     } else {
-        // Username - lookup via getpwnam
+        // Username - lookup via nix
         lookup_user_by_name(user)?
     };
 
@@ -38,18 +38,11 @@ pub fn resolve_user(user: &str, group: Option<&str>) -> Result<(u32, u32)> {
 
 /// Look up a user by name and return (uid, gid)
 fn lookup_user_by_name(username: &str) -> Result<(u32, u32)> {
-    let c_username =
-        CString::new(username).map_err(|_| DaemonError::UserNotFound(username.to_string()))?;
+    let user = User::from_name(username)
+        .map_err(|_| DaemonError::UserNotFound(username.to_string()))?
+        .ok_or_else(|| DaemonError::UserNotFound(username.to_string()))?;
 
-    // SAFETY: getpwnam is a standard POSIX function. We pass a valid C string.
-    // The returned pointer is either null or points to a static buffer.
-    unsafe {
-        let pwd = libc::getpwnam(c_username.as_ptr());
-        if pwd.is_null() {
-            return Err(DaemonError::UserNotFound(username.to_string()));
-        }
-        Ok(((*pwd).pw_uid, (*pwd).pw_gid))
-    }
+    Ok((user.uid.as_raw(), user.gid.as_raw()))
 }
 
 /// Resolve a group specification to gid
@@ -63,19 +56,12 @@ fn resolve_group(group: &str) -> Result<u32> {
         return Ok(gid);
     }
 
-    // Look up by name
-    let c_group =
-        CString::new(group).map_err(|_| DaemonError::GroupNotFound(group.to_string()))?;
+    // Look up by name using nix
+    let grp = Group::from_name(group)
+        .map_err(|_| DaemonError::GroupNotFound(group.to_string()))?
+        .ok_or_else(|| DaemonError::GroupNotFound(group.to_string()))?;
 
-    // SAFETY: getgrnam is a standard POSIX function. We pass a valid C string.
-    // The returned pointer is either null or points to a static buffer.
-    unsafe {
-        let grp = libc::getgrnam(c_group.as_ptr());
-        if grp.is_null() {
-            return Err(DaemonError::GroupNotFound(group.to_string()));
-        }
-        Ok((*grp).gr_gid)
-    }
+    Ok(grp.gid.as_raw())
 }
 
 #[cfg(test)]

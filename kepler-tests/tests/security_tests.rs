@@ -22,7 +22,7 @@ use tempfile::TempDir;
 
 /// Check if the current process is running as root
 fn is_root() -> bool {
-    unsafe { libc::getuid() == 0 }
+    nix::unistd::getuid().is_root()
 }
 
 /// Get the UID of a running process from /proc/{pid}/status
@@ -101,32 +101,16 @@ fn get_limit_value(limits_content: &str, limit_name: &str) -> Option<u64> {
 /// Look up a user by name and return their UID
 #[cfg(unix)]
 fn lookup_uid_by_name(username: &str) -> Option<u32> {
-    use std::ffi::CString;
-    let c_username = CString::new(username).ok()?;
-    unsafe {
-        let pwd = libc::getpwnam(c_username.as_ptr());
-        if pwd.is_null() {
-            None
-        } else {
-            Some((*pwd).pw_uid)
-        }
-    }
+    use nix::unistd::User;
+    User::from_name(username).ok()?.map(|u| u.uid.as_raw())
 }
 
 /// Look up a group by name and return their GID
 #[cfg(unix)]
 #[allow(dead_code)] // May be used in future tests
 fn lookup_gid_by_name(groupname: &str) -> Option<u32> {
-    use std::ffi::CString;
-    let c_groupname = CString::new(groupname).ok()?;
-    unsafe {
-        let grp = libc::getgrnam(c_groupname.as_ptr());
-        if grp.is_null() {
-            None
-        } else {
-            Some((*grp).gr_gid)
-        }
-    }
+    use nix::unistd::Group;
+    Group::from_name(groupname).ok()?.map(|g| g.gid.as_raw())
 }
 
 // ============================================================================

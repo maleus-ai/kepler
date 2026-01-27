@@ -63,8 +63,7 @@ async fn main() -> Result<()> {
     // Block root execution by default (security measure)
     #[cfg(unix)]
     {
-        // SAFETY: getuid() is always safe to call
-        if unsafe { libc::getuid() } == 0 {
+        if nix::unistd::getuid().is_root() {
             if !args.allow_root {
                 eprintln!("Error: Running as root is not allowed for security reasons.");
                 eprintln!("Use --allow-root to override (not recommended).");

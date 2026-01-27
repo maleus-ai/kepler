@@ -157,41 +157,23 @@ impl CommandSpecBuilder {
 /// Apply resource limits using setrlimit (Unix only)
 #[cfg(unix)]
 fn apply_resource_limits(limits: &ResourceLimits) -> std::io::Result<()> {
-    use libc::{rlimit, setrlimit, RLIMIT_AS, RLIMIT_CPU, RLIMIT_NOFILE};
+    use nix::sys::resource::{setrlimit, Resource};
 
     if let Some(ref mem_str) = limits.memory {
         if let Ok(bytes) = parse_memory_limit(mem_str) {
-            let rlim = rlimit {
-                rlim_cur: bytes,
-                rlim_max: bytes,
-            };
-            // SAFETY: setrlimit is safe to call with valid arguments
-            if unsafe { setrlimit(RLIMIT_AS, &rlim) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
+            setrlimit(Resource::RLIMIT_AS, bytes, bytes)
+                .map_err(std::io::Error::other)?;
         }
     }
 
     if let Some(cpu_secs) = limits.cpu_time {
-        let rlim = rlimit {
-            rlim_cur: cpu_secs,
-            rlim_max: cpu_secs,
-        };
-        // SAFETY: setrlimit is safe to call with valid arguments
-        if unsafe { setrlimit(RLIMIT_CPU, &rlim) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        setrlimit(Resource::RLIMIT_CPU, cpu_secs, cpu_secs)
+            .map_err(std::io::Error::other)?;
     }
 
     if let Some(max_fds) = limits.max_fds {
-        let rlim = rlimit {
-            rlim_cur: max_fds,
-            rlim_max: max_fds,
-        };
-        // SAFETY: setrlimit is safe to call with valid arguments
-        if unsafe { setrlimit(RLIMIT_NOFILE, &rlim) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        setrlimit(Resource::RLIMIT_NOFILE, max_fds, max_fds)
+            .map_err(std::io::Error::other)?;
     }
 
     Ok(())
@@ -648,9 +630,9 @@ pub async fn stop_service(
         {
             if let Some(pid) = handle.child.id() {
                 debug!("Sending SIGTERM to process {}", pid);
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
-                }
+                use nix::sys::signal::{kill, Signal};
+                use nix::unistd::Pid;
+                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
             }
         }
 

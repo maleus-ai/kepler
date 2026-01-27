@@ -142,6 +142,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cfg_aliases"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+
+[[package]]
 name = "chrono"
 version = "0.4.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -519,6 +525,7 @@ dependencies = [
  "hex",
  "kepler-protocol",
  "libc",
+ "nix",
  "notify",
  "notify-debouncer-mini",
  "parking_lot",
@@ -538,6 +545,7 @@ name = "kepler-protocol"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "nix",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -555,6 +563,7 @@ dependencies = [
  "kepler-daemon",
  "kepler-protocol",
  "libc",
+ "nix",
  "parking_lot",
  "serde",
  "serde_yaml",
@@ -670,6 +679,18 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "225e7cfe711e0ba79a68baeddb2982723e4235247aefce1482f2f16c27865b66"
+dependencies = [
+ "bitflags 2.10.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]

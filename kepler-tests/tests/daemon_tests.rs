@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 /// Check if the current process is running as root
 #[cfg(unix)]
 fn is_root() -> bool {
-    unsafe { libc::getuid() == 0 }
+    nix::unistd::getuid().is_root()
 }
 
 /// Find the daemon binary, returns None if not found

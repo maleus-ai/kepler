@@ -114,8 +114,7 @@ where
     #[cfg(unix)]
     {
         let cred = stream.peer_cred().map_err(ServerError::PeerCredentials)?;
-        // SAFETY: getuid() is always safe to call
-        let daemon_uid = unsafe { libc::getuid() };
+        let daemon_uid = nix::unistd::getuid().as_raw();
 
         if cred.uid() != daemon_uid {
             debug!(
