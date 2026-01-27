@@ -319,7 +319,6 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }
     }
 
@@ -332,7 +331,6 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }
     }
 
@@ -345,7 +343,6 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }
     }
 
@@ -358,7 +355,6 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }
     }
 
@@ -371,7 +367,6 @@ impl TestHookBuilder {
             working_dir: None,
             environment,
             env_file: None,
-            log_level: None,
         }
     }
 
@@ -384,7 +379,6 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: Some(env_file),
-            log_level: None,
         }
     }
 
@@ -397,7 +391,6 @@ impl TestHookBuilder {
             working_dir: Some(working_dir),
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }
     }
 
@@ -410,7 +403,6 @@ impl TestHookBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }
     }
 }

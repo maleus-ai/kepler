@@ -368,11 +368,37 @@ services:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `timestamp` | `bool` | `false` | Include timestamps in log output |
+| `store` | `bool` or `object` | `true` | Whether to store logs to disk |
+| `store.stdout` | `bool` | `true` | Store stdout logs |
+| `store.stderr` | `bool` | `true` | Store stderr logs |
 | `retention.on_start` | `clear\|retain` | `retain` | Log retention when service starts |
 | `retention.on_stop` | `clear\|retain` | `clear` | Log retention when service stops |
 | `retention.on_restart` | `clear\|retain` | `retain` | Log retention when service restarts |
 | `retention.on_exit` | `clear\|retain` | `retain` | Log retention when service process exits |
 | `retention.on_cleanup` | `clear\|retain` | `clear` | Log retention on cleanup |
+
+**Log storage (`store`):**
+
+The `store` option controls whether stdout/stderr output from services and hooks is captured and stored in the log buffer. This can be specified in two forms:
+
+**Simple form** - enable or disable all log storage:
+```yaml
+logs:
+  store: false  # Disable all log storage
+```
+
+**Extended form** - granular control over stdout/stderr:
+```yaml
+logs:
+  store:
+    stdout: true   # Store stdout
+    stderr: false  # Don't store stderr
+```
+
+This is useful for:
+- **Noisy services**: Disable logging for services that produce excessive output
+- **Error-only logging**: Store only stderr to capture errors while ignoring verbose stdout
+- **Performance**: Reduce memory and disk usage for high-throughput services
 
 **Log retention values:**
 - `retain`: Keep logs when the event occurs (default for `on_start`, `on_restart`, `on_exit`)
@@ -385,33 +411,37 @@ services:
 
 Each level overrides the previous one. Service settings override global settings, which override built-in defaults.
 
-**Example:**
+**Examples:**
 ```yaml
-# Global log settings (level 2)
+# Disable all log storage globally
 logs:
-  retention:
-    on_start: clear      # Override default retain → clear for all services
-    on_stop: retain      # Override default clear → retain for all services
+  store: false
+
+# Store only stderr (errors) globally
+logs:
+  store:
+    stdout: false
+    stderr: true
 
 services:
+  noisy-service:
+    command: ["./verbose-app"]
+    logs:
+      store: false  # Disable logs for this service only
+
+  important-service:
+    command: ["./critical-app"]
+    logs:
+      store:
+        stdout: false  # Don't store stdout
+        stderr: true   # Only store errors
+
   backend:
     command: ["npm", "run", "dev"]
     logs:
       retention:
-        on_stop: clear   # Service override (level 1): clear instead of global retain
-        # on_start: not set → inherits global "clear"
-        # on_restart: not set → inherits built-in default "retain"
-        # on_exit: not set → inherits built-in default "retain"
-        # on_cleanup: not set → inherits built-in default "clear"
-
-  frontend:
-    command: ["npm", "run", "start"]
-    # No logs config → inherits all from global, then built-in defaults
-    # on_start: global "clear"
-    # on_stop: global "retain"
-    # on_restart: built-in "retain"
-    # on_exit: built-in "retain"
-    # on_cleanup: built-in "clear"
+        on_stop: clear   # Service override: clear instead of global retain
+        # on_start: not set → inherits global or built-in default
 ```
 
 #### Service Hooks

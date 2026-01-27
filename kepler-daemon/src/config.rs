@@ -41,9 +41,6 @@ pub enum HookCommand {
         environment: Vec<String>,
         #[serde(default)]
         env_file: Option<PathBuf>,
-        /// Per-hook log level override
-        #[serde(default)]
-        log_level: Option<HookLogLevel>,
     },
     Command {
         command: Vec<String>,
@@ -57,9 +54,6 @@ pub enum HookCommand {
         environment: Vec<String>,
         #[serde(default)]
         env_file: Option<PathBuf>,
-        /// Per-hook log level override
-        #[serde(default)]
-        log_level: Option<HookLogLevel>,
     },
 }
 
@@ -96,13 +90,6 @@ impl HookCommand {
         match self {
             HookCommand::Script { env_file, .. } => env_file.as_deref(),
             HookCommand::Command { env_file, .. } => env_file.as_deref(),
-        }
-    }
-
-    pub fn log_level(&self) -> Option<&HookLogLevel> {
-        match self {
-            HookCommand::Script { log_level, .. } => log_level.as_ref(),
-            HookCommand::Command { log_level, .. } => log_level.as_ref(),
         }
     }
 }
@@ -319,27 +306,44 @@ pub enum LogRetention {
     Retain, // Keep logs after stop
 }
 
-/// Log level for hook output
+/// Log storage configuration - supports simple bool or per-stream control
 #[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum HookLogLevel {
-    /// Disable hook logging
-    No,
-    /// Log only errors
-    Error,
-    /// Log warnings and above
-    Warn,
-    /// Log info and above (default)
-    Info,
-    /// Log debug and above
-    Debug,
-    /// Log everything
-    Trace,
+#[serde(untagged)]
+pub enum LogStoreConfig {
+    /// Simple form: store: true/false
+    Simple(bool),
+    /// Extended form: store: { stdout: true, stderr: false }
+    Extended {
+        #[serde(default = "default_true")]
+        stdout: bool,
+        #[serde(default = "default_true")]
+        stderr: bool,
+    },
 }
 
-impl Default for HookLogLevel {
+fn default_true() -> bool {
+    true
+}
+
+impl Default for LogStoreConfig {
     fn default() -> Self {
-        HookLogLevel::Info
+        LogStoreConfig::Simple(true)
+    }
+}
+
+impl LogStoreConfig {
+    pub fn store_stdout(&self) -> bool {
+        match self {
+            LogStoreConfig::Simple(v) => *v,
+            LogStoreConfig::Extended { stdout, .. } => *stdout,
+        }
+    }
+
+    pub fn store_stderr(&self) -> bool {
+        match self {
+            LogStoreConfig::Simple(v) => *v,
+            LogStoreConfig::Extended { stderr, .. } => *stderr,
+        }
     }
 }
 
@@ -363,12 +367,12 @@ pub struct LogRetentionConfig {
 pub struct LogConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<bool>,
+    /// Whether to store logs (default: true for both streams)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<LogStoreConfig>,
     /// Nested log retention settings
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<LogRetentionConfig>,
-    /// Hook output log level
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hooks: Option<HookLogLevel>,
 }
 
 impl LogConfig {
@@ -412,16 +416,21 @@ pub fn resolve_log_retention(
         .unwrap_or(default)
 }
 
-/// Resolve hook log level.
-/// Priority: service setting > global setting > default (Info)
-pub fn resolve_hook_log_level(
+/// Resolve log store settings.
+/// Priority: service setting > global setting > default (store both)
+pub fn resolve_log_store(
     service_logs: Option<&LogConfig>,
     global_logs: Option<&LogConfig>,
-) -> HookLogLevel {
-    service_logs
-        .and_then(|l| l.hooks.clone())
-        .or_else(|| global_logs.and_then(|l| l.hooks.clone()))
-        .unwrap_or_default()
+) -> (bool, bool) {
+    // (store_stdout, store_stderr)
+    let config = service_logs
+        .and_then(|l| l.store.as_ref())
+        .or_else(|| global_logs.and_then(|l| l.store.as_ref()));
+
+    match config {
+        Some(c) => (c.store_stdout(), c.store_stderr()),
+        None => (true, true), // Default: store both
+    }
 }
 
 /// Deserialize duration from string like "10s", "5m", "1h"

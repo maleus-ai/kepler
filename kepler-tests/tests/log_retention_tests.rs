@@ -156,6 +156,7 @@ async fn test_all_log_retention_events() {
 
     let log_config = LogConfig {
         timestamp: Some(true),
+        store: None,
         retention: Some(LogRetentionConfig {
             on_stop: Some(LogRetention::Retain),
             on_start: Some(LogRetention::Clear),
@@ -163,7 +164,6 @@ async fn test_all_log_retention_events() {
             on_cleanup: Some(LogRetention::Clear),
             on_exit: Some(LogRetention::Retain),
         }),
-        hooks: None,
     };
 
     let config = TestConfigBuilder::new()

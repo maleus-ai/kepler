@@ -260,6 +260,7 @@ async fn main() -> Result<()> {
                     logs,
                     state.clone(),
                     exit_tx,
+                    global_log_config.as_ref(),
                 )
                 .await
                 {
@@ -703,6 +704,7 @@ async fn start_services(
             logs.clone(),
             state.clone(),
             exit_tx.clone(),
+            config.logs.as_ref(),
         )
         .await?;
 

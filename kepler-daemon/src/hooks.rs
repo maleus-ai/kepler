@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::{debug, error, info};
 
-use crate::config::{GlobalHooks, HookCommand, HookLogLevel, LogConfig, ServiceHooks};
+use crate::config::{resolve_log_store, GlobalHooks, HookCommand, LogConfig, ServiceHooks};
 use crate::env::build_hook_env;
 use crate::errors::{DaemonError, Result};
 use crate::logs::SharedLogBuffer;
@@ -63,7 +63,8 @@ pub async fn run_hook(
     service_name: &str,
     service_user: Option<&str>,
     service_group: Option<&str>,
-    effective_log_level: HookLogLevel,
+    store_stdout: bool,
+    store_stderr: bool,
 ) -> Result<()> {
     // Convert hook to program and args
     let program_and_args = match hook {
@@ -125,14 +126,12 @@ pub async fn run_hook(
         effective_group,
     );
 
-    // Determine effective log level (per-hook override > passed in level)
-    let final_log_level = hook.log_level().cloned().unwrap_or(effective_log_level);
-
     // Spawn using unified function with logging
     let mode = SpawnMode::SynchronousWithLogging {
         logs: logs.cloned(),
         log_service_name: service_name.to_string(),
-        hook_log_level: final_log_level,
+        store_stdout,
+        store_stderr,
     };
 
     match spawn_command(spec, mode).await? {
@@ -185,12 +184,10 @@ pub async fn run_global_hook(
     if let Some(hook) = hook {
         info!("Running global {} hook", hook_type.as_str());
         let service_name = global_hook_service_name(hook_type);
-        // Resolve hook log level from global config
-        let log_level = global_log_config
-            .and_then(|c| c.hooks.clone())
-            .unwrap_or_default();
+        // Resolve store settings from global config
+        let (store_stdout, store_stderr) = resolve_log_store(None, global_log_config);
         // Global hooks run as daemon user (no service user to inherit)
-        run_hook(hook, working_dir, env, logs, &service_name, None, None, log_level).await?;
+        run_hook(hook, working_dir, env, logs, &service_name, None, None, store_stdout, store_stderr).await?;
     }
 
     Ok(())
@@ -236,11 +233,8 @@ pub async fn run_service_hook(
             service_name
         );
         let log_name = service_hook_log_name(service_name, hook_type);
-        // Resolve hook log level: service config > global config > default
-        let log_level = service_log_config
-            .and_then(|c| c.hooks.clone())
-            .or_else(|| global_log_config.and_then(|c| c.hooks.clone()))
-            .unwrap_or_default();
+        // Resolve store settings: service config > global config > default
+        let (store_stdout, store_stderr) = resolve_log_store(service_log_config, global_log_config);
         match run_hook(
             hook,
             working_dir,
@@ -249,7 +243,8 @@ pub async fn run_service_hook(
             &log_name,
             service_user,
             service_group,
-            log_level,
+            store_stdout,
+            store_stderr,
         )
         .await
         {

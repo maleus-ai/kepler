@@ -7,7 +7,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{parse_memory_limit, HookLogLevel, LogRetention, ResourceLimits, ServiceConfig};
+use crate::config::{parse_memory_limit, resolve_log_store, LogRetention, ResourceLimits, ServiceConfig};
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
 use crate::hooks::{run_service_hook, ServiceHookType};
@@ -206,13 +206,19 @@ pub enum SpawnMode {
     SynchronousWithLogging {
         logs: Option<SharedLogBuffer>,
         log_service_name: String,
-        /// Hook log level - if No, output won't be logged
-        hook_log_level: HookLogLevel,
+        /// Whether to store stdout output
+        store_stdout: bool,
+        /// Whether to store stderr output
+        store_stderr: bool,
     },
     /// Return a handle for async monitoring (for services)
     Asynchronous {
         logs: SharedLogBuffer,
         log_service_name: String,
+        /// Whether to store stdout output
+        store_stdout: bool,
+        /// Whether to store stderr output
+        store_stderr: bool,
     },
 }
 
@@ -333,22 +339,20 @@ pub async fn spawn_command(spec: CommandSpec, mode: SpawnMode) -> Result<SpawnRe
         SpawnMode::SynchronousWithLogging {
             logs,
             log_service_name,
-            hook_log_level,
+            store_stdout,
+            store_stderr,
         } => {
-            // Check if logging is enabled
-            let should_log = hook_log_level != HookLogLevel::No;
-
             // Capture stdout with conditional logging
             let stdout = child.stdout.take();
-            let logs_for_stdout = if should_log { logs.clone() } else { None };
+            let logs_for_stdout = if store_stdout { logs.clone() } else { None };
             let service_name_stdout = log_service_name.clone();
-            let should_log_stdout = should_log;
+            let should_store_stdout = store_stdout;
             let stdout_handle = tokio::spawn(async move {
                 if let Some(stdout) = stdout {
                     let reader = BufReader::new(stdout);
                     let mut lines = reader.lines();
                     while let Ok(Some(line)) = lines.next_line().await {
-                        if should_log_stdout {
+                        if should_store_stdout {
                             // Log to daemon's log output
                             info!(target: "hook", "[{}] {}", service_name_stdout, line);
                             // Also capture in log buffer
@@ -362,15 +366,15 @@ pub async fn spawn_command(spec: CommandSpec, mode: SpawnMode) -> Result<SpawnRe
 
             // Capture stderr with conditional logging
             let stderr = child.stderr.take();
-            let logs_for_stderr = if should_log { logs.clone() } else { None };
+            let logs_for_stderr = if store_stderr { logs.clone() } else { None };
             let service_name_stderr = log_service_name.clone();
-            let should_log_stderr = should_log;
+            let should_store_stderr = store_stderr;
             let stderr_handle = tokio::spawn(async move {
                 if let Some(stderr) = stderr {
                     let reader = BufReader::new(stderr);
                     let mut lines = reader.lines();
                     while let Ok(Some(line)) = lines.next_line().await {
-                        if should_log_stderr {
+                        if should_store_stderr {
                             // Log to daemon's log output
                             info!(target: "hook", "[{}] {}", service_name_stderr, line);
                             // Also capture in log buffer
@@ -399,17 +403,22 @@ pub async fn spawn_command(spec: CommandSpec, mode: SpawnMode) -> Result<SpawnRe
         SpawnMode::Asynchronous {
             logs,
             log_service_name,
+            store_stdout,
+            store_stderr,
         } => {
             // Capture stdout
             let stdout = child.stdout.take();
             let stdout_task = if let Some(stdout) = stdout {
                 let logs_clone = logs.clone();
                 let service_name_clone = log_service_name.clone();
+                let should_store = store_stdout;
                 Some(tokio::spawn(async move {
                     let reader = BufReader::new(stdout);
                     let mut lines = reader.lines();
                     while let Ok(Some(line)) = lines.next_line().await {
-                        logs_clone.push(service_name_clone.clone(), line, LogStream::Stdout);
+                        if should_store {
+                            logs_clone.push(service_name_clone.clone(), line, LogStream::Stdout);
+                        }
                     }
                 }))
             } else {
@@ -421,11 +430,14 @@ pub async fn spawn_command(spec: CommandSpec, mode: SpawnMode) -> Result<SpawnRe
             let stderr_task = if let Some(stderr) = stderr {
                 let logs_clone = logs.clone();
                 let service_name_clone = log_service_name.clone();
+                let should_store = store_stderr;
                 Some(tokio::spawn(async move {
                     let reader = BufReader::new(stderr);
                     let mut lines = reader.lines();
                     while let Ok(Some(line)) = lines.next_line().await {
-                        logs_clone.push(service_name_clone.clone(), line, LogStream::Stderr);
+                        if should_store {
+                            logs_clone.push(service_name_clone.clone(), line, LogStream::Stderr);
+                        }
                     }
                 }))
             } else {
@@ -449,6 +461,8 @@ pub struct ProcessExitEvent {
     pub exit_code: Option<i32>,
 }
 
+use crate::config::LogConfig;
+
 /// Spawn a service process
 pub async fn spawn_service(
     config_path: &Path,
@@ -458,6 +472,7 @@ pub async fn spawn_service(
     logs: SharedLogBuffer,
     state: SharedDaemonState,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
+    global_log_config: Option<&LogConfig>,
 ) -> Result<ProcessHandle> {
     let working_dir = service_config
         .working_dir
@@ -492,10 +507,18 @@ pub async fn spawn_service(
         service_config.limits.clone(),
     );
 
+    // Resolve store settings
+    let (store_stdout, store_stderr) = resolve_log_store(
+        service_config.logs.as_ref(),
+        global_log_config,
+    );
+
     // Spawn using unified function
     let mode = SpawnMode::Asynchronous {
         logs,
         log_service_name: service_name.to_string(),
+        store_stdout,
+        store_stderr,
     };
 
     let handle = match spawn_command(spec, mode).await? {
@@ -833,6 +856,7 @@ pub async fn handle_process_exit(
             logs,
             state.clone(),
             exit_tx,
+            global_log_config.as_ref(),
         )
         .await
         {

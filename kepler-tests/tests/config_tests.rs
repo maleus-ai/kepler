@@ -816,53 +816,77 @@ services:
     assert_eq!(service_logs.get_on_stop(), Some(LogRetention::Retain));
 }
 
-/// Hook log level parses correctly
+/// Log store config parses correctly (simple form)
 #[test]
-fn test_hook_log_level_parsing() {
-    use kepler_daemon::config::HookLogLevel;
+fn test_log_store_simple_parsing() {
+    use kepler_daemon::config::LogStoreConfig;
 
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("kepler.yaml");
 
     let yaml = r#"
 logs:
-  hooks: no
+  store: false
 services:
   test:
     command: ["sleep", "3600"]
     logs:
-      hooks: info
+      store: true
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load(&config_path).unwrap();
 
-    assert_eq!(config.logs.as_ref().unwrap().hooks, Some(HookLogLevel::No));
+    assert_eq!(config.logs.as_ref().unwrap().store, Some(LogStoreConfig::Simple(false)));
     assert_eq!(
-        config.services["test"].logs.as_ref().unwrap().hooks,
-        Some(HookLogLevel::Info)
+        config.services["test"].logs.as_ref().unwrap().store,
+        Some(LogStoreConfig::Simple(true))
     );
 }
 
-/// All hook log levels are valid
+/// Log store config parses correctly (extended form)
 #[test]
-fn test_all_hook_log_levels() {
-    for level in ["no", "error", "warn", "info", "debug", "trace"] {
-        let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join("kepler.yaml");
+fn test_log_store_extended_parsing() {
+    use kepler_daemon::config::LogStoreConfig;
 
-        let yaml = format!(r#"
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
 logs:
-  hooks: {}
+  store:
+    stdout: true
+    stderr: false
 services:
   test:
     command: ["sleep", "3600"]
-"#, level);
+    logs:
+      store:
+        stdout: false
+        stderr: true
+"#;
 
-        std::fs::write(&config_path, &yaml).unwrap();
-        let result = KeplerConfig::load(&config_path);
-        assert!(result.is_ok(), "Failed for level: {}", level);
-    }
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load(&config_path).unwrap();
+
+    let global_store = config.logs.as_ref().unwrap().store.as_ref().unwrap();
+    assert!(global_store.store_stdout());
+    assert!(!global_store.store_stderr());
+
+    let service_store = config.services["test"].logs.as_ref().unwrap().store.as_ref().unwrap();
+    assert!(!service_store.store_stdout());
+    assert!(service_store.store_stderr());
+}
+
+/// Log store config defaults when not specified
+#[test]
+fn test_log_store_defaults() {
+    use kepler_daemon::config::resolve_log_store;
+
+    // No config at all - defaults to (true, true)
+    let (store_stdout, store_stderr) = resolve_log_store(None, None);
+    assert!(store_stdout, "Default should store stdout");
+    assert!(store_stderr, "Default should store stderr");
 }
 
 // ============================================================================

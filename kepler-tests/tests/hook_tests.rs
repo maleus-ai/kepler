@@ -21,7 +21,6 @@ async fn test_script_format_hook() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -69,7 +68,6 @@ async fn test_command_format_hook() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -114,7 +112,6 @@ async fn test_hook_environment_variables() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -169,7 +166,6 @@ async fn test_hook_working_directory() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -341,7 +337,6 @@ async fn test_hook_failure_doesnt_block_service() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -382,7 +377,6 @@ async fn test_hook_execution_order() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         on_start: Some(HookCommand::Script {
             run: format!("echo 'start' >> {}", order_file.display()),
@@ -391,7 +385,6 @@ async fn test_hook_execution_order() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -439,7 +432,6 @@ async fn test_hook_own_environment_variables() {
             working_dir: None,
             environment: vec!["HOOK_VAR=from_hook".to_string()],
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -494,7 +486,6 @@ async fn test_hook_env_file() {
             working_dir: None,
             environment: Vec::new(),
             env_file: Some(env_file_path),
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -545,7 +536,6 @@ async fn test_hook_env_overrides_service_env() {
             working_dir: None,
             environment: vec!["SHARED_VAR=from_hook".to_string()],
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -597,7 +587,6 @@ async fn test_hook_env_expansion_with_service_env() {
             working_dir: None,
             environment: vec!["COMBINED=${SERVICE_VAR}_plus_hook".to_string()],
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -662,7 +651,6 @@ async fn test_hook_env_priority() {
             working_dir: None,
             environment: vec!["VAR3=hook_env".to_string()],
             env_file: Some(hook_env_file),
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -719,10 +707,10 @@ async fn test_hook_env_priority() {
 // Hook Log Level Tests
 // ============================================================================
 
-/// Hook output is NOT logged when hooks log level is "no"
+/// Hook/service output is NOT logged when store: false
 #[tokio::test]
-async fn test_hook_output_disabled() {
-    use kepler_daemon::config::{HookLogLevel, LogConfig};
+async fn test_log_output_disabled() {
+    use kepler_daemon::config::{LogConfig, LogStoreConfig};
 
     let temp_dir = TempDir::new().unwrap();
     let marker = MarkerFileHelper::new(temp_dir.path());
@@ -738,7 +726,6 @@ async fn test_hook_output_disabled() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -746,8 +733,8 @@ async fn test_hook_output_disabled() {
     let config = TestConfigBuilder::new()
         .with_logs(LogConfig {
             timestamp: None,
+            store: Some(LogStoreConfig::Simple(false)),
             retention: None,
-            hooks: Some(HookLogLevel::No),
         })
         .add_service(
             "test",
@@ -775,17 +762,17 @@ async fn test_hook_output_disabled() {
         let hook_output_logged = entries.iter().any(|e| e.line.contains("HOOK_SECRET_OUTPUT"));
         assert!(
             !hook_output_logged,
-            "Hook output should not be logged when hooks: no"
+            "Hook output should not be logged when store: false"
         );
     }
 
     harness.stop_service("test").await.unwrap();
 }
 
-/// Hook output IS logged when hooks log level is "info"
+/// Hook/service output IS logged when store: true (or default)
 #[tokio::test]
-async fn test_hook_output_enabled() {
-    use kepler_daemon::config::{HookLogLevel, LogConfig};
+async fn test_log_output_enabled() {
+    use kepler_daemon::config::{LogConfig, LogStoreConfig};
 
     let temp_dir = TempDir::new().unwrap();
     let marker = MarkerFileHelper::new(temp_dir.path());
@@ -801,7 +788,6 @@ async fn test_hook_output_enabled() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -809,8 +795,8 @@ async fn test_hook_output_enabled() {
     let config = TestConfigBuilder::new()
         .with_logs(LogConfig {
             timestamp: None,
+            store: Some(LogStoreConfig::Simple(true)),
             retention: None,
-            hooks: Some(HookLogLevel::Info),
         })
         .add_service(
             "test",
@@ -841,7 +827,7 @@ async fn test_hook_output_enabled() {
         let hook_output_logged = entries.iter().any(|e| e.line.contains("HOOK_VISIBLE_OUTPUT"));
         assert!(
             hook_output_logged,
-            "Hook output should be logged when hooks: info"
+            "Hook output should be logged when store: true"
         );
     }
 

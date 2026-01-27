@@ -219,6 +219,7 @@ impl TestDaemonHarness {
             logs.clone(),
             self.state.clone(),
             self.exit_tx.clone(),
+            global_log_config.as_ref(),
         )
         .await?;
 
@@ -478,6 +479,7 @@ impl TestDaemonHarness {
                         logs,
                         state.clone(),
                         exit_tx.clone(),
+                        global_log_config.as_ref(),
                     )
                     .await
                     {

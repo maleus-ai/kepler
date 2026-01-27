@@ -127,7 +127,6 @@ async fn test_service_dependencies_order() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -140,7 +139,6 @@ async fn test_service_dependencies_order() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
@@ -153,7 +151,6 @@ async fn test_service_dependencies_order() {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            log_level: None,
         }),
         ..Default::default()
     };
