@@ -301,12 +301,12 @@ services:
 - `retain`: Keep logs when the event occurs (default for `on_start`, `on_restart`, `on_exit`)
 - `clear`: Clear logs when the event occurs (default for `on_stop`, `on_cleanup`)
 
-**Inheritance priority** (highest to lowest):
-1. **Service-level setting** - Explicit setting in the service's `logs:` block
+**Inheritance priority** (lowest to highest):
+1. **Built-in default** - The default value shown in the table above
 2. **Global-level setting** - Setting in the top-level `logs:` block
-3. **Built-in default** - The default value shown in the table above
+3. **Service-level setting** - Explicit setting in the service's `logs:` block
 
-When a log retention event occurs, Kepler checks each level in order and uses the first explicitly set value it finds. If no value is set at any level, it falls back to the built-in default.
+Each level overrides the previous one. Service settings override global settings, which override built-in defaults.
 
 **Example:**
 ```yaml
