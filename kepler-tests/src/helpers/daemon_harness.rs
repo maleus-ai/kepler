@@ -1,13 +1,14 @@
 //! Test harness that manages daemon state without full binary
 
 use chrono::Utc;
-use kepler_daemon::config::KeplerConfig;
+use kepler_daemon::config::{KeplerConfig, LogRetention};
 use kepler_daemon::env::build_service_env;
 use kepler_daemon::health::spawn_health_checker;
 use kepler_daemon::hooks::{run_service_hook, ServiceHookType};
 use kepler_daemon::logs::SharedLogBuffer;
 use kepler_daemon::process::{spawn_service, stop_service, ProcessExitEvent};
 use kepler_daemon::state::{new_shared_state, ServiceStatus, SharedDaemonState};
+use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
@@ -18,6 +19,8 @@ pub struct TestDaemonHarness {
     pub config_dir: PathBuf,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
     exit_rx: Option<mpsc::Receiver<ProcessExitEvent>>,
+    restart_tx: mpsc::Sender<FileChangeEvent>,
+    restart_rx: Option<mpsc::Receiver<FileChangeEvent>>,
 }
 
 impl TestDaemonHarness {
@@ -31,6 +34,7 @@ impl TestDaemonHarness {
 
         let state = new_shared_state();
         let (exit_tx, exit_rx) = mpsc::channel(32);
+        let (restart_tx, restart_rx) = mpsc::channel(32);
 
         // Load the config into state
         {
@@ -46,6 +50,8 @@ impl TestDaemonHarness {
             config_dir: config_dir.to_path_buf(),
             exit_tx,
             exit_rx: Some(exit_rx),
+            restart_tx,
+            restart_rx: Some(restart_rx),
         })
     }
 
@@ -53,6 +59,7 @@ impl TestDaemonHarness {
     pub async fn from_file(config_path: &Path) -> std::io::Result<Self> {
         let state = new_shared_state();
         let (exit_tx, exit_rx) = mpsc::channel(32);
+        let (restart_tx, restart_rx) = mpsc::channel(32);
 
         let config_path = config_path.canonicalize()?;
         let config_dir = config_path
@@ -74,6 +81,8 @@ impl TestDaemonHarness {
             config_dir,
             exit_tx,
             exit_rx: Some(exit_rx),
+            restart_tx,
+            restart_rx: Some(restart_rx),
         })
     }
 
@@ -85,6 +94,16 @@ impl TestDaemonHarness {
     /// Get a clone of the exit event sender
     pub fn exit_tx(&self) -> mpsc::Sender<ProcessExitEvent> {
         self.exit_tx.clone()
+    }
+
+    /// Take the restart event receiver (can only be taken once)
+    pub fn take_restart_rx(&mut self) -> Option<mpsc::Receiver<FileChangeEvent>> {
+        self.restart_rx.take()
+    }
+
+    /// Get a clone of the restart event sender
+    pub fn restart_tx(&self) -> mpsc::Sender<FileChangeEvent> {
+        self.restart_tx.clone()
     }
 
     /// Get the shared state
@@ -201,6 +220,11 @@ impl TestDaemonHarness {
 
         let pid = handle.child.id();
 
+        let working_dir = service_config
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| self.config_dir.clone());
+
         // Store the handle and update state
         {
             let mut state = self.state.write();
@@ -215,6 +239,21 @@ impl TestDaemonHarness {
                     service_state.started_at = Some(Utc::now());
                 }
             }
+        }
+
+        // Start file watcher if configured
+        if !service_config.restart.watch_patterns().is_empty() {
+            let handle = spawn_file_watcher(
+                self.config_path.clone(),
+                service_name.to_string(),
+                service_config.restart.watch_patterns().to_vec(),
+                working_dir,
+                self.restart_tx.clone(),
+            );
+            let mut state = self.state.write();
+            state
+                .watchers
+                .insert((self.config_path.clone(), service_name.to_string()), handle);
         }
 
         Ok(())
@@ -342,6 +381,115 @@ impl TestDaemonHarness {
     pub fn logs(&self) -> Option<SharedLogBuffer> {
         let state = self.state.read();
         state.configs.get(&self.config_path).map(|c| c.logs.clone())
+    }
+
+    /// Spawn a file change handler that restarts services on file changes
+    /// Must be called after taking restart_rx with take_restart_rx()
+    pub fn spawn_file_change_handler(&self, mut restart_rx: mpsc::Receiver<FileChangeEvent>) {
+        let state = self.state.clone();
+        let config_path = self.config_path.clone();
+        let exit_tx = self.exit_tx.clone();
+
+        tokio::spawn(async move {
+            while let Some(event) = restart_rx.recv().await {
+                // Get service config and global log config
+                let (service_config, global_log_config) = {
+                    let state = state.read();
+                    let config_state = state.configs.get(&event.config_path);
+                    (
+                        config_state.and_then(|cs| cs.config.services.get(&event.service_name).cloned()),
+                        config_state.and_then(|cs| cs.config.logs.clone()),
+                    )
+                };
+
+                if let Some(config) = service_config {
+                    // Get config_dir and logs
+                    let (config_dir, logs) = {
+                        let state = state.read();
+                        if let Some(cs) = state.configs.get(&event.config_path) {
+                            (
+                                cs.config_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")),
+                                cs.logs.clone(),
+                            )
+                        } else {
+                            continue;
+                        }
+                    };
+
+                    // Run on_restart hook
+                    let working_dir = config
+                        .working_dir
+                        .clone()
+                        .unwrap_or_else(|| config_dir.clone());
+                    let env = build_service_env(&config, &config_dir).unwrap_or_default();
+
+                    let _ = run_service_hook(
+                        &config.hooks,
+                        ServiceHookType::OnRestart,
+                        &event.service_name,
+                        &working_dir,
+                        &env,
+                        Some(&logs),
+                        config.user.as_deref(),
+                        config.group.as_deref(),
+                    )
+                    .await;
+
+                    // Apply on_restart log retention policy
+                    let service_retention = config.logs.as_ref().map(|l| &l.on_restart);
+                    let global_retention = global_log_config.as_ref().map(|l| &l.on_restart);
+
+                    let should_clear = match service_retention.or(global_retention) {
+                        Some(LogRetention::Retain) => false,
+                        _ => true,
+                    };
+
+                    if should_clear {
+                        logs.clear_service(&event.service_name);
+                        logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                    }
+
+                    // Stop the service
+                    if let Err(_) = stop_service(&event.config_path, &event.service_name, state.clone()).await {
+                        continue;
+                    }
+
+                    // Small delay
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                    // Restart the service
+                    match spawn_service(
+                        &event.config_path,
+                        &event.service_name,
+                        &config,
+                        &config_dir,
+                        logs,
+                        state.clone(),
+                        exit_tx.clone(),
+                    )
+                    .await
+                    {
+                        Ok(handle) => {
+                            let pid = handle.child.id();
+                            let mut state = state.write();
+                            state.processes.insert(
+                                (event.config_path.clone(), event.service_name.clone()),
+                                handle,
+                            );
+                            if let Some(cs) = state.configs.get_mut(&event.config_path) {
+                                if let Some(ss) = cs.services.get_mut(&event.service_name) {
+                                    ss.status = ServiceStatus::Running;
+                                    ss.pid = pid;
+                                    ss.started_at = Some(Utc::now());
+                                    ss.restart_count += 1;
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        });
     }
 
     /// Reload the config from disk
