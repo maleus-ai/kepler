@@ -109,6 +109,8 @@ pub struct ServiceHooks {
     pub on_stop: Option<HookCommand>,
     pub on_restart: Option<HookCommand>,
     pub on_exit: Option<HookCommand>,
+    pub on_healthcheck_success: Option<HookCommand>,
+    pub on_healthcheck_fail: Option<HookCommand>,
 }
 
 /// Log retention policy on service stop

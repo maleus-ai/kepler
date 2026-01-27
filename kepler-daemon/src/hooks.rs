@@ -37,6 +37,8 @@ pub enum ServiceHookType {
     OnStop,
     OnRestart,
     OnExit,
+    OnHealthcheckSuccess,
+    OnHealthcheckFail,
 }
 
 impl ServiceHookType {
@@ -47,6 +49,8 @@ impl ServiceHookType {
             ServiceHookType::OnStop => "on_stop",
             ServiceHookType::OnRestart => "on_restart",
             ServiceHookType::OnExit => "on_exit",
+            ServiceHookType::OnHealthcheckSuccess => "on_healthcheck_success",
+            ServiceHookType::OnHealthcheckFail => "on_healthcheck_fail",
         }
     }
 }
@@ -206,6 +210,8 @@ pub async fn run_service_hook(
         ServiceHookType::OnStop => &hooks.on_stop,
         ServiceHookType::OnRestart => &hooks.on_restart,
         ServiceHookType::OnExit => &hooks.on_exit,
+        ServiceHookType::OnHealthcheckSuccess => &hooks.on_healthcheck_success,
+        ServiceHookType::OnHealthcheckFail => &hooks.on_healthcheck_fail,
     };
 
     if let Some(hook) = hook {
