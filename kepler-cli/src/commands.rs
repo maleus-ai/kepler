@@ -40,7 +40,11 @@ pub enum Commands {
         lines: usize,
     },
     /// List all services and their states
-    PS,
+    PS {
+        /// Show status for all loaded configs
+        #[arg(short, long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

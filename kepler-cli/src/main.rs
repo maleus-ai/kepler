@@ -11,7 +11,7 @@ use clap::Parser;
 use kepler_daemon::Daemon;
 use kepler_protocol::{
     client::Client,
-    protocol::{Response, ResponseData, ServiceInfo},
+    protocol::{ConfigStatus, Response, ResponseData, ServiceInfo},
 };
 use tracing_subscriber::EnvFilter;
 
@@ -64,6 +64,11 @@ async fn main() -> Result<()> {
         Err(e) => return Err(e.into()),
     };
 
+    // Handle PS with --all flag (doesn't require config)
+    if let Commands::PS { all: true } = &cli.command {
+        return handle_ps_all(&mut client).await;
+    }
+
     // Resolve config path for service commands
     let config_path = Config::resolve_config_path(&cli.file)?;
     let canonical_path = config_path
@@ -94,7 +99,7 @@ async fn main() -> Result<()> {
             handle_logs(&mut client, canonical_path, service, follow, lines).await?;
         }
 
-        Commands::PS => {
+        Commands::PS { .. } => {
             handle_ps(&mut client, canonical_path).await?;
         }
 
@@ -349,6 +354,32 @@ async fn handle_ps(client: &mut Client, config_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+async fn handle_ps_all(client: &mut Client) -> Result<()> {
+    let response = client.status(None).await?;
+
+    match response {
+        Response::Ok {
+            data: Some(ResponseData::MultiConfigStatus(configs)),
+            ..
+        } => {
+            if configs.is_empty() {
+                println!("No configs loaded");
+                return Ok(());
+            }
+
+            print_multi_config_table(&configs);
+            Ok(())
+        }
+        Response::Ok { message, .. } => {
+            println!("{}", message.unwrap_or_default());
+            Ok(())
+        }
+        Response::Error { message } => {
+            anyhow::bail!("Error: {}", message);
+        }
+    }
+}
+
 fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>) {
     // Calculate column widths
     let name_width = services
@@ -414,6 +445,109 @@ fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>
             pid_str,
             uptime_str,
             health_str,
+            name_width = name_width,
+            status_width = status_width,
+            pid_width = pid_width,
+            uptime_width = uptime_width,
+            health_width = health_width
+        );
+    }
+}
+
+fn print_multi_config_table(configs: &[ConfigStatus]) {
+    // Collect all services with their config paths
+    let mut rows: Vec<(&str, &str, &ServiceInfo)> = Vec::new();
+    for config in configs {
+        for (name, info) in &config.services {
+            rows.push((&config.config_path, name, info));
+        }
+    }
+
+    // Sort by config path, then by service name
+    rows.sort_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(b.1)));
+
+    // Abbreviate home directory with ~
+    let home_dir = std::env::var("HOME").ok();
+    let abbreviate_path = |path: &str| -> String {
+        if let Some(ref home) = home_dir {
+            if path.starts_with(home) {
+                return format!("~{}", &path[home.len()..]);
+            }
+        }
+        path.to_string()
+    };
+
+    // Calculate column widths
+    let config_width = rows
+        .iter()
+        .map(|(p, _, _)| abbreviate_path(p).len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+    let name_width = rows
+        .iter()
+        .map(|(_, n, _)| n.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let status_width = 10;
+    let pid_width = 8;
+    let uptime_width = 12;
+    let health_width = 8;
+
+    // Print header
+    println!(
+        "{:<config_width$}  {:<name_width$}  {:<status_width$}  {:<pid_width$}  {:<uptime_width$}  {:<health_width$}",
+        "CONFIG", "NAME", "STATUS", "PID", "UPTIME", "HEALTH",
+        config_width = config_width,
+        name_width = name_width,
+        status_width = status_width,
+        pid_width = pid_width,
+        uptime_width = uptime_width,
+        health_width = health_width
+    );
+    println!(
+        "{:-<config_width$}  {:-<name_width$}  {:-<status_width$}  {:-<pid_width$}  {:-<uptime_width$}  {:-<health_width$}",
+        "", "", "", "", "", "",
+        config_width = config_width,
+        name_width = name_width,
+        status_width = status_width,
+        pid_width = pid_width,
+        uptime_width = uptime_width,
+        health_width = health_width
+    );
+
+    for (config_path, name, info) in rows {
+        let abbreviated_path = abbreviate_path(config_path);
+        let pid_str = info
+            .pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string());
+
+        let uptime_str = info
+            .started_at
+            .map(|ts| format_uptime(ts))
+            .unwrap_or_else(|| "-".to_string());
+
+        let health_str = if info.health_check_failures > 0 {
+            format!("{} fail", info.health_check_failures)
+        } else if info.status == "healthy" {
+            "ok".to_string()
+        } else if info.status == "unhealthy" {
+            "failing".to_string()
+        } else {
+            "-".to_string()
+        };
+
+        println!(
+            "{:<config_width$}  {:<name_width$}  {:<status_width$}  {:<pid_width$}  {:<uptime_width$}  {:<health_width$}",
+            abbreviated_path,
+            name,
+            info.status,
+            pid_str,
+            uptime_str,
+            health_str,
+            config_width = config_width,
             name_width = name_width,
             status_width = status_width,
             pid_width = pid_width,
