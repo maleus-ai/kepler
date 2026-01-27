@@ -12,8 +12,12 @@ pub mod state;
 pub mod watcher;
 
 const GLOBAL_STATE_DIR: &str = ".kepler";
+const KEPLER_DAEMON_PATH_ENV: &str = "KEPLER_DAEMON_PATH";
 
 pub fn global_state_dir() -> PathBuf {
+    if let Ok(path) = std::env::var(KEPLER_DAEMON_PATH_ENV) {
+        return PathBuf::from(path);
+    }
     dirs::home_dir()
         .expect("Could not determine home directory")
         .join(GLOBAL_STATE_DIR)
@@ -23,9 +27,7 @@ pub struct Daemon {}
 
 impl Daemon {
     pub fn global_state_dir() -> PathBuf {
-        dirs::home_dir()
-            .expect("Could not determine home directory")
-            .join(GLOBAL_STATE_DIR)
+        global_state_dir()
     }
 
     pub fn get_socket_path() -> PathBuf {
