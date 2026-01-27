@@ -231,10 +231,25 @@ restart:
 - The `on_restart` hook runs before file-change restarts (same as process-exit restarts)
 - The `on_restart` log retention policy applies to file-change restarts
 
-**Important:** File watching requires restart to be enabled (`policy: always` or `policy: on-failure`). Combining `policy: no` with `watch` patterns will result in a validation error:
-```
-watch patterns require restart to be enabled (policy: always or on-failure)
-```
+> **⚠️ Constraint: `policy: no` cannot be combined with `watch`**
+>
+> File watching requires restart to be enabled. Using `policy: no` with `watch` patterns is invalid and will be rejected during config validation with the error:
+> ```
+> watch patterns require restart to be enabled (policy: always or on-failure)
+> ```
+>
+> **Invalid configuration (will fail):**
+> ```yaml
+> services:
+>   invalid:
+>     command: ["npm", "run", "dev"]
+>     restart:
+>       policy: no       # ❌ Cannot use 'no' with watch patterns
+>       watch:
+>         - "src/**/*.ts"
+> ```
+>
+> To use file watching, set `policy` to `always` or `on-failure`.
 
 **Examples:**
 ```yaml
