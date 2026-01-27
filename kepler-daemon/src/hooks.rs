@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tracing::{debug, error, info};
 
 use crate::config::{GlobalHooks, HookCommand, ServiceHooks};
 use crate::env::build_hook_env;
 use crate::errors::{DaemonError, Result};
-use crate::logs::{LogStream, SharedLogBuffer};
+use crate::logs::SharedLogBuffer;
+use crate::process::{spawn_command, CommandSpec, SpawnMode, SpawnResult};
 
 /// Types of global hooks
 #[derive(Debug, Clone, Copy)]
@@ -59,119 +57,93 @@ impl ServiceHookType {
 /// Execute a hook command
 pub async fn run_hook(
     hook: &HookCommand,
-    working_dir: &Path,
+    base_working_dir: &Path,
     env: &HashMap<String, String>,
     logs: Option<&SharedLogBuffer>,
     service_name: &str,
     service_user: Option<&str>,
     service_group: Option<&str>,
 ) -> Result<()> {
-    // Build hook-specific environment (merges with base env)
-    let hook_env = build_hook_env(hook, env, working_dir)?;
-
-    let (program, args) = match hook {
+    // Convert hook to program and args
+    let program_and_args = match hook {
         HookCommand::Script { run, .. } => {
             // Run script through shell
-            ("sh".to_string(), vec!["-c".to_string(), run.clone()])
+            vec!["sh".to_string(), "-c".to_string(), run.clone()]
         }
         HookCommand::Command { command, .. } => {
             if command.is_empty() {
                 return Ok(());
             }
-            (command[0].clone(), command[1..].to_vec())
+            command.clone()
         }
     };
 
-    debug!("Running hook: {} {:?}", program, args);
-
-    let mut cmd = Command::new(&program);
-    cmd.args(&args)
-        .current_dir(working_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .envs(&hook_env);
-
-    // Determine effective user (Unix only)
-    #[cfg(unix)]
-    {
-        use crate::user::resolve_user;
-
-        // Priority: hook user > service user > daemon user
-        let effective_user = match hook.user() {
-            Some("daemon") => None, // Run as daemon user (no change)
-            Some(user) => Some(user), // Hook specifies explicit user
-            None => service_user, // Inherit from service
-        };
-
-        if let Some(user) = effective_user {
-            let (uid, gid) = resolve_user(user, service_group)?;
-            cmd.uid(uid);
-            cmd.gid(gid);
-            debug!("Hook will run as uid={}, gid={}", uid, gid);
-        }
-    }
-
-    let mut child = cmd.spawn().map_err(|e| DaemonError::HookFailed {
-        hook_type: format!("{} {:?}", program, args),
-        message: e.to_string(),
-    })?;
-
-    // Capture stdout
-    let stdout = child.stdout.take();
-    let logs_for_stdout = logs.cloned();
-    let service_name_stdout = service_name.to_string();
-    let stdout_handle = tokio::spawn(async move {
-        if let Some(stdout) = stdout {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                // Log to daemon's log output
-                info!(target: "hook", "[{}] {}", service_name_stdout, line);
-                // Also capture in log buffer
-                if let Some(ref logs) = logs_for_stdout {
-                    logs.push(service_name_stdout.clone(), line, LogStream::Stdout);
-                }
+    // Determine effective working directory
+    // Priority: hook working_dir > base_working_dir (from service)
+    let effective_working_dir = match hook.working_dir() {
+        Some(dir) => {
+            if dir.is_absolute() {
+                dir.to_path_buf()
+            } else {
+                base_working_dir.join(dir)
             }
         }
-    });
+        None => base_working_dir.to_path_buf(),
+    };
 
-    // Capture stderr
-    let stderr = child.stderr.take();
-    let logs_for_stderr = logs.cloned();
-    let service_name_stderr = service_name.to_string();
-    let stderr_handle = tokio::spawn(async move {
-        if let Some(stderr) = stderr {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                // Log to daemon's log output (as warning for stderr)
-                info!(target: "hook", "[{}] {}", service_name_stderr, line);
-                // Also capture in log buffer
-                if let Some(ref logs) = logs_for_stderr {
-                    logs.push(service_name_stderr.clone(), line, LogStream::Stderr);
-                }
+    // Build hook-specific environment (merges with base env)
+    let hook_env = build_hook_env(hook, env, &effective_working_dir)?;
+
+    // Determine effective user
+    // Priority: hook user > service user > daemon user
+    let effective_user = match hook.user() {
+        Some("daemon") => None, // Run as daemon user (no change)
+        Some(user) => Some(user.to_string()), // Hook specifies explicit user
+        None => service_user.map(|s| s.to_string()), // Inherit from service
+    };
+
+    // Determine effective group
+    // Priority: hook group > service group
+    let effective_group = hook
+        .group()
+        .map(|s| s.to_string())
+        .or_else(|| service_group.map(|s| s.to_string()));
+
+    debug!(
+        "Running hook: {} {:?}",
+        &program_and_args[0],
+        &program_and_args[1..]
+    );
+
+    // Build CommandSpec
+    let spec = CommandSpec::new(
+        program_and_args.clone(),
+        effective_working_dir,
+        hook_env,
+        effective_user,
+        effective_group,
+    );
+
+    // Spawn using unified function with logging
+    let mode = SpawnMode::SynchronousWithLogging {
+        logs: logs.cloned(),
+        log_service_name: service_name.to_string(),
+    };
+
+    match spawn_command(spec, mode).await? {
+        SpawnResult::Completed { exit_code } => {
+            if exit_code != Some(0) {
+                return Err(DaemonError::HookFailed {
+                    hook_type: format!("{} {:?}", &program_and_args[0], &program_and_args[1..]),
+                    message: format!("Exit code: {:?}", exit_code),
+                });
             }
+            Ok(())
         }
-    });
-
-    let status = child.wait().await.map_err(|e| DaemonError::HookFailed {
-        hook_type: format!("{} {:?}", program, args),
-        message: e.to_string(),
-    })?;
-
-    // Wait for output capture to complete
-    let _ = stdout_handle.await;
-    let _ = stderr_handle.await;
-
-    if !status.success() {
-        return Err(DaemonError::HookFailed {
-            hook_type: format!("{} {:?}", program, args),
-            message: format!("Exit code: {:?}", status.code()),
-        });
+        SpawnResult::Handle(_) => {
+            unreachable!("SynchronousWithLogging mode should return Completed")
+        }
     }
-
-    Ok(())
 }
 
 /// The prefix used for global hook logs

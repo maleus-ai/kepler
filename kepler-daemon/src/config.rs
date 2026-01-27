@@ -34,6 +34,10 @@ pub enum HookCommand {
         #[serde(default)]
         user: Option<String>,
         #[serde(default)]
+        group: Option<String>,
+        #[serde(default)]
+        working_dir: Option<PathBuf>,
+        #[serde(default)]
         environment: Vec<String>,
         #[serde(default)]
         env_file: Option<PathBuf>,
@@ -42,6 +46,10 @@ pub enum HookCommand {
         command: Vec<String>,
         #[serde(default)]
         user: Option<String>,
+        #[serde(default)]
+        group: Option<String>,
+        #[serde(default)]
+        working_dir: Option<PathBuf>,
         #[serde(default)]
         environment: Vec<String>,
         #[serde(default)]
@@ -54,6 +62,20 @@ impl HookCommand {
         match self {
             HookCommand::Script { user, .. } => user.as_deref(),
             HookCommand::Command { user, .. } => user.as_deref(),
+        }
+    }
+
+    pub fn group(&self) -> Option<&str> {
+        match self {
+            HookCommand::Script { group, .. } => group.as_deref(),
+            HookCommand::Command { group, .. } => group.as_deref(),
+        }
+    }
+
+    pub fn working_dir(&self) -> Option<&Path> {
+        match self {
+            HookCommand::Script { working_dir, .. } => working_dir.as_deref(),
+            HookCommand::Command { working_dir, .. } => working_dir.as_deref(),
         }
     }
 

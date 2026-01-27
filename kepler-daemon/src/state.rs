@@ -131,6 +131,16 @@ pub struct ProcessHandle {
     pub stderr_task: Option<JoinHandle<()>>,
 }
 
+impl std::fmt::Debug for ProcessHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProcessHandle")
+            .field("child_pid", &self.child.id())
+            .field("stdout_task", &self.stdout_task.is_some())
+            .field("stderr_task", &self.stderr_task.is_some())
+            .finish()
+    }
+}
+
 /// Global daemon state
 pub struct DaemonState {
     /// Map from config path (canonicalized) to config state

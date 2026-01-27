@@ -17,6 +17,8 @@ async fn test_script_format_hook() {
         on_start: Some(HookCommand::Script {
             run: format!("touch {}", marker.marker_path("script").display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }),
@@ -62,6 +64,8 @@ async fn test_command_format_hook() {
                 marker_path.to_string_lossy().to_string(),
             ],
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }),
@@ -104,6 +108,8 @@ async fn test_hook_environment_variables() {
         on_start: Some(HookCommand::Script {
             run: format!("echo \"TEST_VAR=$TEST_VAR\" >> {}", marker_path.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }),
@@ -156,6 +162,8 @@ async fn test_hook_working_directory() {
         on_start: Some(HookCommand::Script {
             run: format!("pwd >> {}", marker_path.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }),
@@ -325,6 +333,8 @@ async fn test_hook_failure_doesnt_block_service() {
         on_start: Some(HookCommand::Script {
             run: "exit 1".to_string(), // Always fails
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }),
@@ -363,12 +373,16 @@ async fn test_hook_execution_order() {
         on_init: Some(HookCommand::Script {
             run: format!("echo 'init' >> {}", order_file.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }),
         on_start: Some(HookCommand::Script {
             run: format!("echo 'start' >> {}", order_file.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }),
@@ -414,6 +428,8 @@ async fn test_hook_own_environment_variables() {
         on_start: Some(HookCommand::Script {
             run: format!("echo \"HOOK_VAR=$HOOK_VAR\" >> {}", marker_path.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: vec!["HOOK_VAR=from_hook".to_string()],
             env_file: None,
         }),
@@ -466,6 +482,8 @@ async fn test_hook_env_file() {
         on_start: Some(HookCommand::Script {
             run: format!("echo \"HOOK_FILE_VAR=$HOOK_FILE_VAR\" >> {}", marker_path.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: Some(env_file_path),
         }),
@@ -514,6 +532,8 @@ async fn test_hook_env_overrides_service_env() {
         on_start: Some(HookCommand::Script {
             run: format!("echo \"SHARED_VAR=$SHARED_VAR\" >> {}", marker_path.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: vec!["SHARED_VAR=from_hook".to_string()],
             env_file: None,
         }),
@@ -563,6 +583,8 @@ async fn test_hook_env_expansion_with_service_env() {
         on_start: Some(HookCommand::Script {
             run: format!("echo \"COMBINED=$COMBINED\" >> {}", marker_path.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: vec!["COMBINED=${SERVICE_VAR}_plus_hook".to_string()],
             env_file: None,
         }),
@@ -625,6 +647,8 @@ async fn test_hook_env_priority() {
                 marker_path.display()
             ),
             user: None,
+            group: None,
+            working_dir: None,
             environment: vec!["VAR3=hook_env".to_string()],
             env_file: Some(hook_env_file),
         }),

@@ -222,8 +222,10 @@ hooks:
   on_restart:
     run: ./notify.sh
     user: admin                    # Run hook as specific user
+    group: developers              # Override group (Unix only)
   on_init:
     run: ./setup.sh
+    working_dir: ./scripts         # Override working directory
     environment:                   # Hook-specific environment variables
       - SETUP_MODE=full
       - DEBUG=true
@@ -241,10 +243,16 @@ hooks:
   4. Service's `env_file` variables
   5. System environment variables
 
-**Hook user behavior** (Unix only):
-- By default, hooks inherit the service's `user:` setting
+**Hook user/group behavior** (Unix only):
+- By default, hooks inherit the service's `user:` and `group:` settings
 - `user: daemon` runs as the kepler daemon user (for elevated privileges)
 - `user: <name>` runs as a specific user
+- `group: <name>` overrides the group (defaults to service's group if not set)
+
+**Hook working directory:**
+- By default, hooks run in the service's `working_dir`
+- `working_dir: <path>` overrides the working directory for that hook
+- Relative paths are resolved relative to the service's working_dir
 
 #### Health Check Options
 

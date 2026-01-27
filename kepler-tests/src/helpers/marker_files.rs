@@ -30,6 +30,8 @@ impl MarkerFileHelper {
         HookCommand::Script {
             run: format!("touch {}", marker_path.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }
@@ -41,6 +43,8 @@ impl MarkerFileHelper {
         HookCommand::Script {
             run: format!("date +%s >> {}", marker_path.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }
@@ -52,6 +56,8 @@ impl MarkerFileHelper {
         HookCommand::Script {
             run: format!("echo '{}' >> {}", value, marker_path.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }
@@ -67,6 +73,8 @@ impl MarkerFileHelper {
         HookCommand::Script {
             run: capture_commands.join(" && "),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }
@@ -87,6 +95,8 @@ impl MarkerFileHelper {
         HookCommand::Script {
             run: capture_commands.join(" && "),
             user: None,
+            group: None,
+            working_dir: None,
             environment,
             env_file: None,
         }

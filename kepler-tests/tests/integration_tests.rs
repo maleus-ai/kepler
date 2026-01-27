@@ -123,6 +123,8 @@ async fn test_service_dependencies_order() {
         on_start: Some(kepler_daemon::config::HookCommand::Script {
             run: format!("echo 'frontend' >> {}", order_file.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }),
@@ -133,6 +135,8 @@ async fn test_service_dependencies_order() {
         on_start: Some(kepler_daemon::config::HookCommand::Script {
             run: format!("echo 'backend' >> {}", order_file.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }),
@@ -143,6 +147,8 @@ async fn test_service_dependencies_order() {
         on_start: Some(kepler_daemon::config::HookCommand::Script {
             run: format!("echo 'database' >> {}", order_file.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }),

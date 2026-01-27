@@ -302,6 +302,8 @@ impl TestHookBuilder {
         HookCommand::Script {
             run: script.to_string(),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }
@@ -312,6 +314,8 @@ impl TestHookBuilder {
         HookCommand::Command {
             command: cmd.iter().map(|s| s.to_string()).collect(),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }
@@ -322,6 +326,8 @@ impl TestHookBuilder {
         HookCommand::Script {
             run: format!("touch {}", path.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }
@@ -332,6 +338,8 @@ impl TestHookBuilder {
         HookCommand::Script {
             run: format!("echo '{}' >> {}", message, path.display()),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: None,
         }
@@ -342,6 +350,8 @@ impl TestHookBuilder {
         HookCommand::Script {
             run: script.to_string(),
             user: None,
+            group: None,
+            working_dir: None,
             environment,
             env_file: None,
         }
@@ -352,8 +362,34 @@ impl TestHookBuilder {
         HookCommand::Script {
             run: script.to_string(),
             user: None,
+            group: None,
+            working_dir: None,
             environment: Vec::new(),
             env_file: Some(env_file),
+        }
+    }
+
+    /// Create a script hook with a custom working directory
+    pub fn script_with_working_dir(script: &str, working_dir: PathBuf) -> HookCommand {
+        HookCommand::Script {
+            run: script.to_string(),
+            user: None,
+            group: None,
+            working_dir: Some(working_dir),
+            environment: Vec::new(),
+            env_file: None,
+        }
+    }
+
+    /// Create a script hook with a custom group
+    pub fn script_with_group(script: &str, group: &str) -> HookCommand {
+        HookCommand::Script {
+            run: script.to_string(),
+            user: None,
+            group: Some(group.to_string()),
+            working_dir: None,
+            environment: Vec::new(),
+            env_file: None,
         }
     }
 }
