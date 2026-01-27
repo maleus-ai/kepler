@@ -55,6 +55,20 @@ where
             source: e,
         })?;
 
+        // Set socket permissions to owner-only (0o600) for security
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &self.socket_path,
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .map_err(|e| ServerError::SocketPermissions {
+                socket_path: self.socket_path.clone(),
+                source: e,
+            })?;
+        }
+
         loop {
             tokio::select! {
                 result = listener.accept() => {
@@ -95,6 +109,33 @@ where
     Fut: Future<Output = Response> + Send,
 {
     debug!("Client connected, reading request...");
+
+    // Verify peer credentials - only allow connections from the same user
+    #[cfg(unix)]
+    {
+        let cred = stream.peer_cred().map_err(ServerError::PeerCredentials)?;
+        // SAFETY: getuid() is always safe to call
+        let daemon_uid = unsafe { libc::getuid() };
+
+        if cred.uid() != daemon_uid {
+            debug!(
+                "Unauthorized connection attempt: client UID {} != daemon UID {}",
+                cred.uid(),
+                daemon_uid
+            );
+            let response = Response::error(format!(
+                "Unauthorized: UID {} is not allowed to connect",
+                cred.uid()
+            ));
+            let bytes = encode_response(&response)?;
+            stream.write_all(&bytes).await.map_err(ServerError::Send)?;
+            return Err(ServerError::Unauthorized {
+                client_uid: cred.uid(),
+                daemon_uid,
+            });
+        }
+        debug!("Peer credentials verified: UID {}", cred.uid());
+    }
 
     let line = {
         let mut reader = BufReader::new(&mut stream);

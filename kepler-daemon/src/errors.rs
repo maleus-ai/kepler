@@ -79,6 +79,9 @@ pub enum DaemonError {
 
     #[error("Group not found: {0}")]
     GroupNotFound(String),
+
+    #[error("Failed to copy config file to secure location: {0}")]
+    ConfigCopy(#[source] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, DaemonError>;

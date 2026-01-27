@@ -8,6 +8,7 @@ use tokio::process::Child;
 use tokio::task::JoinHandle;
 
 use crate::config::KeplerConfig;
+use crate::errors::DaemonError;
 use crate::logs::SharedLogBuffer;
 
 /// Status of a service
@@ -179,16 +180,63 @@ impl DaemonState {
     }
 
     /// Load or reload a config file
+    ///
+    /// Security model: The config file is copied to a secure location (~/.kepler/configs/<hash>/config.yaml)
+    /// before being parsed. This prevents privilege escalation even if someone modifies the original
+    /// file after loading, since the daemon uses the secure copy.
     pub fn load_config(&mut self, path: PathBuf) -> crate::errors::Result<()> {
-        let config = KeplerConfig::load(&path)?;
-        let hash = KeplerConfig::compute_hash(&path)?;
+        // Read original file contents and compute hash
+        let contents = std::fs::read(&path)?;
+        let hash = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&contents))
+        };
 
+        // Check if config already loaded with same hash
         if let Some(existing) = self.configs.get(&path) {
             if existing.config_hash == hash {
-                // Config hasn't changed
                 return Ok(());
             }
         }
+
+        // Create state directory for this config
+        let state_dir = crate::global_state_dir().join("configs").join(&hash);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&state_dir)
+                .map_err(DaemonError::ConfigCopy)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(&state_dir).map_err(DaemonError::ConfigCopy)?;
+        }
+
+        // Copy config to secure location
+        let copied_config_path = state_dir.join("config.yaml");
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&copied_config_path)
+                .map_err(DaemonError::ConfigCopy)?;
+            file.write_all(&contents).map_err(DaemonError::ConfigCopy)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&copied_config_path, &contents).map_err(DaemonError::ConfigCopy)?;
+        }
+
+        // Parse config from the secure copy
+        let config = KeplerConfig::load(&copied_config_path)?;
 
         // Preserve initialized state when reloading (logs are now on disk)
         let (existing_initialized, existing_service_states) =

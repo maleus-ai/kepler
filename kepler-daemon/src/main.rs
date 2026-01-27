@@ -36,13 +36,51 @@ async fn main() -> Result<()> {
 
     info!("Starting Kepler daemon");
 
-    // Ensure state directory exists
-    let state_dir = Daemon::global_state_dir();
-    fs::create_dir_all(&state_dir)?;
+    // Warn if running as root
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid() is always safe to call
+        if unsafe { libc::getuid() } == 0 {
+            tracing::warn!(
+                "WARNING: Running the Kepler daemon as root is not recommended. \
+                Consider running as a non-privileged user for better security."
+            );
+        }
+    }
 
-    // Write PID file
+    // Ensure state directory exists with secure permissions (0o700)
+    let state_dir = Daemon::global_state_dir();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&state_dir)?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(&state_dir)?;
+    }
+
+    // Write PID file with secure permissions (0o600)
     let pid_file = Daemon::get_pid_file();
-    fs::write(&pid_file, std::process::id().to_string())?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&pid_file)?;
+        file.write_all(std::process::id().to_string().as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&pid_file, std::process::id().to_string())?;
+    }
 
     // Initialize daemon state
     let state = new_shared_state();

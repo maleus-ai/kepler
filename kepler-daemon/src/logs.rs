@@ -48,8 +48,19 @@ pub struct LogBuffer {
 
 impl LogBuffer {
     pub fn new(logs_dir: PathBuf) -> Self {
-        // Create logs directory if it doesn't exist
-        fs::create_dir_all(&logs_dir).ok();
+        // Create logs directory if it doesn't exist with secure permissions (0o700)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&logs_dir);
+        }
+        #[cfg(not(unix))]
+        {
+            fs::create_dir_all(&logs_dir).ok();
+        }
 
         // Count existing log entries to initialize sequence
         let sequence = Self::count_existing_entries(&logs_dir);
@@ -93,13 +104,28 @@ impl LogBuffer {
         // Format: {timestamp_unix}\t{stream}\t{service}\t{line}
         let entry = format!("{}\t{}\t{}\t{}\n", timestamp, stream.as_str(), service, line);
 
-        // Append to file
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_file)
+        // Append to file with secure permissions (0o600)
+        #[cfg(unix)]
         {
-            let _ = file.write_all(entry.as_bytes());
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Ok(mut file) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(&log_file)
+            {
+                let _ = file.write_all(entry.as_bytes());
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if let Ok(mut file) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_file)
+            {
+                let _ = file.write_all(entry.as_bytes());
+            }
         }
 
         self.sequence += 1;

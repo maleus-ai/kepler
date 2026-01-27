@@ -55,6 +55,19 @@ pub enum ServerError {
         source: std::io::Error,
     },
 
+    #[error("failed to set socket permissions at {socket_path}: {source}")]
+    SocketPermissions {
+        socket_path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to verify peer credentials: {0}")]
+    PeerCredentials(#[source] std::io::Error),
+
+    #[error("unauthorized connection: UID {client_uid} does not match daemon UID {daemon_uid}")]
+    Unauthorized { client_uid: u32, daemon_uid: u32 },
+
     #[error("failed to send response: {0}")]
     Send(#[source] std::io::Error),
 
