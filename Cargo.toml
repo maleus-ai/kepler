@@ -1,3 +1,3 @@
 [workspace]
-members = ["kepler-cli", "kepler-protocol", "kepler-daemon"]
+members = ["kepler-cli", "kepler-protocol", "kepler-daemon", "kepler-tests"]
 resolver = "2"

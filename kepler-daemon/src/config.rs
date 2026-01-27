@@ -1,4 +1,4 @@
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serializer};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::errors::{DaemonError, Result};
 
 /// Root configuration structure
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct KeplerConfig {
     #[serde(default)]
     pub hooks: Option<GlobalHooks>,
@@ -17,7 +17,7 @@ pub struct KeplerConfig {
 }
 
 /// Global hooks that run at daemon lifecycle events
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct GlobalHooks {
     pub on_init: Option<HookCommand>,
     pub on_start: Option<HookCommand>,
@@ -26,7 +26,7 @@ pub struct GlobalHooks {
 }
 
 /// Hook command - either a script or a command array
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(untagged)]
 pub enum HookCommand {
     Script {
@@ -38,7 +38,7 @@ pub enum HookCommand {
 }
 
 /// Service configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct ServiceConfig {
     pub command: Vec<String>,
     #[serde(default)]
@@ -62,7 +62,7 @@ pub struct ServiceConfig {
 }
 
 /// Restart policy for services
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum RestartPolicy {
     #[default]
@@ -72,16 +72,16 @@ pub enum RestartPolicy {
 }
 
 /// Health check configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct HealthCheck {
     pub test: Vec<String>,
-    #[serde(default = "default_interval", deserialize_with = "deserialize_duration")]
+    #[serde(default = "default_interval", deserialize_with = "deserialize_duration", serialize_with = "serialize_duration")]
     pub interval: Duration,
-    #[serde(default = "default_timeout", deserialize_with = "deserialize_duration")]
+    #[serde(default = "default_timeout", deserialize_with = "deserialize_duration", serialize_with = "serialize_duration")]
     pub timeout: Duration,
     #[serde(default = "default_retries")]
     pub retries: u32,
-    #[serde(default = "default_start_period", deserialize_with = "deserialize_duration")]
+    #[serde(default = "default_start_period", deserialize_with = "deserialize_duration", serialize_with = "serialize_duration")]
     pub start_period: Duration,
 }
 
@@ -102,7 +102,7 @@ fn default_start_period() -> Duration {
 }
 
 /// Service-specific hooks
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct ServiceHooks {
     pub on_init: Option<HookCommand>,
     pub on_start: Option<HookCommand>,
@@ -114,7 +114,7 @@ pub struct ServiceHooks {
 }
 
 /// Log retention policy on service stop
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LogRetention {
     #[default]
@@ -123,7 +123,7 @@ pub enum LogRetention {
 }
 
 /// Log configuration
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct LogConfig {
     #[serde(default)]
     pub timestamp: bool,
@@ -146,6 +146,36 @@ where
 {
     let s = String::deserialize(deserializer)?;
     parse_duration(&s).map_err(serde::de::Error::custom)
+}
+
+/// Serialize duration to string like "10s", "5m", "1h", "100ms"
+fn serialize_duration<S>(duration: &Duration, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&format_duration(duration))
+}
+
+/// Format duration as string (e.g., "10s", "5m", "1h", "100ms")
+pub fn format_duration(duration: &Duration) -> String {
+    let millis = duration.as_millis() as u64;
+
+    if millis == 0 {
+        return "0s".to_string();
+    }
+
+    // Use the largest unit that divides evenly
+    if millis % (24 * 60 * 60 * 1000) == 0 {
+        format!("{}d", millis / (24 * 60 * 60 * 1000))
+    } else if millis % (60 * 60 * 1000) == 0 {
+        format!("{}h", millis / (60 * 60 * 1000))
+    } else if millis % (60 * 1000) == 0 {
+        format!("{}m", millis / (60 * 1000))
+    } else if millis % 1000 == 0 {
+        format!("{}s", millis / 1000)
+    } else {
+        format!("{}ms", millis)
+    }
 }
 
 /// Parse duration string (e.g., "10s", "5m", "1h", "100ms")

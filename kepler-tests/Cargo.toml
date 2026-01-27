@@ -1,0 +1,22 @@
+[package]
+name = "kepler-tests"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+kepler-daemon = { path = "../kepler-daemon" }
+kepler-protocol = { path = "../kepler-protocol" }
+tokio = { version = "1.35", features = ["full", "test-util"] }
+tempfile = "3.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+
+[dev-dependencies]
+tokio = { version = "1.35", features = ["full", "test-util", "macros"] }
