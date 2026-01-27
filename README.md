@@ -192,13 +192,52 @@ services:
 | `hooks` | `object` | - | Service-specific hooks |
 | `user` | `string` | - | User to run as (Unix only) |
 | `group` | `string` | - | Group override (Unix only) |
-| `logs.timestamp` | `bool` | `false` | Include timestamps in logs |
-| `logs.on_stop` | `clear\|retain` | `clear` | Log retention on stop |
+| `logs` | `object` | - | Log configuration (see below) |
 
 **User format** (Unix only):
 - `"username"` - resolve user by name (uses user's primary group)
 - `"1000"` - numeric uid (gid defaults to same value)
 - `"1000:1000"` - explicit uid:gid pair
+
+#### Log Configuration
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `timestamp` | `bool` | `false` | Include timestamps in log output |
+| `on_start` | `clear\|retain` | `clear` | Log retention when service starts |
+| `on_stop` | `clear\|retain` | `clear` | Log retention when service stops |
+| `on_restart` | `clear\|retain` | `clear` | Log retention when service restarts |
+| `on_exit` | `clear\|retain` | `clear` | Log retention when service process exits |
+| `on_cleanup` | `clear\|retain` | `clear` | Log retention on cleanup |
+
+**Log retention values:**
+- `clear` (default): Clear logs when the event occurs
+- `retain`: Keep logs when the event occurs
+
+**Example:**
+```yaml
+services:
+  backend:
+    command: ["npm", "run", "dev"]
+    logs:
+      timestamp: true
+      on_stop: retain    # Keep logs when stopped
+      on_restart: clear  # Clear logs on restart
+      on_exit: retain    # Keep logs when process exits
+```
+
+Log configuration can also be set globally at the top level to apply defaults to all services:
+```yaml
+logs:
+  timestamp: true
+  on_stop: retain
+
+services:
+  backend:
+    command: ["npm", "run", "dev"]
+    logs:
+      on_stop: clear  # Override global setting for this service
+```
 
 #### Service Hooks
 
