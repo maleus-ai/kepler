@@ -1,7 +1,18 @@
 //! Daemon startup behavior tests
+//!
+//! Tests for daemon startup behavior, including root execution blocking.
+//!
+//! Some tests require root privileges and are marked with #[ignore].
+//! Run with: `sudo -E cargo test --test daemon_tests -- --include-ignored`
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+/// Check if the current process is running as root
+#[cfg(unix)]
+fn is_root() -> bool {
+    unsafe { libc::getuid() == 0 }
+}
 
 /// Find the daemon binary, returns None if not found
 fn find_daemon_binary() -> Option<PathBuf> {
@@ -23,14 +34,20 @@ fn find_daemon_binary() -> Option<PathBuf> {
 }
 
 /// Daemon refuses to run as root without --allow-root
-/// Run with: sudo cargo test test_root_execution_blocked -- --ignored
+/// Run with: sudo -E cargo test test_root_execution_blocked -- --include-ignored
 #[test]
-#[ignore]
+#[cfg(unix)]
+#[ignore] // Requires root - run with: sudo -E cargo test -- --include-ignored
 fn test_root_execution_blocked() {
+    if !is_root() {
+        eprintln!("Skipping test_root_execution_blocked: requires root to verify root-blocking behavior");
+        return;
+    }
+
     let daemon_path = match find_daemon_binary() {
         Some(p) => p,
         None => {
-            println!("Skipping test_root_execution_blocked: kepler-daemon binary not found");
+            eprintln!("Skipping test_root_execution_blocked: kepler-daemon binary not found");
             return;
         }
     };
@@ -52,14 +69,20 @@ fn test_root_execution_blocked() {
 }
 
 /// Daemon accepts --allow-root flag when running as root
-/// Run with: sudo cargo test test_root_with_allow_flag -- --ignored
+/// Run with: sudo -E cargo test test_root_with_allow_flag -- --include-ignored
 #[test]
-#[ignore]
+#[cfg(unix)]
+#[ignore] // Requires root - run with: sudo -E cargo test -- --include-ignored
 fn test_root_with_allow_flag() {
+    if !is_root() {
+        eprintln!("Skipping test_root_with_allow_flag: requires root to verify --allow-root behavior");
+        return;
+    }
+
     let daemon_path = match find_daemon_binary() {
         Some(p) => p,
         None => {
-            println!("Skipping test_root_with_allow_flag: kepler-daemon binary not found");
+            eprintln!("Skipping test_root_with_allow_flag: kepler-daemon binary not found");
             return;
         }
     };
@@ -83,9 +106,9 @@ fn test_root_with_allow_flag() {
 #[test]
 #[cfg(unix)]
 fn test_nonroot_execution_allowed() {
-    // Skip if running as root
-    if unsafe { libc::getuid() } == 0 {
-        println!("Skipping test_nonroot_execution_allowed: running as root");
+    // Skip if running as root - this test verifies non-root behavior
+    if is_root() {
+        eprintln!("Skipping test_nonroot_execution_allowed: running as root");
         return;
     }
 

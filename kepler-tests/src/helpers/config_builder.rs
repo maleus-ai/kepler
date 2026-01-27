@@ -81,6 +81,8 @@ pub struct TestServiceBuilder {
     hooks: Option<ServiceHooks>,
     logs: Option<LogConfig>,
     limits: Option<ResourceLimits>,
+    user: Option<String>,
+    group: Option<String>,
 }
 
 impl TestServiceBuilder {
@@ -96,6 +98,8 @@ impl TestServiceBuilder {
             hooks: None,
             logs: None,
             limits: None,
+            user: None,
+            group: None,
         }
     }
 
@@ -196,6 +200,18 @@ impl TestServiceBuilder {
         self
     }
 
+    /// Set the user to run the service as
+    pub fn with_user(mut self, user: &str) -> Self {
+        self.user = Some(user.to_string());
+        self
+    }
+
+    /// Set the group to run the service as
+    pub fn with_group(mut self, group: &str) -> Self {
+        self.group = Some(group.to_string());
+        self
+    }
+
     pub fn build(self) -> ServiceConfig {
         ServiceConfig {
             command: self.command,
@@ -207,8 +223,8 @@ impl TestServiceBuilder {
             healthcheck: self.healthcheck,
             hooks: self.hooks,
             logs: self.logs,
-            user: None,
-            group: None,
+            user: self.user,
+            group: self.group,
             limits: self.limits,
         }
     }
@@ -399,6 +415,30 @@ impl TestHookBuilder {
         HookCommand::Script {
             run: script.to_string(),
             user: None,
+            group: Some(group.to_string()),
+            working_dir: None,
+            environment: Vec::new(),
+            env_file: None,
+        }
+    }
+
+    /// Create a script hook with a custom user
+    pub fn script_with_user(script: &str, user: &str) -> HookCommand {
+        HookCommand::Script {
+            run: script.to_string(),
+            user: Some(user.to_string()),
+            group: None,
+            working_dir: None,
+            environment: Vec::new(),
+            env_file: None,
+        }
+    }
+
+    /// Create a script hook with custom user and group
+    pub fn script_with_user_and_group(script: &str, user: &str, group: &str) -> HookCommand {
+        HookCommand::Script {
+            run: script.to_string(),
+            user: Some(user.to_string()),
             group: Some(group.to_string()),
             working_dir: None,
             environment: Vec::new(),
