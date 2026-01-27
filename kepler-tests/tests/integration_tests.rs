@@ -7,7 +7,7 @@ use kepler_tests::helpers::config_builder::{
 };
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
-use kepler_tests::helpers::wait_utils::{wait_for_healthy, wait_for_unhealthy};
+use kepler_tests::helpers::wait_utils::{wait_for_healthy, wait_for_running, wait_for_unhealthy};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -60,7 +60,7 @@ async fn test_full_lifecycle_with_healthcheck_hooks() {
     );
 
     // 2. Start health checker - service should become unhealthy (no marker file)
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     wait_for_unhealthy(
         harness.state(),
@@ -102,7 +102,7 @@ async fn test_full_lifecycle_with_healthcheck_hooks() {
     );
 
     // Verify final status
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Stopped));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Stopped));
 
     // Check hook counts - each should fire exactly once
     assert_eq!(marker.count_marker_lines("on_init"), 1);
@@ -240,7 +240,7 @@ async fn test_multiple_health_transitions() {
         .unwrap();
 
     harness.start_service("test").await.unwrap();
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     // Transition 1: Running -> Unhealthy (no marker file)
     wait_for_unhealthy(
@@ -332,21 +332,21 @@ async fn test_service_stop_restart_cycle() {
 
     // Cycle 1
     harness.start_service("test").await.unwrap();
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Running));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Running));
     harness.stop_service("test").await.unwrap();
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Stopped));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Stopped));
 
     // Cycle 2
     harness.start_service("test").await.unwrap();
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Running));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Running));
     harness.stop_service("test").await.unwrap();
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Stopped));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Stopped));
 
     // Cycle 3
     harness.start_service("test").await.unwrap();
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Running));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Running));
     harness.stop_service("test").await.unwrap();
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Stopped));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Stopped));
 
     // Wait for hooks to complete
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -378,17 +378,17 @@ async fn test_multiple_concurrent_services() {
     harness.start_service("service3").await.unwrap();
 
     // All should be running
-    assert_eq!(harness.get_status("service1"), Some(ServiceStatus::Running));
-    assert_eq!(harness.get_status("service2"), Some(ServiceStatus::Running));
-    assert_eq!(harness.get_status("service3"), Some(ServiceStatus::Running));
+    assert_eq!(harness.get_status("service1").await, Some(ServiceStatus::Running));
+    assert_eq!(harness.get_status("service2").await, Some(ServiceStatus::Running));
+    assert_eq!(harness.get_status("service3").await, Some(ServiceStatus::Running));
 
     // Stop all
     harness.stop_all().await.unwrap();
 
     // All should be stopped
-    assert_eq!(harness.get_status("service1"), Some(ServiceStatus::Stopped));
-    assert_eq!(harness.get_status("service2"), Some(ServiceStatus::Stopped));
-    assert_eq!(harness.get_status("service3"), Some(ServiceStatus::Stopped));
+    assert_eq!(harness.get_status("service1").await, Some(ServiceStatus::Stopped));
+    assert_eq!(harness.get_status("service2").await, Some(ServiceStatus::Stopped));
+    assert_eq!(harness.get_status("service3").await, Some(ServiceStatus::Stopped));
 }
 
 // ============================================================================
@@ -455,15 +455,22 @@ async fn test_resource_limits_applied() {
 
     harness.start_service("limited").await.unwrap();
 
+    // Wait for the service to reach Running status
+    wait_for_running(
+        harness.state(),
+        harness.config_path(),
+        "limited",
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+
     // Get PID from state
-    let pid = {
-        let state = harness.state().read();
-        state
-            .configs
-            .get(&harness.config_path)
-            .and_then(|cs| cs.services.get("limited"))
-            .and_then(|s| s.pid)
-    };
+    let pid = harness
+        .state()
+        .get_service_state(harness.config_path().to_path_buf(), "limited".to_string())
+        .await
+        .and_then(|s| s.pid);
 
     assert!(pid.is_some(), "Service should have a PID");
     let pid = pid.unwrap();
@@ -533,8 +540,8 @@ async fn test_multiple_services_with_healthchecks() {
     // Start both services
     harness.start_service("service1").await.unwrap();
     harness.start_service("service2").await.unwrap();
-    harness.start_health_checker("service1").unwrap();
-    harness.start_health_checker("service2").unwrap();
+    harness.start_health_checker("service1").await.unwrap();
+    harness.start_health_checker("service2").await.unwrap();
 
     // Both should become unhealthy (no marker files)
     wait_for_unhealthy(
@@ -568,8 +575,8 @@ async fn test_multiple_services_with_healthchecks() {
     .unwrap();
 
     // service1 should be healthy, service2 still unhealthy
-    assert_eq!(harness.get_status("service1"), Some(ServiceStatus::Healthy));
-    assert_eq!(harness.get_status("service2"), Some(ServiceStatus::Unhealthy));
+    assert_eq!(harness.get_status("service1").await, Some(ServiceStatus::Healthy));
+    assert_eq!(harness.get_status("service2").await, Some(ServiceStatus::Unhealthy));
 
     // Make service2 healthy
     std::fs::write(&marker2_path, "ok").unwrap();
@@ -584,8 +591,8 @@ async fn test_multiple_services_with_healthchecks() {
     .unwrap();
 
     // Both should now be healthy
-    assert_eq!(harness.get_status("service1"), Some(ServiceStatus::Healthy));
-    assert_eq!(harness.get_status("service2"), Some(ServiceStatus::Healthy));
+    assert_eq!(harness.get_status("service1").await, Some(ServiceStatus::Healthy));
+    assert_eq!(harness.get_status("service2").await, Some(ServiceStatus::Healthy));
 
     harness.stop_all().await.unwrap();
 }

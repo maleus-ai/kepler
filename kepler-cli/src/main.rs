@@ -1,12 +1,12 @@
 mod commands;
 mod config;
+mod errors;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use crate::{commands::Commands, commands::DaemonCommands, config::Config};
-use anyhow::{Context, Result};
+use crate::{commands::Commands, commands::DaemonCommands, config::Config, errors::{CliError, Result}};
 use chrono::{DateTime, Local, Utc};
 use clap::Parser;
 use colored::{Color, Colorize};
@@ -35,7 +35,14 @@ pub struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    if let Err(e) = run().await {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     let filter = if cli.verbose {
@@ -72,10 +79,11 @@ async fn main() -> Result<()> {
     }
 
     // Resolve config path for service commands
-    let config_path = Config::resolve_config_path(&cli.file)?;
+    let config_path = Config::resolve_config_path(&cli.file)
+        .map_err(|_| CliError::ConfigNotFound(PathBuf::from(cli.file.as_deref().unwrap_or("kepler.yaml"))))?;
     let canonical_path = config_path
         .canonicalize()
-        .with_context(|| format!("Config file not found: {}", config_path.display()))?;
+        .map_err(|_| CliError::ConfigNotFound(config_path.clone()))?;
 
     match cli.command {
         Commands::Start { service } => {
@@ -147,7 +155,7 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
                 // Start daemon in background
                 let daemon_path = std::env::current_exe()?
                     .parent()
-                    .ok_or_else(|| anyhow::anyhow!("Cannot find daemon binary"))?
+                    .ok_or(CliError::DaemonNotFound)?
                     .join("kepler-daemon");
 
                 // Check if daemon binary exists
@@ -167,8 +175,7 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
                         return Ok(());
                     }
                 }
-                eprintln!("Daemon failed to start within timeout");
-                std::process::exit(1);
+                return Err(CliError::DaemonStartTimeout);
             } else {
                 // Start daemon in foreground (exec into it)
                 let daemon_path = which_daemon()?;
@@ -178,7 +185,10 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
                 let status = tokio::process::Command::new(&daemon_path)
                     .status()
                     .await
-                    .with_context(|| format!("Failed to run daemon: {}", daemon_path.display()))?;
+                    .map_err(|source| CliError::DaemonExec {
+                        path: daemon_path,
+                        source,
+                    })?;
 
                 if !status.success() {
                     std::process::exit(status.code().unwrap_or(1));
@@ -298,9 +308,7 @@ fn which_daemon() -> Result<PathBuf> {
         return Ok(release_path);
     }
 
-    Err(anyhow::anyhow!(
-        "Could not find kepler-daemon binary. Make sure it's in PATH or the same directory as kepler."
-    ))
+    Err(CliError::DaemonNotFound)
 }
 
 fn start_daemon_detached(daemon_path: &PathBuf) -> Result<()> {
@@ -313,7 +321,10 @@ fn start_daemon_detached(daemon_path: &PathBuf) -> Result<()> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .with_context(|| format!("Failed to start daemon: {}", daemon_path.display()))?;
+            .map_err(|source| CliError::DaemonSpawn {
+                path: daemon_path.clone(),
+                source,
+            })?;
     }
 
     #[cfg(not(unix))]
@@ -323,7 +334,10 @@ fn start_daemon_detached(daemon_path: &PathBuf) -> Result<()> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .with_context(|| format!("Failed to start daemon: {}", daemon_path.display()))?;
+            .map_err(|source| CliError::DaemonSpawn {
+                path: daemon_path.clone(),
+                source,
+            })?;
     }
 
     Ok(())
@@ -377,7 +391,7 @@ async fn handle_ps_all(client: &mut Client) -> Result<()> {
             Ok(())
         }
         Response::Error { message } => {
-            anyhow::bail!("Error: {}", message);
+            Err(CliError::Server(message))
         }
     }
 }

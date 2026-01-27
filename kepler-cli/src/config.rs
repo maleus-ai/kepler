@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use crate::errors::{CliError, Result};
 use std::path::{Path, PathBuf};
 
 pub struct Config {}
@@ -29,9 +29,9 @@ impl Config {
         match file {
             Some(path) => Ok(PathBuf::from(path)),
             None => {
-                let cwd = std::env::current_dir().context("Failed to get current directory")?;
+                let cwd = std::env::current_dir()?;
                 Config::find_config_file(&cwd)
-                    .context("No kepler.yaml or kepler.yml found. Use -f to specify a config file.")
+                    .ok_or_else(|| CliError::ConfigNotFound(PathBuf::from("kepler.yaml")))
             }
         }
     }

@@ -16,7 +16,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 kepler-protocol = { path = "../kepler-protocol" }
 kepler-daemon = { path = "../kepler-daemon" }
-anyhow = "1.0.100"
+thiserror = "2.0"
 tokio = { version = "1.49.0", features = ["full", "process"] }
 chrono = "0.4"
 which = "6.0"

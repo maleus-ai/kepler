@@ -1,29 +1,29 @@
-use anyhow::Result;
-use chrono::Utc;
 use clap::Parser;
+use kepler_daemon::config::LogRetention;
 use kepler_daemon::deps::{get_service_with_deps, get_start_order, get_stop_order};
 use kepler_daemon::env::build_service_env;
 use kepler_daemon::errors::DaemonError;
 use kepler_daemon::health::spawn_health_checker;
-use kepler_daemon::config::LogRetention;
 use kepler_daemon::hooks::{
-    run_global_hook, run_service_hook, GlobalHookType, ServiceHookParams, ServiceHookType, GLOBAL_HOOK_PREFIX,
+    run_global_hook, run_service_hook, GlobalHookType, ServiceHookParams, ServiceHookType,
+    GLOBAL_HOOK_PREFIX,
 };
 use kepler_daemon::process::{
     handle_process_exit, spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams,
 };
-use kepler_daemon::state::{new_shared_state, ServiceStatus, SharedDaemonState};
+use kepler_daemon::state::ServiceStatus;
+use kepler_daemon::state_actor::{create_state_actor, StateHandle, TaskHandleType};
 use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
 use kepler_daemon::Daemon;
 use kepler_protocol::protocol::{
-    ConfigStatus, LogEntry, Request, Response, ResponseData, ServiceInfo,
+    LogEntry, Request, Response, ResponseData,
 };
 use kepler_protocol::server::Server;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Canonicalize a config path, returning an error if the path doesn't exist
 fn canonicalize_config_path(path: PathBuf) -> std::result::Result<PathBuf, DaemonError> {
@@ -46,7 +46,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     // Parse CLI arguments
     let args = Args::parse();
 
@@ -110,8 +110,11 @@ async fn main() -> Result<()> {
         fs::write(&pid_file, std::process::id().to_string())?;
     }
 
-    // Initialize daemon state
-    let state = new_shared_state();
+    // Create state actor and handle
+    let (state_handle, state_actor) = create_state_actor();
+
+    // Spawn the state actor
+    tokio::spawn(state_actor.run());
 
     // Create channels for process exit events
     let (exit_tx, mut exit_rx) = mpsc::channel::<ProcessExitEvent>(100);
@@ -120,7 +123,7 @@ async fn main() -> Result<()> {
     let (restart_tx, mut restart_rx) = mpsc::channel::<FileChangeEvent>(100);
 
     // Clone state and channels for handler
-    let handler_state = state.clone();
+    let handler_state = state_handle.clone();
     let handler_exit_tx = exit_tx.clone();
     let handler_restart_tx = restart_tx.clone();
 
@@ -129,9 +132,7 @@ async fn main() -> Result<()> {
         let state = handler_state.clone();
         let exit_tx = handler_exit_tx.clone();
         let restart_tx = handler_restart_tx.clone();
-        async move {
-            handle_request(request, state, shutdown_tx, exit_tx, restart_tx).await
-        }
+        async move { handle_request(request, state, shutdown_tx, exit_tx, restart_tx).await }
     };
 
     // Create server
@@ -141,7 +142,7 @@ async fn main() -> Result<()> {
     info!("Daemon listening on {:?}", socket_path);
 
     // Clone state for event handlers
-    let exit_state = state.clone();
+    let exit_state = state_handle.clone();
     let exit_tx_clone = exit_tx.clone();
 
     // Spawn process exit handler
@@ -163,7 +164,7 @@ async fn main() -> Result<()> {
     });
 
     // Clone state for restart handler
-    let restart_state = state.clone();
+    let restart_state = state_handle.clone();
     let restart_exit_tx = exit_tx.clone();
 
     // Spawn file change handler
@@ -179,27 +180,21 @@ async fn main() -> Result<()> {
             let exit_tx = restart_exit_tx.clone();
 
             // Get service config and global log config before stopping
-            let (service_config, global_log_config) = {
-                let state = state.read();
-                let config_state = state.configs.get(&event.config_path);
-                (
-                    config_state.and_then(|cs| cs.config.services.get(&event.service_name).cloned()),
-                    config_state.and_then(|cs| cs.config.logs.clone()),
-                )
-            };
+            let service_config = state
+                .get_service_config(event.config_path.clone(), event.service_name.clone())
+                .await;
+            let global_log_config = state.get_global_log_config(event.config_path.clone()).await;
 
             if let Some(config) = service_config {
                 // Get config_dir and logs for hooks
-                let (config_dir, logs) = {
-                    let state = state.read();
-                    if let Some(cs) = state.configs.get(&event.config_path) {
-                        (
-                            cs.config_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")),
-                            cs.logs.clone(),
-                        )
-                    } else {
-                        continue;
-                    }
+                let config_dir = state
+                    .get_config_dir(event.config_path.clone())
+                    .await
+                    .unwrap_or_else(|| PathBuf::from("."));
+
+                let logs = match state.get_logs_buffer(event.config_path.clone()).await {
+                    Some(l) => l,
+                    None => continue,
                 };
 
                 // Run on_restart hook (same as process-exit restarts)
@@ -218,13 +213,20 @@ async fn main() -> Result<()> {
                     service_log_config: config.logs.as_ref(),
                     global_log_config: global_log_config.as_ref(),
                 };
-                let _ = run_service_hook(
+
+                if let Err(e) = run_service_hook(
                     &config.hooks,
                     ServiceHookType::OnRestart,
                     &event.service_name,
                     &hook_params,
                 )
-                .await;
+                .await
+                {
+                    warn!(
+                        "Hook on_restart failed for {}: {}",
+                        event.service_name, e
+                    );
+                }
 
                 // Apply on_restart log retention policy
                 {
@@ -234,18 +236,30 @@ async fn main() -> Result<()> {
                         config.logs.as_ref(),
                         global_log_config.as_ref(),
                         |l| l.get_on_restart(),
-                        LogRetention::Retain, // New default for on_restart
+                        LogRetention::Retain,
                     );
                     let should_clear = retention == LogRetention::Clear;
 
                     if should_clear {
-                        logs.clear_service(&event.service_name);
-                        logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                        state
+                            .clear_service_logs(
+                                event.config_path.clone(),
+                                event.service_name.clone(),
+                            )
+                            .await;
+                        state
+                            .clear_service_logs_prefix(
+                                event.config_path.clone(),
+                                format!("[{}.", event.service_name),
+                            )
+                            .await;
                     }
                 }
 
                 // Stop the service
-                if let Err(e) = stop_service(&event.config_path, &event.service_name, state.clone()).await {
+                if let Err(e) =
+                    stop_service(&event.config_path, &event.service_name, state.clone()).await
+                {
                     error!("Failed to stop service for restart: {}", e);
                     continue;
                 }
@@ -264,22 +278,31 @@ async fn main() -> Result<()> {
                     exit_tx,
                     global_log_config: global_log_config.as_ref(),
                 };
+
                 match spawn_service(spawn_params).await {
                     Ok(handle) => {
-                        let pid = handle.child.id();
-                        let mut state = state.write();
-                        state.processes.insert(
-                            (event.config_path.clone(), event.service_name.clone()),
-                            handle,
-                        );
-                        if let Some(cs) = state.configs.get_mut(&event.config_path) {
-                            if let Some(ss) = cs.services.get_mut(&event.service_name) {
-                                ss.status = ServiceStatus::Running;
-                                ss.pid = pid;
-                                ss.started_at = Some(Utc::now());
-                                ss.restart_count += 1;
-                            }
-                        }
+                        state
+                            .store_process_handle(
+                                event.config_path.clone(),
+                                event.service_name.clone(),
+                                handle,
+                            )
+                            .await;
+
+                        let _ = state
+                            .set_service_status(
+                                event.config_path.clone(),
+                                event.service_name.clone(),
+                                ServiceStatus::Running,
+                            )
+                            .await;
+                        // Note: PID is already set by spawn_service
+                        let _ = state
+                            .increment_restart_count(
+                                event.config_path.clone(),
+                                event.service_name.clone(),
+                            )
+                            .await;
                     }
                     Err(e) => {
                         error!("Failed to restart service after file change: {}", e);
@@ -301,7 +324,7 @@ async fn main() -> Result<()> {
 
 async fn handle_request(
     request: Request,
-    state: SharedDaemonState,
+    state: StateHandle,
     shutdown_tx: mpsc::Sender<()>,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
     restart_tx: mpsc::Sender<FileChangeEvent>,
@@ -312,10 +335,7 @@ async fn handle_request(
         Request::Shutdown => {
             info!("Shutdown requested");
             // Stop all services first
-            let config_paths: Vec<_> = {
-                let state = state.read();
-                state.configs.keys().cloned().collect()
-            };
+            let config_paths = state.shutdown().await;
 
             for config_path in config_paths {
                 if let Err(e) = stop_all_services(&config_path, state.clone(), false).await {
@@ -387,42 +407,16 @@ async fn handle_request(
             }
         }
 
-        Request::Status { config_path } => {
-            let state = state.read();
-
-            match config_path {
-                Some(path) => {
-                    if let Some(config_state) = state.configs.get(&path) {
-                        let services: HashMap<String, ServiceInfo> = config_state
-                            .services
-                            .iter()
-                            .map(|(name, svc)| (name.clone(), svc.to_service_info()))
-                            .collect();
-                        Response::ok_with_data(ResponseData::ServiceStatus(services))
-                    } else {
-                        // Config not loaded, return empty status
-                        Response::ok_with_data(ResponseData::ServiceStatus(HashMap::new()))
-                    }
-                }
-                None => {
-                    // Return status for all configs
-                    let configs: Vec<ConfigStatus> = state
-                        .configs
-                        .iter()
-                        .map(|(path, cs)| ConfigStatus {
-                            config_path: path.to_string_lossy().to_string(),
-                            config_hash: cs.config_hash.clone(),
-                            services: cs
-                                .services
-                                .iter()
-                                .map(|(name, svc)| (name.clone(), svc.to_service_info()))
-                                .collect(),
-                        })
-                        .collect();
-                    Response::ok_with_data(ResponseData::MultiConfigStatus(configs))
-                }
-            }
-        }
+        Request::Status { config_path } => match config_path {
+            Some(path) => match state.get_service_status(path.clone(), None).await {
+                Ok(services) => Response::ok_with_data(ResponseData::ServiceStatus(services)),
+                Err(_) => Response::ok_with_data(ResponseData::ServiceStatus(HashMap::new())),
+            },
+            None => match state.get_all_status().await {
+                Ok(configs) => Response::ok_with_data(ResponseData::MultiConfigStatus(configs)),
+                Err(e) => Response::error(e.to_string()),
+            },
+        },
 
         Request::Logs {
             config_path,
@@ -434,39 +428,17 @@ async fn handle_request(
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
-            let state = state.read();
 
-            if let Some(config_state) = state.configs.get(&config_path) {
-                let entries: Vec<LogEntry> = config_state
-                    .logs
-                    .tail(lines, service.as_deref())
-                    .into_iter()
-                    .map(|l| l.into())
-                    .collect();
-                Response::ok_with_data(ResponseData::Logs(entries))
-            } else {
-                Response::ok_with_data(ResponseData::Logs(Vec::new()))
+            match state.get_logs(config_path, service, lines).await {
+                Ok(entries) => Response::ok_with_data(ResponseData::Logs(entries)),
+                Err(_) => Response::ok_with_data(ResponseData::Logs(Vec::new())),
             }
         }
 
-        Request::ListConfigs => {
-            let state = state.read();
-            let configs: Vec<_> = state
-                .configs
-                .iter()
-                .map(|(path, cs)| kepler_protocol::protocol::LoadedConfigInfo {
-                    config_path: path.to_string_lossy().to_string(),
-                    config_hash: cs.config_hash.clone(),
-                    service_count: cs.config.services.len(),
-                    running_count: cs
-                        .services
-                        .values()
-                        .filter(|s| s.status.is_running())
-                        .count(),
-                })
-                .collect();
-            Response::ok_with_data(ResponseData::ConfigList(configs))
-        }
+        Request::ListConfigs => match state.list_configs().await {
+            Ok(configs) => Response::ok_with_data(ResponseData::ConfigList(configs)),
+            Err(e) => Response::error(e.to_string()),
+        },
 
         Request::UnloadConfig { config_path } => {
             let config_path = match canonicalize_config_path(config_path) {
@@ -479,9 +451,10 @@ async fn handle_request(
             }
 
             // Unload config
-            state.write().unload_config(&config_path);
+            state.unload_config(config_path.clone()).await;
             Response::ok_with_message(format!("Unloaded config: {}", config_path.display()))
         }
+
         Request::LogsChunk {
             config_path,
             service,
@@ -494,40 +467,24 @@ async fn handle_request(
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
-            let state = state.read();
 
-            if let Some(config_state) = state.configs.get(&config_path) {
-                let all_entries: Vec<LogEntry> = config_state
-                    .logs
-                    .tail(usize::MAX, service.as_deref())
-                    .into_iter()
-                    .map(|l| l.into())
-                    .collect();
+            let all_entries = state
+                .get_logs(config_path, service, usize::MAX)
+                .await
+                .unwrap_or_default();
 
-                let total = all_entries.len();
-                let entries: Vec<LogEntry> = all_entries
-                    .into_iter()
-                    .skip(offset)
-                    .take(limit)
-                    .collect();
+            let total = all_entries.len();
+            let entries: Vec<LogEntry> = all_entries.into_iter().skip(offset).take(limit).collect();
 
-                let has_more = offset + entries.len() < total;
-                let next_offset = offset + entries.len();
+            let has_more = offset + entries.len() < total;
+            let next_offset = offset + entries.len();
 
-                Response::ok_with_data(ResponseData::LogChunk(LogChunkData {
-                    entries,
-                    has_more,
-                    next_offset,
-                    total: Some(total),
-                }))
-            } else {
-                Response::ok_with_data(ResponseData::LogChunk(LogChunkData {
-                    entries: Vec::new(),
-                    has_more: false,
-                    next_offset: 0,
-                    total: Some(0),
-                }))
-            }
+            Response::ok_with_data(ResponseData::LogChunk(LogChunkData {
+                entries,
+                has_more,
+                next_offset,
+                total: Some(total),
+            }))
         }
     }
 }
@@ -535,15 +492,12 @@ async fn handle_request(
 async fn start_services(
     config_path: &PathBuf,
     service: Option<&str>,
-    state: SharedDaemonState,
+    state: StateHandle,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
     restart_tx: mpsc::Sender<FileChangeEvent>,
 ) -> std::result::Result<String, DaemonError> {
     // Load or reload config
-    {
-        let mut state = state.write();
-        state.load_config(config_path.clone())?;
-    }
+    state.load_config(config_path.clone()).await?;
 
     let config_dir = config_path
         .parent()
@@ -551,42 +505,52 @@ async fn start_services(
         .unwrap_or_else(|| PathBuf::from("."));
 
     // Get config and determine services to start
-    let (config, services_to_start, logs, global_hooks, global_log_config, initialized) = {
-        let state = state.read();
-        let config_state = state
-            .configs
-            .get(config_path)
-            .ok_or_else(|| kepler_daemon::errors::DaemonError::ConfigNotFound(config_path.clone()))?;
+    let config = state
+        .get_config(config_path.clone())
+        .await
+        .ok_or_else(|| DaemonError::ConfigNotFound(config_path.clone()))?;
 
-        let services_to_start = match service {
-            Some(name) => get_service_with_deps(name, &config_state.config.services)?,
-            None => get_start_order(&config_state.config.services)?,
-        };
-
-        (
-            config_state.config.clone(),
-            services_to_start,
-            config_state.logs.clone(),
-            config_state.config.hooks.clone(),
-            config_state.config.logs.clone(),
-            config_state.initialized,
-        )
+    let services_to_start = match service {
+        Some(name) => get_service_with_deps(name, &config.services)?,
+        None => get_start_order(&config.services)?,
     };
+
+    let logs = state
+        .get_logs_buffer(config_path.clone())
+        .await
+        .ok_or_else(|| DaemonError::ConfigNotFound(config_path.clone()))?;
+
+    let global_hooks = config.hooks.clone();
+    let global_log_config = config.logs.clone();
+    let initialized = state.is_config_initialized(config_path.clone()).await;
 
     // Run global on_init hook if first time
     if !initialized {
         let env = std::env::vars().collect();
-        run_global_hook(&global_hooks, GlobalHookType::OnInit, &config_dir, &env, Some(&logs), global_log_config.as_ref()).await?;
+        run_global_hook(
+            &global_hooks,
+            GlobalHookType::OnInit,
+            &config_dir,
+            &env,
+            Some(&logs),
+            global_log_config.as_ref(),
+        )
+        .await?;
 
-        let mut state = state.write();
-        if let Some(config_state) = state.configs.get_mut(config_path) {
-            config_state.initialized = true;
-        }
+        state.mark_config_initialized(config_path.clone()).await?;
     }
 
     // Run global on_start hook
     let env = std::env::vars().collect();
-    run_global_hook(&global_hooks, GlobalHookType::OnStart, &config_dir, &env, Some(&logs), global_log_config.as_ref()).await?;
+    run_global_hook(
+        &global_hooks,
+        GlobalHookType::OnStart,
+        &config_dir,
+        &env,
+        Some(&logs),
+        global_log_config.as_ref(),
+    )
+    .await?;
 
     let mut started = Vec::new();
 
@@ -595,43 +559,30 @@ async fn start_services(
         let service_config = config
             .services
             .get(service_name)
-            .ok_or_else(|| {
-                kepler_daemon::errors::DaemonError::ServiceNotFound(service_name.clone())
-            })?;
+            .ok_or_else(|| DaemonError::ServiceNotFound(service_name.clone()))?;
 
         // Check if already running
+        if state
+            .is_service_running(config_path.clone(), service_name.clone())
+            .await
         {
-            let state = state.read();
-            if let Some(config_state) = state.configs.get(config_path) {
-                if let Some(service_state) = config_state.services.get(service_name) {
-                    if service_state.status.is_running() {
-                        debug!("Service {} is already running", service_name);
-                        continue;
-                    }
-                }
-            }
+            debug!("Service {} is already running", service_name);
+            continue;
         }
 
         // Update status to starting
-        {
-            let mut state = state.write();
-            if let Some(config_state) = state.configs.get_mut(config_path) {
-                if let Some(service_state) = config_state.services.get_mut(service_name) {
-                    service_state.status = ServiceStatus::Starting;
-                }
-            }
-        }
+        let _ = state
+            .set_service_status(
+                config_path.clone(),
+                service_name.clone(),
+                ServiceStatus::Starting,
+            )
+            .await;
 
         // Run on_init hook if first time for this service
-        let service_initialized = {
-            let state = state.read();
-            state
-                .configs
-                .get(config_path)
-                .and_then(|cs| cs.services.get(service_name))
-                .map(|s| s.initialized)
-                .unwrap_or(false)
-        };
+        let service_initialized = state
+            .is_service_initialized(config_path.clone(), service_name.clone())
+            .await;
 
         let working_dir = service_config
             .working_dir
@@ -658,12 +609,9 @@ async fn start_services(
             )
             .await?;
 
-            let mut state = state.write();
-            if let Some(config_state) = state.configs.get_mut(config_path) {
-                if let Some(service_state) = config_state.services.get_mut(service_name) {
-                    service_state.initialized = true;
-                }
-            }
+            state
+                .mark_service_initialized(config_path.clone(), service_name.clone())
+                .await?;
         }
 
         // Run on_start hook
@@ -683,13 +631,20 @@ async fn start_services(
                 service_config.logs.as_ref(),
                 config.logs.as_ref(),
                 |l| l.get_on_start(),
-                LogRetention::Retain, // New default for on_start
+                LogRetention::Retain,
             );
             let should_clear = retention == LogRetention::Clear;
 
             if should_clear {
-                logs.clear_service(service_name);
-                logs.clear_service_prefix(&format!("[{}.", service_name));
+                state
+                    .clear_service_logs(config_path.clone(), service_name.clone())
+                    .await;
+                state
+                    .clear_service_logs_prefix(
+                        config_path.clone(),
+                        format!("[{}.", service_name),
+                    )
+                    .await;
             }
         }
 
@@ -706,23 +661,19 @@ async fn start_services(
         };
         let handle = spawn_service(spawn_params).await?;
 
-        let pid = handle.child.id();
-
         // Store handle and update state
-        {
-            let mut state = state.write();
-            state
-                .processes
-                .insert((config_path.clone(), service_name.clone()), handle);
+        state
+            .store_process_handle(config_path.clone(), service_name.clone(), handle)
+            .await;
 
-            if let Some(config_state) = state.configs.get_mut(config_path) {
-                if let Some(service_state) = config_state.services.get_mut(service_name) {
-                    service_state.status = ServiceStatus::Running;
-                    service_state.pid = pid;
-                    service_state.started_at = Some(Utc::now());
-                }
-            }
-        }
+        let _ = state
+            .set_service_status(
+                config_path.clone(),
+                service_name.clone(),
+                ServiceStatus::Running,
+            )
+            .await;
+        // Note: PID is already set by spawn_service
 
         // Start health check if configured
         if let Some(health_config) = &service_config.healthcheck {
@@ -732,10 +683,14 @@ async fn start_services(
                 health_config.clone(),
                 state.clone(),
             );
-            let mut state = state.write();
             state
-                .health_checks
-                .insert((config_path.clone(), service_name.clone()), handle);
+                .store_task_handle(
+                    config_path.clone(),
+                    service_name.clone(),
+                    TaskHandleType::HealthCheck,
+                    handle,
+                )
+                .await;
         }
 
         // Start file watcher if configured
@@ -747,10 +702,14 @@ async fn start_services(
                 working_dir,
                 restart_tx.clone(),
             );
-            let mut state = state.write();
             state
-                .watchers
-                .insert((config_path.clone(), service_name.clone()), handle);
+                .store_task_handle(
+                    config_path.clone(),
+                    service_name.clone(),
+                    TaskHandleType::FileWatcher,
+                    handle,
+                )
+                .await;
         }
 
         started.push(service_name.clone());
@@ -766,7 +725,7 @@ async fn start_services(
 async fn stop_services(
     config_path: &PathBuf,
     service: Option<&str>,
-    state: SharedDaemonState,
+    state: StateHandle,
     clean: bool,
 ) -> std::result::Result<String, DaemonError> {
     let config_dir = config_path
@@ -776,54 +735,39 @@ async fn stop_services(
 
     // Load config if clean is requested (so cleanup hooks can run even if not started)
     if clean {
-        let mut state = state.write();
         // Ignore error if config doesn't exist - will be handled below
-        let _ = state.load_config(config_path.clone());
+        let _ = state.load_config(config_path.clone()).await;
     }
 
     // Get services to stop
-    let (services_to_stop, global_hooks, service_configs, logs, global_log_config) = {
-        let state = state.read();
-        let config_state = match state.configs.get(config_path) {
-            Some(cs) => cs,
-            None => return Ok("Config not loaded".to_string()),
-        };
-
-        let services_to_stop = match service {
-            Some(name) => {
-                if !config_state.config.services.contains_key(name) {
-                    return Err(kepler_daemon::errors::DaemonError::ServiceNotFound(
-                        name.to_string(),
-                    ));
-                }
-                vec![name.to_string()]
-            }
-            None => get_stop_order(&config_state.config.services)?,
-        };
-
-        (
-            services_to_stop,
-            config_state.config.hooks.clone(),
-            config_state.config.services.clone(),
-            config_state.logs.clone(),
-            config_state.config.logs.clone(),
-        )
+    let config = match state.get_config(config_path.clone()).await {
+        Some(c) => c,
+        None => return Ok("Config not loaded".to_string()),
     };
+
+    let services_to_stop = match service {
+        Some(name) => {
+            if !config.services.contains_key(name) {
+                return Err(DaemonError::ServiceNotFound(name.to_string()));
+            }
+            vec![name.to_string()]
+        }
+        None => get_stop_order(&config.services)?,
+    };
+
+    let logs = state.get_logs_buffer(config_path.clone()).await;
+    let global_log_config = config.logs.clone();
+    let global_hooks = config.hooks.clone();
+    let service_configs = config.services.clone();
 
     let mut stopped = Vec::new();
 
     // Stop services in reverse dependency order
     for service_name in &services_to_stop {
         // Check if running
-        let is_running = {
-            let state = state.read();
-            state
-                .configs
-                .get(config_path)
-                .and_then(|cs| cs.services.get(service_name))
-                .map(|s| s.status.is_running())
-                .unwrap_or(false)
-        };
+        let is_running = state
+            .is_service_running(config_path.clone(), service_name.clone())
+            .await;
 
         if !is_running {
             continue;
@@ -840,19 +784,23 @@ async fn stop_services(
             let hook_params = ServiceHookParams {
                 working_dir: &working_dir,
                 env: &env,
-                logs: Some(&logs),
+                logs: logs.as_ref(),
                 service_user: service_config.user.as_deref(),
                 service_group: service_config.group.as_deref(),
                 service_log_config: service_config.logs.as_ref(),
                 global_log_config: global_log_config.as_ref(),
             };
-            let _ = run_service_hook(
+
+            if let Err(e) = run_service_hook(
                 &service_config.hooks,
                 ServiceHookType::OnStop,
                 service_name,
                 &hook_params,
             )
-            .await;
+            .await
+            {
+                warn!("Hook on_stop failed for {}: {}", service_name, e);
+            }
         }
 
         stop_service(config_path, service_name, state.clone()).await?;
@@ -861,76 +809,93 @@ async fn stop_services(
 
     // Run global on_stop hook if stopping all and services were stopped
     if service.is_none() && !stopped.is_empty() {
-        let env = std::env::vars().collect();
-        let _ = run_global_hook(&global_hooks, GlobalHookType::OnStop, &config_dir, &env, Some(&logs), global_log_config.as_ref()).await;
+        if let Some(ref logs) = logs {
+            let env = std::env::vars().collect();
+            if let Err(e) = run_global_hook(
+                &global_hooks,
+                GlobalHookType::OnStop,
+                &config_dir,
+                &env,
+                Some(logs),
+                global_log_config.as_ref(),
+            )
+            .await
+            {
+                warn!("Hook on_stop failed: {}", e);
+            }
+        }
     }
 
     // Run on_cleanup if requested (even if no services were running)
     if service.is_none() && clean {
         info!("Running cleanup hooks");
-        let env = std::env::vars().collect();
-        if let Err(e) = run_global_hook(&global_hooks, GlobalHookType::OnCleanup, &config_dir, &env, Some(&logs), global_log_config.as_ref())
+        if let Some(ref logs) = logs {
+            let env = std::env::vars().collect();
+            if let Err(e) = run_global_hook(
+                &global_hooks,
+                GlobalHookType::OnCleanup,
+                &config_dir,
+                &env,
+                Some(logs),
+                global_log_config.as_ref(),
+            )
             .await
-        {
-            error!("Cleanup hook failed: {}", e);
+            {
+                error!("Cleanup hook failed: {}", e);
+            }
         }
     }
 
     // Clear logs based on retention policy
-    // When clean=true, use on_cleanup retention; otherwise use on_stop
-    for service_name in &stopped {
-        use kepler_daemon::config::resolve_log_retention;
+    if let Some(ref logs_buffer) = logs {
+        for service_name in &stopped {
+            use kepler_daemon::config::resolve_log_retention;
 
-        let service_logs = service_configs
-            .get(service_name)
-            .and_then(|c| c.logs.as_ref());
+            let service_logs = service_configs
+                .get(service_name)
+                .and_then(|c| c.logs.as_ref());
 
-        let retention = if clean {
-            // on_cleanup defaults to Clear
-            resolve_log_retention(
-                service_logs,
-                global_log_config.as_ref(),
-                |l| l.get_on_cleanup(),
-                LogRetention::Clear,
-            )
-        } else {
-            // on_stop defaults to Clear
-            resolve_log_retention(
-                service_logs,
-                global_log_config.as_ref(),
-                |l| l.get_on_stop(),
-                LogRetention::Clear,
-            )
-        };
-        let should_clear = retention == LogRetention::Clear;
+            let retention = if clean {
+                resolve_log_retention(
+                    service_logs,
+                    global_log_config.as_ref(),
+                    |l| l.get_on_cleanup(),
+                    LogRetention::Clear,
+                )
+            } else {
+                resolve_log_retention(
+                    service_logs,
+                    global_log_config.as_ref(),
+                    |l| l.get_on_stop(),
+                    LogRetention::Clear,
+                )
+            };
+            let should_clear = retention == LogRetention::Clear;
 
-        if should_clear {
-            // Clear service logs and all its hook logs (e.g., "backend" and "[backend.*]")
-            logs.clear_service(service_name);
-            logs.clear_service_prefix(&format!("[{}.", service_name));
+            if should_clear {
+                logs_buffer.clear_service(service_name);
+                logs_buffer.clear_service_prefix(&format!("[{}.", service_name));
+            }
         }
-    }
 
-    // For global hooks logs, check global config when stopping all or cleaning
-    if service.is_none() && (!stopped.is_empty() || clean) {
-        let should_clear_global = if clean {
-            // on_cleanup defaults to Clear
-            global_log_config
-                .as_ref()
-                .and_then(|c| c.get_on_cleanup())
-                .unwrap_or(LogRetention::Clear)
-                == LogRetention::Clear
-        } else {
-            // on_stop defaults to Clear
-            global_log_config
-                .as_ref()
-                .and_then(|c| c.get_on_stop())
-                .unwrap_or(LogRetention::Clear)
-                == LogRetention::Clear
-        };
-        if should_clear_global {
-            // Clear all global hook logs using prefix
-            logs.clear_service_prefix(GLOBAL_HOOK_PREFIX);
+        // For global hooks logs, check global config when stopping all or cleaning
+        if service.is_none() && (!stopped.is_empty() || clean) {
+            let should_clear_global = if clean {
+                global_log_config
+                    .as_ref()
+                    .and_then(|c| c.get_on_cleanup())
+                    .unwrap_or(LogRetention::Clear)
+                    == LogRetention::Clear
+            } else {
+                global_log_config
+                    .as_ref()
+                    .and_then(|c| c.get_on_stop())
+                    .unwrap_or(LogRetention::Clear)
+                    == LogRetention::Clear
+            };
+            if should_clear_global {
+                logs_buffer.clear_service_prefix(GLOBAL_HOOK_PREFIX);
+            }
         }
     }
 
@@ -943,9 +908,9 @@ async fn stop_services(
 
 async fn stop_all_services(
     config_path: &PathBuf,
-    state: SharedDaemonState,
+    state: StateHandle,
     clean: bool,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     stop_services(config_path, None, state, clean).await?;
     Ok(())
 }
@@ -953,7 +918,7 @@ async fn stop_all_services(
 async fn restart_services(
     config_path: &PathBuf,
     service: Option<&str>,
-    state: SharedDaemonState,
+    state: StateHandle,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
     restart_tx: mpsc::Sender<FileChangeEvent>,
 ) -> std::result::Result<String, DaemonError> {
@@ -962,71 +927,63 @@ async fn restart_services(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
 
+    // Load or reload config
+    state.load_config(config_path.clone()).await?;
+
     // Get services to restart
-    let services_to_restart = {
-        let mut state = state.write();
-        // Load or reload config
-        state.load_config(config_path.clone())?;
+    let config = state
+        .get_config(config_path.clone())
+        .await
+        .ok_or_else(|| DaemonError::ConfigNotFound(config_path.clone()))?;
 
-        let config_state = state
-            .configs
-            .get(config_path)
-            .ok_or_else(|| kepler_daemon::errors::DaemonError::ConfigNotFound(config_path.clone()))?;
-
-        match service {
-            Some(name) => {
-                if !config_state.config.services.contains_key(name) {
-                    return Err(kepler_daemon::errors::DaemonError::ServiceNotFound(
-                        name.to_string(),
-                    ));
-                }
-                vec![name.to_string()]
+    let services_to_restart = match service {
+        Some(name) => {
+            if !config.services.contains_key(name) {
+                return Err(DaemonError::ServiceNotFound(name.to_string()));
             }
-            None => get_start_order(&config_state.config.services)?,
+            vec![name.to_string()]
         }
+        None => get_start_order(&config.services)?,
     };
 
-    // Get service configs, logs, and global log config for restart
-    let (service_configs, logs, global_log_config) = {
-        let state = state.read();
-        let config_state = state.configs.get(config_path);
-        (
-            config_state.map(|cs| cs.config.services.clone()).unwrap_or_default(),
-            config_state.map(|cs| cs.logs.clone()),
-            config_state.and_then(|cs| cs.config.logs.clone()),
-        )
-    };
+    let logs = state.get_logs_buffer(config_path.clone()).await;
+    let global_log_config = config.logs.clone();
+    let service_configs = config.services.clone();
 
     // Run on_restart hooks
     for service_name in &services_to_restart {
-        if let Some(config) = service_configs.get(service_name) {
-            let working_dir = config
+        if let Some(service_config) = service_configs.get(service_name) {
+            let working_dir = service_config
                 .working_dir
                 .clone()
                 .unwrap_or_else(|| config_dir.clone());
-            let env = build_service_env(config, &config_dir).unwrap_or_default();
+            let env = build_service_env(service_config, &config_dir).unwrap_or_default();
 
             let hook_params = ServiceHookParams {
                 working_dir: &working_dir,
                 env: &env,
                 logs: logs.as_ref(),
-                service_user: config.user.as_deref(),
-                service_group: config.group.as_deref(),
-                service_log_config: config.logs.as_ref(),
+                service_user: service_config.user.as_deref(),
+                service_group: service_config.group.as_deref(),
+                service_log_config: service_config.logs.as_ref(),
                 global_log_config: global_log_config.as_ref(),
             };
-            let _ = run_service_hook(
-                &config.hooks,
+
+            if let Err(e) = run_service_hook(
+                &service_config.hooks,
                 ServiceHookType::OnRestart,
                 service_name,
                 &hook_params,
             )
-            .await;
+            .await
+            {
+                warn!("Hook on_restart failed for {}: {}", service_name, e);
+            }
         }
     }
 
     // Clear logs based on on_restart retention policy
-    if let Some(logs) = &logs {
+    if let Some(ref logs_buffer) = logs {
         use kepler_daemon::config::resolve_log_retention;
 
         for service_name in &services_to_restart {
@@ -1038,13 +995,13 @@ async fn restart_services(
                 service_logs,
                 global_log_config.as_ref(),
                 |l| l.get_on_restart(),
-                LogRetention::Retain, // New default for on_restart
+                LogRetention::Retain,
             );
             let should_clear = retention == LogRetention::Clear;
 
             if should_clear {
-                logs.clear_service(service_name);
-                logs.clear_service_prefix(&format!("[{}.", service_name));
+                logs_buffer.clear_service(service_name);
+                logs_buffer.clear_service_prefix(&format!("[{}.", service_name));
             }
         }
     }

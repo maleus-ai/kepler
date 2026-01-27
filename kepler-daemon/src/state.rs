@@ -1,10 +1,7 @@
 use chrono::{DateTime, Utc};
 use kepler_protocol::protocol::ServiceInfo;
-use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::process::Child;
 use tokio::task::JoinHandle;
 
 use crate::config::KeplerConfig;
@@ -45,6 +42,7 @@ impl ServiceStatus {
 }
 
 /// State of a single service
+#[derive(Clone)]
 pub struct ServiceState {
     pub status: ServiceStatus,
     pub pid: Option<u32>,
@@ -72,11 +70,17 @@ impl Default for ServiceState {
 
 impl ServiceState {
     pub fn to_service_info(&self) -> ServiceInfo {
+        ServiceInfo::from(self)
+    }
+}
+
+impl From<&ServiceState> for ServiceInfo {
+    fn from(state: &ServiceState) -> Self {
         ServiceInfo {
-            status: self.status.as_str().to_string(),
-            pid: self.pid,
-            started_at: self.started_at.map(|dt| dt.timestamp()),
-            health_check_failures: self.health_check_failures,
+            status: state.status.as_str().to_string(),
+            pid: state.pid,
+            started_at: state.started_at.map(|dt| dt.timestamp()),
+            health_check_failures: state.health_check_failures,
         }
     }
 }
@@ -125,9 +129,11 @@ impl ConfigState {
     }
 }
 
-/// Process handle for a running service (stored separately due to !Send/!Sync)
+/// Process handle for a running service
+/// Note: Child is not stored here - it's owned by the monitor task
 pub struct ProcessHandle {
-    pub child: Child,
+    /// Channel to signal shutdown to the monitor task
+    pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub stdout_task: Option<JoinHandle<()>>,
     pub stderr_task: Option<JoinHandle<()>>,
 }
@@ -135,7 +141,7 @@ pub struct ProcessHandle {
 impl std::fmt::Debug for ProcessHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProcessHandle")
-            .field("child_pid", &self.child.id())
+            .field("shutdown_tx", &self.shutdown_tx.is_some())
             .field("stdout_task", &self.stdout_task.is_some())
             .field("stderr_task", &self.stderr_task.is_some())
             .finish()
@@ -327,11 +333,4 @@ impl Default for DaemonState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Thread-safe wrapper for daemon state
-pub type SharedDaemonState = Arc<RwLock<DaemonState>>;
-
-pub fn new_shared_state() -> SharedDaemonState {
-    Arc::new(RwLock::new(DaemonState::new()))
 }

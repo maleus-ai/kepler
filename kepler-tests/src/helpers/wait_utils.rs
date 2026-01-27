@@ -1,6 +1,7 @@
 //! Async utilities to wait for state transitions
 
-use kepler_daemon::state::{ServiceStatus, SharedDaemonState};
+use kepler_daemon::state::ServiceStatus;
+use kepler_daemon::state_actor::StateHandle;
 use std::path::Path;
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
@@ -27,7 +28,7 @@ impl std::error::Error for WaitError {}
 
 /// Wait for a service to reach the Healthy status
 pub async fn wait_for_healthy(
-    state: &SharedDaemonState,
+    state: &StateHandle,
     config_path: &Path,
     service_name: &str,
     timeout: Duration,
@@ -44,7 +45,7 @@ pub async fn wait_for_healthy(
 
 /// Wait for a service to reach the Unhealthy status
 pub async fn wait_for_unhealthy(
-    state: &SharedDaemonState,
+    state: &StateHandle,
     config_path: &Path,
     service_name: &str,
     timeout: Duration,
@@ -61,7 +62,7 @@ pub async fn wait_for_unhealthy(
 
 /// Wait for a service to reach the Running status
 pub async fn wait_for_running(
-    state: &SharedDaemonState,
+    state: &StateHandle,
     config_path: &Path,
     service_name: &str,
     timeout: Duration,
@@ -78,7 +79,7 @@ pub async fn wait_for_running(
 
 /// Wait for a service to reach the Stopped status
 pub async fn wait_for_stopped(
-    state: &SharedDaemonState,
+    state: &StateHandle,
     config_path: &Path,
     service_name: &str,
     timeout: Duration,
@@ -95,7 +96,7 @@ pub async fn wait_for_stopped(
 
 /// Wait for a service to reach a specific status
 pub async fn wait_for_status(
-    state: &SharedDaemonState,
+    state: &StateHandle,
     config_path: &Path,
     service_name: &str,
     expected_status: ServiceStatus,
@@ -105,22 +106,22 @@ pub async fn wait_for_status(
     let config_path = config_path.to_path_buf();
 
     while start.elapsed() < timeout {
-        let current_status = {
-            let state = state.read();
-            if let Some(config_state) = state.configs.get(&config_path) {
-                if let Some(service_state) = config_state.services.get(service_name) {
-                    Some(service_state.status)
-                } else {
-                    return Err(WaitError::ServiceNotFound);
-                }
-            } else {
-                return Err(WaitError::ConfigNotFound);
-            }
-        };
+        let service_state = state
+            .get_service_state(config_path.clone(), service_name.to_string())
+            .await;
 
-        if let Some(status) = current_status {
-            if status == expected_status {
-                return Ok(());
+        match service_state {
+            Some(s) => {
+                if s.status == expected_status {
+                    return Ok(());
+                }
+            }
+            None => {
+                // Check if config exists
+                if state.get_config(config_path.clone()).await.is_none() {
+                    return Err(WaitError::ConfigNotFound);
+                }
+                return Err(WaitError::ServiceNotFound);
             }
         }
 
@@ -132,7 +133,7 @@ pub async fn wait_for_status(
 
 /// Wait for a service to be in any running state (Running, Healthy, or Unhealthy)
 pub async fn wait_for_any_running(
-    state: &SharedDaemonState,
+    state: &StateHandle,
     config_path: &Path,
     service_name: &str,
     timeout: Duration,
@@ -141,22 +142,22 @@ pub async fn wait_for_any_running(
     let config_path = config_path.to_path_buf();
 
     while start.elapsed() < timeout {
-        let current_status = {
-            let state = state.read();
-            if let Some(config_state) = state.configs.get(&config_path) {
-                if let Some(service_state) = config_state.services.get(service_name) {
-                    Some(service_state.status)
-                } else {
-                    return Err(WaitError::ServiceNotFound);
-                }
-            } else {
-                return Err(WaitError::ConfigNotFound);
-            }
-        };
+        let service_state = state
+            .get_service_state(config_path.clone(), service_name.to_string())
+            .await;
 
-        if let Some(status) = current_status {
-            if status.is_running() {
-                return Ok(status);
+        match service_state {
+            Some(s) => {
+                if s.status.is_running() {
+                    return Ok(s.status);
+                }
+            }
+            None => {
+                // Check if config exists
+                if state.get_config(config_path.clone()).await.is_none() {
+                    return Err(WaitError::ConfigNotFound);
+                }
+                return Err(WaitError::ServiceNotFound);
             }
         }
 
@@ -168,7 +169,7 @@ pub async fn wait_for_any_running(
 
 /// Wait for a status transition (status changes from one value to another)
 pub async fn wait_for_transition(
-    state: &SharedDaemonState,
+    state: &StateHandle,
     config_path: &Path,
     service_name: &str,
     from_status: ServiceStatus,
@@ -180,24 +181,24 @@ pub async fn wait_for_transition(
     let mut seen_from = false;
 
     while start.elapsed() < timeout {
-        let current_status = {
-            let state = state.read();
-            if let Some(config_state) = state.configs.get(&config_path) {
-                if let Some(service_state) = config_state.services.get(service_name) {
-                    Some(service_state.status)
-                } else {
-                    return Err(WaitError::ServiceNotFound);
-                }
-            } else {
-                return Err(WaitError::ConfigNotFound);
-            }
-        };
+        let service_state = state
+            .get_service_state(config_path.clone(), service_name.to_string())
+            .await;
 
-        if let Some(status) = current_status {
-            if status == from_status {
-                seen_from = true;
-            } else if seen_from && status == to_status {
-                return Ok(());
+        match service_state {
+            Some(s) => {
+                if s.status == from_status {
+                    seen_from = true;
+                } else if seen_from && s.status == to_status {
+                    return Ok(());
+                }
+            }
+            None => {
+                // Check if config exists
+                if state.get_config(config_path.clone()).await.is_none() {
+                    return Err(WaitError::ConfigNotFound);
+                }
+                return Err(WaitError::ServiceNotFound);
             }
         }
 
@@ -209,7 +210,7 @@ pub async fn wait_for_transition(
 
 /// Wait for health check failures to reach a specific count
 pub async fn wait_for_health_check_failures(
-    state: &SharedDaemonState,
+    state: &StateHandle,
     config_path: &Path,
     service_name: &str,
     expected_failures: u32,
@@ -219,22 +220,22 @@ pub async fn wait_for_health_check_failures(
     let config_path = config_path.to_path_buf();
 
     while start.elapsed() < timeout {
-        let failures = {
-            let state = state.read();
-            if let Some(config_state) = state.configs.get(&config_path) {
-                if let Some(service_state) = config_state.services.get(service_name) {
-                    Some(service_state.health_check_failures)
-                } else {
-                    return Err(WaitError::ServiceNotFound);
-                }
-            } else {
-                return Err(WaitError::ConfigNotFound);
-            }
-        };
+        let service_state = state
+            .get_service_state(config_path.clone(), service_name.to_string())
+            .await;
 
-        if let Some(count) = failures {
-            if count >= expected_failures {
-                return Ok(());
+        match service_state {
+            Some(s) => {
+                if s.health_check_failures >= expected_failures {
+                    return Ok(());
+                }
+            }
+            None => {
+                // Check if config exists
+                if state.get_config(config_path.clone()).await.is_none() {
+                    return Err(WaitError::ConfigNotFound);
+                }
+                return Err(WaitError::ServiceNotFound);
             }
         }
 
@@ -245,37 +246,38 @@ pub async fn wait_for_health_check_failures(
 }
 
 /// Get the current status of a service
-pub fn get_service_status(
-    state: &SharedDaemonState,
+pub async fn get_service_status(
+    state: &StateHandle,
     config_path: &Path,
     service_name: &str,
 ) -> Result<ServiceStatus, WaitError> {
     let config_path = config_path.to_path_buf();
-    let state = state.read();
 
-    if let Some(config_state) = state.configs.get(&config_path) {
-        if let Some(service_state) = config_state.services.get(service_name) {
-            Ok(service_state.status)
-        } else {
-            Err(WaitError::ServiceNotFound)
+    let service_state = state
+        .get_service_state(config_path.clone(), service_name.to_string())
+        .await;
+
+    match service_state {
+        Some(s) => Ok(s.status),
+        None => {
+            // Check if config exists
+            if state.get_config(config_path).await.is_none() {
+                Err(WaitError::ConfigNotFound)
+            } else {
+                Err(WaitError::ServiceNotFound)
+            }
         }
-    } else {
-        Err(WaitError::ConfigNotFound)
     }
 }
 
 /// Check if a service exists in the state
-pub fn service_exists(
-    state: &SharedDaemonState,
+pub async fn service_exists(
+    state: &StateHandle,
     config_path: &Path,
     service_name: &str,
 ) -> bool {
-    let config_path = config_path.to_path_buf();
-    let state = state.read();
-
-    if let Some(config_state) = state.configs.get(&config_path) {
-        config_state.services.contains_key(service_name)
-    } else {
-        false
-    }
+    state
+        .get_service_state(config_path.to_path_buf(), service_name.to_string())
+        .await
+        .is_some()
 }

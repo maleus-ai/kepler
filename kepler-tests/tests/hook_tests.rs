@@ -757,7 +757,7 @@ async fn test_log_output_disabled() {
     );
 
     // Check logs - hook output should NOT be present
-    if let Some(logs) = harness.logs() {
+    if let Some(logs) = harness.logs().await {
         let entries = logs.tail(100, None);
         let hook_output_logged = entries.iter().any(|e| e.line.contains("HOOK_SECRET_OUTPUT"));
         assert!(
@@ -822,7 +822,7 @@ async fn test_log_output_enabled() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Check logs - hook output SHOULD be present
-    if let Some(logs) = harness.logs() {
+    if let Some(logs) = harness.logs().await {
         let entries = logs.tail(100, None);
         let hook_output_logged = entries.iter().any(|e| e.line.contains("HOOK_VISIBLE_OUTPUT"));
         assert!(

@@ -6,7 +6,7 @@ use crate::config::{resolve_log_store, GlobalHooks, HookCommand, LogConfig, Serv
 use crate::env::build_hook_env;
 use crate::errors::{DaemonError, Result};
 use crate::logs::SharedLogBuffer;
-use crate::process::{spawn_command, CommandSpec, SpawnMode, SpawnResult};
+use crate::process::{spawn_command_sync, CommandSpec, SpawnMode};
 
 /// Context for running a hook
 pub struct HookRunContext<'a> {
@@ -147,20 +147,14 @@ pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>) -> Result<()
         store_stderr: ctx.store_stderr,
     };
 
-    match spawn_command(spec, mode).await? {
-        SpawnResult::Completed { exit_code } => {
-            if exit_code != Some(0) {
-                return Err(DaemonError::HookFailed {
-                    hook_type: format!("{} {:?}", &program_and_args[0], &program_and_args[1..]),
-                    message: format!("Exit code: {:?}", exit_code),
-                });
-            }
-            Ok(())
-        }
-        SpawnResult::Handle(_) => {
-            unreachable!("SynchronousWithLogging mode should return Completed")
-        }
+    let result = spawn_command_sync(spec, mode).await?;
+    if result.exit_code != Some(0) {
+        return Err(DaemonError::HookFailed {
+            hook_type: format!("{} {:?}", &program_and_args[0], &program_and_args[1..]),
+            message: format!("Exit code: {:?}", result.exit_code),
+        });
     }
+    Ok(())
 }
 
 /// The prefix used for global hook logs

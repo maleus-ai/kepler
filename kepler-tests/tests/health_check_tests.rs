@@ -33,9 +33,9 @@ async fn test_running_to_healthy_transition() {
         .unwrap();
 
     harness.start_service("test").await.unwrap();
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Running));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Running));
 
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     // Wait for healthy status
     let result = wait_for_healthy(
@@ -47,7 +47,7 @@ async fn test_running_to_healthy_transition() {
     .await;
 
     assert!(result.is_ok(), "Service should become healthy");
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Healthy));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Healthy));
 
     harness.stop_service("test").await.unwrap();
 }
@@ -76,7 +76,7 @@ async fn test_running_to_unhealthy_after_retries() {
         .unwrap();
 
     harness.start_service("test").await.unwrap();
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     // Wait for unhealthy status (after 2 retries)
     let result = wait_for_unhealthy(
@@ -88,7 +88,7 @@ async fn test_running_to_unhealthy_after_retries() {
     .await;
 
     assert!(result.is_ok(), "Service should become unhealthy after retries exhausted");
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Unhealthy));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Unhealthy));
 
     harness.stop_service("test").await.unwrap();
 }
@@ -121,7 +121,7 @@ async fn test_unhealthy_to_healthy_recovery() {
         .unwrap();
 
     harness.start_service("test").await.unwrap();
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     // Wait for unhealthy (file doesn't exist yet)
     let result = wait_for_unhealthy(
@@ -145,7 +145,7 @@ async fn test_unhealthy_to_healthy_recovery() {
     )
     .await;
     assert!(result.is_ok(), "Service should recover to healthy");
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Healthy));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Healthy));
 
     harness.stop_service("test").await.unwrap();
 }
@@ -175,12 +175,12 @@ async fn test_start_period_delay() {
         .unwrap();
 
     harness.start_service("test").await.unwrap();
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     // Immediately after starting, should still be Running (not Healthy yet)
     // because of start_period delay
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Running));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Running));
 
     // After start_period + interval, should be healthy
     let result = wait_for_healthy(
@@ -221,7 +221,7 @@ async fn test_health_check_timeout() {
         .unwrap();
 
     harness.start_service("test").await.unwrap();
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     // Wait for unhealthy (health check should timeout)
     let result = wait_for_unhealthy(
@@ -233,7 +233,7 @@ async fn test_health_check_timeout() {
     .await;
 
     assert!(result.is_ok(), "Service should become unhealthy due to timeout");
-    assert_eq!(harness.get_status("test"), Some(ServiceStatus::Unhealthy));
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Unhealthy));
 
     harness.stop_service("test").await.unwrap();
 }
@@ -262,7 +262,7 @@ async fn test_cmd_format_health_check() {
         .unwrap();
 
     harness.start_service("test").await.unwrap();
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     let result = wait_for_healthy(
         harness.state(),
@@ -301,7 +301,7 @@ async fn test_cmd_shell_format_health_check() {
         .unwrap();
 
     harness.start_service("test").await.unwrap();
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     let result = wait_for_healthy(
         harness.state(),
@@ -347,7 +347,7 @@ async fn test_on_healthcheck_success_hook() {
         .unwrap();
 
     harness.start_service("test").await.unwrap();
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     // Wait for the hook marker to appear
     let hook_fired = marker
@@ -390,7 +390,7 @@ async fn test_on_healthcheck_fail_hook() {
         .unwrap();
 
     harness.start_service("test").await.unwrap();
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     // Wait for the hook marker to appear
     let hook_fired = marker
@@ -433,7 +433,7 @@ async fn test_healthcheck_hook_fires_once_per_transition() {
         .unwrap();
 
     harness.start_service("test").await.unwrap();
-    harness.start_health_checker("test").unwrap();
+    harness.start_health_checker("test").await.unwrap();
 
     // Wait for the service to become healthy
     wait_for_healthy(

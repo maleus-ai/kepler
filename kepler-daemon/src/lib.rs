@@ -9,6 +9,7 @@ pub mod hooks;
 pub mod logs;
 pub mod process;
 pub mod state;
+pub mod state_actor;
 #[cfg(unix)]
 pub mod user;
 pub mod watcher;

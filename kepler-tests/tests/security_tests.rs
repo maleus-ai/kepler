@@ -157,14 +157,11 @@ async fn test_privilege_dropping_applied() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Get the service PID
-    let pid = {
-        let state = harness.state().read();
-        state
-            .configs
-            .get(&harness.config_path)
-            .and_then(|cs| cs.services.get("privileged"))
-            .and_then(|s| s.pid)
-    };
+    let pid = harness
+        .state()
+        .get_service_state(harness.config_path().to_path_buf(), "privileged".to_string())
+        .await
+        .and_then(|s| s.pid);
 
     assert!(pid.is_some(), "Service should have a PID");
     let pid = pid.unwrap();
@@ -462,14 +459,11 @@ async fn test_cpu_time_limit_applied() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Get the service PID
-    let pid = {
-        let state = harness.state().read();
-        state
-            .configs
-            .get(&harness.config_path)
-            .and_then(|cs| cs.services.get("cpu_limited"))
-            .and_then(|s| s.pid)
-    };
+    let pid = harness
+        .state()
+        .get_service_state(harness.config_path().to_path_buf(), "cpu_limited".to_string())
+        .await
+        .and_then(|s| s.pid);
 
     assert!(pid.is_some(), "Service should have a PID");
     let pid = pid.unwrap();
@@ -532,14 +526,11 @@ async fn test_memory_limit_applied() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Get the service PID
-    let pid = {
-        let state = harness.state().read();
-        state
-            .configs
-            .get(&harness.config_path)
-            .and_then(|cs| cs.services.get("memory_limited"))
-            .and_then(|s| s.pid)
-    };
+    let pid = harness
+        .state()
+        .get_service_state(harness.config_path().to_path_buf(), "memory_limited".to_string())
+        .await
+        .and_then(|s| s.pid);
 
     assert!(pid.is_some(), "Service should have a PID");
     let pid = pid.unwrap();
@@ -600,14 +591,11 @@ async fn test_file_descriptor_limit_applied() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Get the service PID
-    let pid = {
-        let state = harness.state().read();
-        state
-            .configs
-            .get(&harness.config_path)
-            .and_then(|cs| cs.services.get("fd_limited"))
-            .and_then(|s| s.pid)
-    };
+    let pid = harness
+        .state()
+        .get_service_state(harness.config_path().to_path_buf(), "fd_limited".to_string())
+        .await
+        .and_then(|s| s.pid);
 
     assert!(pid.is_some(), "Service should have a PID");
     let pid = pid.unwrap();
@@ -671,14 +659,11 @@ async fn test_all_resource_limits_applied() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Get the service PID
-    let pid = {
-        let state = harness.state().read();
-        state
-            .configs
-            .get(&harness.config_path)
-            .and_then(|cs| cs.services.get("all_limited"))
-            .and_then(|s| s.pid)
-    };
+    let pid = harness
+        .state()
+        .get_service_state(harness.config_path().to_path_buf(), "all_limited".to_string())
+        .await
+        .and_then(|s| s.pid);
 
     assert!(pid.is_some(), "Service should have a PID");
     let pid = pid.unwrap();
@@ -881,14 +866,11 @@ async fn test_numeric_uid_privilege_dropping() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let pid = {
-        let state = harness.state().read();
-        state
-            .configs
-            .get(&harness.config_path)
-            .and_then(|cs| cs.services.get("numeric_user"))
-            .and_then(|s| s.pid)
-    };
+    let pid = harness
+        .state()
+        .get_service_state(harness.config_path().to_path_buf(), "numeric_user".to_string())
+        .await
+        .and_then(|s| s.pid);
 
     assert!(pid.is_some(), "Service should have a PID");
     let pid = pid.unwrap();
@@ -929,14 +911,11 @@ async fn test_uid_gid_pair_privilege_dropping() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let pid = {
-        let state = harness.state().read();
-        state
-            .configs
-            .get(&harness.config_path)
-            .and_then(|cs| cs.services.get("uid_gid_user"))
-            .and_then(|s| s.pid)
-    };
+    let pid = harness
+        .state()
+        .get_service_state(harness.config_path().to_path_buf(), "uid_gid_user".to_string())
+        .await
+        .and_then(|s| s.pid);
 
     assert!(pid.is_some(), "Service should have a PID");
     let pid = pid.unwrap();
@@ -981,14 +960,11 @@ async fn test_user_with_group_override() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let pid = {
-        let state = harness.state().read();
-        state
-            .configs
-            .get(&harness.config_path)
-            .and_then(|cs| cs.services.get("user_group"))
-            .and_then(|s| s.pid)
-    };
+    let pid = harness
+        .state()
+        .get_service_state(harness.config_path().to_path_buf(), "user_group".to_string())
+        .await
+        .and_then(|s| s.pid);
 
     assert!(pid.is_some(), "Service should have a PID");
     let pid = pid.unwrap();

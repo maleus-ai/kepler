@@ -8,14 +8,15 @@ use tracing::{debug, error, info, warn};
 use crate::config::HealthCheck;
 use crate::env::build_service_env;
 use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
-use crate::state::{ServiceStatus, SharedDaemonState};
+use crate::state::ServiceStatus;
+use crate::state_actor::StateHandle;
 
 /// Spawn a health check monitoring task for a service
 pub fn spawn_health_checker(
     config_path: PathBuf,
     service_name: String,
     health_config: HealthCheck,
-    state: SharedDaemonState,
+    state: StateHandle,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         health_check_loop(config_path, service_name, health_config, state).await;
@@ -26,7 +27,7 @@ async fn health_check_loop(
     config_path: PathBuf,
     service_name: String,
     config: HealthCheck,
-    state: SharedDaemonState,
+    state: StateHandle,
 ) {
     // Wait for start_period before beginning checks
     if !config.start_period.is_zero() {
@@ -37,171 +38,162 @@ async fn health_check_loop(
         sleep(config.start_period).await;
     }
 
-    let mut consecutive_failures: u32 = 0;
-
     loop {
         // Check if service is still running
+        if !state
+            .is_service_running(config_path.clone(), service_name.clone())
+            .await
         {
-            let state = state.read();
-            if let Some(config_state) = state.configs.get(&config_path) {
-                if let Some(service_state) = config_state.services.get(&service_name) {
-                    if !service_state.status.is_running() {
-                        debug!(
-                            "Health check for {} stopping - service not running",
-                            service_name
-                        );
-                        return;
-                    }
-                } else {
-                    return;
-                }
-            } else {
-                return;
-            }
+            debug!(
+                "Health check for {} stopping - service not running",
+                service_name
+            );
+            return;
         }
 
         // Run health check
         let passed = run_health_check(&config.test, config.timeout).await;
 
-        // Update state based on result and detect transitions for hooks
-        let hook_info = {
-            let mut state = state.write();
-            if let Some(config_state) = state.configs.get_mut(&config_path) {
-                if let Some(service_state) = config_state.services.get_mut(&service_name) {
-                    let previous_status = service_state.status;
+        // Update state based on result
+        let update_result = state
+            .update_health_check(
+                config_path.clone(),
+                service_name.clone(),
+                passed,
+                config.retries,
+            )
+            .await;
 
-                    if passed {
-                        consecutive_failures = 0;
-                        service_state.health_check_failures = 0;
-                        if service_state.status == ServiceStatus::Running
-                            || service_state.status == ServiceStatus::Unhealthy
-                        {
-                            service_state.status = ServiceStatus::Healthy;
-                            debug!("Health check passed for {}", service_name);
-                        }
-                    } else {
-                        consecutive_failures += 1;
-                        service_state.health_check_failures = consecutive_failures;
-                        warn!(
-                            "Health check failed for {} ({}/{})",
-                            service_name, consecutive_failures, config.retries
-                        );
-
-                        if consecutive_failures >= config.retries
-                            && service_state.status != ServiceStatus::Unhealthy
-                        {
-                            info!(
-                                "Service {} marked as unhealthy after {} failures",
-                                service_name, consecutive_failures
-                            );
-                            service_state.status = ServiceStatus::Unhealthy;
-                        }
-                    }
-
-                    let new_status = service_state.status;
-
-                    // Detect transition and gather hook info
-                    if previous_status != new_status {
-                        if let Some(service_config) = config_state.config.services.get(&service_name)
-                        {
-                            let config_dir = config_path
-                                .parent()
-                                .map(|p| p.to_path_buf())
-                                .unwrap_or_else(|| PathBuf::from("."));
-                            let working_dir = service_config
-                                .working_dir
-                                .clone()
-                                .unwrap_or_else(|| config_dir.clone());
-
-                            Some((
-                                previous_status,
-                                new_status,
-                                service_config.hooks.clone(),
-                                working_dir,
-                                config_state.logs.clone(),
-                                config_dir,
-                                service_config.clone(),
-                                service_config.user.clone(),
-                                service_config.group.clone(),
-                                config_state.config.logs.clone(),
-                            ))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
+        match update_result {
+            Ok(update) => {
+                if passed {
+                    debug!("Health check passed for {}", service_name);
                 } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        // Call hooks outside the lock
-        if let Some((previous_status, new_status, hooks, working_dir, logs, config_dir, service_config, service_user, service_group, global_log_config)) =
-            hook_info
-        {
-            let hook_type = match new_status {
-                ServiceStatus::Healthy
-                    if previous_status == ServiceStatus::Running
-                        || previous_status == ServiceStatus::Unhealthy =>
-                {
-                    Some(ServiceHookType::OnHealthcheckSuccess)
-                }
-                ServiceStatus::Unhealthy
-                    if previous_status == ServiceStatus::Running
-                        || previous_status == ServiceStatus::Healthy =>
-                {
-                    Some(ServiceHookType::OnHealthcheckFail)
-                }
-                _ => None,
-            };
-
-            if let Some(hook_type) = hook_type {
-                // Build environment for hook
-                let env = match build_service_env(&service_config, &config_dir) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        error!(
-                            "Failed to build environment for {} hook: {}",
-                            hook_type.as_str(),
-                            e
-                        );
-                        std::collections::HashMap::new()
-                    }
-                };
-
-                let hook_params = ServiceHookParams {
-                    working_dir: &working_dir,
-                    env: &env,
-                    logs: Some(&logs),
-                    service_user: service_user.as_deref(),
-                    service_group: service_group.as_deref(),
-                    service_log_config: service_config.logs.as_ref(),
-                    global_log_config: global_log_config.as_ref(),
-                };
-                if let Err(e) = run_service_hook(
-                    &hooks,
-                    hook_type,
-                    &service_name,
-                    &hook_params,
-                )
-                .await
-                {
-                    error!(
-                        "Failed to run {} hook for {}: {}",
-                        hook_type.as_str(),
-                        service_name,
-                        e
+                    warn!(
+                        "Health check failed for {} ({}/{})",
+                        service_name, update.failures, config.retries
                     );
+
+                    if update.failures >= config.retries
+                        && update.previous_status != ServiceStatus::Unhealthy
+                    {
+                        info!(
+                            "Service {} marked as unhealthy after {} failures",
+                            service_name, update.failures
+                        );
+                    }
                 }
+
+                // Run hooks if status changed
+                if update.previous_status != update.new_status {
+                    run_status_change_hook(
+                        &config_path,
+                        &service_name,
+                        update.previous_status,
+                        update.new_status,
+                        &state,
+                    )
+                    .await;
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Failed to update health check for {}: {}",
+                    service_name, e
+                );
             }
         }
 
         // Wait for next interval
         sleep(config.interval).await;
+    }
+}
+
+/// Run hook when health status changes
+async fn run_status_change_hook(
+    config_path: &PathBuf,
+    service_name: &str,
+    previous_status: ServiceStatus,
+    new_status: ServiceStatus,
+    state: &StateHandle,
+) {
+    let hook_type = match new_status {
+        ServiceStatus::Healthy
+            if previous_status == ServiceStatus::Running
+                || previous_status == ServiceStatus::Unhealthy =>
+        {
+            Some(ServiceHookType::OnHealthcheckSuccess)
+        }
+        ServiceStatus::Unhealthy
+            if previous_status == ServiceStatus::Running
+                || previous_status == ServiceStatus::Healthy =>
+        {
+            Some(ServiceHookType::OnHealthcheckFail)
+        }
+        _ => None,
+    };
+
+    if let Some(hook_type) = hook_type {
+        // Get service config
+        let service_config = match state
+            .get_service_config(config_path.clone(), service_name.to_string())
+            .await
+        {
+            Some(sc) => sc,
+            None => return,
+        };
+
+        let config_dir = state
+            .get_config_dir(config_path.clone())
+            .await
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let logs = state.get_logs_buffer(config_path.clone()).await;
+        let global_log_config = state.get_global_log_config(config_path.clone()).await;
+
+        let working_dir = service_config
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| config_dir.clone());
+
+        // Build environment for hook
+        let env = match build_service_env(&service_config, &config_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                error!(
+                    "Failed to build environment for {} hook: {}",
+                    hook_type.as_str(),
+                    e
+                );
+                std::collections::HashMap::new()
+            }
+        };
+
+        let hook_params = ServiceHookParams {
+            working_dir: &working_dir,
+            env: &env,
+            logs: logs.as_ref(),
+            service_user: service_config.user.as_deref(),
+            service_group: service_config.group.as_deref(),
+            service_log_config: service_config.logs.as_ref(),
+            global_log_config: global_log_config.as_ref(),
+        };
+
+        if let Err(e) = run_service_hook(
+            &service_config.hooks,
+            hook_type,
+            service_name,
+            &hook_params,
+        )
+        .await
+        {
+            warn!(
+                "Hook {} failed for {}: {}",
+                hook_type.as_str(),
+                service_name,
+                e
+            );
+        }
     }
 }
 

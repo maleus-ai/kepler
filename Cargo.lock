@@ -500,12 +500,12 @@ dependencies = [
 name = "kepler-cli"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
  "clap",
  "colored",
  "kepler-daemon",
  "kepler-protocol",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -1,20 +1,20 @@
 //! Test harness that manages daemon state without full binary
 
-use chrono::Utc;
 use kepler_daemon::config::{KeplerConfig, LogRetention};
 use kepler_daemon::env::build_service_env;
 use kepler_daemon::health::spawn_health_checker;
 use kepler_daemon::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use kepler_daemon::logs::SharedLogBuffer;
 use kepler_daemon::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
-use kepler_daemon::state::{new_shared_state, ServiceStatus, SharedDaemonState};
+use kepler_daemon::state::ServiceStatus;
+use kepler_daemon::state_actor::{create_state_actor, StateHandle, TaskHandleType};
 use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 /// Test harness for managing daemon state
 pub struct TestDaemonHarness {
-    pub state: SharedDaemonState,
+    pub state: StateHandle,
     pub config_path: PathBuf,
     pub config_dir: PathBuf,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
@@ -32,17 +32,16 @@ impl TestDaemonHarness {
             .map_err(std::io::Error::other)?;
         std::fs::write(&config_path, config_yaml)?;
 
-        let state = new_shared_state();
+        let (state, actor) = create_state_actor();
+        tokio::spawn(actor.run());
+
         let (exit_tx, exit_rx) = mpsc::channel(32);
         let (restart_tx, restart_rx) = mpsc::channel(32);
 
         // Load the config into state
-        {
-            let mut state = state.write();
-            state.load_config(config_path.clone()).map_err(|e| {
-                std::io::Error::other(e.to_string())
-            })?;
-        }
+        state.load_config(config_path.clone()).await.map_err(|e| {
+            std::io::Error::other(e.to_string())
+        })?;
 
         Ok(Self {
             state,
@@ -57,7 +56,9 @@ impl TestDaemonHarness {
 
     /// Create a harness from an existing config file
     pub async fn from_file(config_path: &Path) -> std::io::Result<Self> {
-        let state = new_shared_state();
+        let (state, actor) = create_state_actor();
+        tokio::spawn(actor.run());
+
         let (exit_tx, exit_rx) = mpsc::channel(32);
         let (restart_tx, restart_rx) = mpsc::channel(32);
 
@@ -68,12 +69,9 @@ impl TestDaemonHarness {
             .unwrap_or_else(|| PathBuf::from("."));
 
         // Load the config into state
-        {
-            let mut state = state.write();
-            state.load_config(config_path.clone()).map_err(|e| {
-                std::io::Error::other(e.to_string())
-            })?;
-        }
+        state.load_config(config_path.clone()).await.map_err(|e| {
+            std::io::Error::other(e.to_string())
+        })?;
 
         Ok(Self {
             state,
@@ -106,8 +104,8 @@ impl TestDaemonHarness {
         self.restart_tx.clone()
     }
 
-    /// Get the shared state
-    pub fn state(&self) -> &SharedDaemonState {
+    /// Get the state handle
+    pub fn state(&self) -> &StateHandle {
         &self.state
     }
 
@@ -118,44 +116,33 @@ impl TestDaemonHarness {
 
     /// Start a specific service
     pub async fn start_service(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let (service_config, logs, global_log_config) = {
-            let state = self.state.read();
-            let config_state = state
-                .configs
-                .get(&self.config_path)
-                .ok_or("Config not found")?;
-            let service_config = config_state
-                .config
-                .services
-                .get(service_name)
-                .ok_or("Service not found")?
-                .clone();
-            (service_config, config_state.logs.clone(), config_state.config.logs.clone())
-        };
+        let service_config = self.state
+            .get_service_config(self.config_path.clone(), service_name.to_string())
+            .await
+            .ok_or("Service not found")?;
+
+        let logs = self.state
+            .get_logs_buffer(self.config_path.clone())
+            .await
+            .ok_or("Logs not found")?;
+
+        let global_log_config = self.state
+            .get_global_log_config(self.config_path.clone())
+            .await;
 
         // Update status to starting
-        {
-            let mut state = self.state.write();
-            if let Some(config_state) = state.configs.get_mut(&self.config_path) {
-                if let Some(service_state) = config_state.services.get_mut(service_name) {
-                    service_state.status = ServiceStatus::Starting;
-                }
-            }
-        }
+        let _ = self.state
+            .set_service_status(
+                self.config_path.clone(),
+                service_name.to_string(),
+                ServiceStatus::Starting,
+            )
+            .await;
 
         // Run on_init hook if not initialized
-        let should_run_init = {
-            let state = self.state.read();
-            if let Some(config_state) = state.configs.get(&self.config_path) {
-                if let Some(service_state) = config_state.services.get(service_name) {
-                    !service_state.initialized
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        };
+        let should_run_init = !self.state
+            .is_service_initialized(self.config_path.clone(), service_name.to_string())
+            .await;
 
         let working_dir = service_config
             .working_dir
@@ -182,12 +169,9 @@ impl TestDaemonHarness {
             .await?;
 
             // Mark as initialized
-            let mut state = self.state.write();
-            if let Some(config_state) = state.configs.get_mut(&self.config_path) {
-                if let Some(service_state) = config_state.services.get_mut(service_name) {
-                    service_state.initialized = true;
-                }
-            }
+            let _ = self.state
+                .mark_service_initialized(self.config_path.clone(), service_name.to_string())
+                .await;
         }
 
         // Run on_start hook
@@ -212,28 +196,24 @@ impl TestDaemonHarness {
         };
         let handle = spawn_service(spawn_params).await?;
 
-        let pid = handle.child.id();
-
         let working_dir = service_config
             .working_dir
             .clone()
             .unwrap_or_else(|| self.config_dir.clone());
 
-        // Store the handle and update state
-        {
-            let mut state = self.state.write();
-            state
-                .processes
-                .insert((self.config_path.clone(), service_name.to_string()), handle);
+        // Store the handle
+        self.state
+            .store_process_handle(self.config_path.clone(), service_name.to_string(), handle)
+            .await;
 
-            if let Some(config_state) = state.configs.get_mut(&self.config_path) {
-                if let Some(service_state) = config_state.services.get_mut(service_name) {
-                    service_state.status = ServiceStatus::Running;
-                    service_state.pid = pid;
-                    service_state.started_at = Some(Utc::now());
-                }
-            }
-        }
+        // Update status to Running (PID is already set by spawn_service)
+        let _ = self.state
+            .set_service_status(
+                self.config_path.clone(),
+                service_name.to_string(),
+                ServiceStatus::Running,
+            )
+            .await;
 
         // Start file watcher if configured
         if !service_config.restart.watch_patterns().is_empty() {
@@ -244,32 +224,27 @@ impl TestDaemonHarness {
                 working_dir,
                 self.restart_tx.clone(),
             );
-            let mut state = self.state.write();
-            state
-                .watchers
-                .insert((self.config_path.clone(), service_name.to_string()), handle);
+            self.state
+                .store_task_handle(
+                    self.config_path.clone(),
+                    service_name.to_string(),
+                    TaskHandleType::FileWatcher,
+                    handle,
+                )
+                .await;
         }
 
         Ok(())
     }
 
     /// Start the health checker for a service
-    pub fn start_health_checker(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let health_config = {
-            let state = self.state.read();
-            let config_state = state
-                .configs
-                .get(&self.config_path)
-                .ok_or("Config not found")?;
-            let service_config = config_state
-                .config
-                .services
-                .get(service_name)
-                .ok_or("Service not found")?;
-            service_config.healthcheck.clone()
-        };
+    pub async fn start_health_checker(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let service_config = self.state
+            .get_service_config(self.config_path.clone(), service_name.to_string())
+            .await
+            .ok_or("Service not found")?;
 
-        if let Some(health_config) = health_config {
+        if let Some(health_config) = service_config.healthcheck {
             let handle = spawn_health_checker(
                 self.config_path.clone(),
                 service_name.to_string(),
@@ -278,11 +253,14 @@ impl TestDaemonHarness {
             );
 
             // Store the health check handle
-            let mut state = self.state.write();
-            state.health_checks.insert(
-                (self.config_path.clone(), service_name.to_string()),
-                handle,
-            );
+            self.state
+                .store_task_handle(
+                    self.config_path.clone(),
+                    service_name.to_string(),
+                    TaskHandleType::HealthCheck,
+                    handle,
+                )
+                .await;
         }
 
         Ok(())
@@ -291,20 +269,19 @@ impl TestDaemonHarness {
     /// Stop a specific service
     pub async fn stop_service(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Get service config for hooks
-        let (service_config, logs, global_log_config) = {
-            let state = self.state.read();
-            let config_state = state
-                .configs
-                .get(&self.config_path)
-                .ok_or("Config not found")?;
-            let service_config = config_state
-                .config
-                .services
-                .get(service_name)
-                .ok_or("Service not found")?
-                .clone();
-            (service_config, config_state.logs.clone(), config_state.config.logs.clone())
-        };
+        let service_config = self.state
+            .get_service_config(self.config_path.clone(), service_name.to_string())
+            .await
+            .ok_or("Service not found")?;
+
+        let logs = self.state
+            .get_logs_buffer(self.config_path.clone())
+            .await
+            .ok_or("Logs not found")?;
+
+        let global_log_config = self.state
+            .get_global_log_config(self.config_path.clone())
+            .await;
 
         // Run on_stop hook
         let working_dir = service_config
@@ -338,81 +315,71 @@ impl TestDaemonHarness {
 
     /// Stop all services
     pub async fn stop_all(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let service_names: Vec<String> = {
-            let state = self.state.read();
-            if let Some(config_state) = state.configs.get(&self.config_path) {
-                config_state.services.keys().cloned().collect()
-            } else {
-                Vec::new()
-            }
-        };
+        let configs = self.state.list_configs().await.unwrap_or_default();
 
-        for name in service_names {
-            let _ = self.stop_service(&name).await;
+        for config_info in configs {
+            if config_info.config_path == self.config_path.to_string_lossy() {
+                // Get all service names from the config
+                if let Some(config) = self.state.get_config(self.config_path.clone()).await {
+                    let service_names: Vec<String> = config.services.keys().cloned().collect();
+                    for name in service_names {
+                        let _ = self.stop_service(&name).await;
+                    }
+                }
+            }
         }
 
         Ok(())
     }
 
     /// Get the current status of a service
-    pub fn get_status(&self, service_name: &str) -> Option<ServiceStatus> {
-        let state = self.state.read();
-        state
-            .configs
-            .get(&self.config_path)?
-            .services
-            .get(service_name)
+    pub async fn get_status(&self, service_name: &str) -> Option<ServiceStatus> {
+        self.state
+            .get_service_state(self.config_path.clone(), service_name.to_string())
+            .await
             .map(|s| s.status)
     }
 
     /// Check if a service has a health check configured
-    pub fn has_healthcheck(&self, service_name: &str) -> bool {
-        let state = self.state.read();
-        if let Some(config_state) = state.configs.get(&self.config_path) {
-            if let Some(service_config) = config_state.config.services.get(service_name) {
-                return service_config.healthcheck.is_some();
-            }
-        }
-        false
+    pub async fn has_healthcheck(&self, service_name: &str) -> bool {
+        self.state
+            .get_service_config(self.config_path.clone(), service_name.to_string())
+            .await
+            .map(|c| c.healthcheck.is_some())
+            .unwrap_or(false)
     }
 
     /// Get the logs buffer
-    pub fn logs(&self) -> Option<SharedLogBuffer> {
-        let state = self.state.read();
-        state.configs.get(&self.config_path).map(|c| c.logs.clone())
+    pub async fn logs(&self) -> Option<SharedLogBuffer> {
+        self.state.get_logs_buffer(self.config_path.clone()).await
     }
 
     /// Spawn a file change handler that restarts services on file changes
     /// Must be called after taking restart_rx with take_restart_rx()
     pub fn spawn_file_change_handler(&self, mut restart_rx: mpsc::Receiver<FileChangeEvent>) {
         let state = self.state.clone();
-        let _config_path = self.config_path.clone();
         let exit_tx = self.exit_tx.clone();
 
         tokio::spawn(async move {
             while let Some(event) = restart_rx.recv().await {
                 // Get service config and global log config
-                let (service_config, global_log_config) = {
-                    let state = state.read();
-                    let config_state = state.configs.get(&event.config_path);
-                    (
-                        config_state.and_then(|cs| cs.config.services.get(&event.service_name).cloned()),
-                        config_state.and_then(|cs| cs.config.logs.clone()),
-                    )
-                };
+                let service_config = state
+                    .get_service_config(event.config_path.clone(), event.service_name.clone())
+                    .await;
+                let global_log_config = state
+                    .get_global_log_config(event.config_path.clone())
+                    .await;
 
                 if let Some(config) = service_config {
                     // Get config_dir and logs
-                    let (config_dir, logs) = {
-                        let state = state.read();
-                        if let Some(cs) = state.configs.get(&event.config_path) {
-                            (
-                                cs.config_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")),
-                                cs.logs.clone(),
-                            )
-                        } else {
-                            continue;
-                        }
+                    let config_dir = state
+                        .get_config_dir(event.config_path.clone())
+                        .await
+                        .unwrap_or_else(|| PathBuf::from("."));
+
+                    let logs = match state.get_logs_buffer(event.config_path.clone()).await {
+                        Some(l) => l,
+                        None => continue,
                     };
 
                     // Run on_restart hook
@@ -447,7 +414,7 @@ impl TestDaemonHarness {
                             config.logs.as_ref(),
                             global_log_config.as_ref(),
                             |l| l.get_on_restart(),
-                            LogRetention::Retain, // New default for on_restart
+                            LogRetention::Retain,
                         );
                         let should_clear = retention == LogRetention::Clear;
 
@@ -477,20 +444,28 @@ impl TestDaemonHarness {
                         global_log_config: global_log_config.as_ref(),
                     };
                     if let Ok(handle) = spawn_service(spawn_params).await {
-                        let pid = handle.child.id();
-                        let mut state = state.write();
-                        state.processes.insert(
-                            (event.config_path.clone(), event.service_name.clone()),
-                            handle,
-                        );
-                        if let Some(cs) = state.configs.get_mut(&event.config_path) {
-                            if let Some(ss) = cs.services.get_mut(&event.service_name) {
-                                ss.status = ServiceStatus::Running;
-                                ss.pid = pid;
-                                ss.started_at = Some(Utc::now());
-                                ss.restart_count += 1;
-                            }
-                        }
+                        state
+                            .store_process_handle(
+                                event.config_path.clone(),
+                                event.service_name.clone(),
+                                handle,
+                            )
+                            .await;
+
+                        let _ = state
+                            .set_service_status(
+                                event.config_path.clone(),
+                                event.service_name.clone(),
+                                ServiceStatus::Running,
+                            )
+                            .await;
+                        // Note: PID is already set by spawn_service
+                        let _ = state
+                            .increment_restart_count(
+                                event.config_path.clone(),
+                                event.service_name.clone(),
+                            )
+                            .await;
                     }
                 }
             }
@@ -498,43 +473,9 @@ impl TestDaemonHarness {
     }
 
     /// Reload the config from disk
-    pub fn reload_config(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut state = self.state.write();
-        state.load_config(self.config_path.clone())?;
+    pub async fn reload_config(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.state.load_config(self.config_path.clone()).await?;
         Ok(())
-    }
-}
-
-impl Drop for TestDaemonHarness {
-    fn drop(&mut self) {
-        // Cancel all health checks and watchers
-        let mut state = self.state.write();
-
-        // Cancel health checks for this config
-        let health_keys: Vec<_> = state
-            .health_checks
-            .keys()
-            .filter(|(p, _)| p == &self.config_path)
-            .cloned()
-            .collect();
-        for key in health_keys {
-            if let Some(handle) = state.health_checks.remove(&key) {
-                handle.abort();
-            }
-        }
-
-        // Cancel watchers for this config
-        let watcher_keys: Vec<_> = state
-            .watchers
-            .keys()
-            .filter(|(p, _)| p == &self.config_path)
-            .cloned()
-            .collect();
-        for key in watcher_keys {
-            if let Some(handle) = state.watchers.remove(&key) {
-                handle.abort();
-            }
-        }
     }
 }
 
@@ -571,10 +512,10 @@ mod tests {
 
         // Start the service
         harness.start_service("test").await.unwrap();
-        assert_eq!(harness.get_status("test"), Some(ServiceStatus::Running));
+        assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Running));
 
         // Stop the service
         harness.stop_service("test").await.unwrap();
-        assert_eq!(harness.get_status("test"), Some(ServiceStatus::Stopped));
+        assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Stopped));
     }
 }
