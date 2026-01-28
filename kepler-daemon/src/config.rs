@@ -352,8 +352,6 @@ pub struct LogRetentionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_restart: Option<LogRetention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_cleanup: Option<LogRetention>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_exit: Option<LogRetention>,
 }
 
@@ -384,11 +382,6 @@ impl LogConfig {
     /// Get on_restart retention from nested retention config
     pub fn get_on_restart(&self) -> Option<LogRetention> {
         self.retention.as_ref().and_then(|r| r.on_restart.clone())
-    }
-
-    /// Get on_cleanup retention from nested retention config
-    pub fn get_on_cleanup(&self) -> Option<LogRetention> {
-        self.retention.as_ref().and_then(|r| r.on_cleanup.clone())
     }
 
     /// Get on_exit retention from nested retention config

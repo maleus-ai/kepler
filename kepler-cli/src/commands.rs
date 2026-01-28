@@ -45,6 +45,15 @@ pub enum Commands {
         #[arg(short, long)]
         all: bool,
     },
+    /// Prune all stopped/orphaned config state directories
+    Prune {
+        /// Force prune even if services appear running
+        #[arg(long)]
+        force: bool,
+        /// Show what would be pruned without deleting
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

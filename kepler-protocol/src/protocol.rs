@@ -72,6 +72,13 @@ pub enum Request {
         /// Path to the config file
         config_path: PathBuf,
     },
+    /// Prune all stopped/orphaned config state directories
+    Prune {
+        /// Force prune even if services appear running
+        force: bool,
+        /// Show what would be pruned without deleting
+        dry_run: bool,
+    },
 }
 
 /// Response sent from daemon to CLI
@@ -144,6 +151,21 @@ pub enum ResponseData {
     LogChunk(LogChunkData),
     /// Daemon info
     DaemonInfo(DaemonInfo),
+    /// Pruned configs info
+    PrunedConfigs(Vec<PrunedConfigInfo>),
+}
+
+/// Information about a pruned config
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrunedConfigInfo {
+    /// Original config path (or "unknown" if orphaned)
+    pub config_path: String,
+    /// Config hash (state directory name)
+    pub config_hash: String,
+    /// Bytes freed by pruning
+    pub bytes_freed: u64,
+    /// Status: "pruned", "skipped", "would_prune", "orphaned"
+    pub status: String,
 }
 
 /// Chunked log entries for large log responses

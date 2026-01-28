@@ -4,11 +4,13 @@
 //! lifecycle operations (start, stop, restart, exit handling). It eliminates duplication
 //! by providing unified methods that handle hooks, log retention, and state updates.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{resolve_log_retention, LogRetention};
+use crate::config::{resolve_log_retention, KeplerConfig, LogRetention};
+use kepler_protocol::protocol::PrunedConfigInfo;
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
 use crate::deps::{get_service_with_deps, get_start_order, get_stop_order};
@@ -34,8 +36,6 @@ pub enum LifecycleEvent {
     Restart,
     /// Process exit - on_exit hook, on_exit retention + auto-restart logic
     Exit,
-    /// Cleanup - on_cleanup retention only
-    Cleanup,
 }
 
 /// Errors that can occur during service orchestration
@@ -58,6 +58,9 @@ pub enum OrchestratorError {
 
     #[error("Hook failed: {0}")]
     HookFailed(String),
+
+    #[error("IO error: {0}")]
+    Io(String),
 
     #[error("Daemon error: {0}")]
     DaemonError(#[from] crate::errors::DaemonError),
@@ -363,28 +366,23 @@ impl ServiceOrchestrator {
         // Apply log retention
         if let Some(ref logs_buffer) = logs {
             for service_name in &stopped {
-                let service_logs = config
-                    .services
-                    .get(service_name)
-                    .and_then(|c| c.logs.as_ref());
-
-                let retention = if clean {
-                    resolve_log_retention(
-                        service_logs,
-                        global_log_config.as_ref(),
-                        |l| l.get_on_cleanup(),
-                        LogRetention::Clear,
-                    )
+                // When clean is true, always clear logs (no retention policy check)
+                let should_clear = if clean {
+                    true
                 } else {
+                    let service_logs = config
+                        .services
+                        .get(service_name)
+                        .and_then(|c| c.logs.as_ref());
                     resolve_log_retention(
                         service_logs,
                         global_log_config.as_ref(),
                         |l| l.get_on_stop(),
                         LogRetention::Clear,
-                    )
+                    ) == LogRetention::Clear
                 };
 
-                if retention == LogRetention::Clear {
+                if should_clear {
                     logs_buffer.clear_service(service_name);
                     logs_buffer.clear_service_prefix(&format!("[{}.", service_name));
                 }
@@ -392,19 +390,13 @@ impl ServiceOrchestrator {
 
             // Clear global hook logs if stopping all
             if service_filter.is_none() && (!stopped.is_empty() || clean) {
-                let should_clear_global = if clean {
-                    global_log_config
-                        .as_ref()
-                        .and_then(|c| c.get_on_cleanup())
-                        .unwrap_or(LogRetention::Clear)
-                        == LogRetention::Clear
-                } else {
-                    global_log_config
+                // When clean is true, always clear; otherwise check on_stop retention
+                let should_clear_global = clean
+                    || global_log_config
                         .as_ref()
                         .and_then(|c| c.get_on_stop())
                         .unwrap_or(LogRetention::Clear)
-                        == LogRetention::Clear
-                };
+                        == LogRetention::Clear;
                 if should_clear_global {
                     logs_buffer.clear_service_prefix(GLOBAL_HOOK_PREFIX);
                 }
@@ -731,12 +723,6 @@ impl ServiceOrchestrator {
                 |l| l.get_on_exit(),
                 LogRetention::Retain,
             ),
-            LifecycleEvent::Cleanup => resolve_log_retention(
-                ctx.service_config.logs.as_ref(),
-                ctx.global_log_config.as_ref(),
-                |l| l.get_on_cleanup(),
-                LogRetention::Clear,
-            ),
             LifecycleEvent::Init => return, // No retention for init
         };
 
@@ -813,4 +799,156 @@ impl ServiceOrchestrator {
                 .await;
         }
     }
+
+    /// Prune all stopped/orphaned config state directories
+    ///
+    /// Scans `~/.kepler/configs/` for all config state directories and:
+    /// - For each config: verifies all services are stopped (or orphaned)
+    /// - Runs the global `on_cleanup` hook (if config readable)
+    /// - Deletes the config's state directory entirely
+    /// - Reports what was pruned
+    pub async fn prune_all(
+        &self,
+        force: bool,
+        dry_run: bool,
+    ) -> Result<Vec<PrunedConfigInfo>, OrchestratorError> {
+        let configs_dir = crate::global_state_dir().join("configs");
+
+        if !configs_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut results = Vec::new();
+
+        // Scan all config hash directories
+        let entries = std::fs::read_dir(&configs_dir)
+            .map_err(|e| OrchestratorError::Io(e.to_string()))?;
+
+        for entry in entries.flatten() {
+            let hash = entry.file_name().to_string_lossy().to_string();
+            let state_dir = entry.path();
+
+            if !state_dir.is_dir() {
+                continue;
+            }
+
+            // Try to read stored config to get original path
+            let config_file = state_dir.join("config.yaml");
+            let (original_path, is_orphaned) = self.resolve_original_path(&config_file);
+
+            // Check if safe to prune
+            let can_prune = force || is_orphaned || self.registry.can_prune_config(&hash).await;
+
+            if !can_prune {
+                results.push(PrunedConfigInfo {
+                    config_path: original_path.clone(),
+                    config_hash: hash,
+                    bytes_freed: 0,
+                    status: "skipped (running)".to_string(),
+                });
+                continue;
+            }
+
+            let size = dir_size(&state_dir);
+
+            if dry_run {
+                results.push(PrunedConfigInfo {
+                    config_path: original_path,
+                    config_hash: hash,
+                    bytes_freed: size,
+                    status: if is_orphaned {
+                        "would_prune (orphaned)".to_string()
+                    } else {
+                        "would_prune".to_string()
+                    },
+                });
+                continue;
+            }
+
+            // Run cleanup hook if config is readable (not orphaned)
+            if !is_orphaned {
+                self.run_cleanup_hook_for_prune(&config_file).await;
+            }
+
+            // Delete entire state directory
+            if let Err(e) = std::fs::remove_dir_all(&state_dir) {
+                error!("Failed to remove {}: {}", state_dir.display(), e);
+                results.push(PrunedConfigInfo {
+                    config_path: original_path,
+                    config_hash: hash,
+                    bytes_freed: 0,
+                    status: format!("failed: {}", e),
+                });
+                continue;
+            }
+
+            // Unload from registry if loaded
+            if let Ok(path) = PathBuf::from(&original_path).canonicalize() {
+                self.registry.unload(&path).await;
+            }
+
+            results.push(PrunedConfigInfo {
+                config_path: original_path,
+                config_hash: hash,
+                bytes_freed: size,
+                status: if is_orphaned {
+                    "pruned (orphaned)".to_string()
+                } else {
+                    "pruned".to_string()
+                },
+            });
+
+            info!("Pruned config state directory: {}", state_dir.display());
+        }
+
+        Ok(results)
+    }
+
+    /// Resolve original config path from stored config
+    fn resolve_original_path(&self, config_file: &Path) -> (String, bool) {
+        // The stored config.yaml is a copy - try to read it
+        // If readable, return its path; otherwise mark as orphaned
+        if config_file.exists() && KeplerConfig::load(config_file).is_ok() {
+            // Config is readable
+            return (config_file.display().to_string(), false);
+        }
+        ("unknown (orphaned)".to_string(), true)
+    }
+
+    /// Run cleanup hook before pruning
+    async fn run_cleanup_hook_for_prune(&self, config_file: &Path) {
+        if let Ok(config) = KeplerConfig::load(config_file) {
+            let config_dir = config_file.parent().unwrap_or(Path::new("."));
+            let env: HashMap<String, String> = std::env::vars().collect();
+
+            if let Err(e) = run_global_hook(
+                &config.hooks,
+                GlobalHookType::OnCleanup,
+                config_dir,
+                &env,
+                None, // No log buffer for prune
+                config.logs.as_ref(),
+            )
+            .await
+            {
+                warn!("Cleanup hook failed: {}", e);
+            }
+        }
+    }
+}
+
+/// Calculate the size of a directory recursively
+fn dir_size(path: &Path) -> u64 {
+    let mut size = 0;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                size += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            } else if path.is_dir() {
+                size += dir_size(&path);
+            }
+        }
+    }
+    size
 }

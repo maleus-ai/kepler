@@ -340,5 +340,12 @@ async fn handle_request(
                 total: Some(total),
             }))
         }
+
+        Request::Prune { force, dry_run } => {
+            match orchestrator.prune_all(force, dry_run).await {
+                Ok(results) => Response::ok_with_data(ResponseData::PrunedConfigs(results)),
+                Err(e) => Response::error(e.to_string()),
+            }
+        }
     }
 }

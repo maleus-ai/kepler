@@ -78,6 +78,11 @@ async fn run() -> Result<()> {
         return handle_ps_all(&mut client).await;
     }
 
+    // Handle prune command (doesn't require config)
+    if let Commands::Prune { force, dry_run } = &cli.command {
+        return handle_prune(&mut client, *force, *dry_run).await;
+    }
+
     // Resolve config path for service commands
     let config_path = Config::resolve_config_path(&cli.file)
         .map_err(|_| CliError::ConfigNotFound(PathBuf::from(cli.file.as_deref().unwrap_or("kepler.yaml"))))?;
@@ -114,6 +119,11 @@ async fn run() -> Result<()> {
         }
 
         Commands::Daemon { .. } => {
+            // Already handled above
+            unreachable!()
+        }
+
+        Commands::Prune { .. } => {
             // Already handled above
             unreachable!()
         }
@@ -753,5 +763,73 @@ fn print_log_entry(entry: &kepler_protocol::protocol::LogEntry, color_map: &mut 
             "{} {}{} | {}",
             timestamp_str, stream_indicator, colored_service, entry.line
         );
+    }
+}
+
+async fn handle_prune(client: &mut Client, force: bool, dry_run: bool) -> Result<()> {
+    let response = client.prune(force, dry_run).await?;
+
+    match response {
+        Response::Ok {
+            data: Some(ResponseData::PrunedConfigs(configs)),
+            ..
+        } => {
+            if configs.is_empty() {
+                println!("Nothing to prune");
+                return Ok(());
+            }
+
+            let mut total_freed: u64 = 0;
+            for info in &configs {
+                let size = format_bytes(info.bytes_freed);
+                let hash_short = if info.config_hash.len() > 8 {
+                    &info.config_hash[..8]
+                } else {
+                    &info.config_hash
+                };
+                println!("{}: {} ({}, {})", info.status, info.config_path, hash_short, size);
+                if info.status.starts_with("pruned") || info.status.starts_with("would_prune") {
+                    total_freed += info.bytes_freed;
+                }
+            }
+
+            if dry_run {
+                println!("\nWould free: {}", format_bytes(total_freed));
+            } else {
+                let pruned_count = configs.iter().filter(|c| c.status.starts_with("pruned")).count();
+                if pruned_count > 0 {
+                    println!("\nPruned {} config(s), freed {}", pruned_count, format_bytes(total_freed));
+                }
+            }
+        }
+        Response::Ok { message, .. } => {
+            if let Some(msg) = message {
+                println!("{}", msg);
+            } else {
+                println!("Nothing to prune");
+            }
+        }
+        Response::Error { message } => {
+            eprintln!("Error: {}", message);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
     }
 }

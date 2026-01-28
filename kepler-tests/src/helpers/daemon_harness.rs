@@ -9,7 +9,12 @@ use kepler_daemon::process::{spawn_service, stop_service, ProcessExitEvent, Spaw
 use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tokio::sync::mpsc;
+
+/// Mutex to synchronize environment variable setting and ConfigActor creation.
+/// This ensures that parallel tests don't interfere with each other's KEPLER_DAEMON_PATH.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Test harness for managing daemon state
 pub struct TestDaemonHarness {
@@ -25,14 +30,28 @@ pub struct TestDaemonHarness {
 impl TestDaemonHarness {
     /// Create a new test harness with the given config
     pub async fn new(config: KeplerConfig, config_dir: &Path) -> std::io::Result<Self> {
-        // Write config to file
+        // Write config to file first (outside the lock)
         let config_path = config_dir.join("kepler.yaml");
         let config_yaml = serde_yaml::to_string(&config)
             .map_err(std::io::Error::other)?;
         std::fs::write(&config_path, config_yaml)?;
 
-        let (handle, actor) = ConfigActor::create(config_path.clone())
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        // Lock to ensure atomic env var setting + ConfigActor creation
+        // This prevents race conditions when tests run in parallel
+        let (handle, actor) = {
+            let _guard = ENV_LOCK.lock().unwrap();
+
+            // Set KEPLER_DAEMON_PATH to isolate state within this test's directory
+            // SAFETY: We hold ENV_LOCK, so no other test can interfere between
+            // setting the env var and creating the ConfigActor.
+            let kepler_state_dir = config_dir.join(".kepler");
+            unsafe {
+                std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
+            }
+
+            ConfigActor::create(config_path.clone())
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+        };
         tokio::spawn(actor.run());
 
         let (exit_tx, exit_rx) = mpsc::channel(32);
@@ -57,8 +76,22 @@ impl TestDaemonHarness {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
 
-        let (handle, actor) = ConfigActor::create(config_path.clone())
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        // Lock to ensure atomic env var setting + ConfigActor creation
+        // This prevents race conditions when tests run in parallel
+        let (handle, actor) = {
+            let _guard = ENV_LOCK.lock().unwrap();
+
+            // Set KEPLER_DAEMON_PATH to isolate state within this test's directory
+            // SAFETY: We hold ENV_LOCK, so no other test can interfere between
+            // setting the env var and creating the ConfigActor.
+            let kepler_state_dir = config_dir.join(".kepler");
+            unsafe {
+                std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
+            }
+
+            ConfigActor::create(config_path.clone())
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+        };
         tokio::spawn(actor.run());
 
         let (exit_tx, exit_rx) = mpsc::channel(32);

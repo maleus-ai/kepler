@@ -164,7 +164,6 @@ async fn test_all_log_retention_events() {
             on_stop: Some(LogRetention::Retain),
             on_start: Some(LogRetention::Clear),
             on_restart: Some(LogRetention::Retain),
-            on_cleanup: Some(LogRetention::Clear),
             on_exit: Some(LogRetention::Retain),
         }),
     };
@@ -193,7 +192,6 @@ async fn test_all_log_retention_events() {
     assert_eq!(service_logs.get_on_stop(), Some(LogRetention::Retain));
     assert_eq!(service_logs.get_on_start(), Some(LogRetention::Clear));
     assert_eq!(service_logs.get_on_restart(), Some(LogRetention::Retain));
-    assert_eq!(service_logs.get_on_cleanup(), Some(LogRetention::Clear));
     assert_eq!(service_logs.get_on_exit(), Some(LogRetention::Retain));
 }
 
@@ -470,7 +468,6 @@ logs:
     on_stop: retain
     on_start: clear
     on_restart: retain
-    on_cleanup: clear
     on_exit: retain
 
 services:
@@ -491,7 +488,6 @@ services:
     assert_eq!(global_logs.get_on_stop(), Some(LogRetention::Retain));
     assert_eq!(global_logs.get_on_start(), Some(LogRetention::Clear));
     assert_eq!(global_logs.get_on_restart(), Some(LogRetention::Retain));
-    assert_eq!(global_logs.get_on_cleanup(), Some(LogRetention::Clear));
     assert_eq!(global_logs.get_on_exit(), Some(LogRetention::Retain));
 
     // Check service config overrides
@@ -509,7 +505,6 @@ fn test_default_log_config_is_none() {
     assert_eq!(log_config.get_on_stop(), None);
     assert_eq!(log_config.get_on_start(), None);
     assert_eq!(log_config.get_on_restart(), None);
-    assert_eq!(log_config.get_on_cleanup(), None);
     assert_eq!(log_config.get_on_exit(), None);
     assert_eq!(log_config.timestamp, None);
     assert!(log_config.retention.is_none());
@@ -628,9 +623,5 @@ fn test_new_default_values() {
 
     // on_stop defaults to clear
     let retention = resolve_log_retention(None, None, |l| l.get_on_stop(), LogRetention::Clear);
-    assert_eq!(retention, LogRetention::Clear);
-
-    // on_cleanup defaults to clear
-    let retention = resolve_log_retention(None, None, |l| l.get_on_cleanup(), LogRetention::Clear);
     assert_eq!(retention, LogRetention::Clear);
 }
