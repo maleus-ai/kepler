@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use tokio::task::JoinHandle;
 
 use crate::config::KeplerConfig;
+use crate::env::build_service_env;
 use crate::errors::DaemonError;
 use crate::logs::SharedLogBuffer;
 
@@ -58,6 +59,10 @@ pub struct ServiceState {
     pub restart_count: u32,
     /// Whether on_init hook has been run for this service
     pub initialized: bool,
+    /// Pre-computed environment variables for this service
+    pub computed_env: std::collections::HashMap<String, String>,
+    /// Pre-computed working directory for this service
+    pub working_dir: PathBuf,
 }
 
 impl Default for ServiceState {
@@ -70,6 +75,8 @@ impl Default for ServiceState {
             health_check_failures: 0,
             restart_count: 0,
             initialized: false,
+            computed_env: std::collections::HashMap::new(),
+            working_dir: PathBuf::new(),
         }
     }
 }
@@ -108,11 +115,34 @@ impl ConfigState {
         let state_dir = crate::global_state_dir().join("configs").join(&config_hash);
         let logs_dir = state_dir.join("logs");
 
-        // Initialize service states
+        // Get config directory for resolving relative paths
+        let config_dir = config_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        // Initialize service states with pre-computed environment and working directory
         let services = config
             .services
-            .keys()
-            .map(|name| (name.clone(), ServiceState::default()))
+            .iter()
+            .map(|(name, service_config)| {
+                // Compute working directory
+                let working_dir = service_config
+                    .working_dir
+                    .clone()
+                    .unwrap_or_else(|| config_dir.clone());
+
+                // Compute environment (best effort - fallback to empty on error)
+                let computed_env = build_service_env(service_config, &config_dir)
+                    .unwrap_or_default();
+
+                let state = ServiceState {
+                    computed_env,
+                    working_dir,
+                    ..Default::default()
+                };
+                (name.clone(), state)
+            })
             .collect();
 
         Self {

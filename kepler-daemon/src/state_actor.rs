@@ -26,6 +26,10 @@ pub struct ServiceContext {
     pub config_dir: PathBuf,
     pub logs: SharedLogBuffer,
     pub global_log_config: Option<LogConfig>,
+    /// Pre-computed environment variables from state
+    pub env: std::collections::HashMap<String, String>,
+    /// Pre-computed working directory from state
+    pub working_dir: PathBuf,
 }
 
 /// Result from updating health check
@@ -413,7 +417,8 @@ impl StateHandle {
         reply_rx.await.unwrap_or(0)
     }
 
-    /// Get service context - bundles service_config, config_dir, logs, and global_log_config.
+    /// Get service context - bundles service_config, config_dir, logs, global_log_config,
+    /// and pre-computed environment/working_dir from state.
     ///
     /// This method reduces the common pattern of making multiple separate calls
     /// to fetch these related pieces of data.
@@ -424,7 +429,7 @@ impl StateHandle {
     ) -> Option<ServiceContext> {
         // Fetch service config
         let service_config = self
-            .get_service_config(config_path.clone(), service_name)
+            .get_service_config(config_path.clone(), service_name.clone())
             .await?;
 
         // Fetch config directory
@@ -437,13 +442,20 @@ impl StateHandle {
         let logs = self.get_logs_buffer(config_path.clone()).await?;
 
         // Fetch global log config
-        let global_log_config = self.get_global_log_config(config_path).await;
+        let global_log_config = self.get_global_log_config(config_path.clone()).await;
+
+        // Fetch service state for cached env and working_dir
+        let service_state = self
+            .get_service_state(config_path, service_name)
+            .await?;
 
         Some(ServiceContext {
             service_config,
             config_dir,
             logs,
             global_log_config,
+            env: service_state.computed_env,
+            working_dir: service_state.working_dir,
         })
     }
 

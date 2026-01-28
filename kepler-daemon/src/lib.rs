@@ -7,8 +7,8 @@ pub mod errors;
 pub mod health;
 pub mod hooks;
 pub mod logs;
+pub mod orchestrator;
 pub mod process;
-pub mod restart_coordinator;
 pub mod state;
 pub mod state_actor;
 #[cfg(unix)]
