@@ -516,7 +516,54 @@ hooks:
 
 **Duration format:** `100ms`, `10s`, `5m`, `1h`, `1d`
 
-## Environment Variables
+## Variable Expansion
+
+Kepler supports `${VAR}` syntax for expanding environment variables in config values. However, **commands are NOT expanded** at config time—they are left for the shell to expand at runtime.
+
+### What IS expanded at config load time:
+
+| Field | Example |
+|-------|---------|
+| `working_dir` | `working_dir: ${PROJECT_ROOT}/app` |
+| `env_file` | `env_file: ${CONFIG_DIR}/.env` |
+| `user`, `group` | `user: ${SERVICE_USER}` |
+| `environment` entries | `- DATABASE_URL=postgres://${DB_HOST}:${DB_PORT}/db` |
+| `limits.memory` | `memory: ${MEM_LIMIT}` |
+| `restart.watch` patterns | `- ${SRC_DIR}/**/*.ts` |
+
+### What is NOT expanded (shell expands at runtime):
+
+| Field | Why |
+|-------|-----|
+| `command` | Shell expands `$VAR` from process environment |
+| `hooks.run` / `hooks.command` | Shell expands `$VAR` from process environment |
+| `healthcheck.test` | Shell expands `$VAR` from process environment |
+
+### Expansion context
+
+At config load time, expansion uses:
+1. System environment variables (all of them)
+2. `env_file` variables (if specified) — these **override** system vars for expansion
+
+### Passing values to commands
+
+Instead of relying on config-time expansion in commands, pass values via the `environment` array:
+
+```yaml
+services:
+  app:
+    command: ["sh", "-c", "echo Hello $NAME"]  # Shell expands $NAME at runtime
+    environment:
+      - NAME=World                             # Injected into process env
+      - DB_URL=postgres://${DB_HOST}/db        # ${DB_HOST} expanded at config time
+```
+
+This design ensures:
+- Commands work as users expect (shell expansion at runtime)
+- Clear separation between config-time expansion and runtime environment
+- Values are passed consistently through environment variables
+
+## Kepler Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
