@@ -31,6 +31,30 @@ pub struct ServiceHookParams<'a> {
     pub global_log_config: Option<&'a LogConfig>,
 }
 
+impl<'a> ServiceHookParams<'a> {
+    /// Create ServiceHookParams from service context.
+    ///
+    /// This builder method centralizes the common pattern of constructing
+    /// ServiceHookParams from a ServiceConfig and related context.
+    pub fn from_service_context(
+        service_config: &'a crate::config::ServiceConfig,
+        working_dir: &'a Path,
+        env: &'a HashMap<String, String>,
+        logs: Option<&'a SharedLogBuffer>,
+        global_log_config: Option<&'a LogConfig>,
+    ) -> Self {
+        Self {
+            working_dir,
+            env,
+            logs,
+            service_user: service_config.user.as_deref(),
+            service_group: service_config.group.as_deref(),
+            service_log_config: service_config.logs.as_ref(),
+            global_log_config,
+        }
+    }
+}
+
 /// Types of global hooks
 #[derive(Debug, Clone, Copy)]
 pub enum GlobalHookType {
@@ -48,6 +72,12 @@ impl GlobalHookType {
             GlobalHookType::OnStop => "on_stop",
             GlobalHookType::OnCleanup => "on_cleanup",
         }
+    }
+}
+
+impl std::fmt::Display for GlobalHookType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -74,6 +104,12 @@ impl ServiceHookType {
             ServiceHookType::OnHealthcheckSuccess => "on_healthcheck_success",
             ServiceHookType::OnHealthcheckFail => "on_healthcheck_fail",
         }
+    }
+}
+
+impl std::fmt::Display for ServiceHookType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 

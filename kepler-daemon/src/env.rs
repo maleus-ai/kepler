@@ -1,15 +1,23 @@
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use crate::config::{HookCommand, ServiceConfig};
 use crate::errors::{DaemonError, Result};
 
-/// Expand ${VAR} references in a string using environment variables and extra env
-pub fn expand_env(s: &str, extra_env: &HashMap<String, String>) -> String {
-    let re = Regex::new(r"\$\{([^}]+)\}").unwrap();
+/// Pre-compiled regex for environment variable expansion
+static ENV_VAR_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\$\{([^}]+)\}").unwrap()
+});
 
-    re.replace_all(s, |caps: &regex::Captures| {
+/// Expand ${VAR} references in a string using environment variables and extra env.
+///
+/// Note: This is used for runtime expansion of environment values that reference
+/// other variables (e.g., from env_file or previously set variables).
+/// Config-level environment expansion happens at config load time.
+pub fn expand_env(s: &str, extra_env: &HashMap<String, String>) -> String {
+    ENV_VAR_REGEX.replace_all(s, |caps: &regex::Captures| {
         let var_name = &caps[1];
         // First check extra_env, then system env
         extra_env
@@ -18,7 +26,7 @@ pub fn expand_env(s: &str, extra_env: &HashMap<String, String>) -> String {
             .or_else(|| std::env::var(var_name).ok())
             .unwrap_or_default()
     })
-    .to_string()
+    .into_owned()
 }
 
 /// Load environment variables from a .env file

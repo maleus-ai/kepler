@@ -527,16 +527,141 @@ impl KeplerConfig {
             }
         })?;
 
-        let config: KeplerConfig =
+        let mut config: KeplerConfig =
             serde_yaml::from_str(&contents).map_err(|e| DaemonError::ConfigParse {
                 path: path.to_path_buf(),
                 source: e,
             })?;
 
+        // Pre-compute all environment variable expansions
+        config.resolve_environment();
+
         // Validate the config
         config.validate(path)?;
 
         Ok(config)
+    }
+
+    /// Pre-compute all environment variable expansions in the config.
+    /// This expands shell-style variable references using shellexpand,
+    /// supporting ${VAR}, ${VAR:-default}, ${VAR:+value}, and ~ expansion.
+    fn resolve_environment(&mut self) {
+        // Expand global hooks
+        if let Some(ref mut hooks) = self.hooks {
+            Self::expand_global_hooks(hooks);
+        }
+
+        // Expand service configs
+        for service in self.services.values_mut() {
+            Self::expand_service_config(service);
+        }
+    }
+
+    /// Expand environment variables in a string using shell-style expansion.
+    /// Supports ${VAR}, ${VAR:-default}, ${VAR:+value}, ~ (tilde), etc.
+    fn expand_value(s: &str) -> String {
+        shellexpand::full(s)
+            .map(|expanded| expanded.into_owned())
+            .unwrap_or_else(|_| s.to_string())
+    }
+
+    /// Expand environment variables in global hooks
+    fn expand_global_hooks(hooks: &mut GlobalHooks) {
+        if let Some(ref mut hook) = hooks.on_init {
+            Self::expand_hook_command(hook);
+        }
+        if let Some(ref mut hook) = hooks.on_start {
+            Self::expand_hook_command(hook);
+        }
+        if let Some(ref mut hook) = hooks.on_stop {
+            Self::expand_hook_command(hook);
+        }
+        if let Some(ref mut hook) = hooks.on_cleanup {
+            Self::expand_hook_command(hook);
+        }
+    }
+
+    /// Expand environment variables in a hook command.
+    /// Only expands paths (working_dir, env_file).
+    /// Command/script content is NOT expanded - it's left for the shell to handle
+    /// since it may contain runtime variable references like $VAR or ${VAR}.
+    fn expand_hook_command(hook: &mut HookCommand) {
+        match hook {
+            HookCommand::Script {
+                working_dir,
+                env_file,
+                ..
+            } => {
+                if let Some(wd) = working_dir {
+                    *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy()));
+                }
+                if let Some(ef) = env_file {
+                    *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy()));
+                }
+            }
+            HookCommand::Command {
+                working_dir,
+                env_file,
+                ..
+            } => {
+                if let Some(wd) = working_dir {
+                    *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy()));
+                }
+                if let Some(ef) = env_file {
+                    *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy()));
+                }
+            }
+        }
+    }
+
+    /// Expand environment variables in a service config.
+    /// Only expands paths (working_dir, env_file).
+    /// Command arguments are NOT expanded - they're left for the shell to handle
+    /// since they may contain runtime variable references like $VAR or ${VAR}.
+    fn expand_service_config(service: &mut ServiceConfig) {
+        // Expand working_dir
+        if let Some(ref mut wd) = service.working_dir {
+            *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy()));
+        }
+
+        // NOTE: Do NOT expand service.environment values here.
+        // Those are expanded at runtime in build_service_env() because they may
+        // reference variables from env_file or other environment entries.
+
+        // Expand env_file path
+        if let Some(ref mut ef) = service.env_file {
+            *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy()));
+        }
+
+        // Expand service hooks
+        if let Some(ref mut hooks) = service.hooks {
+            Self::expand_service_hooks(hooks);
+        }
+    }
+
+    /// Expand environment variables in service hooks
+    fn expand_service_hooks(hooks: &mut ServiceHooks) {
+        if let Some(ref mut hook) = hooks.on_init {
+            Self::expand_hook_command(hook);
+        }
+        if let Some(ref mut hook) = hooks.on_start {
+            Self::expand_hook_command(hook);
+        }
+        if let Some(ref mut hook) = hooks.on_stop {
+            Self::expand_hook_command(hook);
+        }
+        if let Some(ref mut hook) = hooks.on_restart {
+            Self::expand_hook_command(hook);
+        }
+        if let Some(ref mut hook) = hooks.on_exit {
+            Self::expand_hook_command(hook);
+        }
+        if let Some(ref mut hook) = hooks.on_healthcheck_success {
+            Self::expand_hook_command(hook);
+        }
+        if let Some(ref mut hook) = hooks.on_healthcheck_fail {
+            Self::expand_hook_command(hook);
+        }
     }
 
     /// Validate the configuration

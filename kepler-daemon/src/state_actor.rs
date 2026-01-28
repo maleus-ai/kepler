@@ -17,6 +17,17 @@ pub enum TaskHandleType {
     FileWatcher,
 }
 
+/// Context for a service that bundles commonly fetched together data.
+/// This reduces the pattern of making multiple separate calls for
+/// service_config, config_dir, logs, and global_log_config.
+#[derive(Clone)]
+pub struct ServiceContext {
+    pub service_config: ServiceConfig,
+    pub config_dir: PathBuf,
+    pub logs: SharedLogBuffer,
+    pub global_log_config: Option<LogConfig>,
+}
+
 /// Result from updating health check
 pub struct HealthCheckUpdate {
     pub previous_status: ServiceStatus,
@@ -400,6 +411,40 @@ impl StateHandle {
             .send(StateCommand::GetUptimeSecs { reply: reply_tx })
             .await;
         reply_rx.await.unwrap_or(0)
+    }
+
+    /// Get service context - bundles service_config, config_dir, logs, and global_log_config.
+    ///
+    /// This method reduces the common pattern of making multiple separate calls
+    /// to fetch these related pieces of data.
+    pub async fn get_service_context(
+        &self,
+        config_path: PathBuf,
+        service_name: String,
+    ) -> Option<ServiceContext> {
+        // Fetch service config
+        let service_config = self
+            .get_service_config(config_path.clone(), service_name)
+            .await?;
+
+        // Fetch config directory
+        let config_dir = self
+            .get_config_dir(config_path.clone())
+            .await
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        // Fetch logs buffer
+        let logs = self.get_logs_buffer(config_path.clone()).await?;
+
+        // Fetch global log config
+        let global_log_config = self.get_global_log_config(config_path).await;
+
+        Some(ServiceContext {
+            service_config,
+            config_dir,
+            logs,
+            global_log_config,
+        })
     }
 
     // === Mutation Methods ===

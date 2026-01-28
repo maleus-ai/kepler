@@ -41,6 +41,12 @@ impl ServiceStatus {
     }
 }
 
+impl std::fmt::Display for ServiceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// State of a single service
 #[derive(Clone)]
 pub struct ServiceState {

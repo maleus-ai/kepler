@@ -111,7 +111,7 @@ async fn health_check_loop(
 
 /// Run hook when health status changes
 async fn run_status_change_hook(
-    config_path: &PathBuf,
+    config_path: &std::path::Path,
     service_name: &str,
     previous_status: ServiceStatus,
     new_status: ServiceStatus,
@@ -134,30 +134,23 @@ async fn run_status_change_hook(
     };
 
     if let Some(hook_type) = hook_type {
-        // Get service config
-        let service_config = match state
-            .get_service_config(config_path.clone(), service_name.to_string())
+        // Get service context (bundles service_config, config_dir, logs, global_log_config)
+        let ctx = match state
+            .get_service_context(config_path.to_path_buf(), service_name.to_string())
             .await
         {
-            Some(sc) => sc,
+            Some(ctx) => ctx,
             None => return,
         };
 
-        let config_dir = state
-            .get_config_dir(config_path.clone())
-            .await
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let logs = state.get_logs_buffer(config_path.clone()).await;
-        let global_log_config = state.get_global_log_config(config_path.clone()).await;
-
-        let working_dir = service_config
+        let working_dir = ctx
+            .service_config
             .working_dir
             .clone()
-            .unwrap_or_else(|| config_dir.clone());
+            .unwrap_or_else(|| ctx.config_dir.clone());
 
         // Build environment for hook
-        let env = match build_service_env(&service_config, &config_dir) {
+        let env = match build_service_env(&ctx.service_config, &ctx.config_dir) {
             Ok(e) => e,
             Err(e) => {
                 error!(
@@ -169,18 +162,16 @@ async fn run_status_change_hook(
             }
         };
 
-        let hook_params = ServiceHookParams {
-            working_dir: &working_dir,
-            env: &env,
-            logs: logs.as_ref(),
-            service_user: service_config.user.as_deref(),
-            service_group: service_config.group.as_deref(),
-            service_log_config: service_config.logs.as_ref(),
-            global_log_config: global_log_config.as_ref(),
-        };
+        let hook_params = ServiceHookParams::from_service_context(
+            &ctx.service_config,
+            &working_dir,
+            &env,
+            Some(&ctx.logs),
+            ctx.global_log_config.as_ref(),
+        );
 
         if let Err(e) = run_service_hook(
-            &service_config.hooks,
+            &ctx.service_config.hooks,
             hook_type,
             service_name,
             &hook_params,
