@@ -1,0 +1,7 @@
+services:
+  default-service:
+    env_file: __ENV_FILE__
+    environment:
+      - DEFAULT_VAL=${UNDEFINED_VAR:-default_value_used}
+    command: ["sh", "-c", "echo $DEFAULT_VAL && sleep 30"]
+    restart: no

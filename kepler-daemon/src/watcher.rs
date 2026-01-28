@@ -1,11 +1,51 @@
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+/// Extract the base directory from a glob pattern.
+/// Returns the portion of the path before any glob characters (* ? [ {).
+fn extract_base_dir(pattern: &str) -> Option<PathBuf> {
+    // Find the first glob character
+    let glob_chars = ['*', '?', '[', '{'];
+    let first_glob_pos = pattern.chars().position(|c| glob_chars.contains(&c));
+
+    match first_glob_pos {
+        Some(pos) => {
+            // Get the portion before the glob character
+            let prefix = &pattern[..pos];
+            // Find the last path separator before the glob
+            if let Some(last_sep) = prefix.rfind('/') {
+                let base_path = &pattern[..last_sep];
+                if base_path.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(base_path))
+                }
+            } else {
+                // No separator before glob, return None (use working_dir)
+                None
+            }
+        }
+        None => {
+            // No glob characters - treat as literal path, get parent dir
+            Path::new(pattern)
+                .parent()
+                .map(|p| p.to_path_buf())
+                .filter(|p| !p.as_os_str().is_empty())
+        }
+    }
+}
+
+/// Check if a pattern is absolute (starts with /)
+fn is_absolute_pattern(pattern: &str) -> bool {
+    pattern.starts_with('/')
+}
 
 /// Message sent when a file change is detected
 #[derive(Debug, Clone)]
@@ -91,6 +131,34 @@ impl FileWatcherActor {
         builder.build().ok()
     }
 
+    /// Collect all directories that need to be watched based on patterns
+    fn collect_watch_dirs(patterns: &[String], default_dir: &Path) -> Vec<PathBuf> {
+        let mut dirs: HashSet<PathBuf> = HashSet::new();
+
+        for pattern in patterns {
+            if is_absolute_pattern(pattern) {
+                // Extract base directory from absolute pattern
+                if let Some(base_dir) = extract_base_dir(pattern) {
+                    if base_dir.exists() {
+                        dirs.insert(base_dir);
+                    } else {
+                        warn!("Watch pattern base directory does not exist: {:?}", base_dir);
+                    }
+                }
+            } else {
+                // Relative pattern - use default working directory
+                dirs.insert(default_dir.to_path_buf());
+            }
+        }
+
+        // If no directories collected, use the default
+        if dirs.is_empty() {
+            dirs.insert(default_dir.to_path_buf());
+        }
+
+        dirs.into_iter().collect()
+    }
+
     /// Run the actor event loop
     pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let Some(mut glob_set) = Self::build_glob_set(&self.patterns) else {
@@ -98,15 +166,24 @@ impl FileWatcherActor {
             return Ok(());
         };
 
+        // Collect all directories to watch
+        let watch_dirs = Self::collect_watch_dirs(&self.patterns, &self.working_dir);
+
         info!(
-            "Starting file watcher for {} in {:?} with patterns: {:?}",
-            self.service_name, self.working_dir, self.patterns
+            "Starting file watcher for {} with patterns: {:?}, watching dirs: {:?}",
+            self.service_name, self.patterns, watch_dirs
         );
 
         // Create debounced watcher using std channel
         let (watcher_tx, watcher_rx) = std_mpsc::channel();
         let mut debouncer = new_debouncer(Duration::from_millis(500), watcher_tx)?;
-        debouncer.watcher().watch(&self.working_dir, RecursiveMode::Recursive)?;
+
+        // Watch all collected directories
+        for dir in &watch_dirs {
+            if let Err(e) = debouncer.watcher().watch(dir, RecursiveMode::Recursive) {
+                warn!("Failed to watch directory {:?}: {}", dir, e);
+            }
+        }
 
         // Create a channel for receiving file events in async context
         let (async_event_tx, mut async_event_rx) = mpsc::channel::<Vec<notify_debouncer_mini::DebouncedEvent>>(32);
@@ -193,14 +270,25 @@ impl FileWatcherActor {
         for event in events {
             if event.kind == DebouncedEventKind::Any {
                 let path = &event.path;
-                // Get path relative to working_dir
+                let path_str = path.to_string_lossy();
+
+                // Check if the full absolute path matches any pattern
+                if glob_set.is_match(path.as_os_str()) || glob_set.is_match(&*path_str) {
+                    debug!(
+                        "File change detected for {} (absolute match): {:?}",
+                        self.service_name, path
+                    );
+                    return true;
+                }
+
+                // Also check relative to working_dir for relative patterns
                 if let Ok(relative) = path.strip_prefix(&self.working_dir) {
                     let relative_str = relative.to_string_lossy();
                     if glob_set.is_match(relative.as_os_str())
                         || glob_set.is_match(&*relative_str)
                     {
                         debug!(
-                            "File change detected for {}: {:?}",
+                            "File change detected for {} (relative match): {:?}",
                             self.service_name, path
                         );
                         return true;

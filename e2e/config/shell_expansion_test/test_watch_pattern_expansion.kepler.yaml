@@ -1,0 +1,8 @@
+services:
+  watch-service:
+    env_file: __ENV_FILE__
+    command: ["sh", "-c", "echo WATCH_SERVICE_START && sleep 30"]
+    restart:
+      policy: always
+      watch:
+        - "${SRC_DIR}/**/*.txt"

@@ -1,0 +1,9 @@
+services:
+  lua-watch-service:
+    env_file: __ENV_FILE__
+    command: ["sh", "-c", "echo LUA_WATCH_START && sleep 30"]
+    restart:
+      policy: always
+      watch: !lua |
+        local dir = env.WATCH_DIR or "/tmp"
+        return {dir .. "/**/*.txt"}

@@ -1,0 +1,13 @@
+lua: |
+  global.load_order = {}
+  table.insert(global.load_order, "lua_block")
+
+lua_import:
+  - __LUA_FILE__
+
+services:
+  import-order-service:
+    environment: !lua |
+      return {"LOAD_ORDER=" .. table.concat(global.load_order, ",")}
+    command: ["sh", "-c", "echo LOAD_ORDER=$LOAD_ORDER && sleep 30"]
+    restart: no

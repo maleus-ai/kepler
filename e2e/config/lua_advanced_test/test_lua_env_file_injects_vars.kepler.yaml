@@ -1,0 +1,9 @@
+services:
+  inject-service:
+    env_file: __ENV_FILE__
+    environment: !lua |
+      -- INJECTED_VAR should be available from env_file
+      local val = env.INJECTED_VAR or "NOT_FOUND"
+      return {"FROM_LUA=" .. val}
+    command: ["sh", "-c", "echo FROM_LUA=$FROM_LUA && sleep 30"]
+    restart: no

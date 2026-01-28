@@ -1,0 +1,9 @@
+services:
+  hook-context-service:
+    command: ["sh", "-c", "echo HOOK_CONTEXT_RUNNING && sleep 30"]
+    hooks:
+      on_start:
+        environment: !lua |
+          return {"SERVICE_NAME=" .. (service or "nil")}
+        run: "echo SERVICE=$SERVICE_NAME >> __MARKER_FILE__"
+    restart: no

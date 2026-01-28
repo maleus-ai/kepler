@@ -1,0 +1,9 @@
+lua: |
+  global.shared = "shared_data"
+
+services:
+  global-sharing-service:
+    environment: !lua |
+      return {"SHARED_VALUE=" .. global.shared}
+    command: ["sh", "-c", "echo SHARED_VALUE=$SHARED_VALUE && sleep 30"]
+    restart: no

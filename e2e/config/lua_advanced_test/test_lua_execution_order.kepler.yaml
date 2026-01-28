@@ -1,0 +1,14 @@
+lua: |
+  global.order = {}
+  table.insert(global.order, "lua_block")
+
+services:
+  order-service:
+    env_file: !lua |
+      table.insert(global.order, "env_file")
+      return "__ENV_FILE_PATH__"
+    environment: !lua |
+      table.insert(global.order, "environment")
+      return {"ORDER=" .. table.concat(global.order, ",")}
+    command: ["sh", "-c", "echo ORDER=$ORDER && sleep 30"]
+    restart: no

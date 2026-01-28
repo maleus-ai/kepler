@@ -601,6 +601,28 @@ impl E2eHarness {
         Ok(config_path)
     }
 
+    /// Copy a supporting file from the source config directory to the test's config directory.
+    /// This is useful for lua_import files that need to be alongside the config.
+    ///
+    /// # Arguments
+    /// * `test_module` - The test module name (e.g., "lua_advanced_test")
+    /// * `file_name` - The file name to copy (e.g., "order_tracker.lua")
+    pub fn copy_supporting_file(&self, test_module: &str, file_name: &str) -> E2eResult<PathBuf> {
+        let source_file = get_config_dir().join(test_module).join(file_name);
+
+        if !source_file.exists() {
+            return Err(E2eError::ConfigNotFound(source_file));
+        }
+
+        let config_dir = self.temp_dir.path().join("test_configs");
+        std::fs::create_dir_all(&config_dir)?;
+
+        let dest_path = config_dir.join(file_name);
+        std::fs::copy(&source_file, &dest_path)?;
+
+        Ok(dest_path)
+    }
+
     /// Load a config from the e2e/config directory and copy it to the test's temp directory.
     ///
     /// # Arguments

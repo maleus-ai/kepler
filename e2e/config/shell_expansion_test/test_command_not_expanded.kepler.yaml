@@ -1,0 +1,5 @@
+services:
+  cmd-service:
+    env_file: __ENV_FILE__
+    command: ["sh", "-c", "echo $RUNTIME_VAR && sleep 30"]
+    restart: no

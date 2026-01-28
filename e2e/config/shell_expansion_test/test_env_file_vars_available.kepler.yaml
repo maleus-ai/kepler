@@ -1,0 +1,7 @@
+services:
+  vars-service:
+    env_file: __ENV_FILE__
+    environment:
+      - FULL_PATH=${BASE_PATH}/${SUB_PATH}
+    command: ["sh", "-c", "echo $FULL_PATH && sleep 30"]
+    restart: no
