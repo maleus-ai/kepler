@@ -1,0 +1,5 @@
+services:
+  test:
+    command: !lua |
+      print('Hello from lua')
+      return {"echo", "Hello from kepler"}

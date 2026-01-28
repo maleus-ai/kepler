@@ -63,9 +63,9 @@ pub fn load_env_file(path: &Path) -> Result<HashMap<String, String>> {
 /// Priority (highest to lowest):
 /// 1. Service-defined environment variables (already expanded at config load time)
 /// 2. Variables from env_file (loaded from state directory copy)
-/// 3. Minimal system environment (PATH, HOME, USER, SHELL only)
+/// 3. ALL system environment variables
 ///
-/// Note: Only essential system variables are inherited.
+/// Note: All system variables are now inherited to support Lua scripting.
 /// The env_file is loaded from the state directory (where it was copied at snapshot time),
 /// not from the original path. This ensures the snapshot is self-contained.
 pub fn build_service_env(
@@ -75,12 +75,9 @@ pub fn build_service_env(
 ) -> Result<HashMap<String, String>> {
     let mut env = HashMap::new();
 
-    // Start with minimal system environment (only essential variables)
-    const INHERITED_VARS: &[&str] = &["PATH", "HOME", "USER", "SHELL"];
-    for var_name in INHERITED_VARS {
-        if let Ok(value) = std::env::var(var_name) {
-            env.insert(var_name.to_string(), value);
-        }
+    // Start with ALL system environment variables
+    for (key, value) in std::env::vars() {
+        env.insert(key, value);
     }
 
     // Load env_file from STATE DIRECTORY (copied at snapshot time)

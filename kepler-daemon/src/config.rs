@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::errors::{DaemonError, Result};
+use crate::lua_eval::{EvalContext, LuaEvaluator};
 
 /// Load environment variables from an env_file.
 /// Returns an empty HashMap if the file doesn't exist or can't be parsed.
@@ -35,6 +36,14 @@ fn expand_with_context(s: &str, context: &HashMap<String, String>) -> String {
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct KeplerConfig {
+    /// Inline Lua code that runs in global scope to define functions
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lua: Option<String>,
+
+    /// External Lua files to import (paths relative to config file)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lua_import: Vec<PathBuf>,
+
     #[serde(default)]
     pub hooks: Option<GlobalHooks>,
     #[serde(default)]
@@ -547,11 +556,35 @@ impl KeplerConfig {
             }
         })?;
 
-        let mut config: KeplerConfig =
+        // Get the config file's directory for resolving relative paths
+        let config_dir = path.parent().unwrap_or(Path::new("."));
+
+        // Check if there are any !lua or !lua_file tags in the content
+        let has_lua_tags = contents.contains("!lua");
+
+        let mut config: KeplerConfig = if has_lua_tags {
+            // Parse as raw YAML Value first to handle Lua tags
+            let mut value: serde_yaml::Value =
+                serde_yaml::from_str(&contents).map_err(|e| DaemonError::ConfigParse {
+                    path: path.to_path_buf(),
+                    source: e,
+                })?;
+
+            // Process Lua scripts
+            Self::process_lua_scripts(&mut value, config_dir, path)?;
+
+            // Now deserialize the processed value
+            serde_yaml::from_value(value).map_err(|e| DaemonError::ConfigParse {
+                path: path.to_path_buf(),
+                source: e,
+            })?
+        } else {
+            // No Lua tags, parse directly
             serde_yaml::from_str(&contents).map_err(|e| DaemonError::ConfigParse {
                 path: path.to_path_buf(),
                 source: e,
-            })?;
+            })?
+        };
 
         // Pre-compute all environment variable expansions
         config.resolve_environment();
@@ -560,6 +593,445 @@ impl KeplerConfig {
         config.validate(path)?;
 
         Ok(config)
+    }
+
+    /// Process Lua scripts in the config value tree.
+    ///
+    /// This function:
+    /// 1. Extracts and loads the `lua:` block and `lua_import` files
+    /// 2. Walks the value tree to find and evaluate `!lua` and `!lua_file` tags
+    /// 3. Replaces tagged values with their Lua evaluation results
+    fn process_lua_scripts(
+        value: &mut serde_yaml::Value,
+        config_dir: &Path,
+        config_path: &Path,
+    ) -> Result<()> {
+        use serde_yaml::Value;
+
+        // Extract lua: and lua_import: from the root mapping
+        let (lua_code, lua_imports) = if let Value::Mapping(map) = &*value {
+            let lua_code = map
+                .get(&Value::String("lua".to_string()))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            let lua_imports: Vec<PathBuf> = map
+                .get(&Value::String("lua_import".to_string()))
+                .and_then(|v| v.as_sequence())
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| {
+                            let p = PathBuf::from(s);
+                            if p.is_relative() {
+                                config_dir.join(p)
+                            } else {
+                                p
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            (lua_code, lua_imports)
+        } else {
+            (None, Vec::new())
+        };
+
+        // Create Lua evaluator and load the code
+        let evaluator = LuaEvaluator::new().map_err(|e| {
+            DaemonError::LuaError {
+                path: config_path.to_path_buf(),
+                message: e.to_string(),
+            }
+        })?;
+
+        // Load lua: block
+        if let Some(ref code) = lua_code {
+            evaluator.load_inline(code).map_err(|e| {
+                DaemonError::LuaError {
+                    path: config_path.to_path_buf(),
+                    message: format!("Error in lua: block: {}", e),
+                }
+            })?;
+        }
+
+        // Load lua_import files
+        for import_path in &lua_imports {
+            evaluator.load_file(import_path).map_err(|e| {
+                DaemonError::LuaError {
+                    path: config_path.to_path_buf(),
+                    message: format!("Error loading {}: {}", import_path.display(), e),
+                }
+            })?;
+        }
+
+        // Now process the services
+        if let Value::Mapping(map) = value {
+            if let Some(Value::Mapping(services)) =
+                map.get_mut(&Value::String("services".to_string()))
+            {
+                // Collect service names first to avoid borrowing issues
+                let service_names: Vec<String> = services
+                    .keys()
+                    .filter_map(|k| k.as_str().map(String::from))
+                    .collect();
+
+                for service_name in service_names {
+                    if let Some(service_value) =
+                        services.get_mut(&Value::String(service_name.clone()))
+                    {
+                        Self::process_service_lua(
+                            service_value,
+                            &service_name,
+                            &evaluator,
+                            config_dir,
+                            config_path,
+                        )?;
+                    }
+                }
+            }
+
+            // Process global hooks
+            if let Some(hooks_value) = map.get_mut(&Value::String("hooks".to_string())) {
+                let ctx = EvalContext {
+                    env: Self::get_system_env(),
+                    service: None,
+                    hook: None,
+                };
+                Self::process_lua_tags_recursive(
+                    hooks_value,
+                    &evaluator,
+                    &ctx,
+                    config_dir,
+                    config_path,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process Lua tags within a service configuration.
+    ///
+    /// Follows the order specified in the design:
+    /// 1. Evaluate env_file with env={system_vars}
+    /// 2. Load the resulting env_file
+    /// 3. Evaluate environment with env={system_vars + env_file}
+    /// 4. Evaluate all other fields with env={system_vars + env_file + environment}
+    fn process_service_lua(
+        service_value: &mut serde_yaml::Value,
+        service_name: &str,
+        evaluator: &LuaEvaluator,
+        config_dir: &Path,
+        config_path: &Path,
+    ) -> Result<()> {
+        use serde_yaml::Value;
+
+        let service_map = match service_value {
+            Value::Mapping(map) => map,
+            _ => return Ok(()),
+        };
+
+        // Step 1: Get system environment
+        let mut env = Self::get_system_env();
+
+        // Step 2: Evaluate env_file if it's a Lua tag
+        if let Some(env_file_value) = service_map.get_mut(&Value::String("env_file".to_string())) {
+            let ctx = EvalContext {
+                env: env.clone(),
+                service: Some(service_name.to_string()),
+                hook: None,
+            };
+            Self::process_single_lua_tag(env_file_value, evaluator, &ctx, config_dir, config_path)?;
+        }
+
+        // Step 3: Load env_file content if specified
+        if let Some(Value::String(env_file_path)) =
+            service_map.get(&Value::String("env_file".to_string()))
+        {
+            let path = if PathBuf::from(env_file_path).is_relative() {
+                config_dir.join(env_file_path)
+            } else {
+                PathBuf::from(env_file_path)
+            };
+            let env_file_vars = load_env_file(&path);
+            for (k, v) in env_file_vars {
+                env.insert(k, v);
+            }
+        }
+
+        // Step 4: Evaluate environment if it's a Lua tag
+        if let Some(environment_value) =
+            service_map.get_mut(&Value::String("environment".to_string()))
+        {
+            let ctx = EvalContext {
+                env: env.clone(),
+                service: Some(service_name.to_string()),
+                hook: None,
+            };
+            Self::process_single_lua_tag(
+                environment_value,
+                evaluator,
+                &ctx,
+                config_dir,
+                config_path,
+            )?;
+        }
+
+        // Step 5: Merge environment array into env
+        if let Some(Value::Sequence(environment)) =
+            service_map.get(&Value::String("environment".to_string()))
+        {
+            for entry in environment {
+                if let Value::String(s) = entry {
+                    if let Some((key, value)) = s.split_once('=') {
+                        env.insert(key.to_string(), value.to_string());
+                    }
+                }
+            }
+        }
+
+        // Step 6: Evaluate all other Lua tags with full context
+        let ctx = EvalContext {
+            env,
+            service: Some(service_name.to_string()),
+            hook: None,
+        };
+
+        // Process all fields except env_file and environment (already done)
+        for (key, field_value) in service_map.iter_mut() {
+            let key_str = key.as_str().unwrap_or("");
+            if key_str != "env_file" && key_str != "environment" {
+                Self::process_lua_tags_recursive(
+                    field_value,
+                    evaluator,
+                    &ctx,
+                    config_dir,
+                    config_path,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process a single value that might be a Lua tag.
+    fn process_single_lua_tag(
+        value: &mut serde_yaml::Value,
+        evaluator: &LuaEvaluator,
+        ctx: &EvalContext,
+        config_dir: &Path,
+        config_path: &Path,
+    ) -> Result<()> {
+        use serde_yaml::Value;
+
+        if let Value::Tagged(tagged) = &*value {
+            let tag = tagged.tag.to_string();
+            if tag == "!lua" || tag == "!lua_file" {
+                let result = Self::evaluate_lua_tag(
+                    &tag,
+                    &tagged.value,
+                    evaluator,
+                    ctx,
+                    config_dir,
+                    config_path,
+                )?;
+                *value = result;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Recursively process Lua tags in a value tree.
+    fn process_lua_tags_recursive(
+        value: &mut serde_yaml::Value,
+        evaluator: &LuaEvaluator,
+        ctx: &EvalContext,
+        config_dir: &Path,
+        config_path: &Path,
+    ) -> Result<()> {
+        use serde_yaml::Value;
+
+        match &*value {
+            Value::Tagged(tagged) => {
+                let tag = tagged.tag.to_string();
+                if tag == "!lua" || tag == "!lua_file" {
+                    let result = Self::evaluate_lua_tag(
+                        &tag,
+                        &tagged.value,
+                        evaluator,
+                        ctx,
+                        config_dir,
+                        config_path,
+                    )?;
+                    *value = result;
+                }
+            }
+            Value::Mapping(_) => {
+                // We need to get mutable access after matching
+                if let Value::Mapping(map) = value {
+                    let keys: Vec<serde_yaml::Value> = map.keys().cloned().collect();
+                    for key in keys {
+                        if let Some(v) = map.get_mut(&key) {
+                            Self::process_lua_tags_recursive(v, evaluator, ctx, config_dir, config_path)?;
+                        }
+                    }
+                }
+            }
+            Value::Sequence(_) => {
+                if let Value::Sequence(seq) = value {
+                    for item in seq.iter_mut() {
+                        Self::process_lua_tags_recursive(item, evaluator, ctx, config_dir, config_path)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Evaluate a Lua tag and return the resulting YAML value.
+    fn evaluate_lua_tag(
+        tag: &str,
+        code_value: &serde_yaml::Value,
+        evaluator: &LuaEvaluator,
+        ctx: &EvalContext,
+        config_dir: &Path,
+        config_path: &Path,
+    ) -> Result<serde_yaml::Value> {
+        let code = if tag == "!lua_file" {
+            // For !lua_file, the value is a path to a Lua file
+            let file_path = code_value.as_str().ok_or_else(|| DaemonError::LuaError {
+                path: config_path.to_path_buf(),
+                message: "!lua_file value must be a string path".to_string(),
+            })?;
+
+            let full_path = if PathBuf::from(file_path).is_relative() {
+                config_dir.join(file_path)
+            } else {
+                PathBuf::from(file_path)
+            };
+
+            std::fs::read_to_string(&full_path).map_err(|e| DaemonError::LuaError {
+                path: config_path.to_path_buf(),
+                message: format!("Failed to read {}: {}", full_path.display(), e),
+            })?
+        } else {
+            // For !lua, the value is inline Lua code
+            code_value.as_str().ok_or_else(|| DaemonError::LuaError {
+                path: config_path.to_path_buf(),
+                message: "!lua value must be a string".to_string(),
+            })?.to_string()
+        };
+
+        // Evaluate the Lua code
+        let result: mlua::Value = evaluator.eval(&code, ctx).map_err(|e| DaemonError::LuaError {
+            path: config_path.to_path_buf(),
+            message: format!("Lua error: {}", e),
+        })?;
+
+        // Convert Lua result to YAML value
+        Self::lua_to_yaml(result, config_path)
+    }
+
+    /// Convert a Lua value to a YAML value.
+    fn lua_to_yaml(lua_value: mlua::Value, config_path: &Path) -> Result<serde_yaml::Value> {
+        use serde_yaml::Value;
+
+        match lua_value {
+            mlua::Value::Nil => Ok(Value::Null),
+            mlua::Value::Boolean(b) => Ok(Value::Bool(b)),
+            mlua::Value::Integer(i) => Ok(Value::Number(serde_yaml::Number::from(i))),
+            mlua::Value::Number(n) => {
+                // Convert float to YAML number
+                Ok(Value::Number(
+                    serde_yaml::Number::from(n as f64),
+                ))
+            }
+            mlua::Value::String(s) => {
+                let s = s.to_str().map_err(|e| DaemonError::LuaError {
+                    path: config_path.to_path_buf(),
+                    message: format!("Invalid UTF-8 string: {}", e),
+                })?;
+                Ok(Value::String(s.to_string()))
+            }
+            mlua::Value::Table(table) => {
+                // Determine if it's an array or a map
+                let mut is_array = true;
+                let mut max_index = 0i32;
+                let mut count = 0;
+
+                for pair in table.clone().pairs::<mlua::Value, mlua::Value>() {
+                    let (k, _) = pair.map_err(|e| DaemonError::LuaError {
+                        path: config_path.to_path_buf(),
+                        message: format!("Error iterating table: {}", e),
+                    })?;
+                    count += 1;
+                    match k {
+                        mlua::Value::Integer(i) if i > 0 => {
+                            max_index = max_index.max(i);
+                        }
+                        _ => {
+                            is_array = false;
+                        }
+                    }
+                }
+
+                if is_array && max_index as usize == count && count > 0 {
+                    // It's an array
+                    let mut seq = Vec::new();
+                    for i in 1..=max_index {
+                        let v: mlua::Value = table.get(i).map_err(|e| DaemonError::LuaError {
+                            path: config_path.to_path_buf(),
+                            message: format!("Error getting array element {}: {}", i, e),
+                        })?;
+                        seq.push(Self::lua_to_yaml(v, config_path)?);
+                    }
+                    Ok(Value::Sequence(seq))
+                } else {
+                    // It's a map
+                    let mut map = serde_yaml::Mapping::new();
+                    for pair in table.pairs::<mlua::Value, mlua::Value>() {
+                        let (k, v) = pair.map_err(|e| DaemonError::LuaError {
+                            path: config_path.to_path_buf(),
+                            message: format!("Error iterating table: {}", e),
+                        })?;
+
+                        let key = match k {
+                            mlua::Value::String(s) => {
+                                let s = s.to_str().map_err(|e| DaemonError::LuaError {
+                                    path: config_path.to_path_buf(),
+                                    message: format!("Invalid UTF-8 key: {}", e),
+                                })?;
+                                Value::String(s.to_string())
+                            }
+                            mlua::Value::Integer(i) => Value::Number(serde_yaml::Number::from(i)),
+                            _ => {
+                                return Err(DaemonError::LuaError {
+                                    path: config_path.to_path_buf(),
+                                    message: format!("Table key must be string or integer, got {:?}", k.type_name()),
+                                });
+                            }
+                        };
+
+                        map.insert(key, Self::lua_to_yaml(v, config_path)?);
+                    }
+                    Ok(Value::Mapping(map))
+                }
+            }
+            other => Err(DaemonError::LuaError {
+                path: config_path.to_path_buf(),
+                message: format!("Cannot convert Lua {} to YAML", other.type_name()),
+            }),
+        }
+    }
+
+    /// Get all system environment variables as a HashMap.
+    fn get_system_env() -> HashMap<String, String> {
+        std::env::vars().collect()
     }
 
     /// Pre-compute all environment variable expansions in the config.

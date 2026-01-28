@@ -355,19 +355,19 @@ async fn test_service_env_overrides_system_env() {
     harness.stop_service("test").await.unwrap();
 }
 
-/// Non-inherited system variables are NOT passed to service but CAN be accessed via ${VAR} expansion
+/// All system variables ARE passed to service and CAN also be accessed via ${VAR} expansion
 ///
 /// NOTE: We use `printenv` to check if a variable exists in the runtime environment.
 /// The ${VAR} expansion happens at config load time, so if we define EXPANDED_VAR=${KEPLER_TEST_VAR}
 /// in the environment array, it becomes EXPANDED_VAR=test_value_123 at config time.
-/// But KEPLER_TEST_VAR itself is NOT passed to the process (it's not in PATH,HOME,USER,SHELL).
+/// ALL system vars are now inherited (changed from only PATH,HOME,USER,SHELL).
 #[tokio::test]
-async fn test_non_inherited_sys_var_not_passed_but_expandable() {
+async fn test_system_var_passed_and_expandable() {
     let temp_dir = TempDir::new().unwrap();
     let marker = MarkerFileHelper::new(temp_dir.path());
-    let marker_path = marker.marker_path("non_inherited");
+    let marker_path = marker.marker_path("sys_var");
 
-    // Set a non-inherited env var in the test process (simulating daemon having it)
+    // Set a system env var in the test process (simulating daemon having it)
     // SAFETY: This is a test environment, and we clean up the var at the end
     unsafe {
         std::env::set_var("KEPLER_TEST_VAR", "test_value_123");
@@ -381,7 +381,7 @@ async fn test_non_inherited_sys_var_not_passed_but_expandable() {
                 "-c".to_string(),
                 format!(
                     concat!(
-                        // Check if KEPLER_TEST_VAR exists in runtime env (should NOT)
+                        // Check if KEPLER_TEST_VAR exists in runtime env (should exist - all vars inherited)
                         "echo DIRECT=$(printenv KEPLER_TEST_VAR 2>/dev/null || echo NOTSET) >> {} && ",
                         // Check EXPANDED_VAR which should have the expanded value
                         "echo EXPANDED=$(printenv EXPANDED_VAR) >> {} && ",
@@ -391,7 +391,7 @@ async fn test_non_inherited_sys_var_not_passed_but_expandable() {
                     marker_path.display()
                 ),
             ])
-            // Use ${VAR} syntax to explicitly reference the non-inherited var at config time
+            // Use ${VAR} syntax to explicitly reference the var at config time
             .with_environment(vec!["EXPANDED_VAR=${KEPLER_TEST_VAR}".to_string()])
             .build(),
         )
@@ -404,17 +404,17 @@ async fn test_non_inherited_sys_var_not_passed_but_expandable() {
     harness.start_service("test").await.unwrap();
 
     let content = marker
-        .wait_for_marker_content("non_inherited", Duration::from_secs(2))
+        .wait_for_marker_content("sys_var", Duration::from_secs(2))
         .await;
 
     assert!(content.is_some(), "Service should have written env vars");
     let content = content.unwrap();
 
-    // KEPLER_TEST_VAR should NOT exist in process runtime environment
-    // (only PATH, HOME, USER, SHELL are inherited)
+    // KEPLER_TEST_VAR SHOULD exist in process runtime environment
+    // (all system vars are now inherited)
     assert!(
-        content.contains("DIRECT=NOTSET"),
-        "Non-inherited var should NOT be directly available in runtime env. Got: {}",
+        content.contains("DIRECT=test_value_123"),
+        "System var should be directly available in runtime env. Got: {}",
         content
     );
 

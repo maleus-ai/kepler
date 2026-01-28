@@ -82,6 +82,9 @@ pub enum DaemonError {
 
     #[error("Failed to copy config file to secure location: {0}")]
     ConfigCopy(#[source] std::io::Error),
+
+    #[error("Lua error in config '{path}': {message}")]
+    LuaError { path: PathBuf, message: String },
 }
 
 pub type Result<T> = std::result::Result<T, DaemonError>;

@@ -9,6 +9,7 @@ pub mod errors;
 pub mod health;
 pub mod hooks;
 pub mod logs;
+pub mod lua_eval;
 pub mod orchestrator;
 pub mod persistence;
 pub mod process;

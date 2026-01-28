@@ -10,6 +10,8 @@ use std::time::Duration;
 
 /// Builder for creating test configurations
 pub struct TestConfigBuilder {
+    lua: Option<String>,
+    lua_import: Vec<PathBuf>,
     hooks: Option<GlobalHooks>,
     logs: Option<LogConfig>,
     services: HashMap<String, ServiceConfig>,
@@ -18,10 +20,22 @@ pub struct TestConfigBuilder {
 impl TestConfigBuilder {
     pub fn new() -> Self {
         Self {
+            lua: None,
+            lua_import: Vec::new(),
             hooks: None,
             logs: None,
             services: HashMap::new(),
         }
+    }
+
+    pub fn with_lua(mut self, lua: &str) -> Self {
+        self.lua = Some(lua.to_string());
+        self
+    }
+
+    pub fn with_lua_import(mut self, paths: Vec<PathBuf>) -> Self {
+        self.lua_import = paths;
+        self
     }
 
     pub fn with_global_hooks(mut self, hooks: GlobalHooks) -> Self {
@@ -41,6 +55,8 @@ impl TestConfigBuilder {
 
     pub fn build(self) -> KeplerConfig {
         KeplerConfig {
+            lua: self.lua,
+            lua_import: self.lua_import,
             hooks: self.hooks,
             logs: self.logs,
             services: self.services,
@@ -50,6 +66,8 @@ impl TestConfigBuilder {
     /// Write the config to a YAML file and return the path
     pub fn write_to_file(&self, dir: &std::path::Path) -> std::io::Result<PathBuf> {
         let config = KeplerConfig {
+            lua: self.lua.clone(),
+            lua_import: self.lua_import.clone(),
             hooks: self.hooks.clone(),
             logs: self.logs.clone(),
             services: self.services.clone(),

@@ -563,6 +563,176 @@ This design ensures:
 - Clear separation between config-time expansion and runtime environment
 - Values are passed consistently through environment variables
 
+## Lua Scripting
+
+Kepler supports Lua scripting (using Luau) for dynamic config generation via the `!lua` and `!lua_file` YAML tags. This enables conditional configs, environment transformation, and reusable functions.
+
+### Basic Usage
+
+```yaml
+lua: |
+  function get_port()
+    return env.PORT or "8080"
+  end
+
+services:
+  backend:
+    command: !lua |
+      return {"node", "server.js", "--port", get_port()}
+
+    environment: !lua |
+      local result = {"NODE_ENV=production"}
+      if env.DEBUG then
+        table.insert(result, "DEBUG=true")
+      end
+      return result
+```
+
+### Config Structure
+
+| Field | Description |
+|-------|-------------|
+| `lua:` | Inline Lua code that runs in global scope, defines functions |
+| `lua_import:` | Array of paths to external Lua files to load |
+| `!lua \|` | YAML tag for inline Lua that returns a value |
+| `!lua_file path` | YAML tag to load and execute a Lua file |
+
+### Available Context
+
+In `!lua` blocks, these variables are available:
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `env` | table | Read-only table of environment variables |
+| `service` | string | Current service name (nil in global hooks) |
+| `hook` | string | Current hook name (nil outside hooks) |
+| `global` | table | Shared mutable table for cross-block state |
+
+The `env` table includes all system environment variables, plus any loaded from `env_file`, plus any defined in `environment` (in that order of precedence).
+
+### Examples
+
+**Conditional env_file:**
+```yaml
+services:
+  api:
+    env_file: !lua |
+      if env.NODE_ENV == "production" then
+        return "prod.env"
+      end
+      return "dev.env"
+```
+
+**Environment transformation:**
+```yaml
+services:
+  backend:
+    environment: !lua |
+      local result = {}
+      for key, value in pairs(env) do
+        if string.sub(key, 1, 8) == "BACKEND_" then
+          local new_key = string.sub(key, 9)  -- Remove prefix
+          table.insert(result, new_key .. "=" .. value)
+        end
+      end
+      return result
+```
+
+**Shared state between services:**
+```yaml
+lua: |
+  global.api_port = 8080
+
+services:
+  api:
+    environment: !lua |
+      return {"PORT=" .. tostring(global.api_port)}
+
+  worker:
+    environment: !lua |
+      return {"API_URL=http://localhost:" .. tostring(global.api_port)}
+```
+
+**Using external Lua files:**
+```yaml
+lua_import:
+  - ./lua/helpers.lua
+
+services:
+  api:
+    environment: !lua |
+      return transform_env(env, {prefix = "API_"})
+```
+
+**Dynamic healthcheck:**
+```yaml
+services:
+  api:
+    healthcheck:
+      test: !lua |
+        local port = env.PORT or "8080"
+        return {"CMD-SHELL", "curl -f http://localhost:" .. port .. "/health"}
+```
+
+### Type Conversion
+
+| Lua Type | YAML/Config Type |
+|----------|------------------|
+| string | string |
+| number | number (use `tostring()` for string fields) |
+| boolean | boolean (use `tostring()` for string fields) |
+| table (array) | array |
+| table (map) | map (for most fields, use array format for `environment`) |
+| nil | null |
+
+**Note:** For `command` and `environment` arrays, return strings:
+```yaml
+# Correct
+command: !lua |
+  return {"sleep", tostring(10)}
+
+# Incorrect (will fail)
+command: !lua |
+  return {"sleep", 10}
+```
+
+### Helper Functions
+
+Functions defined in `lua:` blocks must receive `env` as a parameter if they need to access environment variables:
+
+```yaml
+lua: |
+  -- Functions capture their definition environment, not the caller's
+  -- So pass env explicitly when needed
+  function filter_env(env_table, prefix)
+    local result = {}
+    for key, value in pairs(env_table) do
+      if string.sub(key, 1, #prefix) == prefix then
+        table.insert(result, key .. "=" .. value)
+      end
+    end
+    return result
+  end
+
+services:
+  api:
+    environment: !lua |
+      return filter_env(env, "API_")  -- Pass env explicitly
+```
+
+### Error Handling
+
+Lua errors during config loading will prevent the config from loading:
+
+```
+Lua error in config '/path/to/kepler.yaml': runtime error at line 3: attempt to call nil value
+```
+
+Make sure to:
+- Return the correct type for each field
+- Use `tostring()` for numbers in string arrays
+- Handle nil values with `or` defaults: `env.PORT or "8080"`
+
 ## Kepler Environment Variables
 
 | Variable | Default | Description |
