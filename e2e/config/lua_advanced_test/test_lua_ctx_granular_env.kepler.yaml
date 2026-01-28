@@ -1,0 +1,34 @@
+services:
+  env-layers:
+    env_file: __ENV_FILE__
+    environment:
+      - ENV_VAR=from_environment
+    command: !lua |
+      -- Verify ctx.sys_env has PATH but not FILE_VAR or ENV_VAR
+      local sys_has_path = ctx.sys_env.PATH ~= nil
+      local sys_no_file = ctx.env_file.FILE_VAR == nil  -- sys_env should not have FILE_VAR
+      local sys_no_env = ctx.sys_env.ENV_VAR == nil
+
+      -- Verify ctx.env_file has FILE_VAR but not ENV_VAR
+      local file_has_var = ctx.env_file.FILE_VAR == "from_file"
+      local file_no_env = ctx.env_file.ENV_VAR == nil
+
+      -- Verify ctx.env has all three
+      local env_has_path = ctx.env.PATH ~= nil
+      local env_has_file = ctx.env.FILE_VAR == "from_file"
+      local env_has_env = ctx.env.ENV_VAR == "from_environment"
+
+      -- Build result
+      local checks = {}
+      table.insert(checks, "SYS_HAS_PATH=" .. tostring(sys_has_path))
+      table.insert(checks, "SYS_NO_ENV=" .. tostring(sys_no_env))
+      table.insert(checks, "FILE_HAS_VAR=" .. tostring(file_has_var))
+      table.insert(checks, "FILE_NO_ENV=" .. tostring(file_no_env))
+      table.insert(checks, "ENV_HAS_PATH=" .. tostring(env_has_path))
+      table.insert(checks, "ENV_HAS_FILE=" .. tostring(env_has_file))
+      table.insert(checks, "ENV_HAS_ENV=" .. tostring(env_has_env))
+
+      local all_pass = sys_has_path and sys_no_env and file_has_var and file_no_env and env_has_path and env_has_file and env_has_env
+
+      return {"sh", "-c", "echo " .. table.concat(checks, " ") .. " ALL_PASS=" .. tostring(all_pass) .. " && sleep 30"}
+    restart: no

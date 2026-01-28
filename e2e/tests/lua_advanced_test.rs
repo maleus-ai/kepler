@@ -358,7 +358,7 @@ async fn test_lua_multiple_services_isolated_context() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that env table is read-only in !lua blocks
+/// Test that ctx.env table is read-only in !lua blocks
 #[tokio::test]
 async fn test_lua_env_readonly() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -366,14 +366,229 @@ async fn test_lua_env_readonly() -> E2eResult<()> {
 
     harness.start_daemon().await?;
 
-    // This should fail to start because the Lua code tries to modify env
+    // This should fail to start because the Lua code tries to modify ctx.env
     let output = harness.start_services(&config_path).await?;
 
     // The service should fail to load due to Lua error
     assert!(
         !output.success() || output.stderr_contains("read-only") || output.stderr_contains("error"),
-        "Modifying env should fail. exit: {}, stderr: {}",
+        "Modifying ctx.env should fail. exit: {}, stderr: {}",
         output.exit_code, output.stderr
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Test that ctx table is read-only in !lua blocks
+#[tokio::test]
+async fn test_lua_ctx_readonly() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_lua_ctx_readonly")?;
+
+    harness.start_daemon().await?;
+
+    // This should fail to start because the Lua code tries to modify ctx
+    let output = harness.start_services(&config_path).await?;
+
+    // The service should fail to load due to Lua error
+    assert!(
+        !output.success() || output.stderr_contains("read-only") || output.stderr_contains("error"),
+        "Modifying ctx should fail. exit: {}, stderr: {}",
+        output.exit_code, output.stderr
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Test granular ctx.sys_env, ctx.env_file, and ctx.env separation
+#[tokio::test]
+async fn test_lua_ctx_granular_env() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    // Create env file with a variable
+    let env_file = harness.create_temp_file("granular.env", "FILE_VAR=from_file")?;
+
+    let config_path = harness.load_config_with_replacements(
+        TEST_MODULE,
+        "test_lua_ctx_granular_env",
+        &[("__ENV_FILE__", env_file.to_str().unwrap())],
+    )?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    harness
+        .wait_for_service_status(&config_path, "env-layers", "running", Duration::from_secs(10))
+        .await?;
+
+    // Check the output verifies all env layer checks passed
+    let logs = harness
+        .wait_for_log_content(&config_path, "ALL_PASS=", Duration::from_secs(5))
+        .await?;
+
+    assert!(
+        logs.stdout_contains("ALL_PASS=true"),
+        "All granular env checks should pass. stdout: {}",
+        logs.stdout
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Test execution order of all Lua-evaluated fields
+#[tokio::test]
+async fn test_lua_execution_order_all_fields() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    // Create a simple env file
+    let env_file = harness.create_temp_file("order_all.env", "DUMMY=1")?;
+
+    let config_path = harness.load_config_with_replacements(
+        TEST_MODULE,
+        "test_lua_execution_order_all_fields",
+        &[("__ENV_FILE_PATH__", env_file.to_str().unwrap())],
+    )?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    // Wait for service - it has a healthcheck so it may transition quickly to "healthy"
+    harness
+        .wait_for_service_status_any(&config_path, "order-test", &["running", "healthy"], Duration::from_secs(10))
+        .await?;
+
+    // Check the execution order
+    let logs = harness
+        .wait_for_log_content(&config_path, "FINAL_ORDER=", Duration::from_secs(5))
+        .await?;
+
+    // env_file and environment should be evaluated before other fields
+    assert!(
+        logs.stdout_contains("ORDER=env_file,environment"),
+        "env_file and environment should be evaluated before command captures ORDER. stdout: {}",
+        logs.stdout
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Test that lua: block is loaded before lua_import (regardless of YAML order)
+#[tokio::test]
+async fn test_lua_import_after_block() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    // Copy the lua import file
+    let lua_file = harness.copy_supporting_file(TEST_MODULE, "import_order_tracker.lua")?;
+
+    let config_path = harness.load_config_with_replacements(
+        TEST_MODULE,
+        "test_lua_import_before_block",
+        &[("__LUA_FILE__", lua_file.to_str().unwrap())],
+    )?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    harness
+        .wait_for_service_status(&config_path, "import-first-service", "running", Duration::from_secs(10))
+        .await?;
+
+    // lua: block should run first, then lua_import
+    let logs = harness
+        .wait_for_log_content(&config_path, "LOAD_ORDER=", Duration::from_secs(5))
+        .await?;
+
+    assert!(
+        logs.stdout_contains("LOAD_ORDER=lua_block,lua_import"),
+        "lua: block should execute before lua_import. stdout: {}",
+        logs.stdout
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Test complex integration with multiple services, hooks, and dependencies
+#[tokio::test]
+async fn test_lua_complex_integration() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    // Create env file for api service
+    let api_env_file = harness.create_temp_file("api.env", "DATABASE_URL=postgres://localhost/test\nWATCH_DIR=/src")?;
+    let marker_file = harness.create_temp_file("complex_marker.txt", "")?;
+
+    let config_path = harness.load_config_with_replacements(
+        TEST_MODULE,
+        "test_lua_complex_integration",
+        &[
+            ("__API_ENV_FILE__", api_env_file.to_str().unwrap()),
+            ("__MARKER_FILE__", marker_file.to_str().unwrap()),
+        ],
+    )?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    // Wait for both services
+    harness
+        .wait_for_service_status(&config_path, "api", "running", Duration::from_secs(10))
+        .await?;
+    harness
+        .wait_for_service_status(&config_path, "worker", "running", Duration::from_secs(10))
+        .await?;
+
+    // Give hooks time to run
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Check api service output
+    let logs = harness.get_logs(&config_path, None, 100).await?;
+
+    // API should have port 8000 (first call to next_port)
+    assert!(
+        logs.stdout_contains("Starting api on port 8000"),
+        "API should have port 8000. stdout: {}",
+        logs.stdout
+    );
+
+    // API should have the database URL from env_file
+    assert!(
+        logs.stdout_contains("DB=postgres://localhost/test"),
+        "API should have DATABASE_URL from env_file. stdout: {}",
+        logs.stdout
+    );
+
+    // Worker should have port 8001 (second call to next_port)
+    assert!(
+        logs.stdout_contains("Worker worker on port 8001"),
+        "Worker should have port 8001. stdout: {}",
+        logs.stdout
+    );
+
+    // Worker should see api in registered services (api registers first due to depends_on ordering)
+    assert!(
+        logs.stdout_contains("registered=api") || logs.stdout_contains("registered=api,worker"),
+        "Worker should see registered services. stdout: {}",
+        logs.stdout
+    );
+
+    // Check marker file for hook execution
+    let marker_content = std::fs::read_to_string(&marker_file)?;
+    assert!(
+        marker_content.contains("Hook on_start for api"),
+        "API on_start hook should have run with correct context. Marker: {}",
+        marker_content
     );
 
     harness.stop_daemon().await?;

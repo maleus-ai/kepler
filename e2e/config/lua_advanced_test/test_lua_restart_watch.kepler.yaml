@@ -5,5 +5,5 @@ services:
     restart:
       policy: always
       watch: !lua |
-        local dir = env.WATCH_DIR or "/tmp"
+        local dir = ctx.env.WATCH_DIR or "/tmp"
         return {dir .. "/**/*.txt"}

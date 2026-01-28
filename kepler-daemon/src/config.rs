@@ -694,15 +694,11 @@ impl KeplerConfig {
 
             // Process global hooks
             if let Some(hooks_value) = map.get_mut(&Value::String("hooks".to_string())) {
-                let ctx = EvalContext {
-                    env: Self::get_system_env(),
-                    service: None,
-                    hook: None,
-                };
-                Self::process_lua_tags_recursive(
+                let sys_env = Self::get_system_env();
+                Self::process_global_hooks_lua(
                     hooks_value,
                     &evaluator,
-                    &ctx,
+                    &sys_env,
                     config_dir,
                     config_path,
                 )?;
@@ -715,10 +711,10 @@ impl KeplerConfig {
     /// Process Lua tags within a service configuration.
     ///
     /// Follows the order specified in the design:
-    /// 1. Evaluate env_file with env={system_vars}
-    /// 2. Load the resulting env_file
-    /// 3. Evaluate environment with env={system_vars + env_file}
-    /// 4. Evaluate all other fields with env={system_vars + env_file + environment}
+    /// 1. Evaluate env_file with ctx.sys_env only
+    /// 2. Load the resulting env_file into ctx.env_file
+    /// 3. Evaluate environment with ctx.sys_env + ctx.env_file available
+    /// 4. Evaluate all other fields with full ctx.env
     fn process_service_lua(
         service_value: &mut serde_yaml::Value,
         service_name: &str,
@@ -733,21 +729,23 @@ impl KeplerConfig {
             _ => return Ok(()),
         };
 
-        // Step 1: Get system environment
-        let mut env = Self::get_system_env();
+        // Step 1: Get system environment (ctx.sys_env)
+        let sys_env = Self::get_system_env();
 
-        // Step 2: Evaluate env_file if it's a Lua tag
+        // Step 2: Evaluate env_file if it's a Lua tag (only sys_env available)
         if let Some(env_file_value) = service_map.get_mut(&Value::String("env_file".to_string())) {
             let ctx = EvalContext {
-                env: env.clone(),
-                service: Some(service_name.to_string()),
-                hook: None,
+                sys_env: sys_env.clone(),
+                env_file: HashMap::new(),
+                env: sys_env.clone(), // At this point, only sys_env is available
+                service_name: Some(service_name.to_string()),
+                hook_name: None,
             };
             Self::process_single_lua_tag(env_file_value, evaluator, &ctx, config_dir, config_path)?;
         }
 
-        // Step 3: Load env_file content if specified
-        if let Some(Value::String(env_file_path)) =
+        // Step 3: Load env_file content if specified (into ctx.env_file)
+        let env_file_vars = if let Some(Value::String(env_file_path)) =
             service_map.get(&Value::String("env_file".to_string()))
         {
             let path = if PathBuf::from(env_file_path).is_relative() {
@@ -755,20 +753,27 @@ impl KeplerConfig {
             } else {
                 PathBuf::from(env_file_path)
             };
-            let env_file_vars = load_env_file(&path);
-            for (k, v) in env_file_vars {
-                env.insert(k, v);
-            }
+            load_env_file(&path)
+        } else {
+            HashMap::new()
+        };
+
+        // Build intermediate env (sys_env + env_file) for environment evaluation
+        let mut env_for_environment = sys_env.clone();
+        for (k, v) in &env_file_vars {
+            env_for_environment.insert(k.clone(), v.clone());
         }
 
-        // Step 4: Evaluate environment if it's a Lua tag
+        // Step 4: Evaluate environment if it's a Lua tag (sys_env + env_file available)
         if let Some(environment_value) =
             service_map.get_mut(&Value::String("environment".to_string()))
         {
             let ctx = EvalContext {
-                env: env.clone(),
-                service: Some(service_name.to_string()),
-                hook: None,
+                sys_env: sys_env.clone(),
+                env_file: env_file_vars.clone(),
+                env: env_for_environment.clone(),
+                service_name: Some(service_name.to_string()),
+                hook_name: None,
             };
             Self::process_single_lua_tag(
                 environment_value,
@@ -779,14 +784,15 @@ impl KeplerConfig {
             )?;
         }
 
-        // Step 5: Merge environment array into env
+        // Step 5: Merge environment array into full env (sys_env + env_file + environment)
+        let mut full_env = env_for_environment;
         if let Some(Value::Sequence(environment)) =
             service_map.get(&Value::String("environment".to_string()))
         {
             for entry in environment {
                 if let Value::String(s) = entry {
                     if let Some((key, value)) = s.split_once('=') {
-                        env.insert(key.to_string(), value.to_string());
+                        full_env.insert(key.to_string(), value.to_string());
                     }
                 }
             }
@@ -794,17 +800,118 @@ impl KeplerConfig {
 
         // Step 6: Evaluate all other Lua tags with full context
         let ctx = EvalContext {
-            env,
-            service: Some(service_name.to_string()),
-            hook: None,
+            sys_env,
+            env_file: env_file_vars,
+            env: full_env,
+            service_name: Some(service_name.to_string()),
+            hook_name: None,
         };
 
         // Process all fields except env_file and environment (already done)
         for (key, field_value) in service_map.iter_mut() {
             let key_str = key.as_str().unwrap_or("");
             if key_str != "env_file" && key_str != "environment" {
+                // Special handling for hooks - pass hook_name context
+                if key_str == "hooks" {
+                    Self::process_service_hooks_lua(
+                        field_value,
+                        service_name,
+                        evaluator,
+                        &ctx,
+                        config_dir,
+                        config_path,
+                    )?;
+                } else {
+                    Self::process_lua_tags_recursive(
+                        field_value,
+                        evaluator,
+                        &ctx,
+                        config_dir,
+                        config_path,
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process Lua tags in service hooks with proper hook_name context.
+    fn process_service_hooks_lua(
+        hooks_value: &mut serde_yaml::Value,
+        service_name: &str,
+        evaluator: &LuaEvaluator,
+        base_ctx: &EvalContext,
+        config_dir: &Path,
+        config_path: &Path,
+    ) -> Result<()> {
+        use serde_yaml::Value;
+
+        let hooks_map = match hooks_value {
+            Value::Mapping(map) => map,
+            _ => return Ok(()),
+        };
+
+        // Process each hook type with its name in the context
+        let hook_names: Vec<String> = hooks_map
+            .keys()
+            .filter_map(|k| k.as_str().map(String::from))
+            .collect();
+
+        for hook_name in hook_names {
+            if let Some(hook_value) = hooks_map.get_mut(&Value::String(hook_name.clone())) {
+                let ctx = EvalContext {
+                    sys_env: base_ctx.sys_env.clone(),
+                    env_file: base_ctx.env_file.clone(),
+                    env: base_ctx.env.clone(),
+                    service_name: Some(service_name.to_string()),
+                    hook_name: Some(hook_name),
+                };
                 Self::process_lua_tags_recursive(
-                    field_value,
+                    hook_value,
+                    evaluator,
+                    &ctx,
+                    config_dir,
+                    config_path,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process Lua tags in global hooks with proper hook_name context.
+    fn process_global_hooks_lua(
+        hooks_value: &mut serde_yaml::Value,
+        evaluator: &LuaEvaluator,
+        sys_env: &HashMap<String, String>,
+        config_dir: &Path,
+        config_path: &Path,
+    ) -> Result<()> {
+        use serde_yaml::Value;
+
+        let hooks_map = match hooks_value {
+            Value::Mapping(map) => map,
+            _ => return Ok(()),
+        };
+
+        // Process each hook type with its name in the context
+        let hook_names: Vec<String> = hooks_map
+            .keys()
+            .filter_map(|k| k.as_str().map(String::from))
+            .collect();
+
+        for hook_name in hook_names {
+            if let Some(hook_value) = hooks_map.get_mut(&Value::String(hook_name.clone())) {
+                let ctx = EvalContext {
+                    sys_env: sys_env.clone(),
+                    env_file: HashMap::new(),
+                    env: sys_env.clone(),
+                    service_name: None, // Global hooks have no service
+                    hook_name: Some(hook_name),
+                };
+                Self::process_lua_tags_recursive(
+                    hook_value,
                     evaluator,
                     &ctx,
                     config_dir,
@@ -980,8 +1087,8 @@ impl KeplerConfig {
                     }
                 }
 
-                if is_array && max_index as usize == count && count > 0 {
-                    // It's an array
+                if count == 0 || (is_array && max_index as usize == count) {
+                    // It's an array (or empty table treated as empty array)
                     let mut seq = Vec::new();
                     for i in 1..=max_index {
                         let v: mlua::Value = table.get(i).map_err(|e| DaemonError::LuaError {

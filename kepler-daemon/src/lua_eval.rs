@@ -10,12 +10,16 @@ use std::path::Path;
 /// Context passed to each Lua evaluation.
 #[derive(Debug, Clone, Default)]
 pub struct EvalContext {
-    /// Environment variables available as `env` table in Lua.
+    /// System environment variables (from std::env::vars())
+    pub sys_env: HashMap<String, String>,
+    /// Variables loaded from env_file (empty if no env_file)
+    pub env_file: HashMap<String, String>,
+    /// Full accumulated environment (sys_env + env_file + environment)
     pub env: HashMap<String, String>,
-    /// Current service name (available as `service` variable).
-    pub service: Option<String>,
-    /// Current hook name (available as `hook` variable).
-    pub hook: Option<String>,
+    /// Current service name (None if global context)
+    pub service_name: Option<String>,
+    /// Current hook name (None if not in a hook)
+    pub hook_name: Option<String>,
 }
 
 /// Evaluator for Lua scripts in config files.
@@ -90,21 +94,39 @@ impl LuaEvaluator {
     fn build_env_table(&self, ctx: &EvalContext) -> LuaResult<Table> {
         let env_table = self.lua.create_table()?;
 
-        // Add `env` (read-only table of environment variables)
-        let env = self.create_frozen_env(&ctx.env)?;
-        env_table.set("env", env)?;
+        // Create the `ctx` table with granular access
+        let ctx_table = self.lua.create_table()?;
+
+        // Add ctx.sys_env (read-only system environment variables)
+        let sys_env = self.create_frozen_env(&ctx.sys_env, "ctx.sys_env")?;
+        ctx_table.raw_set("sys_env", sys_env)?;
+
+        // Add ctx.env_file (read-only env_file variables)
+        let env_file = self.create_frozen_env(&ctx.env_file, "ctx.env_file")?;
+        ctx_table.raw_set("env_file", env_file)?;
+
+        // Add ctx.env (read-only full accumulated environment)
+        let env = self.create_frozen_env(&ctx.env, "ctx.env")?;
+        ctx_table.raw_set("env", env)?;
+
+        // Add ctx.service_name (nil if global)
+        if let Some(ref service_name) = ctx.service_name {
+            ctx_table.raw_set("service_name", service_name.as_str())?;
+        }
+
+        // Add ctx.hook_name (nil if not in hook)
+        if let Some(ref hook_name) = ctx.hook_name {
+            ctx_table.raw_set("hook_name", hook_name.as_str())?;
+        }
+
+        // Freeze the ctx table to make it read-only (returns a proxy)
+        let frozen_ctx = self.freeze_table(&ctx_table, "ctx")?;
+
+        env_table.set("ctx", frozen_ctx)?;
 
         // Add `global` (shared mutable table)
         let global: Table = self.lua.globals().get("global")?;
         env_table.set("global", global)?;
-
-        // Add context-specific variables
-        if let Some(ref service) = ctx.service {
-            env_table.set("service", service.as_str())?;
-        }
-        if let Some(ref hook) = ctx.hook {
-            env_table.set("hook", hook.as_str())?;
-        }
 
         // Set metatable with __index fallback to globals
         // This allows access to functions defined in lua: block and standard library
@@ -116,8 +138,34 @@ impl LuaEvaluator {
         Ok(env_table)
     }
 
+    /// Freeze a table to make it read-only using proxy pattern.
+    /// This creates a proxy table that forwards reads to the original table
+    /// but blocks all writes.
+    fn freeze_table(&self, table: &Table, name: &str) -> LuaResult<Table> {
+        let name_for_newindex = name.to_string();
+        let name_for_metatable = name.to_string();
+
+        // Create an empty proxy table
+        let proxy = self.lua.create_table()?;
+
+        // Create metatable with __index pointing to original table and __newindex blocking writes
+        let meta = self.lua.create_table()?;
+        meta.set("__index", table.clone())?;
+        meta.set(
+            "__newindex",
+            self.lua
+                .create_function(move |_, _: (Value, Value, Value)| -> LuaResult<()> {
+                    Err(mlua::Error::RuntimeError(format!("{} is read-only", name_for_newindex)))
+                })?,
+        )?;
+        meta.set("__metatable", format!("{} is read-only", name_for_metatable))?;
+
+        proxy.set_metatable(Some(meta));
+        Ok(proxy)
+    }
+
     /// Create a read-only table of environment variables.
-    fn create_frozen_env(&self, vars: &HashMap<String, String>) -> LuaResult<Table> {
+    fn create_frozen_env(&self, vars: &HashMap<String, String>, name: &str) -> LuaResult<Table> {
         // Create a regular table with all env values
         // We'll use metatables to prevent writes, but allow direct iteration
         let env_table = self.lua.create_table()?;
@@ -126,17 +174,19 @@ impl LuaEvaluator {
         }
 
         // Create metatable that prevents modifications
+        let name_for_closure = name.to_string();
+        let name_for_metatable = name.to_string();
         let meta = self.lua.create_table()?;
         meta.set(
             "__newindex",
             self.lua
-                .create_function(|_, _: (Value, Value, Value)| -> LuaResult<()> {
-                    Err(mlua::Error::RuntimeError("env is read-only".to_string()))
+                .create_function(move |_, _: (Value, Value, Value)| -> LuaResult<()> {
+                    Err(mlua::Error::RuntimeError(format!("{} is read-only", name_for_closure)))
                 })?,
         )?;
 
         // Prevent removing the metatable
-        meta.set("__metatable", "env is read-only")?;
+        meta.set("__metatable", format!("{} is read-only", name_for_metatable))?;
 
         env_table.set_metatable(Some(meta));
         Ok(env_table)
@@ -362,7 +412,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result: String = eval.eval(r#"return env.FOO"#, &ctx).unwrap();
+        let result: String = eval.eval(r#"return ctx.env.FOO"#, &ctx).unwrap();
         assert_eq!(result, "bar");
     }
 
@@ -371,7 +421,7 @@ mod tests {
         let eval = LuaEvaluator::new().unwrap();
         let ctx = EvalContext::default();
 
-        let result = eval.eval::<Value>(r#"env.NEW = "value""#, &ctx);
+        let result = eval.eval::<Value>(r#"ctx.env.NEW = "value""#, &ctx);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("read-only"));
     }
@@ -393,12 +443,11 @@ mod tests {
     fn test_lua_service_context() {
         let eval = LuaEvaluator::new().unwrap();
         let ctx = EvalContext {
-            env: HashMap::new(),
-            service: Some("backend".to_string()),
-            hook: None,
+            service_name: Some("backend".to_string()),
+            ..Default::default()
         };
 
-        let result: String = eval.eval(r#"return service"#, &ctx).unwrap();
+        let result: String = eval.eval(r#"return ctx.service_name"#, &ctx).unwrap();
         assert_eq!(result, "backend");
     }
 
@@ -452,12 +501,12 @@ mod tests {
     fn test_lua_hook_context() {
         let eval = LuaEvaluator::new().unwrap();
         let ctx = EvalContext {
-            env: HashMap::new(),
-            service: Some("api".to_string()),
-            hook: Some("on_start".to_string()),
+            service_name: Some("api".to_string()),
+            hook_name: Some("on_start".to_string()),
+            ..Default::default()
         };
 
-        let result: String = eval.eval(r#"return hook"#, &ctx).unwrap();
+        let result: String = eval.eval(r#"return ctx.hook_name"#, &ctx).unwrap();
         assert_eq!(result, "on_start");
     }
 
@@ -466,8 +515,8 @@ mod tests {
         let eval = LuaEvaluator::new().unwrap();
         let ctx = EvalContext::default();
 
-        // service should be nil when not set
-        let result: Value = eval.eval(r#"return service"#, &ctx).unwrap();
+        // service_name should be nil when not set
+        let result: Value = eval.eval(r#"return ctx.service_name"#, &ctx).unwrap();
         assert!(matches!(result, Value::Nil));
     }
 

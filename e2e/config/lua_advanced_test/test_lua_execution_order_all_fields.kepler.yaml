@@ -1,0 +1,37 @@
+lua: |
+  global.exec_order = {}
+  function track(name)
+    table.insert(global.exec_order, name)
+  end
+
+services:
+  order-test:
+    env_file: !lua |
+      track("env_file")
+      return "__ENV_FILE_PATH__"
+    environment: !lua |
+      track("environment")
+      -- Must return an array of "KEY=value" strings
+      return {"ORDER=" .. table.concat(global.exec_order, ",")}
+    working_dir: !lua |
+      track("working_dir")
+      return "/tmp"
+    depends_on: !lua |
+      track("depends_on")
+      return {}
+    healthcheck:
+      test: !lua |
+        track("healthcheck")
+        return {"CMD-SHELL", "true"}
+      interval: 30s
+    restart:
+      policy: always
+      watch: !lua |
+        track("restart_watch")
+        return {}
+    command: !lua |
+      track("command")
+      -- The ORDER env var was set in environment phase, and should contain:
+      -- env_file,environment (other fields come later)
+      -- command is evaluated after environment
+      return {"sh", "-c", "echo ORDER=$ORDER FINAL_ORDER=" .. table.concat(global.exec_order, ",") .. " && sleep 30"}

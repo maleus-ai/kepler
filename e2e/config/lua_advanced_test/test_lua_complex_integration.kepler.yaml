@@ -1,0 +1,65 @@
+lua: |
+  global.config = { base_port = 8000, services = {} }
+  function next_port()
+    local port = global.config.base_port
+    global.config.base_port = port + 1
+    return tostring(port)
+  end
+  function register_service(name)
+    global.config.services[name] = true
+  end
+
+services:
+  api:
+    env_file: __API_ENV_FILE__
+    environment: !lua |
+      register_service(ctx.service_name)
+      local db_url = ctx.env_file.DATABASE_URL or "default_db"
+      return {
+        "PORT=" .. next_port(),
+        "SERVICE=" .. ctx.service_name,
+        "DB_URL=" .. db_url
+      }
+    command: ["sh", "-c", "echo Starting $SERVICE on port $PORT with DB=$DB_URL && sleep 300"]
+    healthcheck:
+      test: !lua |
+        return {"CMD-SHELL", "curl -f http://localhost:" .. ctx.env.PORT .. "/health || exit 1"}
+      interval: 10s
+    hooks:
+      on_start:
+        environment: !lua |
+          return {"HOOK=" .. (ctx.hook_name or "none"), "SVC=" .. (ctx.service_name or "none")}
+        run: "echo Hook $HOOK for $SVC >> __MARKER_FILE__"
+    restart:
+      policy: always
+      watch: !lua |
+        local base = ctx.env_file.WATCH_DIR or "/app"
+        return {base .. "/**/*.rs"}
+    logs:
+      retention:
+        on_restart: retain
+
+  worker:
+    depends_on: !lua |
+      return {"api"}
+    environment: !lua |
+      register_service(ctx.service_name)
+      return {
+        "PORT=" .. next_port(),
+        "SERVICE=" .. ctx.service_name,
+        "REGISTERED_SERVICES=" .. (function()
+          local names = {}
+          for k, _ in pairs(global.config.services) do
+            table.insert(names, k)
+          end
+          table.sort(names)
+          return table.concat(names, ",")
+        end)()
+      }
+    command: ["sh", "-c", "echo Worker $SERVICE on port $PORT registered=$REGISTERED_SERVICES && sleep 300"]
+    hooks:
+      on_start:
+        environment: !lua |
+          return {"WORKER_HOOK=" .. (ctx.hook_name or "none")}
+        run: "echo Worker hook $WORKER_HOOK >> __MARKER_FILE__"
+    restart: no

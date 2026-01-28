@@ -53,7 +53,7 @@ services:
     assert_eq!(service.command, vec!["echo", "hello", "world"]);
 }
 
-/// Test: !lua accesses env table
+/// Test: !lua accesses ctx.env table
 #[test]
 fn test_lua_env_access() {
     let temp_dir = TempDir::new().unwrap();
@@ -68,7 +68,7 @@ services:
   test:
     command: ["echo", "hello"]
     environment: !lua |
-      return {"MY_VAR=" .. (env.KEPLER_LUA_TEST_VAR or "default")}
+      return {"MY_VAR=" .. (ctx.env.KEPLER_LUA_TEST_VAR or "default")}
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
@@ -82,7 +82,7 @@ services:
     assert!(service.environment.contains(&"MY_VAR=test_value".to_string()));
 }
 
-/// Test: env table is read-only
+/// Test: ctx.env table is read-only
 #[test]
 fn test_lua_env_readonly() {
     let temp_dir = TempDir::new().unwrap();
@@ -92,7 +92,7 @@ services:
   test:
     command: ["echo", "hello"]
     working_dir: !lua |
-      env.NEW_VAR = "should fail"
+      ctx.env.NEW_VAR = "should fail"
       return "/tmp"
 "#;
 
@@ -147,7 +147,7 @@ services:
     assert!(service.environment.contains(&"SHARED=from_lua_block".to_string()));
 }
 
-/// Test: service context variable is available
+/// Test: ctx.service_name variable is available
 #[test]
 fn test_lua_service_context() {
     let temp_dir = TempDir::new().unwrap();
@@ -157,7 +157,7 @@ services:
   myservice:
     command: ["echo", "hello"]
     environment: !lua |
-      return {"SERVICE_NAME=" .. service}
+      return {"SERVICE_NAME=" .. ctx.service_name}
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
@@ -270,7 +270,7 @@ services:
   test:
     command: ["echo", "hello"]
     environment: !lua |
-      if env.KEPLER_ENV == "production" then
+      if ctx.env.KEPLER_ENV == "production" then
         return {"LOG_LEVEL=warn"}
       else
         return {"LOG_LEVEL=debug"}
@@ -303,7 +303,7 @@ services:
     command: ["echo", "hello"]
     healthcheck:
       test: !lua |
-        local port = env.KEPLER_HEALTH_PORT or "80"
+        local port = ctx.env.KEPLER_HEALTH_PORT or "80"
         return {"CMD-SHELL", "curl -f http://localhost:" .. port .. "/health"}
       interval: 10s
       timeout: 5s
@@ -347,7 +347,7 @@ services:
     assert!(service.environment.contains(&"MAX=5".to_string()));
 }
 
-/// Test: env_file evaluation order (Lua sees system vars)
+/// Test: env_file evaluation order (Lua sees system vars via ctx.sys_env)
 #[test]
 fn test_lua_env_file_evaluation_order() {
     let temp_dir = TempDir::new().unwrap();
@@ -361,7 +361,7 @@ services:
   test:
     command: ["echo", "hello"]
     env_file: !lua |
-      return env.KEPLER_BASE_PATH .. "/.env"
+      return ctx.sys_env.KEPLER_BASE_PATH .. "/.env"
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
@@ -402,7 +402,7 @@ services:
       local result = {}
       local prefix = "KEPLER_BACKEND_"
       local new_prefix = "APP_"
-      for key, value in pairs(env) do
+      for key, value in pairs(ctx.env) do
         if string.sub(key, 1, #prefix) == prefix then
           local new_key = new_prefix .. string.sub(key, #prefix + 1)
           table.insert(result, new_key .. "=" .. value)
@@ -484,13 +484,13 @@ services:
 fn test_lua_nil_handling() {
     let temp_dir = TempDir::new().unwrap();
 
-    // When env var is not set, env.NONEXISTENT should be nil
+    // When env var is not set, ctx.env.NONEXISTENT should be nil
     let yaml = r#"
 services:
   test:
     command: ["echo", "hello"]
     environment: !lua |
-      local val = env.KEPLER_NONEXISTENT_VAR
+      local val = ctx.env.KEPLER_NONEXISTENT_VAR
       if val == nil then
         return {"STATUS=not_found"}
       else

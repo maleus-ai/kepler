@@ -4,12 +4,12 @@ lua: |
   end
 
 services:
-  dep-target:
-    command: ["sh", "-c", "echo DEP_TARGET_START && sleep 30"]
-    restart: no
-
   dep-source:
     depends_on: !lua |
       return get_deps()
     command: ["sh", "-c", "echo DEP_SOURCE_START && sleep 30"]
+    restart: no
+
+  dep-target:
+    command: ["sh", "-c", "echo DEP_TARGET_START && sleep 30"]
     restart: no

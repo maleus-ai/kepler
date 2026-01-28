@@ -1,8 +1,8 @@
 services:
-  readonly-service:
+  ctx-readonly-service:
     environment: !lua |
-      -- This should fail because ctx.env is read-only
-      ctx.env.NEW_VAR = "test"
+      -- This should fail because ctx is read-only
+      ctx.service_name = "hacked"
       return {"RESULT=should_not_reach"}
     command: ["sh", "-c", "echo $RESULT && sleep 30"]
     restart: no
