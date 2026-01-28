@@ -1,0 +1,4 @@
+# Template config - marker is replaced at runtime with CYCLE_N_MARKER
+services:
+  cyclic-logger:
+    command: ["sh", "-c", "echo CYCLE_MARKER; sleep 300"]

@@ -58,14 +58,19 @@ impl LogBuffer {
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
-            let _ = std::fs::DirBuilder::new()
+            if let Err(e) = std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
-                .create(&logs_dir);
+                .create(&logs_dir)
+            {
+                tracing::warn!("Failed to create logs directory {:?}: {}", logs_dir, e);
+            }
         }
         #[cfg(not(unix))]
         {
-            fs::create_dir_all(&logs_dir).ok();
+            if let Err(e) = fs::create_dir_all(&logs_dir) {
+                tracing::warn!("Failed to create logs directory {:?}: {}", logs_dir, e);
+            }
         }
 
         // Count existing log entries to initialize sequence
@@ -109,23 +114,37 @@ impl LogBuffer {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            if let Ok(mut file) = OpenOptions::new()
+            match OpenOptions::new()
                 .create(true)
                 .append(true)
                 .mode(0o600)
                 .open(&log_file)
             {
-                let _ = file.write_all(entry.as_bytes());
+                Ok(mut file) => {
+                    if let Err(e) = file.write_all(entry.as_bytes()) {
+                        tracing::warn!("Failed to write log entry to {:?}: {}", log_file, e);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to open log file {:?}: {}", log_file, e);
+                }
             }
         }
         #[cfg(not(unix))]
         {
-            if let Ok(mut file) = OpenOptions::new()
+            match OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&log_file)
             {
-                let _ = file.write_all(entry.as_bytes());
+                Ok(mut file) => {
+                    if let Err(e) = file.write_all(entry.as_bytes()) {
+                        tracing::warn!("Failed to write log entry to {:?}: {}", log_file, e);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to open log file {:?}: {}", log_file, e);
+                }
             }
         }
 

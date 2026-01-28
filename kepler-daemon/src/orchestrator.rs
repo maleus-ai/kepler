@@ -411,6 +411,25 @@ impl ServiceOrchestrator {
             }
         }
 
+        // When clean=true and stopping all services, remove entire state directory
+        // This makes `stop --clean` behave like `prune` - complete cleanup
+        if service_filter.is_none() && clean {
+            let config_hash = handle.config_hash();
+            let state_dir = crate::global_state_dir().join("configs").join(&config_hash);
+
+            // Remove entire state directory (logs, config snapshots, env_files, etc.)
+            if state_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&state_dir) {
+                    warn!("Failed to remove state directory {:?}: {}", state_dir, e);
+                } else {
+                    info!("Removed state directory: {:?}", state_dir);
+                }
+            }
+
+            // Unload config from registry
+            self.registry.unload(&config_path.to_path_buf()).await;
+        }
+
         if stopped.is_empty() {
             Ok("No services were running".to_string())
         } else {
@@ -862,6 +881,8 @@ impl ServiceOrchestrator {
         force: bool,
         dry_run: bool,
     ) -> Result<Vec<PrunedConfigInfo>, OrchestratorError> {
+        use crate::persistence::ConfigPersistence;
+
         let configs_dir = crate::global_state_dir().join("configs");
 
         if !configs_dir.exists() {
@@ -882,9 +903,26 @@ impl ServiceOrchestrator {
                 continue;
             }
 
-            // Try to read stored config to get original path
-            let config_file = state_dir.join("config.yaml");
-            let (original_path, is_orphaned) = self.resolve_original_path(&config_file);
+            // Use ConfigPersistence to get the ORIGINAL source path (not state dir path)
+            // This is critical for correctly unloading from the registry
+            let persistence = ConfigPersistence::new(state_dir.clone());
+            let (original_path, is_orphaned) = match persistence.load_source_path() {
+                Ok(Some(source_path)) => {
+                    // Check if the original source file still exists
+                    let exists = source_path.exists();
+                    (source_path.display().to_string(), !exists)
+                }
+                _ => {
+                    // No source_path.txt or failed to read - check if config.yaml is readable
+                    let config_file = state_dir.join("config.yaml");
+                    if config_file.exists() && KeplerConfig::load(&config_file).is_ok() {
+                        // Config is readable but no source path - treat as orphaned
+                        ("unknown (orphaned)".to_string(), true)
+                    } else {
+                        ("unknown (orphaned)".to_string(), true)
+                    }
+                }
+            };
 
             // Check if safe to prune
             let can_prune = force || is_orphaned || self.registry.can_prune_config(&hash).await;
@@ -917,7 +955,16 @@ impl ServiceOrchestrator {
 
             // Run cleanup hook if config is readable (not orphaned)
             if !is_orphaned {
+                let config_file = state_dir.join("config.yaml");
                 self.run_cleanup_hook_for_prune(&config_file).await;
+            }
+
+            // Unload from registry BEFORE deleting state directory
+            // Use the ORIGINAL source path which matches the registry key
+            if !is_orphaned {
+                if let Ok(canonical) = PathBuf::from(&original_path).canonicalize() {
+                    self.registry.unload(&canonical).await;
+                }
             }
 
             // Delete entire state directory
@@ -930,11 +977,6 @@ impl ServiceOrchestrator {
                     status: format!("failed: {}", e),
                 });
                 continue;
-            }
-
-            // Unload from registry if loaded
-            if let Ok(path) = PathBuf::from(&original_path).canonicalize() {
-                self.registry.unload(&path).await;
             }
 
             results.push(PrunedConfigInfo {
@@ -952,17 +994,6 @@ impl ServiceOrchestrator {
         }
 
         Ok(results)
-    }
-
-    /// Resolve original config path from stored config
-    fn resolve_original_path(&self, config_file: &Path) -> (String, bool) {
-        // The stored config.yaml is a copy - try to read it
-        // If readable, return its path; otherwise mark as orphaned
-        if config_file.exists() && KeplerConfig::load(config_file).is_ok() {
-            // Config is readable
-            return (config_file.display().to_string(), false);
-        }
-        ("unknown (orphaned)".to_string(), true)
     }
 
     /// Run cleanup hook before pruning

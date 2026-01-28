@@ -1,0 +1,3 @@
+services:
+  echo-service:
+    command: ["sh", "-c", "echo Starting; sleep 300"]

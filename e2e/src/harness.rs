@@ -1,0 +1,630 @@
+//! E2E test harness for Kepler
+//!
+//! Provides utilities for spawning and managing Kepler binaries in isolated
+//! test environments.
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+use tempfile::TempDir;
+use thiserror::Error;
+use tokio::process::{Child, Command};
+use tokio::time::timeout;
+
+/// Path to the config directory relative to the e2e crate root
+const CONFIG_DIR: &str = "config";
+
+/// Result type for E2E operations
+pub type E2eResult<T> = Result<T, E2eError>;
+
+/// Errors that can occur during E2E testing
+#[derive(Error, Debug)]
+pub enum E2eError {
+    #[error("Failed to find kepler binary: {0}")]
+    BinaryNotFound(String),
+
+    #[error("Failed to spawn process: {0}")]
+    SpawnFailed(#[from] std::io::Error),
+
+    #[error("Timeout waiting for {0}")]
+    Timeout(String),
+
+    #[error("Command failed: {0}")]
+    CommandFailed(String),
+
+    #[error("Process error: {0}")]
+    ProcessError(String),
+
+    #[error("Config not found: {0}")]
+    ConfigNotFound(PathBuf),
+}
+
+/// Output from a CLI command
+#[derive(Debug, Clone)]
+pub struct CommandOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+impl CommandOutput {
+    /// Check if the command succeeded (exit code 0)
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+
+    /// Assert the command succeeded
+    pub fn assert_success(&self) {
+        assert!(
+            self.success(),
+            "Command failed with exit code {}.\nstdout: {}\nstderr: {}",
+            self.exit_code, self.stdout, self.stderr
+        );
+    }
+
+    /// Check if stdout contains a string
+    pub fn stdout_contains(&self, s: &str) -> bool {
+        self.stdout.contains(s)
+    }
+
+    /// Check if stderr contains a string
+    pub fn stderr_contains(&self, s: &str) -> bool {
+        self.stderr.contains(s)
+    }
+}
+
+/// E2E test harness that manages isolated test environments
+pub struct E2eHarness {
+    /// Temporary directory for this test's state
+    temp_dir: TempDir,
+    /// Path to the kepler CLI binary
+    kepler_bin: PathBuf,
+    /// Path to the kepler-daemon binary
+    daemon_bin: PathBuf,
+    /// Running daemon process (if any)
+    daemon_process: Option<Child>,
+}
+
+impl E2eHarness {
+    /// Create a new E2E harness with isolated state directory
+    pub async fn new() -> E2eResult<Self> {
+        let temp_dir = TempDir::new()?;
+        let kepler_bin = find_binary("kepler")?;
+        let daemon_bin = find_binary("kepler-daemon")?;
+
+        Ok(Self {
+            temp_dir,
+            kepler_bin,
+            daemon_bin,
+            daemon_process: None,
+        })
+    }
+
+    /// Get the path to the isolated state directory
+    pub fn state_dir(&self) -> &Path {
+        self.temp_dir.path()
+    }
+
+    /// Get a reference to the temp directory
+    pub fn temp_dir(&self) -> &TempDir {
+        &self.temp_dir
+    }
+
+    /// Get the socket path for the daemon
+    pub fn socket_path(&self) -> PathBuf {
+        self.temp_dir.path().join("kepler.sock")
+    }
+
+    /// Get the configs directory where per-config state is stored
+    pub fn configs_dir(&self) -> PathBuf {
+        self.temp_dir.path().join("configs")
+    }
+
+    /// Check if the state directory for a specific config exists
+    /// Config state directories are named by hash and contain source_path.txt
+    pub fn config_state_exists(&self, config_path: &Path) -> bool {
+        let configs_dir = self.configs_dir();
+        if !configs_dir.exists() {
+            return false;
+        }
+
+        // Look for a directory containing source_path.txt that points to our config
+        if let Ok(entries) = std::fs::read_dir(&configs_dir) {
+            for entry in entries.flatten() {
+                let source_path_file = entry.path().join("source_path.txt");
+                if source_path_file.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&source_path_file) {
+                        let stored_path = PathBuf::from(content.trim());
+                        if stored_path == config_path {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Get the state directory for a specific config (if it exists)
+    pub fn get_config_state_dir(&self, config_path: &Path) -> Option<PathBuf> {
+        let configs_dir = self.configs_dir();
+        if !configs_dir.exists() {
+            return None;
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&configs_dir) {
+            for entry in entries.flatten() {
+                let source_path_file = entry.path().join("source_path.txt");
+                if source_path_file.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&source_path_file) {
+                        let stored_path = PathBuf::from(content.trim());
+                        if stored_path == config_path {
+                            return Some(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if logs exist for a specific config
+    pub fn logs_exist(&self, config_path: &Path) -> bool {
+        if let Some(state_dir) = self.get_config_state_dir(config_path) {
+            let logs_dir = state_dir.join("logs");
+            if logs_dir.exists() {
+                // Check if there are any log files
+                if let Ok(entries) = std::fs::read_dir(&logs_dir) {
+                    return entries.flatten().next().is_some();
+                }
+            }
+        }
+        false
+    }
+
+    /// Start the daemon process
+    pub async fn start_daemon(&mut self) -> E2eResult<()> {
+        if self.daemon_process.is_some() {
+            return Ok(()); // Already running
+        }
+
+        let child = Command::new(&self.daemon_bin)
+            .env("KEPLER_DAEMON_PATH", self.temp_dir.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        self.daemon_process = Some(child);
+
+        // Wait for the socket to appear
+        self.wait_for_socket(Duration::from_secs(10)).await?;
+
+        Ok(())
+    }
+
+    /// Wait for the daemon socket to be available
+    async fn wait_for_socket(&self, timeout_duration: Duration) -> E2eResult<()> {
+        let socket = self.socket_path();
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < timeout_duration {
+            if socket.exists() {
+                // Give the daemon a moment to start accepting connections
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        Err(E2eError::Timeout("daemon socket".to_string()))
+    }
+
+    /// Stop the daemon process
+    pub async fn stop_daemon(&mut self) -> E2eResult<()> {
+        if let Some(mut child) = self.daemon_process.take() {
+            // Try graceful shutdown first via CLI
+            let _ = self.run_cli(&["daemon", "stop"]).await;
+
+            // Wait for process to exit
+            let exit_timeout = timeout(Duration::from_secs(5), child.wait()).await;
+
+            if exit_timeout.is_err() {
+                // Force kill if graceful shutdown failed
+                let _ = child.kill().await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run the kepler CLI with the given arguments
+    pub async fn run_cli(&self, args: &[&str]) -> E2eResult<CommandOutput> {
+        self.run_cli_with_timeout(args, Duration::from_secs(30)).await
+    }
+
+    /// Run the kepler CLI with the given arguments and a custom timeout
+    pub async fn run_cli_with_timeout(
+        &self,
+        args: &[&str],
+        timeout_duration: Duration,
+    ) -> E2eResult<CommandOutput> {
+        let result = timeout(timeout_duration, async {
+            let output = Command::new(&self.kepler_bin)
+                .args(args)
+                .env("KEPLER_DAEMON_PATH", self.temp_dir.path())
+                .output()
+                .await?;
+
+            Ok::<CommandOutput, E2eError>(CommandOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                exit_code: output.status.code().unwrap_or(-1),
+            })
+        })
+        .await;
+
+        match result {
+            Ok(r) => r,
+            Err(_) => Err(E2eError::Timeout(format!(
+                "CLI command: {:?}",
+                args.join(" ")
+            ))),
+        }
+    }
+
+    /// Start services from a config file
+    pub async fn start_services(&self, config_path: &Path) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "start"]).await
+    }
+
+    /// Stop services from a config file
+    pub async fn stop_services(&self, config_path: &Path) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "stop"]).await
+    }
+
+    /// Stop services and clean up state directory
+    pub async fn stop_services_clean(&self, config_path: &Path) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "stop", "--clean"]).await
+    }
+
+    /// Get logs for services
+    pub async fn get_logs(
+        &self,
+        config_path: &Path,
+        service: Option<&str>,
+        lines: usize,
+    ) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+
+        let lines_str = lines.to_string();
+        let mut args = vec!["-f", config_str, "logs", "-n", &lines_str];
+        let service_owned;
+        if let Some(s) = service {
+            service_owned = s.to_string();
+            args.push(&service_owned);
+        }
+
+        self.run_cli(&args).await
+    }
+
+    /// Prune orphaned config state
+    pub async fn prune(&self, force: bool) -> E2eResult<CommandOutput> {
+        let mut args = vec!["prune"];
+        if force {
+            args.push("--force");
+        }
+        self.run_cli(&args).await
+    }
+
+    /// Prune dry run
+    pub async fn prune_dry_run(&self) -> E2eResult<CommandOutput> {
+        self.run_cli(&["prune", "--dry-run"]).await
+    }
+
+    /// Get process status
+    pub async fn ps(&self, config_path: &Path) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "ps"]).await
+    }
+
+    /// Wait for a service to be in a specific status
+    pub async fn wait_for_service_status(
+        &self,
+        config_path: &Path,
+        service: &str,
+        expected_status: &str,
+        timeout_duration: Duration,
+    ) -> E2eResult<()> {
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < timeout_duration {
+            let output = self.ps(config_path).await?;
+            if output.success() && output.stdout.contains(&format!("{}  {}", service, expected_status)) {
+                return Ok(());
+            }
+            // Also check for status in different column positions
+            if output.success() {
+                for line in output.stdout.lines() {
+                    if line.contains(service) && line.contains(expected_status) {
+                        return Ok(());
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        Err(E2eError::Timeout(format!(
+            "service {} to reach status {}",
+            service, expected_status
+        )))
+    }
+
+    /// Wait for logs to appear for a config
+    pub async fn wait_for_logs(
+        &self,
+        config_path: &Path,
+        timeout_duration: Duration,
+    ) -> E2eResult<()> {
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < timeout_duration {
+            if self.logs_exist(config_path) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        Err(E2eError::Timeout("logs to appear".to_string()))
+    }
+
+    /// Wait for logs to contain specific text
+    pub async fn wait_for_log_content(
+        &self,
+        config_path: &Path,
+        expected_content: &str,
+        timeout_duration: Duration,
+    ) -> E2eResult<CommandOutput> {
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < timeout_duration {
+            let output = self.get_logs(config_path, None, 1000).await?;
+            if output.stdout_contains(expected_content) {
+                return Ok(output);
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        Err(E2eError::Timeout(format!(
+            "logs to contain '{}'",
+            expected_content
+        )))
+    }
+
+    /// Create a test config file in a temp directory and return its path
+    pub fn create_test_config(&self, content: &str) -> E2eResult<PathBuf> {
+        let config_dir = self.temp_dir.path().join("test_configs");
+        std::fs::create_dir_all(&config_dir)?;
+
+        let config_path = config_dir.join("test.kepler.yaml");
+        std::fs::write(&config_path, content)?;
+
+        Ok(config_path)
+    }
+
+    /// Create a test config file with a specific name
+    pub fn create_named_config(&self, name: &str, content: &str) -> E2eResult<PathBuf> {
+        let config_dir = self.temp_dir.path().join("test_configs");
+        std::fs::create_dir_all(&config_dir)?;
+
+        let config_path = config_dir.join(name);
+        std::fs::write(&config_path, content)?;
+
+        Ok(config_path)
+    }
+
+    /// Load a config from the e2e/config directory and copy it to the test's temp directory.
+    ///
+    /// # Arguments
+    /// * `test_module` - The test module name (e.g., "stop_clean_test")
+    /// * `config_name` - The config file name without extension (e.g., "test_stop_clean_removes_state_directory")
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config_path = harness.load_config("stop_clean_test", "test_stop_clean_removes_state_directory")?;
+    /// ```
+    pub fn load_config(&self, test_module: &str, config_name: &str) -> E2eResult<PathBuf> {
+        let source_config = get_config_dir()
+            .join(test_module)
+            .join(format!("{}.kepler.yaml", config_name));
+
+        if !source_config.exists() {
+            return Err(E2eError::ConfigNotFound(source_config));
+        }
+
+        let content = std::fs::read_to_string(&source_config)?;
+        self.create_named_config(&format!("{}.kepler.yaml", config_name), &content)
+    }
+
+    /// Load a config and replace placeholders with values.
+    ///
+    /// # Arguments
+    /// * `test_module` - The test module name
+    /// * `config_name` - The config file name without extension
+    /// * `replacements` - List of (placeholder, value) tuples
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config_path = harness.load_config_with_replacements(
+    ///     "prune_start_test",
+    ///     "test_multiple_prune_start_cycles",
+    ///     &[("CYCLE_MARKER", "CYCLE_1_MARKER")]
+    /// )?;
+    /// ```
+    pub fn load_config_with_replacements(
+        &self,
+        test_module: &str,
+        config_name: &str,
+        replacements: &[(&str, &str)],
+    ) -> E2eResult<PathBuf> {
+        let source_config = get_config_dir()
+            .join(test_module)
+            .join(format!("{}.kepler.yaml", config_name));
+
+        if !source_config.exists() {
+            return Err(E2eError::ConfigNotFound(source_config));
+        }
+
+        let mut content = std::fs::read_to_string(&source_config)?;
+        for (placeholder, value) in replacements {
+            content = content.replace(placeholder, value);
+        }
+
+        self.create_named_config(&format!("{}.kepler.yaml", config_name), &content)
+    }
+
+    /// Update an existing config file with new content (for tests that modify configs between runs)
+    pub fn update_config(&self, config_path: &Path, content: &str) -> E2eResult<()> {
+        std::fs::write(config_path, content)?;
+        Ok(())
+    }
+
+    /// Load a config from the e2e/config directory, apply replacements, and write to a specific destination
+    pub fn load_config_to(
+        &self,
+        test_module: &str,
+        config_name: &str,
+        dest_name: &str,
+        replacements: &[(&str, &str)],
+    ) -> E2eResult<PathBuf> {
+        let source_config = get_config_dir()
+            .join(test_module)
+            .join(format!("{}.kepler.yaml", config_name));
+
+        if !source_config.exists() {
+            return Err(E2eError::ConfigNotFound(source_config));
+        }
+
+        let mut content = std::fs::read_to_string(&source_config)?;
+        for (placeholder, value) in replacements {
+            content = content.replace(placeholder, value);
+        }
+
+        self.create_named_config(dest_name, &content)
+    }
+}
+
+/// Get the path to the e2e config directory
+fn get_config_dir() -> PathBuf {
+    // During cargo test, CARGO_MANIFEST_DIR points to the e2e crate
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        return PathBuf::from(manifest_dir).join(CONFIG_DIR);
+    }
+
+    // Fallback: relative to current directory
+    PathBuf::from("e2e").join(CONFIG_DIR)
+}
+
+impl Drop for E2eHarness {
+    fn drop(&mut self) {
+        // Try to stop the daemon if running
+        if let Some(mut child) = self.daemon_process.take() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+/// Find a binary in common locations
+fn find_binary(name: &str) -> E2eResult<PathBuf> {
+    // 1. Check alongside current executable (same build profile)
+    // Test binaries are typically in target/debug/deps, so we need to go up
+    if let Ok(exe) = std::env::current_exe() {
+        // Check same directory as executable
+        if let Some(dir) = exe.parent() {
+            let path = dir.join(name);
+            if path.exists() {
+                return Ok(path.canonicalize()?);
+            }
+
+            // Check parent directory (for when running from deps/)
+            if let Some(parent) = dir.parent() {
+                let path = parent.join(name);
+                if path.exists() {
+                    return Ok(path.canonicalize()?);
+                }
+            }
+        }
+    }
+
+    // 2. Check target/release relative to current directory
+    let release_path = PathBuf::from(format!("target/release/{}", name));
+    if release_path.exists() {
+        return Ok(release_path.canonicalize()?);
+    }
+
+    // 3. Check target/debug relative to current directory
+    let debug_path = PathBuf::from(format!("target/debug/{}", name));
+    if debug_path.exists() {
+        return Ok(debug_path.canonicalize()?);
+    }
+
+    // 4. Check from CARGO_MANIFEST_DIR (set during cargo test)
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let workspace_root = PathBuf::from(&manifest_dir)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from(&manifest_dir));
+
+        // Try release
+        let release_path = workspace_root.join("target/release").join(name);
+        if release_path.exists() {
+            return Ok(release_path.canonicalize()?);
+        }
+
+        // Try debug
+        let debug_path = workspace_root.join("target/debug").join(name);
+        if debug_path.exists() {
+            return Ok(debug_path.canonicalize()?);
+        }
+    }
+
+    // 5. Check PATH
+    if let Ok(path) = which::which(name) {
+        return Ok(path);
+    }
+
+    Err(E2eError::BinaryNotFound(format!(
+        "{} not found. Run 'cargo build' first.",
+        name
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_command_output() {
+        let output = CommandOutput {
+            stdout: "Hello World".to_string(),
+            stderr: "".to_string(),
+            exit_code: 0,
+        };
+
+        assert!(output.success());
+        assert!(output.stdout_contains("Hello"));
+        assert!(!output.stdout_contains("Goodbye"));
+    }
+}

@@ -1,0 +1,3 @@
+services:
+  quick-exit:
+    command: ["sh", "-c", "echo Done && exit 0"]

@@ -1,0 +1,7 @@
+services:
+  service-a:
+    command: ["sh", "-c", "echo Service A starting; sleep 300"]
+  service-b:
+    command: ["sh", "-c", "echo Service B starting; sleep 300"]
+  service-c:
+    command: ["sh", "-c", "echo Service C starting; sleep 300"]

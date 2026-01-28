@@ -1,0 +1,3 @@
+services:
+  preserved-service:
+    command: ["sh", "-c", "echo PRESERVED_MARKER; sleep 300"]
