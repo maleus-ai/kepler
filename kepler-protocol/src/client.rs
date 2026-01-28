@@ -200,4 +200,17 @@ impl Client {
     pub async fn prune(&mut self, force: bool, dry_run: bool) -> Result<Response> {
         self.send_request(&Request::Prune { force, dry_run }).await
     }
+
+    /// Recreate services with fresh config (re-expands environment variables)
+    pub async fn recreate(
+        &mut self,
+        config_path: PathBuf,
+        service: Option<String>,
+    ) -> Result<Response> {
+        self.send_request(&Request::Recreate {
+            config_path,
+            service,
+        })
+        .await
+    }
 }

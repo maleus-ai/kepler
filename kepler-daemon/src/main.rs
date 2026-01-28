@@ -2,7 +2,9 @@ use clap::Parser;
 use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
 use kepler_daemon::errors::DaemonError;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
-use kepler_daemon::process::ProcessExitEvent;
+use kepler_daemon::persistence::ConfigPersistence;
+use kepler_daemon::process::{validate_running_process, ProcessExitEvent};
+use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_daemon::Daemon;
 use kepler_protocol::protocol::{LogEntry, Request, Response, ResponseData};
@@ -12,7 +14,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Canonicalize a config path, returning an error if the path doesn't exist
 fn canonicalize_config_path(path: PathBuf) -> std::result::Result<PathBuf, DaemonError> {
@@ -129,6 +131,9 @@ async fn main() -> anyhow::Result<()> {
     // Create server
     let socket_path = Daemon::get_socket_path();
     let server = Server::new(socket_path.clone(), handler)?;
+
+    // Discover and restore existing configs from persisted snapshots
+    discover_existing_configs(&registry).await;
 
     info!("Daemon listening on {:?}", socket_path);
 
@@ -346,6 +351,172 @@ async fn handle_request(
                 Ok(results) => Response::ok_with_data(ResponseData::PrunedConfigs(results)),
                 Err(e) => Response::error(e.to_string()),
             }
+        }
+
+        Request::Recreate {
+            config_path,
+            service,
+        } => {
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+            match orchestrator
+                .recreate_services(&config_path, service.as_deref())
+                .await
+            {
+                Ok(msg) => Response::ok_with_message(msg),
+                Err(e) => Response::error(e.to_string()),
+            }
+        }
+    }
+}
+
+/// Discover and restore existing configs from persisted snapshots.
+///
+/// This is called at daemon startup to restore configs that have persisted
+/// expanded config snapshots. For each config:
+/// 1. Check if source config still exists
+/// 2. Load the config (uses cached snapshot if available)
+/// 3. Validate that any recorded running processes are still alive
+/// 4. Mark processes as stopped if they're no longer running
+async fn discover_existing_configs(registry: &SharedConfigRegistry) {
+    let configs_dir = kepler_daemon::global_state_dir().join("configs");
+
+    if !configs_dir.exists() {
+        debug!("No configs directory found, skipping discovery");
+        return;
+    }
+
+    let entries = match std::fs::read_dir(&configs_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("Failed to read configs directory: {}", e);
+            return;
+        }
+    };
+
+    let mut discovered = 0;
+    let mut restored = 0;
+
+    for entry in entries.flatten() {
+        let state_dir = entry.path();
+        if !state_dir.is_dir() {
+            continue;
+        }
+
+        discovered += 1;
+
+        // Create persistence instance for this config
+        let persistence = ConfigPersistence::new(state_dir.clone());
+
+        // Check if we have an expanded config (means this was previously started)
+        if !persistence.has_expanded_config() {
+            debug!(
+                "Skipping {:?}: no expanded config snapshot",
+                state_dir.file_name()
+            );
+            continue;
+        }
+
+        // Check if source config still exists
+        let source_path = match persistence.load_source_path() {
+            Ok(Some(path)) if path.exists() => path,
+            Ok(Some(path)) => {
+                info!(
+                    "Skipping {:?}: source config no longer exists at {:?}",
+                    state_dir.file_name(),
+                    path
+                );
+                continue;
+            }
+            Ok(None) => {
+                debug!(
+                    "Skipping {:?}: no source path recorded",
+                    state_dir.file_name()
+                );
+                continue;
+            }
+            Err(e) => {
+                warn!("Failed to load source path from {:?}: {}", state_dir, e);
+                continue;
+            }
+        };
+
+        // Load the config (will restore from snapshot)
+        info!("Restoring config from {:?}", source_path);
+        match registry.get_or_create(source_path.clone()).await {
+            Ok(handle) => {
+                restored += 1;
+
+                // Validate running processes
+                validate_restored_processes(&handle).await;
+            }
+            Err(e) => {
+                error!("Failed to restore config {:?}: {}", source_path, e);
+            }
+        }
+    }
+
+    if discovered > 0 {
+        info!(
+            "Config discovery: found {} configs, restored {}",
+            discovered, restored
+        );
+    }
+}
+
+/// Validate that processes recorded as running are still alive.
+///
+/// For each service that was recorded as running, check if the process
+/// is still alive. If not, mark the service as stopped.
+async fn validate_restored_processes(handle: &kepler_daemon::config_actor::ConfigActorHandle) {
+    // Get all service statuses
+    let services = match handle.get_service_status(None).await {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    for (service_name, info) in services {
+        // Check if this service was recorded as running
+        let is_running_status = matches!(
+            info.status.as_str(),
+            "running" | "starting" | "healthy" | "unhealthy"
+        );
+
+        if !is_running_status {
+            continue;
+        }
+
+        // Check if the recorded PID is still alive
+        if let Some(pid) = info.pid {
+            let is_alive = validate_running_process(pid, info.started_at);
+
+            if !is_alive {
+                info!(
+                    "Service {} (PID {}) is no longer running, marking as stopped",
+                    service_name, pid
+                );
+
+                // Mark as stopped (PID was reused or process exited)
+                let _ = handle
+                    .set_service_status(&service_name, ServiceStatus::Stopped)
+                    .await;
+                let _ = handle.set_service_pid(&service_name, None, None).await;
+            } else {
+                info!(
+                    "Service {} (PID {}) is still running, reconnecting",
+                    service_name, pid
+                );
+                // Note: We can't fully reconnect to the process (no Child handle),
+                // but we preserve the state so the user sees the correct status.
+                // The process will continue running independently.
+            }
+        } else {
+            // No PID recorded but status says running - mark as stopped
+            let _ = handle
+                .set_service_status(&service_name, ServiceStatus::Stopped)
+                .await;
         }
     }
 }

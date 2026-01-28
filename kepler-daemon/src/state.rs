@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use kepler_protocol::protocol::ServiceInfo;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::task::JoinHandle;
@@ -110,4 +111,110 @@ impl std::fmt::Debug for ProcessHandle {
             .field("stderr_task", &self.stderr_task.is_some())
             .finish()
     }
+}
+
+// ============================================================================
+// Persisted state structures for disk serialization
+// ============================================================================
+
+/// Serializable version of ServiceStatus
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistedServiceStatus {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+    Failed,
+    Healthy,
+    Unhealthy,
+}
+
+impl From<ServiceStatus> for PersistedServiceStatus {
+    fn from(status: ServiceStatus) -> Self {
+        match status {
+            ServiceStatus::Stopped => PersistedServiceStatus::Stopped,
+            ServiceStatus::Starting => PersistedServiceStatus::Starting,
+            ServiceStatus::Running => PersistedServiceStatus::Running,
+            ServiceStatus::Stopping => PersistedServiceStatus::Stopping,
+            ServiceStatus::Failed => PersistedServiceStatus::Failed,
+            ServiceStatus::Healthy => PersistedServiceStatus::Healthy,
+            ServiceStatus::Unhealthy => PersistedServiceStatus::Unhealthy,
+        }
+    }
+}
+
+impl From<PersistedServiceStatus> for ServiceStatus {
+    fn from(status: PersistedServiceStatus) -> Self {
+        match status {
+            PersistedServiceStatus::Stopped => ServiceStatus::Stopped,
+            PersistedServiceStatus::Starting => ServiceStatus::Starting,
+            PersistedServiceStatus::Running => ServiceStatus::Running,
+            PersistedServiceStatus::Stopping => ServiceStatus::Stopping,
+            PersistedServiceStatus::Failed => ServiceStatus::Failed,
+            PersistedServiceStatus::Healthy => ServiceStatus::Healthy,
+            PersistedServiceStatus::Unhealthy => ServiceStatus::Unhealthy,
+        }
+    }
+}
+
+/// Persisted state of a single service (serializable)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedServiceState {
+    pub status: PersistedServiceStatus,
+    pub pid: Option<u32>,
+    /// Unix timestamp of when the service started
+    pub started_at: Option<i64>,
+    pub exit_code: Option<i32>,
+    pub health_check_failures: u32,
+    pub restart_count: u32,
+    pub initialized: bool,
+}
+
+impl From<&ServiceState> for PersistedServiceState {
+    fn from(state: &ServiceState) -> Self {
+        PersistedServiceState {
+            status: state.status.into(),
+            pid: state.pid,
+            started_at: state.started_at.map(|dt| dt.timestamp()),
+            exit_code: state.exit_code,
+            health_check_failures: state.health_check_failures,
+            restart_count: state.restart_count,
+            initialized: state.initialized,
+        }
+    }
+}
+
+impl PersistedServiceState {
+    /// Convert to ServiceState, using provided computed_env and working_dir
+    pub fn to_service_state(
+        &self,
+        computed_env: HashMap<String, String>,
+        working_dir: PathBuf,
+    ) -> ServiceState {
+        ServiceState {
+            status: self.status.into(),
+            pid: self.pid,
+            started_at: self
+                .started_at
+                .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
+            exit_code: self.exit_code,
+            health_check_failures: self.health_check_failures,
+            restart_count: self.restart_count,
+            initialized: self.initialized,
+            computed_env,
+            working_dir,
+        }
+    }
+}
+
+/// Persisted config state containing all service states (serializable)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedConfigState {
+    /// Service states keyed by service name
+    pub services: HashMap<String, PersistedServiceState>,
+    /// Whether the config has been initialized (on_init hook run)
+    pub config_initialized: bool,
+    /// Unix timestamp of when the snapshot was taken
+    pub snapshot_time: i64,
 }

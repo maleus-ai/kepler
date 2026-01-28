@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::config::{
     parse_memory_limit, resolve_log_store, LogConfig, ResourceLimits, ServiceConfig,
@@ -746,4 +746,119 @@ pub async fn stop_service(
     let _ = handle.set_service_pid(service_name, None, None).await;
 
     Ok(())
+}
+
+// ============================================================================
+// Process validation for reconnection
+// ============================================================================
+
+/// Validate that a process with the given PID is still running.
+///
+/// This is used during daemon restart to verify that a previously-recorded
+/// process is still alive before attempting to reconnect to it.
+///
+/// # Arguments
+/// * `pid` - The process ID to check
+/// * `expected_start_time` - Optional expected start time (Unix timestamp) for
+///   additional validation against PID reuse
+///
+/// # Returns
+/// * `true` if the process exists (and optionally matches the start time)
+/// * `false` if the process doesn't exist or has been reused
+pub fn validate_running_process(pid: u32, expected_start_time: Option<i64>) -> bool {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        // Check if process exists by sending signal 0 (doesn't actually send anything)
+        let process_exists = kill(Pid::from_raw(pid as i32), None).is_ok();
+
+        if !process_exists {
+            trace!("Process {} does not exist", pid);
+            return false;
+        }
+
+        // If we have an expected start time, validate against /proc/{pid}/stat
+        if let Some(expected_ts) = expected_start_time {
+            if let Some(actual_ts) = get_process_start_time(pid) {
+                // Allow some tolerance (5 seconds) for timestamp differences
+                let diff = (expected_ts - actual_ts).abs();
+                if diff > 5 {
+                    trace!(
+                        "Process {} start time mismatch: expected {}, got {} (diff {})",
+                        pid, expected_ts, actual_ts, diff
+                    );
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    #[cfg(not(unix))]
+    {
+        // On non-Unix platforms, we can't easily check process existence
+        // Just assume the process is gone if we can't verify
+        let _ = (pid, expected_start_time);
+        false
+    }
+}
+
+/// Get the start time of a process from /proc/{pid}/stat.
+///
+/// Returns the start time as a Unix timestamp, or None if it can't be determined.
+#[cfg(unix)]
+fn get_process_start_time(pid: u32) -> Option<i64> {
+    use std::fs;
+
+    // Read /proc/{pid}/stat
+    let stat_path = format!("/proc/{}/stat", pid);
+    let stat_content = fs::read_to_string(&stat_path).ok()?;
+
+    // The stat file format has the start time as field 22 (1-indexed)
+    // Format: pid (comm) state ppid pgrp session tty_nr ... starttime ...
+    // We need to handle the case where comm might contain spaces or parentheses
+    let _start_paren = stat_content.find('(')?;
+    let end_paren = stat_content.rfind(')')?;
+    let fields_after_comm = &stat_content[end_paren + 2..];
+    let fields: Vec<&str> = fields_after_comm.split_whitespace().collect();
+
+    // Field 20 (0-indexed after comm) is starttime in clock ticks since boot
+    let starttime_ticks: u64 = fields.get(19)?.parse().ok()?;
+
+    // Get system boot time
+    let boot_time = get_boot_time()?;
+
+    // Get clock ticks per second (typically 100 on Linux)
+    let ticks_per_sec = get_clock_ticks_per_sec();
+
+    // Calculate absolute start time
+    let start_time = boot_time + (starttime_ticks / ticks_per_sec) as i64;
+
+    Some(start_time)
+}
+
+/// Get the system boot time from /proc/stat.
+#[cfg(unix)]
+fn get_boot_time() -> Option<i64> {
+    use std::fs;
+
+    let stat_content = fs::read_to_string("/proc/stat").ok()?;
+    for line in stat_content.lines() {
+        if line.starts_with("btime ") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            return parts.get(1)?.parse().ok();
+        }
+    }
+    None
+}
+
+/// Get the number of clock ticks per second.
+#[cfg(unix)]
+fn get_clock_ticks_per_sec() -> u64 {
+    // sysconf(_SC_CLK_TCK) typically returns 100 on Linux
+    // We could use libc::sysconf but 100 is the common default
+    100
 }

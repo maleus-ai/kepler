@@ -194,6 +194,14 @@ impl ServiceOrchestrator {
             }
         }
 
+        // Take config snapshot on first successful service start
+        // This captures the expanded environment variables at the time of first start
+        if !started.is_empty() {
+            if let Err(e) = handle.take_snapshot_if_needed().await {
+                warn!("Failed to take config snapshot: {}", e);
+            }
+        }
+
         if started.is_empty() {
             Ok("All services already running".to_string())
         } else {
@@ -465,6 +473,48 @@ impl ServiceOrchestrator {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         // Start services
+        self.start_services(config_path, service_filter).await
+    }
+
+    /// Recreate services with fresh config (re-expands environment variables).
+    ///
+    /// This is used when the user wants to apply changes to environment variables
+    /// or configuration that wouldn't normally take effect until daemon restart.
+    ///
+    /// The process:
+    /// 1. Stop all services (or specific service)
+    /// 2. Clear the config snapshot (forces re-expansion of env vars)
+    /// 3. Unload the config actor
+    /// 4. Reload the config (will parse fresh from source)
+    /// 5. Start services
+    pub async fn recreate_services(
+        &self,
+        config_path: &Path,
+        service_filter: Option<&str>,
+    ) -> Result<String, OrchestratorError> {
+        info!("Recreating services for {:?}", config_path);
+
+        // Stop services first
+        let stop_result = self.stop_services(config_path, service_filter, false).await;
+        if let Err(e) = &stop_result {
+            warn!("Error stopping services during recreate: {}", e);
+        }
+
+        // Get the existing handle to clear snapshot
+        if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
+            // Clear the snapshot to force re-expansion
+            if let Err(e) = handle.clear_snapshot().await {
+                warn!("Failed to clear snapshot: {}", e);
+            }
+        }
+
+        // Unload the config actor completely
+        self.registry.unload(&config_path.to_path_buf()).await;
+
+        // Small delay
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Start services (this will reload the config fresh from source)
         self.start_services(config_path, service_filter).await
     }
 

@@ -79,6 +79,13 @@ pub enum Request {
         /// Show what would be pruned without deleting
         dry_run: bool,
     },
+    /// Recreate services with fresh config (re-expands environment variables)
+    Recreate {
+        /// Path to the config file
+        config_path: PathBuf,
+        /// Service name (None = all services)
+        service: Option<String>,
+    },
 }
 
 /// Response sent from daemon to CLI

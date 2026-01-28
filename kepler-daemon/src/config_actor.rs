@@ -15,7 +15,10 @@ use crate::config::{KeplerConfig, LogConfig, ServiceConfig};
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
 use crate::logs::SharedLogBuffer;
-use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
+use crate::persistence::{ConfigPersistence, ExpandedConfigSnapshot};
+use crate::state::{
+    PersistedConfigState, PersistedServiceState, ProcessHandle, ServiceState, ServiceStatus,
+};
 use kepler_protocol::protocol::{LogEntry, ServiceInfo};
 
 /// Type of task handle stored in state
@@ -173,6 +176,20 @@ pub enum ConfigCommand {
     Shutdown {
         reply: oneshot::Sender<()>,
     },
+
+    // === Persistence Commands ===
+    /// Take a snapshot of the expanded config if not already taken
+    TakeSnapshotIfNeeded {
+        reply: oneshot::Sender<Result<bool>>,
+    },
+    /// Clear the snapshot (for recreate command)
+    ClearSnapshot {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Check if this config was restored from a snapshot
+    IsRestoredFromSnapshot {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// Per-config actor state
@@ -191,11 +208,22 @@ pub struct ConfigActor {
     watchers: HashMap<String, JoinHandle<()>>,
     health_checks: HashMap<String, JoinHandle<()>>,
 
+    // Persistence
+    persistence: ConfigPersistence,
+    /// Whether the config snapshot has been taken (happens on first service start)
+    snapshot_taken: bool,
+    /// Whether this config was restored from a persisted snapshot
+    restored_from_snapshot: bool,
+
     rx: mpsc::Receiver<ConfigCommand>,
 }
 
 impl ConfigActor {
-    /// Create a new config actor by loading a config file
+    /// Create a new config actor by loading a config file.
+    ///
+    /// This method implements Docker-like immutable config persistence:
+    /// - If an expanded config snapshot exists, load from it (don't re-expand env vars)
+    /// - If no snapshot exists, parse fresh from source (snapshot taken on first start)
     pub fn create(config_path: PathBuf) -> Result<(ConfigActorHandle, Self)> {
         // Canonicalize path first
         let canonical_path = std::fs::canonicalize(&config_path).map_err(|e| {
@@ -205,9 +233,6 @@ impl ConfigActor {
                 DaemonError::Io(e)
             }
         })?;
-
-        // Read original file contents
-        let contents = std::fs::read(&canonical_path)?;
 
         // Compute hash from the canonical path
         let hash = {
@@ -231,55 +256,144 @@ impl ConfigActor {
             std::fs::create_dir_all(&state_dir).map_err(DaemonError::ConfigCopy)?;
         }
 
-        // Copy config to secure location
-        let copied_config_path = state_dir.join("config.yaml");
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&copied_config_path)
-                .map_err(DaemonError::ConfigCopy)?;
-            file.write_all(&contents).map_err(DaemonError::ConfigCopy)?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(&copied_config_path, &contents).map_err(DaemonError::ConfigCopy)?;
-        }
+        // Create persistence layer
+        let persistence = ConfigPersistence::new(state_dir.clone());
 
-        // Parse config from the secure copy
-        let config = KeplerConfig::load(&copied_config_path)?;
+        // Save source path for discovery on daemon restart
+        let _ = persistence.save_source_path(&canonical_path);
 
-        // Get config directory
-        let config_dir = canonical_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
+        // Check if we have an existing expanded config snapshot
+        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot) =
+            if let Ok(Some(snapshot)) = persistence.load_expanded_config() {
+                info!(
+                    "Restoring config from snapshot (taken at {})",
+                    snapshot.snapshot_time
+                );
 
-        // Initialize service states with pre-computed environment and working directory
-        let services = config
-            .services
-            .iter()
-            .map(|(name, service_config)| {
-                let working_dir = service_config
-                    .working_dir
-                    .clone()
-                    .unwrap_or_else(|| config_dir.clone());
+                // Load persisted state if available
+                let persisted_state = persistence.load_state().ok().flatten();
 
-                let computed_env = build_service_env(service_config, &config_dir).unwrap_or_default();
+                // Restore service states from snapshot + persisted state
+                let services = snapshot
+                    .config
+                    .services
+                    .iter()
+                    .map(|(name, _service_config)| {
+                        let computed_env = snapshot
+                            .service_envs
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_default();
+                        let working_dir = snapshot
+                            .service_working_dirs
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| snapshot.config_dir.clone());
 
-                let state = ServiceState {
-                    computed_env,
-                    working_dir,
-                    ..Default::default()
-                };
-                (name.clone(), state)
-            })
-            .collect();
+                        // Restore runtime state if available
+                        let state = if let Some(ref ps) = persisted_state {
+                            if let Some(ss) = ps.services.get(name) {
+                                ss.to_service_state(computed_env, working_dir)
+                            } else {
+                                ServiceState {
+                                    computed_env,
+                                    working_dir,
+                                    ..Default::default()
+                                }
+                            }
+                        } else {
+                            ServiceState {
+                                computed_env,
+                                working_dir,
+                                ..Default::default()
+                            }
+                        };
+
+                        (name.clone(), state)
+                    })
+                    .collect();
+
+                let initialized = persisted_state
+                    .as_ref()
+                    .map(|ps| ps.config_initialized)
+                    .unwrap_or(false);
+
+                (
+                    snapshot.config,
+                    snapshot.config_dir,
+                    services,
+                    initialized,
+                    true,  // snapshot was already taken
+                    true,  // restored from snapshot
+                )
+            } else {
+                // No snapshot - parse fresh from source
+                info!("Loading config fresh from source (no snapshot)");
+
+                // Read original file contents
+                let contents = std::fs::read(&canonical_path)?;
+
+                // Copy config to secure location
+                let copied_config_path = state_dir.join("config.yaml");
+                #[cfg(unix)]
+                {
+                    use std::io::Write;
+                    use std::os::unix::fs::OpenOptionsExt;
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o600)
+                        .open(&copied_config_path)
+                        .map_err(DaemonError::ConfigCopy)?;
+                    file.write_all(&contents).map_err(DaemonError::ConfigCopy)?;
+                }
+                #[cfg(not(unix))]
+                {
+                    std::fs::write(&copied_config_path, &contents)
+                        .map_err(DaemonError::ConfigCopy)?;
+                }
+
+                // Parse config from the secure copy
+                let config = KeplerConfig::load(&copied_config_path)?;
+
+                // Get config directory
+                let config_dir = canonical_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."));
+
+                // Initialize service states with pre-computed environment and working directory
+                let services = config
+                    .services
+                    .iter()
+                    .map(|(name, service_config)| {
+                        let working_dir = service_config
+                            .working_dir
+                            .clone()
+                            .unwrap_or_else(|| config_dir.clone());
+
+                        let computed_env =
+                            build_service_env(service_config, &config_dir).unwrap_or_default();
+
+                        let state = ServiceState {
+                            computed_env,
+                            working_dir,
+                            ..Default::default()
+                        };
+                        (name.clone(), state)
+                    })
+                    .collect();
+
+                (
+                    config,
+                    config_dir,
+                    services,
+                    false, // not initialized
+                    false, // snapshot not yet taken
+                    false, // not restored from snapshot
+                )
+            };
 
         // Create logs buffer
         let logs_dir = state_dir.join("logs");
@@ -302,10 +416,13 @@ impl ConfigActor {
             state_dir,
             services,
             logs,
-            initialized: false,
+            initialized,
             processes: HashMap::new(),
             watchers: HashMap::new(),
             health_checks: HashMap::new(),
+            persistence,
+            snapshot_taken,
+            restored_from_snapshot,
             rx,
         };
 
@@ -529,11 +646,87 @@ impl ConfigActor {
 
             // === Lifecycle ===
             ConfigCommand::Shutdown { reply } => {
+                // Save state before shutdown
+                let _ = self.save_state();
                 let _ = reply.send(());
                 return true;
             }
+
+            // === Persistence Commands ===
+            ConfigCommand::TakeSnapshotIfNeeded { reply } => {
+                let result = self.take_snapshot_if_needed();
+                let _ = reply.send(result);
+            }
+            ConfigCommand::ClearSnapshot { reply } => {
+                let result = self.persistence.clear_snapshot();
+                if result.is_ok() {
+                    self.snapshot_taken = false;
+                    self.restored_from_snapshot = false;
+                }
+                let _ = reply.send(result);
+            }
+            ConfigCommand::IsRestoredFromSnapshot { reply } => {
+                let _ = reply.send(self.restored_from_snapshot);
+            }
         }
         false
+    }
+
+    /// Take a snapshot of the expanded config if not already taken.
+    /// Returns Ok(true) if snapshot was taken, Ok(false) if already existed.
+    fn take_snapshot_if_needed(&mut self) -> Result<bool> {
+        if self.snapshot_taken {
+            return Ok(false);
+        }
+
+        info!("Taking config snapshot");
+
+        // Build the snapshot
+        let service_envs: HashMap<String, HashMap<String, String>> = self
+            .services
+            .iter()
+            .map(|(name, state)| (name.clone(), state.computed_env.clone()))
+            .collect();
+
+        let service_working_dirs: HashMap<String, PathBuf> = self
+            .services
+            .iter()
+            .map(|(name, state)| (name.clone(), state.working_dir.clone()))
+            .collect();
+
+        let snapshot = ExpandedConfigSnapshot {
+            config: self.config.clone(),
+            service_envs,
+            service_working_dirs,
+            config_dir: self.config_dir.clone(),
+            snapshot_time: chrono::Utc::now().timestamp(),
+        };
+
+        // Save the snapshot
+        self.persistence.save_expanded_config(&snapshot)?;
+        self.snapshot_taken = true;
+
+        // Also save current state
+        self.save_state()?;
+
+        Ok(true)
+    }
+
+    /// Save the current service state to disk.
+    fn save_state(&self) -> Result<()> {
+        let services: HashMap<String, PersistedServiceState> = self
+            .services
+            .iter()
+            .map(|(name, state)| (name.clone(), PersistedServiceState::from(state)))
+            .collect();
+
+        let state = PersistedConfigState {
+            services,
+            config_initialized: self.initialized,
+            snapshot_time: chrono::Utc::now().timestamp(),
+        };
+
+        self.persistence.save_state(&state)
     }
 
     /// Build a ServiceContext for a service (single round-trip)
@@ -1121,6 +1314,43 @@ impl ConfigActorHandle {
                 handle_type,
             })
             .await;
+    }
+
+    // === Persistence Methods ===
+
+    /// Take a snapshot of the expanded config if not already taken.
+    /// Returns Ok(true) if snapshot was taken, Ok(false) if already existed.
+    pub async fn take_snapshot_if_needed(&self) -> Result<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(ConfigCommand::TakeSnapshotIfNeeded { reply: reply_tx })
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor closed".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
+    }
+
+    /// Clear the snapshot to force re-expansion on next start.
+    pub async fn clear_snapshot(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(ConfigCommand::ClearSnapshot { reply: reply_tx })
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor closed".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
+    }
+
+    /// Check if this config was restored from a snapshot.
+    pub async fn is_restored_from_snapshot(&self) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ConfigCommand::IsRestoredFromSnapshot { reply: reply_tx })
+            .await;
+        reply_rx.await.unwrap_or(false)
     }
 
     // === Lifecycle ===

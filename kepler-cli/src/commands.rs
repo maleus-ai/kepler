@@ -54,6 +54,16 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Recreate services with fresh config (re-expands environment variables)
+    ///
+    /// This command stops services, clears the cached config snapshot,
+    /// and starts services again with freshly-expanded environment variables.
+    /// Use this when you've changed environment variables and want them
+    /// to take effect without restarting the daemon.
+    Recreate {
+        /// Specific service to recreate (recreates all if not specified)
+        service: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

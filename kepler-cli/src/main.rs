@@ -127,6 +127,11 @@ async fn run() -> Result<()> {
             // Already handled above
             unreachable!()
         }
+
+        Commands::Recreate { service } => {
+            let response = client.recreate(canonical_path, service).await?;
+            handle_response(response);
+        }
     }
 
     Ok(())
