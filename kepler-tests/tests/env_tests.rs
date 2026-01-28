@@ -258,7 +258,7 @@ async fn test_env_expansion_references_env_file() {
     harness.stop_service("test").await.unwrap();
 }
 
-/// System environment variables are inherited by the service
+/// Minimal system environment variables (PATH, HOME, USER, SHELL) are inherited by the service
 #[tokio::test]
 async fn test_system_env_inherited() {
     let temp_dir = TempDir::new().unwrap();
@@ -302,14 +302,14 @@ async fn test_system_env_inherited() {
     harness.stop_service("test").await.unwrap();
 }
 
-/// Service env can override system environment variables
+/// Service env can override inherited system environment variables
 #[tokio::test]
 async fn test_service_env_overrides_system_env() {
     let temp_dir = TempDir::new().unwrap();
     let marker = MarkerFileHelper::new(temp_dir.path());
     let marker_path = marker.marker_path("override_system");
 
-    // Override a non-critical env var (not PATH which breaks execution)
+    // Override HOME which is one of the inherited vars (PATH, HOME, USER, SHELL)
     let config = TestConfigBuilder::new()
         .add_service(
             "test",
@@ -317,11 +317,11 @@ async fn test_service_env_overrides_system_env() {
                 "sh".to_string(),
                 "-c".to_string(),
                 format!(
-                    "echo \"LANG=$LANG\" >> {} && sleep 3600",
+                    "echo \"HOME=$HOME\" >> {} && sleep 3600",
                     marker_path.display()
                 ),
             ])
-            .with_environment(vec!["LANG=custom_locale".to_string()])
+            .with_environment(vec!["HOME=/custom/home".to_string()])
             .build(),
         )
         .build();
@@ -336,13 +336,79 @@ async fn test_service_env_overrides_system_env() {
         .wait_for_marker_content("override_system", Duration::from_secs(2))
         .await;
 
-    assert!(content.is_some(), "Service should have written LANG");
+    assert!(content.is_some(), "Service should have written HOME");
     let content = content.unwrap();
     assert!(
-        content.contains("LANG=custom_locale"),
-        "Service env should override system LANG. Got: {}",
+        content.contains("HOME=/custom/home"),
+        "Service env should override inherited HOME. Got: {}",
         content
     );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Non-inherited system variables are NOT passed to service but CAN be accessed via ${VAR} expansion
+#[tokio::test]
+async fn test_non_inherited_sys_var_not_passed_but_expandable() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("non_inherited");
+
+    // Set a non-inherited env var in the test process (simulating daemon having it)
+    // SAFETY: This is a test environment, and we clean up the var at the end
+    unsafe {
+        std::env::set_var("KEPLER_TEST_VAR", "test_value_123");
+    }
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "echo \"DIRECT=$KEPLER_TEST_VAR EXPANDED=$EXPANDED_VAR\" >> {} && sleep 3600",
+                    marker_path.display()
+                ),
+            ])
+            // Use ${VAR} syntax to explicitly reference the non-inherited var
+            .with_environment(vec!["EXPANDED_VAR=${KEPLER_TEST_VAR}".to_string()])
+            .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("non_inherited", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Service should have written env vars");
+    let content = content.unwrap();
+
+    // DIRECT access should be empty (var not inherited)
+    assert!(
+        content.contains("DIRECT=") && !content.contains("DIRECT=test_value_123"),
+        "Non-inherited var should NOT be directly available. Got: {}",
+        content
+    );
+
+    // Expanded access via ${VAR} syntax should work
+    assert!(
+        content.contains("EXPANDED=test_value_123"),
+        "Non-inherited var should be accessible via ${{VAR}} expansion. Got: {}",
+        content
+    );
+
+    // Cleanup
+    // SAFETY: This is a test environment cleanup
+    unsafe {
+        std::env::remove_var("KEPLER_TEST_VAR");
+    }
 
     harness.stop_service("test").await.unwrap();
 }
@@ -516,7 +582,7 @@ async fn test_env_with_equals_in_value() {
     harness.stop_service("test").await.unwrap();
 }
 
-/// Empty environment array works (uses system env only)
+/// Empty environment array works (uses minimal system env only)
 #[tokio::test]
 async fn test_empty_environment() {
     let temp_dir = TempDir::new().unwrap();

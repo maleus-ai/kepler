@@ -477,15 +477,17 @@ hooks:
 ```
 
 **Hook environment variables:**
-- Hooks inherit the service's environment (including system env and service env_file)
+- Hooks inherit the service's environment (including minimal system env and service env_file)
 - `environment:` defines hook-specific variables that override inherited ones
 - `env_file:` loads additional variables from a file (relative to working_dir)
 - Environment merging priority (lowest to highest):
-  1. System environment variables
+  1. Minimal system environment (PATH, HOME, USER, SHELL)
   2. Service's `env_file` variables
   3. Service's `environment` array
   4. Hook's `env_file` variables
   5. Hook's `environment` array
+
+**Note:** Only essential system variables (PATH, HOME, USER, SHELL) are inherited. Use `${VAR}` syntax to reference other system variables in your `environment` arrays.
 
 **Hook user/group behavior** (Unix only):
 - By default, hooks inherit the service's `user:` and `group:` settings

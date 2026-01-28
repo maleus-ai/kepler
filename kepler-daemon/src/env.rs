@@ -63,16 +63,22 @@ pub fn load_env_file(path: &Path) -> Result<HashMap<String, String>> {
 /// Priority (highest to lowest):
 /// 1. Service-defined environment variables
 /// 2. Variables from env_file
-/// 3. System environment variables
+/// 3. Minimal system environment (PATH, HOME, USER, SHELL only)
+///
+/// Note: Only essential system variables are inherited.
+/// Use ${VAR} syntax to reference other system variables.
 pub fn build_service_env(
     config: &ServiceConfig,
     config_dir: &Path,
 ) -> Result<HashMap<String, String>> {
     let mut env = HashMap::new();
 
-    // Start with system environment
-    for (key, value) in std::env::vars() {
-        env.insert(key, value);
+    // Start with minimal system environment (only essential variables)
+    const INHERITED_VARS: &[&str] = &["PATH", "HOME", "USER", "SHELL"];
+    for var_name in INHERITED_VARS {
+        if let Ok(value) = std::env::var(var_name) {
+            env.insert(var_name.to_string(), value);
+        }
     }
 
     // Load env_file if specified

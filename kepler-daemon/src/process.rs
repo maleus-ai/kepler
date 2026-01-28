@@ -246,6 +246,7 @@ pub async fn spawn_command_sync(spec: CommandSpec, mode: SpawnMode) -> Result<Sy
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env_clear()
         .envs(&spec.environment);
 
     // Apply user/group if configured (Unix only)
@@ -418,6 +419,7 @@ pub async fn spawn_command_async(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env_clear()
         .envs(&spec.environment);
 
     // Apply user/group if configured (Unix only)
