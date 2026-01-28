@@ -63,8 +63,7 @@ async fn test_full_lifecycle_with_healthcheck_hooks() {
     harness.start_health_checker("test").await.unwrap();
 
     wait_for_unhealthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -80,8 +79,7 @@ async fn test_full_lifecycle_with_healthcheck_hooks() {
     std::fs::write(&health_marker_path, "ok").unwrap();
 
     wait_for_healthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -244,8 +242,7 @@ async fn test_multiple_health_transitions() {
 
     // Transition 1: Running -> Unhealthy (no marker file)
     wait_for_unhealthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -255,8 +252,7 @@ async fn test_multiple_health_transitions() {
     // Transition 2: Unhealthy -> Healthy (create marker)
     std::fs::write(&health_marker_path, "ok").unwrap();
     wait_for_healthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -266,8 +262,7 @@ async fn test_multiple_health_transitions() {
     // Transition 3: Healthy -> Unhealthy (remove marker)
     std::fs::remove_file(&health_marker_path).unwrap();
     wait_for_unhealthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -277,8 +272,7 @@ async fn test_multiple_health_transitions() {
     // Transition 4: Unhealthy -> Healthy (create marker again)
     std::fs::write(&health_marker_path, "ok").unwrap();
     wait_for_healthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -457,8 +451,7 @@ async fn test_resource_limits_applied() {
 
     // Wait for the service to reach Running status
     wait_for_running(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "limited",
         Duration::from_secs(5),
     )
@@ -467,8 +460,8 @@ async fn test_resource_limits_applied() {
 
     // Get PID from state
     let pid = harness
-        .state()
-        .get_service_state(harness.config_path().to_path_buf(), "limited".to_string())
+        .handle()
+        .get_service_state("limited")
         .await
         .and_then(|s| s.pid);
 
@@ -545,8 +538,7 @@ async fn test_multiple_services_with_healthchecks() {
 
     // Both should become unhealthy (no marker files)
     wait_for_unhealthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "service1",
         Duration::from_secs(5),
     )
@@ -554,8 +546,7 @@ async fn test_multiple_services_with_healthchecks() {
     .unwrap();
 
     wait_for_unhealthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "service2",
         Duration::from_secs(5),
     )
@@ -566,8 +557,7 @@ async fn test_multiple_services_with_healthchecks() {
     std::fs::write(&marker1_path, "ok").unwrap();
 
     wait_for_healthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "service1",
         Duration::from_secs(5),
     )
@@ -582,8 +572,7 @@ async fn test_multiple_services_with_healthchecks() {
     std::fs::write(&marker2_path, "ok").unwrap();
 
     wait_for_healthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "service2",
         Duration::from_secs(5),
     )

@@ -1,20 +1,19 @@
 //! Test harness that manages daemon state without full binary
 
 use kepler_daemon::config::{KeplerConfig, LogRetention};
-use kepler_daemon::env::build_service_env;
+use kepler_daemon::config_actor::{ConfigActor, ConfigActorHandle, TaskHandleType};
 use kepler_daemon::health::spawn_health_checker;
 use kepler_daemon::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use kepler_daemon::logs::SharedLogBuffer;
 use kepler_daemon::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
 use kepler_daemon::state::ServiceStatus;
-use kepler_daemon::state_actor::{create_state_actor, StateHandle, TaskHandleType};
 use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 /// Test harness for managing daemon state
 pub struct TestDaemonHarness {
-    pub state: StateHandle,
+    pub handle: ConfigActorHandle,
     pub config_path: PathBuf,
     pub config_dir: PathBuf,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
@@ -32,19 +31,15 @@ impl TestDaemonHarness {
             .map_err(std::io::Error::other)?;
         std::fs::write(&config_path, config_yaml)?;
 
-        let (state, actor) = create_state_actor();
+        let (handle, actor) = ConfigActor::create(config_path.clone())
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         tokio::spawn(actor.run());
 
         let (exit_tx, exit_rx) = mpsc::channel(32);
         let (restart_tx, restart_rx) = mpsc::channel(32);
 
-        // Load the config into state
-        state.load_config(config_path.clone()).await.map_err(|e| {
-            std::io::Error::other(e.to_string())
-        })?;
-
         Ok(Self {
-            state,
+            handle,
             config_path: config_path.clone(),
             config_dir: config_dir.to_path_buf(),
             exit_tx,
@@ -56,25 +51,21 @@ impl TestDaemonHarness {
 
     /// Create a harness from an existing config file
     pub async fn from_file(config_path: &Path) -> std::io::Result<Self> {
-        let (state, actor) = create_state_actor();
-        tokio::spawn(actor.run());
-
-        let (exit_tx, exit_rx) = mpsc::channel(32);
-        let (restart_tx, restart_rx) = mpsc::channel(32);
-
         let config_path = config_path.canonicalize()?;
         let config_dir = config_path
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
 
-        // Load the config into state
-        state.load_config(config_path.clone()).await.map_err(|e| {
-            std::io::Error::other(e.to_string())
-        })?;
+        let (handle, actor) = ConfigActor::create(config_path.clone())
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        tokio::spawn(actor.run());
+
+        let (exit_tx, exit_rx) = mpsc::channel(32);
+        let (restart_tx, restart_rx) = mpsc::channel(32);
 
         Ok(Self {
-            state,
+            handle,
             config_path,
             config_dir,
             exit_tx,
@@ -104,9 +95,9 @@ impl TestDaemonHarness {
         self.restart_tx.clone()
     }
 
-    /// Get the state handle
-    pub fn state(&self) -> &StateHandle {
-        &self.state
+    /// Get the config actor handle
+    pub fn handle(&self) -> &ConfigActorHandle {
+        &self.handle
     }
 
     /// Get the config path
@@ -116,52 +107,33 @@ impl TestDaemonHarness {
 
     /// Start a specific service
     pub async fn start_service(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let service_config = self.state
-            .get_service_config(self.config_path.clone(), service_name.to_string())
+        // Get service context (single round-trip)
+        let ctx = self.handle
+            .get_service_context(service_name)
             .await
             .ok_or("Service not found")?;
 
-        let logs = self.state
-            .get_logs_buffer(self.config_path.clone())
-            .await
-            .ok_or("Logs not found")?;
-
-        let global_log_config = self.state
-            .get_global_log_config(self.config_path.clone())
-            .await;
-
         // Update status to starting
-        let _ = self.state
-            .set_service_status(
-                self.config_path.clone(),
-                service_name.to_string(),
-                ServiceStatus::Starting,
-            )
+        let _ = self.handle
+            .set_service_status(service_name, ServiceStatus::Starting)
             .await;
 
         // Run on_init hook if not initialized
-        let should_run_init = !self.state
-            .is_service_initialized(self.config_path.clone(), service_name.to_string())
+        let should_run_init = !self.handle
+            .is_service_initialized(service_name)
             .await;
 
-        let working_dir = service_config
-            .working_dir
-            .clone()
-            .unwrap_or_else(|| self.config_dir.clone());
-        let env = build_service_env(&service_config, &self.config_dir)?;
-        let hook_params = ServiceHookParams {
-            working_dir: &working_dir,
-            env: &env,
-            logs: Some(&logs),
-            service_user: service_config.user.as_deref(),
-            service_group: service_config.group.as_deref(),
-            service_log_config: service_config.logs.as_ref(),
-            global_log_config: global_log_config.as_ref(),
-        };
+        let hook_params = ServiceHookParams::from_service_context(
+            &ctx.service_config,
+            &ctx.working_dir,
+            &ctx.env,
+            Some(&ctx.logs),
+            ctx.global_log_config.as_ref(),
+        );
 
         if should_run_init {
             run_service_hook(
-                &service_config.hooks,
+                &ctx.service_config.hooks,
                 ServiceHookType::OnInit,
                 service_name,
                 &hook_params,
@@ -169,14 +141,14 @@ impl TestDaemonHarness {
             .await?;
 
             // Mark as initialized
-            let _ = self.state
-                .mark_service_initialized(self.config_path.clone(), service_name.to_string())
+            let _ = self.handle
+                .mark_service_initialized(service_name)
                 .await;
         }
 
         // Run on_start hook
         run_service_hook(
-            &service_config.hooks,
+            &ctx.service_config.hooks,
             ServiceHookType::OnStart,
             service_name,
             &hook_params,
@@ -185,51 +157,40 @@ impl TestDaemonHarness {
 
         // Spawn the process
         let spawn_params = SpawnServiceParams {
-            config_path: &self.config_path,
             service_name,
-            service_config: &service_config,
-            config_dir: &self.config_dir,
-            logs: logs.clone(),
-            state: self.state.clone(),
+            service_config: &ctx.service_config,
+            config_dir: &ctx.config_dir,
+            logs: ctx.logs.clone(),
+            handle: self.handle.clone(),
             exit_tx: self.exit_tx.clone(),
-            global_log_config: global_log_config.as_ref(),
+            global_log_config: ctx.global_log_config.as_ref(),
         };
-        let handle = spawn_service(spawn_params).await?;
-
-        let working_dir = service_config
-            .working_dir
-            .clone()
-            .unwrap_or_else(|| self.config_dir.clone());
+        let process_handle = spawn_service(spawn_params).await?;
 
         // Store the handle
-        self.state
-            .store_process_handle(self.config_path.clone(), service_name.to_string(), handle)
+        self.handle
+            .store_process_handle(service_name, process_handle)
             .await;
 
         // Update status to Running (PID is already set by spawn_service)
-        let _ = self.state
-            .set_service_status(
-                self.config_path.clone(),
-                service_name.to_string(),
-                ServiceStatus::Running,
-            )
+        let _ = self.handle
+            .set_service_status(service_name, ServiceStatus::Running)
             .await;
 
         // Start file watcher if configured
-        if !service_config.restart.watch_patterns().is_empty() {
-            let handle = spawn_file_watcher(
+        if !ctx.service_config.restart.watch_patterns().is_empty() {
+            let watcher_handle = spawn_file_watcher(
                 self.config_path.clone(),
                 service_name.to_string(),
-                service_config.restart.watch_patterns().to_vec(),
-                working_dir,
+                ctx.service_config.restart.watch_patterns().to_vec(),
+                ctx.working_dir.clone(),
                 self.restart_tx.clone(),
             );
-            self.state
+            self.handle
                 .store_task_handle(
-                    self.config_path.clone(),
-                    service_name.to_string(),
+                    service_name,
                     TaskHandleType::FileWatcher,
-                    handle,
+                    watcher_handle,
                 )
                 .await;
         }
@@ -239,26 +200,24 @@ impl TestDaemonHarness {
 
     /// Start the health checker for a service
     pub async fn start_health_checker(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let service_config = self.state
-            .get_service_config(self.config_path.clone(), service_name.to_string())
+        let ctx = self.handle
+            .get_service_context(service_name)
             .await
             .ok_or("Service not found")?;
 
-        if let Some(health_config) = service_config.healthcheck {
-            let handle = spawn_health_checker(
-                self.config_path.clone(),
+        if let Some(health_config) = ctx.service_config.healthcheck {
+            let task_handle = spawn_health_checker(
                 service_name.to_string(),
                 health_config,
-                self.state.clone(),
+                self.handle.clone(),
             );
 
             // Store the health check handle
-            self.state
+            self.handle
                 .store_task_handle(
-                    self.config_path.clone(),
-                    service_name.to_string(),
+                    service_name,
                     TaskHandleType::HealthCheck,
-                    handle,
+                    task_handle,
                 )
                 .await;
         }
@@ -268,39 +227,23 @@ impl TestDaemonHarness {
 
     /// Stop a specific service
     pub async fn stop_service(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Get service config for hooks
-        let service_config = self.state
-            .get_service_config(self.config_path.clone(), service_name.to_string())
+        // Get service context for hooks
+        let ctx = self.handle
+            .get_service_context(service_name)
             .await
             .ok_or("Service not found")?;
 
-        let logs = self.state
-            .get_logs_buffer(self.config_path.clone())
-            .await
-            .ok_or("Logs not found")?;
-
-        let global_log_config = self.state
-            .get_global_log_config(self.config_path.clone())
-            .await;
-
         // Run on_stop hook
-        let working_dir = service_config
-            .working_dir
-            .clone()
-            .unwrap_or_else(|| self.config_dir.clone());
-        let env = build_service_env(&service_config, &self.config_dir)?;
-        let hook_params = ServiceHookParams {
-            working_dir: &working_dir,
-            env: &env,
-            logs: Some(&logs),
-            service_user: service_config.user.as_deref(),
-            service_group: service_config.group.as_deref(),
-            service_log_config: service_config.logs.as_ref(),
-            global_log_config: global_log_config.as_ref(),
-        };
+        let hook_params = ServiceHookParams::from_service_context(
+            &ctx.service_config,
+            &ctx.working_dir,
+            &ctx.env,
+            Some(&ctx.logs),
+            ctx.global_log_config.as_ref(),
+        );
 
         run_service_hook(
-            &service_config.hooks,
+            &ctx.service_config.hooks,
             ServiceHookType::OnStop,
             service_name,
             &hook_params,
@@ -308,24 +251,18 @@ impl TestDaemonHarness {
         .await?;
 
         // Stop the service
-        stop_service(&self.config_path, service_name, self.state.clone()).await?;
+        stop_service(service_name, self.handle.clone()).await?;
 
         Ok(())
     }
 
     /// Stop all services
     pub async fn stop_all(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let configs = self.state.list_configs().await.unwrap_or_default();
-
-        for config_info in configs {
-            if config_info.config_path == self.config_path.to_string_lossy() {
-                // Get all service names from the config
-                if let Some(config) = self.state.get_config(self.config_path.clone()).await {
-                    let service_names: Vec<String> = config.services.keys().cloned().collect();
-                    for name in service_names {
-                        let _ = self.stop_service(&name).await;
-                    }
-                }
+        // Get all service names from the config
+        if let Some(config) = self.handle.get_config().await {
+            let service_names: Vec<String> = config.services.keys().cloned().collect();
+            for name in service_names {
+                let _ = self.stop_service(&name).await;
             }
         }
 
@@ -334,16 +271,16 @@ impl TestDaemonHarness {
 
     /// Get the current status of a service
     pub async fn get_status(&self, service_name: &str) -> Option<ServiceStatus> {
-        self.state
-            .get_service_state(self.config_path.clone(), service_name.to_string())
+        self.handle
+            .get_service_state(service_name)
             .await
             .map(|s| s.status)
     }
 
     /// Check if a service has a health check configured
     pub async fn has_healthcheck(&self, service_name: &str) -> bool {
-        self.state
-            .get_service_config(self.config_path.clone(), service_name.to_string())
+        self.handle
+            .get_service_config(service_name)
             .await
             .map(|c| c.healthcheck.is_some())
             .unwrap_or(false)
@@ -351,122 +288,209 @@ impl TestDaemonHarness {
 
     /// Get the logs buffer
     pub async fn logs(&self) -> Option<SharedLogBuffer> {
-        self.state.get_logs_buffer(self.config_path.clone()).await
+        self.handle.get_logs_buffer().await
     }
 
     /// Spawn a file change handler that restarts services on file changes
     /// Must be called after taking restart_rx with take_restart_rx()
     pub fn spawn_file_change_handler(&self, mut restart_rx: mpsc::Receiver<FileChangeEvent>) {
-        let state = self.state.clone();
+        let handle = self.handle.clone();
         let exit_tx = self.exit_tx.clone();
 
         tokio::spawn(async move {
             while let Some(event) = restart_rx.recv().await {
-                // Get service config and global log config
-                let service_config = state
-                    .get_service_config(event.config_path.clone(), event.service_name.clone())
-                    .await;
-                let global_log_config = state
-                    .get_global_log_config(event.config_path.clone())
-                    .await;
+                // Get service context
+                let ctx = match handle.get_service_context(&event.service_name).await {
+                    Some(ctx) => ctx,
+                    None => continue,
+                };
 
-                if let Some(config) = service_config {
-                    // Get config_dir and logs
-                    let config_dir = state
-                        .get_config_dir(event.config_path.clone())
-                        .await
-                        .unwrap_or_else(|| PathBuf::from("."));
+                // Run on_restart hook
+                let hook_params = ServiceHookParams::from_service_context(
+                    &ctx.service_config,
+                    &ctx.working_dir,
+                    &ctx.env,
+                    Some(&ctx.logs),
+                    ctx.global_log_config.as_ref(),
+                );
 
-                    let logs = match state.get_logs_buffer(event.config_path.clone()).await {
-                        Some(l) => l,
-                        None => continue,
-                    };
+                let _ = run_service_hook(
+                    &ctx.service_config.hooks,
+                    ServiceHookType::OnRestart,
+                    &event.service_name,
+                    &hook_params,
+                )
+                .await;
+
+                // Apply on_restart log retention policy
+                {
+                    use kepler_daemon::config::resolve_log_retention;
+
+                    let retention = resolve_log_retention(
+                        ctx.service_config.logs.as_ref(),
+                        ctx.global_log_config.as_ref(),
+                        |l| l.get_on_restart(),
+                        LogRetention::Retain,
+                    );
+                    let should_clear = retention == LogRetention::Clear;
+
+                    if should_clear {
+                        ctx.logs.clear_service(&event.service_name);
+                        ctx.logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                    }
+                }
+
+                // Stop the service
+                if stop_service(&event.service_name, handle.clone()).await.is_err() {
+                    continue;
+                }
+
+                // Small delay
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                // Restart the service
+                let spawn_params = SpawnServiceParams {
+                    service_name: &event.service_name,
+                    service_config: &ctx.service_config,
+                    config_dir: &ctx.config_dir,
+                    logs: ctx.logs.clone(),
+                    handle: handle.clone(),
+                    exit_tx: exit_tx.clone(),
+                    global_log_config: ctx.global_log_config.as_ref(),
+                };
+                if let Ok(process_handle) = spawn_service(spawn_params).await {
+                    handle
+                        .store_process_handle(&event.service_name, process_handle)
+                        .await;
+
+                    let _ = handle
+                        .set_service_status(&event.service_name, ServiceStatus::Running)
+                        .await;
+                    // Note: PID is already set by spawn_service
+                    let _ = handle
+                        .increment_restart_count(&event.service_name)
+                        .await;
+                }
+            }
+        });
+    }
+
+    /// Spawn a process exit handler that handles restarts based on restart policy
+    /// Must be called after taking exit_rx with take_exit_rx()
+    pub fn spawn_process_exit_handler(&self, mut exit_rx: mpsc::Receiver<ProcessExitEvent>) {
+        let handle = self.handle.clone();
+        let exit_tx = self.exit_tx.clone();
+
+        tokio::spawn(async move {
+            while let Some(event) = exit_rx.recv().await {
+                // Get service context
+                let ctx = match handle.get_service_context(&event.service_name).await {
+                    Some(ctx) => ctx,
+                    None => continue,
+                };
+
+                // Record process exit in state
+                let _ = handle.record_process_exit(&event.service_name, event.exit_code).await;
+
+                // Run on_exit hook
+                let hook_params = ServiceHookParams::from_service_context(
+                    &ctx.service_config,
+                    &ctx.working_dir,
+                    &ctx.env,
+                    Some(&ctx.logs),
+                    ctx.global_log_config.as_ref(),
+                );
+
+                let _ = run_service_hook(
+                    &ctx.service_config.hooks,
+                    ServiceHookType::OnExit,
+                    &event.service_name,
+                    &hook_params,
+                )
+                .await;
+
+                // Apply on_exit log retention
+                {
+                    use kepler_daemon::config::resolve_log_retention;
+
+                    let retention = resolve_log_retention(
+                        ctx.service_config.logs.as_ref(),
+                        ctx.global_log_config.as_ref(),
+                        |l| l.get_on_exit(),
+                        LogRetention::Retain,
+                    );
+                    let should_clear = retention == LogRetention::Clear;
+
+                    if should_clear {
+                        ctx.logs.clear_service(&event.service_name);
+                        ctx.logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                    }
+                }
+
+                // Determine if we should restart
+                let should_restart = ctx.service_config.restart.should_restart_on_exit(event.exit_code);
+
+                if should_restart {
+                    // Small delay before restart
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                     // Run on_restart hook
-                    let working_dir = config
-                        .working_dir
-                        .clone()
-                        .unwrap_or_else(|| config_dir.clone());
-                    let env = build_service_env(&config, &config_dir).unwrap_or_default();
-                    let hook_params = ServiceHookParams {
-                        working_dir: &working_dir,
-                        env: &env,
-                        logs: Some(&logs),
-                        service_user: config.user.as_deref(),
-                        service_group: config.group.as_deref(),
-                        service_log_config: config.logs.as_ref(),
-                        global_log_config: global_log_config.as_ref(),
-                    };
-
                     let _ = run_service_hook(
-                        &config.hooks,
+                        &ctx.service_config.hooks,
                         ServiceHookType::OnRestart,
                         &event.service_name,
                         &hook_params,
                     )
                     .await;
 
-                    // Apply on_restart log retention policy
+                    // Apply on_restart log retention
                     {
                         use kepler_daemon::config::resolve_log_retention;
 
                         let retention = resolve_log_retention(
-                            config.logs.as_ref(),
-                            global_log_config.as_ref(),
+                            ctx.service_config.logs.as_ref(),
+                            ctx.global_log_config.as_ref(),
                             |l| l.get_on_restart(),
                             LogRetention::Retain,
                         );
                         let should_clear = retention == LogRetention::Clear;
 
                         if should_clear {
-                            logs.clear_service(&event.service_name);
-                            logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                            ctx.logs.clear_service(&event.service_name);
+                            ctx.logs.clear_service_prefix(&format!("[{}.", event.service_name));
                         }
                     }
 
-                    // Stop the service
-                    if stop_service(&event.config_path, &event.service_name, state.clone()).await.is_err() {
-                        continue;
-                    }
-
-                    // Small delay
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
                     // Restart the service
                     let spawn_params = SpawnServiceParams {
-                        config_path: &event.config_path,
                         service_name: &event.service_name,
-                        service_config: &config,
-                        config_dir: &config_dir,
-                        logs,
-                        state: state.clone(),
+                        service_config: &ctx.service_config,
+                        config_dir: &ctx.config_dir,
+                        logs: ctx.logs.clone(),
+                        handle: handle.clone(),
                         exit_tx: exit_tx.clone(),
-                        global_log_config: global_log_config.as_ref(),
+                        global_log_config: ctx.global_log_config.as_ref(),
                     };
-                    if let Ok(handle) = spawn_service(spawn_params).await {
-                        state
-                            .store_process_handle(
-                                event.config_path.clone(),
-                                event.service_name.clone(),
-                                handle,
-                            )
+                    if let Ok(process_handle) = spawn_service(spawn_params).await {
+                        handle
+                            .store_process_handle(&event.service_name, process_handle)
                             .await;
 
-                        let _ = state
-                            .set_service_status(
-                                event.config_path.clone(),
-                                event.service_name.clone(),
-                                ServiceStatus::Running,
-                            )
+                        let _ = handle
+                            .set_service_status(&event.service_name, ServiceStatus::Running)
                             .await;
-                        // Note: PID is already set by spawn_service
-                        let _ = state
-                            .increment_restart_count(
-                                event.config_path.clone(),
-                                event.service_name.clone(),
-                            )
+                        let _ = handle
+                            .increment_restart_count(&event.service_name)
                             .await;
                     }
+                } else {
+                    // Mark as stopped or failed
+                    let status = if event.exit_code == Some(0) {
+                        ServiceStatus::Stopped
+                    } else {
+                        ServiceStatus::Failed
+                    };
+                    let _ = handle.set_service_status(&event.service_name, status).await;
                 }
             }
         });
@@ -474,7 +498,7 @@ impl TestDaemonHarness {
 
     /// Reload the config from disk
     pub async fn reload_config(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.state.load_config(self.config_path.clone()).await?;
+        self.handle.reload_config().await?;
         Ok(())
     }
 }

@@ -9,6 +9,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{resolve_log_retention, LogRetention};
+use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
+use crate::config_registry::SharedConfigRegistry;
 use crate::deps::{get_service_with_deps, get_start_order, get_stop_order};
 use crate::health::spawn_health_checker;
 use crate::hooks::{
@@ -17,7 +19,6 @@ use crate::hooks::{
 };
 use crate::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
 use crate::state::ServiceStatus;
-use crate::state_actor::{ServiceContext, StateHandle, TaskHandleType};
 use crate::watcher::{spawn_file_watcher, FileChangeEvent};
 
 /// Lifecycle events that trigger different hook/retention combinations
@@ -71,7 +72,7 @@ pub enum OrchestratorError {
 /// - Updating state
 /// - Spawning auxiliary tasks (health checks, file watchers)
 pub struct ServiceOrchestrator {
-    state: StateHandle,
+    registry: SharedConfigRegistry,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
     restart_tx: mpsc::Sender<FileChangeEvent>,
 }
@@ -79,20 +80,20 @@ pub struct ServiceOrchestrator {
 impl ServiceOrchestrator {
     /// Create a new ServiceOrchestrator
     pub fn new(
-        state: StateHandle,
+        registry: SharedConfigRegistry,
         exit_tx: mpsc::Sender<ProcessExitEvent>,
         restart_tx: mpsc::Sender<FileChangeEvent>,
     ) -> Self {
         Self {
-            state,
+            registry,
             exit_tx,
             restart_tx,
         }
     }
 
-    /// Get the state handle
-    pub fn state(&self) -> &StateHandle {
-        &self.state
+    /// Get the registry
+    pub fn registry(&self) -> &SharedConfigRegistry {
+        &self.registry
     }
 
     /// Start services for a config
@@ -101,7 +102,7 @@ impl ServiceOrchestrator {
     /// Otherwise starts all services in dependency order.
     ///
     /// This method handles:
-    /// - Loading/reloading the config
+    /// - Loading/reloading the config (via registry)
     /// - Running global on_init hook (if first time)
     /// - Running global on_start hook
     /// - For each service:
@@ -115,18 +116,17 @@ impl ServiceOrchestrator {
         config_path: &Path,
         service_filter: Option<&str>,
     ) -> Result<String, OrchestratorError> {
-        // Load or reload config
-        self.state.load_config(config_path.to_path_buf()).await?;
+        // Get or create the config actor
+        let handle = self
+            .registry
+            .get_or_create(config_path.to_path_buf())
+            .await?;
 
-        let config_dir = config_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let config_dir = handle.get_config_dir().await;
 
         // Get config and determine services to start
-        let config = self
-            .state
-            .get_config(config_path.to_path_buf())
+        let config = handle
+            .get_config()
             .await
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
@@ -135,18 +135,14 @@ impl ServiceOrchestrator {
             None => get_start_order(&config.services)?,
         };
 
-        let logs = self
-            .state
-            .get_logs_buffer(config_path.to_path_buf())
+        let logs = handle
+            .get_logs_buffer()
             .await
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
         let global_hooks = config.hooks.clone();
         let global_log_config = config.logs.clone();
-        let initialized = self
-            .state
-            .is_config_initialized(config_path.to_path_buf())
-            .await;
+        let initialized = handle.is_config_initialized().await;
 
         // Run global on_init hook if first time
         if !initialized {
@@ -161,9 +157,7 @@ impl ServiceOrchestrator {
             )
             .await?;
 
-            self.state
-                .mark_config_initialized(config_path.to_path_buf())
-                .await?;
+            handle.mark_config_initialized().await?;
         }
 
         // Run global on_start hook
@@ -183,19 +177,12 @@ impl ServiceOrchestrator {
         // Start services in order
         for service_name in &services_to_start {
             // Check if already running
-            if self
-                .state
-                .is_service_running(config_path.to_path_buf(), service_name.clone())
-                .await
-            {
+            if handle.is_service_running(service_name).await {
                 debug!("Service {} is already running", service_name);
                 continue;
             }
 
-            match self
-                .start_single_service(config_path, service_name)
-                .await
-            {
+            match self.start_single_service(&handle, service_name).await {
                 Ok(()) => started.push(service_name.clone()),
                 Err(e) => {
                     error!("Failed to start service {}: {}", service_name, e);
@@ -214,39 +201,28 @@ impl ServiceOrchestrator {
     /// Start a single service
     async fn start_single_service(
         &self,
-        config_path: &Path,
+        handle: &ConfigActorHandle,
         service_name: &str,
     ) -> Result<(), OrchestratorError> {
-        // Get service context (includes cached env and working_dir)
-        let ctx = self
-            .state
-            .get_service_context(config_path.to_path_buf(), service_name.to_string())
+        // Get service context (single round-trip)
+        let ctx = handle
+            .get_service_context(service_name)
             .await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
         // Update status to starting
-        let _ = self
-            .state
-            .set_service_status(
-                config_path.to_path_buf(),
-                service_name.to_string(),
-                ServiceStatus::Starting,
-            )
+        let _ = handle
+            .set_service_status(service_name, ServiceStatus::Starting)
             .await;
 
         // Run on_init hook if first time for this service
-        let service_initialized = self
-            .state
-            .is_service_initialized(config_path.to_path_buf(), service_name.to_string())
-            .await;
+        let service_initialized = handle.is_service_initialized(service_name).await;
 
         if !service_initialized {
             self.run_service_hook(&ctx, service_name, ServiceHookType::OnInit)
                 .await?;
 
-            self.state
-                .mark_service_initialized(config_path.to_path_buf(), service_name.to_string())
-                .await?;
+            handle.mark_service_initialized(service_name).await?;
         }
 
         // Run on_start hook
@@ -254,15 +230,14 @@ impl ServiceOrchestrator {
             .await?;
 
         // Apply on_start log retention
-        self.apply_retention(config_path, service_name, &ctx, LifecycleEvent::Start)
+        self.apply_retention(handle, service_name, &ctx, LifecycleEvent::Start)
             .await;
 
         // Spawn process
-        self.spawn_service(config_path, service_name, &ctx).await?;
+        self.spawn_service(handle, service_name, &ctx).await?;
 
         // Spawn auxiliary tasks
-        self.spawn_auxiliary_tasks(config_path, service_name, &ctx)
-            .await;
+        self.spawn_auxiliary_tasks(handle, service_name, &ctx).await;
 
         Ok(())
     }
@@ -284,13 +259,20 @@ impl ServiceOrchestrator {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-        // Load config if clean is requested (so cleanup hooks can run even if not started)
-        if clean {
-            let _ = self.state.load_config(config_path.to_path_buf()).await;
-        }
+        // Get or create the actor (needed for cleanup hooks even if not started)
+        let handle = if clean {
+            Some(self.registry.get_or_create(config_path.to_path_buf()).await?)
+        } else {
+            self.registry.get(&config_path.to_path_buf())
+        };
+
+        let handle = match handle {
+            Some(h) => h,
+            None => return Ok("Config not loaded".to_string()),
+        };
 
         // Get services to stop
-        let config = match self.state.get_config(config_path.to_path_buf()).await {
+        let config = match handle.get_config().await {
             Some(c) => c,
             None => return Ok("Config not loaded".to_string()),
         };
@@ -305,7 +287,7 @@ impl ServiceOrchestrator {
             None => get_stop_order(&config.services)?,
         };
 
-        let logs = self.state.get_logs_buffer(config_path.to_path_buf()).await;
+        let logs = handle.get_logs_buffer().await;
         let global_log_config = config.logs.clone();
         let global_hooks = config.hooks.clone();
 
@@ -314,21 +296,14 @@ impl ServiceOrchestrator {
         // Stop services in reverse dependency order
         for service_name in &services_to_stop {
             // Check if running
-            let is_running = self
-                .state
-                .is_service_running(config_path.to_path_buf(), service_name.clone())
-                .await;
+            let is_running = handle.is_service_running(service_name).await;
 
             if !is_running {
                 continue;
             }
 
             // Get service context
-            if let Some(ctx) = self
-                .state
-                .get_service_context(config_path.to_path_buf(), service_name.clone())
-                .await
-            {
+            if let Some(ctx) = handle.get_service_context(service_name).await {
                 // Run on_stop hook
                 if let Err(e) = self
                     .run_service_hook(&ctx, service_name, ServiceHookType::OnStop)
@@ -339,7 +314,7 @@ impl ServiceOrchestrator {
             }
 
             // Stop the service
-            stop_service(config_path, service_name, self.state.clone())
+            stop_service(service_name, handle.clone())
                 .await
                 .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
 
@@ -452,13 +427,15 @@ impl ServiceOrchestrator {
         config_path: &Path,
         service_filter: Option<&str>,
     ) -> Result<String, OrchestratorError> {
-        // Load or reload config
-        self.state.load_config(config_path.to_path_buf()).await?;
+        // Get or create the config actor (also reloads config)
+        let handle = self
+            .registry
+            .get_or_create(config_path.to_path_buf())
+            .await?;
 
         // Get services to restart
-        let config = self
-            .state
-            .get_config(config_path.to_path_buf())
+        let config = handle
+            .get_config()
             .await
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
@@ -474,11 +451,7 @@ impl ServiceOrchestrator {
 
         // Run on_restart hooks and apply retention
         for service_name in &services_to_restart {
-            if let Some(ctx) = self
-                .state
-                .get_service_context(config_path.to_path_buf(), service_name.clone())
-                .await
-            {
+            if let Some(ctx) = handle.get_service_context(service_name).await {
                 // Run on_restart hook
                 if let Err(e) = self
                     .run_service_hook(&ctx, service_name, ServiceHookType::OnRestart)
@@ -488,7 +461,7 @@ impl ServiceOrchestrator {
                 }
 
                 // Apply on_restart log retention
-                self.apply_retention(config_path, service_name, &ctx, LifecycleEvent::Restart)
+                self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart)
                     .await;
             }
         }
@@ -514,10 +487,14 @@ impl ServiceOrchestrator {
             service_name, config_path
         );
 
+        let handle = self
+            .registry
+            .get(&config_path.to_path_buf())
+            .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
+
         // Get service context
-        let ctx = self
-            .state
-            .get_service_context(config_path.to_path_buf(), service_name.to_string())
+        let ctx = handle
+            .get_service_context(service_name)
             .await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
@@ -530,11 +507,11 @@ impl ServiceOrchestrator {
         }
 
         // Apply on_restart log retention
-        self.apply_retention(config_path, service_name, &ctx, LifecycleEvent::Restart)
+        self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart)
             .await;
 
         // Stop the service
-        stop_service(config_path, service_name, self.state.clone())
+        stop_service(service_name, handle.clone())
             .await
             .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
 
@@ -542,29 +519,20 @@ impl ServiceOrchestrator {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         // Refresh context after stop (state may have changed)
-        let ctx = self
-            .state
-            .get_service_context(config_path.to_path_buf(), service_name.to_string())
+        let ctx = handle
+            .get_service_context(service_name)
             .await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
         // Spawn the service
-        self.spawn_service(config_path, service_name, &ctx).await?;
+        self.spawn_service(&handle, service_name, &ctx).await?;
 
         // Update state
-        let _ = self
-            .state
-            .set_service_status(
-                config_path.to_path_buf(),
-                service_name.to_string(),
-                ServiceStatus::Running,
-            )
+        let _ = handle
+            .set_service_status(service_name, ServiceStatus::Running)
             .await;
 
-        let _ = self
-            .state
-            .increment_restart_count(config_path.to_path_buf(), service_name.to_string())
-            .await;
+        let _ = handle.increment_restart_count(service_name).await;
 
         Ok(())
     }
@@ -583,25 +551,19 @@ impl ServiceOrchestrator {
         service_name: &str,
         exit_code: Option<i32>,
     ) -> Result<(), OrchestratorError> {
+        let handle = match self.registry.get(&config_path.to_path_buf()) {
+            Some(h) => h,
+            None => return Ok(()), // Config no longer loaded
+        };
+
         // Get service context
-        let ctx = match self
-            .state
-            .get_service_context(config_path.to_path_buf(), service_name.to_string())
-            .await
-        {
+        let ctx = match handle.get_service_context(service_name).await {
             Some(ctx) => ctx,
             None => return Ok(()), // Service no longer exists
         };
 
         // Record process exit in state
-        let _ = self
-            .state
-            .record_process_exit(
-                config_path.to_path_buf(),
-                service_name.to_string(),
-                exit_code,
-            )
-            .await;
+        let _ = handle.record_process_exit(service_name, exit_code).await;
 
         // Run on_exit hook
         if let Err(e) = self
@@ -612,7 +574,7 @@ impl ServiceOrchestrator {
         }
 
         // Apply on_exit log retention
-        self.apply_retention(config_path, service_name, &ctx, LifecycleEvent::Exit)
+        self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Exit)
             .await;
 
         // Determine if we should restart
@@ -620,17 +582,9 @@ impl ServiceOrchestrator {
 
         if should_restart {
             // Increment restart count and set status to starting
-            let _ = self
-                .state
-                .increment_restart_count(config_path.to_path_buf(), service_name.to_string())
-                .await;
-            let _ = self
-                .state
-                .set_service_status(
-                    config_path.to_path_buf(),
-                    service_name.to_string(),
-                    ServiceStatus::Starting,
-                )
+            let _ = handle.increment_restart_count(service_name).await;
+            let _ = handle
+                .set_service_status(service_name, ServiceStatus::Starting)
                 .await;
 
             // Small delay before restart
@@ -651,37 +605,26 @@ impl ServiceOrchestrator {
             }
 
             // Apply on_restart log retention
-            self.apply_retention(config_path, service_name, &ctx, LifecycleEvent::Restart)
+            self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart)
                 .await;
 
             // Refresh context (env may have changed if env_file was modified)
-            let ctx = self
-                .state
-                .get_service_context(config_path.to_path_buf(), service_name.to_string())
+            let ctx = handle
+                .get_service_context(service_name)
                 .await
                 .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
             // Spawn new process
-            match self.spawn_service(config_path, service_name, &ctx).await {
+            match self.spawn_service(&handle, service_name, &ctx).await {
                 Ok(()) => {
-                    let _ = self
-                        .state
-                        .set_service_status(
-                            config_path.to_path_buf(),
-                            service_name.to_string(),
-                            ServiceStatus::Running,
-                        )
+                    let _ = handle
+                        .set_service_status(service_name, ServiceStatus::Running)
                         .await;
                 }
                 Err(e) => {
                     error!("Failed to restart service {}: {}", service_name, e);
-                    let _ = self
-                        .state
-                        .set_service_status(
-                            config_path.to_path_buf(),
-                            service_name.to_string(),
-                            ServiceStatus::Failed,
-                        )
+                    let _ = handle
+                        .set_service_status(service_name, ServiceStatus::Failed)
                         .await;
                 }
             }
@@ -692,14 +635,7 @@ impl ServiceOrchestrator {
             } else {
                 ServiceStatus::Failed
             };
-            let _ = self
-                .state
-                .set_service_status(
-                    config_path.to_path_buf(),
-                    service_name.to_string(),
-                    status,
-                )
-                .await;
+            let _ = handle.set_service_status(service_name, status).await;
         }
 
         Ok(())
@@ -765,7 +701,7 @@ impl ServiceOrchestrator {
     /// Apply log retention for an event
     async fn apply_retention(
         &self,
-        config_path: &Path,
+        handle: &ConfigActorHandle,
         service_name: &str,
         ctx: &ServiceContext,
         event: LifecycleEvent,
@@ -805,14 +741,9 @@ impl ServiceOrchestrator {
         };
 
         if retention == LogRetention::Clear {
-            self.state
-                .clear_service_logs(config_path.to_path_buf(), service_name.to_string())
-                .await;
-            self.state
-                .clear_service_logs_prefix(
-                    config_path.to_path_buf(),
-                    format!("[{}.", service_name),
-                )
+            handle.clear_service_logs(service_name).await;
+            handle
+                .clear_service_logs_prefix(&format!("[{}.", service_name))
                 .await;
         }
     }
@@ -820,42 +751,30 @@ impl ServiceOrchestrator {
     /// Spawn a service process
     async fn spawn_service(
         &self,
-        config_path: &Path,
+        handle: &ConfigActorHandle,
         service_name: &str,
         ctx: &ServiceContext,
     ) -> Result<(), OrchestratorError> {
         let spawn_params = SpawnServiceParams {
-            config_path,
             service_name,
             service_config: &ctx.service_config,
             config_dir: &ctx.config_dir,
             logs: ctx.logs.clone(),
-            state: self.state.clone(),
+            handle: handle.clone(),
             exit_tx: self.exit_tx.clone(),
             global_log_config: ctx.global_log_config.as_ref(),
         };
 
-        let handle = spawn_service(spawn_params)
+        let process_handle = spawn_service(spawn_params)
             .await
             .map_err(|e| OrchestratorError::SpawnFailed(e.to_string()))?;
 
         // Store process handle
-        self.state
-            .store_process_handle(
-                config_path.to_path_buf(),
-                service_name.to_string(),
-                handle,
-            )
-            .await;
+        handle.store_process_handle(service_name, process_handle).await;
 
         // Update status to running
-        let _ = self
-            .state
-            .set_service_status(
-                config_path.to_path_buf(),
-                service_name.to_string(),
-                ServiceStatus::Running,
-            )
+        let _ = handle
+            .set_service_status(service_name, ServiceStatus::Running)
             .await;
 
         Ok(())
@@ -864,44 +783,33 @@ impl ServiceOrchestrator {
     /// Spawn auxiliary tasks (health checker, file watcher)
     async fn spawn_auxiliary_tasks(
         &self,
-        config_path: &Path,
+        handle: &ConfigActorHandle,
         service_name: &str,
         ctx: &ServiceContext,
     ) {
         // Start health check if configured
         if let Some(health_config) = &ctx.service_config.healthcheck {
-            let handle = spawn_health_checker(
-                config_path.to_path_buf(),
+            let task_handle = spawn_health_checker(
                 service_name.to_string(),
                 health_config.clone(),
-                self.state.clone(),
+                handle.clone(),
             );
-            self.state
-                .store_task_handle(
-                    config_path.to_path_buf(),
-                    service_name.to_string(),
-                    TaskHandleType::HealthCheck,
-                    handle,
-                )
+            handle
+                .store_task_handle(service_name, TaskHandleType::HealthCheck, task_handle)
                 .await;
         }
 
         // Start file watcher if configured
         if !ctx.service_config.restart.watch_patterns().is_empty() {
-            let handle = spawn_file_watcher(
-                config_path.to_path_buf(),
+            let task_handle = spawn_file_watcher(
+                handle.config_path().clone(),
                 service_name.to_string(),
                 ctx.service_config.restart.watch_patterns().to_vec(),
                 ctx.working_dir.clone(),
                 self.restart_tx.clone(),
             );
-            self.state
-                .store_task_handle(
-                    config_path.to_path_buf(),
-                    service_name.to_string(),
-                    TaskHandleType::FileWatcher,
-                    handle,
-                )
+            handle
+                .store_task_handle(service_name, TaskHandleType::FileWatcher, task_handle)
                 .await;
         }
     }

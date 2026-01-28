@@ -1,8 +1,7 @@
 //! Async utilities to wait for state transitions
 
+use kepler_daemon::config_actor::ConfigActorHandle;
 use kepler_daemon::state::ServiceStatus;
-use kepler_daemon::state_actor::StateHandle;
-use std::path::Path;
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
@@ -28,14 +27,12 @@ impl std::error::Error for WaitError {}
 
 /// Wait for a service to reach the Healthy status
 pub async fn wait_for_healthy(
-    state: &StateHandle,
-    config_path: &Path,
+    handle: &ConfigActorHandle,
     service_name: &str,
     timeout: Duration,
 ) -> Result<(), WaitError> {
     wait_for_status(
-        state,
-        config_path,
+        handle,
         service_name,
         ServiceStatus::Healthy,
         timeout,
@@ -45,14 +42,12 @@ pub async fn wait_for_healthy(
 
 /// Wait for a service to reach the Unhealthy status
 pub async fn wait_for_unhealthy(
-    state: &StateHandle,
-    config_path: &Path,
+    handle: &ConfigActorHandle,
     service_name: &str,
     timeout: Duration,
 ) -> Result<(), WaitError> {
     wait_for_status(
-        state,
-        config_path,
+        handle,
         service_name,
         ServiceStatus::Unhealthy,
         timeout,
@@ -62,14 +57,12 @@ pub async fn wait_for_unhealthy(
 
 /// Wait for a service to reach the Running status
 pub async fn wait_for_running(
-    state: &StateHandle,
-    config_path: &Path,
+    handle: &ConfigActorHandle,
     service_name: &str,
     timeout: Duration,
 ) -> Result<(), WaitError> {
     wait_for_status(
-        state,
-        config_path,
+        handle,
         service_name,
         ServiceStatus::Running,
         timeout,
@@ -79,14 +72,12 @@ pub async fn wait_for_running(
 
 /// Wait for a service to reach the Stopped status
 pub async fn wait_for_stopped(
-    state: &StateHandle,
-    config_path: &Path,
+    handle: &ConfigActorHandle,
     service_name: &str,
     timeout: Duration,
 ) -> Result<(), WaitError> {
     wait_for_status(
-        state,
-        config_path,
+        handle,
         service_name,
         ServiceStatus::Stopped,
         timeout,
@@ -96,18 +87,16 @@ pub async fn wait_for_stopped(
 
 /// Wait for a service to reach a specific status
 pub async fn wait_for_status(
-    state: &StateHandle,
-    config_path: &Path,
+    handle: &ConfigActorHandle,
     service_name: &str,
     expected_status: ServiceStatus,
     timeout: Duration,
 ) -> Result<(), WaitError> {
     let start = Instant::now();
-    let config_path = config_path.to_path_buf();
 
     while start.elapsed() < timeout {
-        let service_state = state
-            .get_service_state(config_path.clone(), service_name.to_string())
+        let service_state = handle
+            .get_service_state(service_name)
             .await;
 
         match service_state {
@@ -117,10 +106,6 @@ pub async fn wait_for_status(
                 }
             }
             None => {
-                // Check if config exists
-                if state.get_config(config_path.clone()).await.is_none() {
-                    return Err(WaitError::ConfigNotFound);
-                }
                 return Err(WaitError::ServiceNotFound);
             }
         }
@@ -133,17 +118,15 @@ pub async fn wait_for_status(
 
 /// Wait for a service to be in any running state (Running, Healthy, or Unhealthy)
 pub async fn wait_for_any_running(
-    state: &StateHandle,
-    config_path: &Path,
+    handle: &ConfigActorHandle,
     service_name: &str,
     timeout: Duration,
 ) -> Result<ServiceStatus, WaitError> {
     let start = Instant::now();
-    let config_path = config_path.to_path_buf();
 
     while start.elapsed() < timeout {
-        let service_state = state
-            .get_service_state(config_path.clone(), service_name.to_string())
+        let service_state = handle
+            .get_service_state(service_name)
             .await;
 
         match service_state {
@@ -153,10 +136,6 @@ pub async fn wait_for_any_running(
                 }
             }
             None => {
-                // Check if config exists
-                if state.get_config(config_path.clone()).await.is_none() {
-                    return Err(WaitError::ConfigNotFound);
-                }
                 return Err(WaitError::ServiceNotFound);
             }
         }
@@ -169,20 +148,18 @@ pub async fn wait_for_any_running(
 
 /// Wait for a status transition (status changes from one value to another)
 pub async fn wait_for_transition(
-    state: &StateHandle,
-    config_path: &Path,
+    handle: &ConfigActorHandle,
     service_name: &str,
     from_status: ServiceStatus,
     to_status: ServiceStatus,
     timeout: Duration,
 ) -> Result<(), WaitError> {
     let start = Instant::now();
-    let config_path = config_path.to_path_buf();
     let mut seen_from = false;
 
     while start.elapsed() < timeout {
-        let service_state = state
-            .get_service_state(config_path.clone(), service_name.to_string())
+        let service_state = handle
+            .get_service_state(service_name)
             .await;
 
         match service_state {
@@ -194,10 +171,6 @@ pub async fn wait_for_transition(
                 }
             }
             None => {
-                // Check if config exists
-                if state.get_config(config_path.clone()).await.is_none() {
-                    return Err(WaitError::ConfigNotFound);
-                }
                 return Err(WaitError::ServiceNotFound);
             }
         }
@@ -210,18 +183,16 @@ pub async fn wait_for_transition(
 
 /// Wait for health check failures to reach a specific count
 pub async fn wait_for_health_check_failures(
-    state: &StateHandle,
-    config_path: &Path,
+    handle: &ConfigActorHandle,
     service_name: &str,
     expected_failures: u32,
     timeout: Duration,
 ) -> Result<(), WaitError> {
     let start = Instant::now();
-    let config_path = config_path.to_path_buf();
 
     while start.elapsed() < timeout {
-        let service_state = state
-            .get_service_state(config_path.clone(), service_name.to_string())
+        let service_state = handle
+            .get_service_state(service_name)
             .await;
 
         match service_state {
@@ -231,10 +202,6 @@ pub async fn wait_for_health_check_failures(
                 }
             }
             None => {
-                // Check if config exists
-                if state.get_config(config_path.clone()).await.is_none() {
-                    return Err(WaitError::ConfigNotFound);
-                }
                 return Err(WaitError::ServiceNotFound);
             }
         }
@@ -247,37 +214,26 @@ pub async fn wait_for_health_check_failures(
 
 /// Get the current status of a service
 pub async fn get_service_status(
-    state: &StateHandle,
-    config_path: &Path,
+    handle: &ConfigActorHandle,
     service_name: &str,
 ) -> Result<ServiceStatus, WaitError> {
-    let config_path = config_path.to_path_buf();
-
-    let service_state = state
-        .get_service_state(config_path.clone(), service_name.to_string())
+    let service_state = handle
+        .get_service_state(service_name)
         .await;
 
     match service_state {
         Some(s) => Ok(s.status),
-        None => {
-            // Check if config exists
-            if state.get_config(config_path).await.is_none() {
-                Err(WaitError::ConfigNotFound)
-            } else {
-                Err(WaitError::ServiceNotFound)
-            }
-        }
+        None => Err(WaitError::ServiceNotFound),
     }
 }
 
 /// Check if a service exists in the state
 pub async fn service_exists(
-    state: &StateHandle,
-    config_path: &Path,
+    handle: &ConfigActorHandle,
     service_name: &str,
 ) -> bool {
-    state
-        .get_service_state(config_path.to_path_buf(), service_name.to_string())
+    handle
+        .get_service_state(service_name)
         .await
         .is_some()
 }

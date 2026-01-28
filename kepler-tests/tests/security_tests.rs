@@ -158,8 +158,8 @@ async fn test_privilege_dropping_applied() {
 
     // Get the service PID
     let pid = harness
-        .state()
-        .get_service_state(harness.config_path().to_path_buf(), "privileged".to_string())
+        .handle()
+        .get_service_state("privileged")
         .await
         .and_then(|s| s.pid);
 
@@ -460,8 +460,8 @@ async fn test_cpu_time_limit_applied() {
 
     // Get the service PID
     let pid = harness
-        .state()
-        .get_service_state(harness.config_path().to_path_buf(), "cpu_limited".to_string())
+        .handle()
+        .get_service_state("cpu_limited")
         .await
         .and_then(|s| s.pid);
 
@@ -527,8 +527,8 @@ async fn test_memory_limit_applied() {
 
     // Get the service PID
     let pid = harness
-        .state()
-        .get_service_state(harness.config_path().to_path_buf(), "memory_limited".to_string())
+        .handle()
+        .get_service_state("memory_limited")
         .await
         .and_then(|s| s.pid);
 
@@ -592,8 +592,8 @@ async fn test_file_descriptor_limit_applied() {
 
     // Get the service PID
     let pid = harness
-        .state()
-        .get_service_state(harness.config_path().to_path_buf(), "fd_limited".to_string())
+        .handle()
+        .get_service_state("fd_limited")
         .await
         .and_then(|s| s.pid);
 
@@ -660,8 +660,8 @@ async fn test_all_resource_limits_applied() {
 
     // Get the service PID
     let pid = harness
-        .state()
-        .get_service_state(harness.config_path().to_path_buf(), "all_limited".to_string())
+        .handle()
+        .get_service_state("all_limited")
         .await
         .and_then(|s| s.pid);
 
@@ -867,8 +867,8 @@ async fn test_numeric_uid_privilege_dropping() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let pid = harness
-        .state()
-        .get_service_state(harness.config_path().to_path_buf(), "numeric_user".to_string())
+        .handle()
+        .get_service_state("numeric_user")
         .await
         .and_then(|s| s.pid);
 
@@ -912,8 +912,8 @@ async fn test_uid_gid_pair_privilege_dropping() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let pid = harness
-        .state()
-        .get_service_state(harness.config_path().to_path_buf(), "uid_gid_user".to_string())
+        .handle()
+        .get_service_state("uid_gid_user")
         .await
         .and_then(|s| s.pid);
 
@@ -961,8 +961,8 @@ async fn test_user_with_group_override() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let pid = harness
-        .state()
-        .get_service_state(harness.config_path().to_path_buf(), "user_group".to_string())
+        .handle()
+        .get_service_state("user_group")
         .await
         .and_then(|s| s.pid);
 

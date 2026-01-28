@@ -39,8 +39,7 @@ async fn test_running_to_healthy_transition() {
 
     // Wait for healthy status
     let result = wait_for_healthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -80,8 +79,7 @@ async fn test_running_to_unhealthy_after_retries() {
 
     // Wait for unhealthy status (after 2 retries)
     let result = wait_for_unhealthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -125,8 +123,7 @@ async fn test_unhealthy_to_healthy_recovery() {
 
     // Wait for unhealthy (file doesn't exist yet)
     let result = wait_for_unhealthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -138,8 +135,7 @@ async fn test_unhealthy_to_healthy_recovery() {
 
     // Wait for healthy recovery
     let result = wait_for_healthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -184,8 +180,7 @@ async fn test_start_period_delay() {
 
     // After start_period + interval, should be healthy
     let result = wait_for_healthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -225,8 +220,7 @@ async fn test_health_check_timeout() {
 
     // Wait for unhealthy (health check should timeout)
     let result = wait_for_unhealthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -265,8 +259,7 @@ async fn test_cmd_format_health_check() {
     harness.start_health_checker("test").await.unwrap();
 
     let result = wait_for_healthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -304,8 +297,7 @@ async fn test_cmd_shell_format_health_check() {
     harness.start_health_checker("test").await.unwrap();
 
     let result = wait_for_healthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )
@@ -437,8 +429,7 @@ async fn test_healthcheck_hook_fires_once_per_transition() {
 
     // Wait for the service to become healthy
     wait_for_healthy(
-        harness.state(),
-        harness.config_path(),
+        harness.handle(),
         "test",
         Duration::from_secs(5),
     )

@@ -80,25 +80,9 @@ async fn test_restart_policy_always() {
         .await
         .unwrap();
 
-    // Take the exit receiver to handle process exits
-    let mut exit_rx = harness.take_exit_rx().unwrap();
-    let state = harness.state().clone();
-    let _config_path = harness.config_path().to_path_buf();
-    let exit_tx = harness.exit_tx();
-
-    // Spawn a task to handle process exit events (simulating what the daemon does)
-    tokio::spawn(async move {
-        while let Some(event) = exit_rx.recv().await {
-            kepler_daemon::process::handle_process_exit(
-                event.config_path,
-                event.service_name,
-                event.exit_code,
-                state.clone(),
-                exit_tx.clone(),
-            )
-            .await;
-        }
-    });
+    // Take the exit receiver and spawn the process exit handler
+    let exit_rx = harness.take_exit_rx().unwrap();
+    harness.spawn_process_exit_handler(exit_rx);
 
     harness.start_service("test").await.unwrap();
 
@@ -141,24 +125,9 @@ async fn test_restart_policy_on_failure_with_failure() {
         .await
         .unwrap();
 
-    // Take the exit receiver to handle process exits
-    let mut exit_rx = harness.take_exit_rx().unwrap();
-    let state = harness.state().clone();
-    let exit_tx = harness.exit_tx();
-
-    // Spawn exit handler
-    tokio::spawn(async move {
-        while let Some(event) = exit_rx.recv().await {
-            kepler_daemon::process::handle_process_exit(
-                event.config_path,
-                event.service_name,
-                event.exit_code,
-                state.clone(),
-                exit_tx.clone(),
-            )
-            .await;
-        }
-    });
+    // Take the exit receiver and spawn the process exit handler
+    let exit_rx = harness.take_exit_rx().unwrap();
+    harness.spawn_process_exit_handler(exit_rx);
 
     harness.start_service("test").await.unwrap();
 
@@ -201,24 +170,9 @@ async fn test_restart_policy_on_failure_with_success() {
         .await
         .unwrap();
 
-    // Take the exit receiver to handle process exits
-    let mut exit_rx = harness.take_exit_rx().unwrap();
-    let state = harness.state().clone();
-    let exit_tx = harness.exit_tx();
-
-    // Spawn exit handler
-    tokio::spawn(async move {
-        while let Some(event) = exit_rx.recv().await {
-            kepler_daemon::process::handle_process_exit(
-                event.config_path,
-                event.service_name,
-                event.exit_code,
-                state.clone(),
-                exit_tx.clone(),
-            )
-            .await;
-        }
-    });
+    // Take the exit receiver and spawn the process exit handler
+    let exit_rx = harness.take_exit_rx().unwrap();
+    harness.spawn_process_exit_handler(exit_rx);
 
     harness.start_service("test").await.unwrap();
 
@@ -275,22 +229,8 @@ async fn test_on_restart_hook_fires() {
         .await
         .unwrap();
 
-    let mut exit_rx = harness.take_exit_rx().unwrap();
-    let state = harness.state().clone();
-    let exit_tx = harness.exit_tx();
-
-    tokio::spawn(async move {
-        while let Some(event) = exit_rx.recv().await {
-            kepler_daemon::process::handle_process_exit(
-                event.config_path,
-                event.service_name,
-                event.exit_code,
-                state.clone(),
-                exit_tx.clone(),
-            )
-            .await;
-        }
-    });
+    let exit_rx = harness.take_exit_rx().unwrap();
+    harness.spawn_process_exit_handler(exit_rx);
 
     harness.start_service("test").await.unwrap();
 
@@ -339,22 +279,8 @@ async fn test_restart_config_extended_policy_only() {
         .await
         .unwrap();
 
-    let mut exit_rx = harness.take_exit_rx().unwrap();
-    let state = harness.state().clone();
-    let exit_tx = harness.exit_tx();
-
-    tokio::spawn(async move {
-        while let Some(event) = exit_rx.recv().await {
-            kepler_daemon::process::handle_process_exit(
-                event.config_path,
-                event.service_name,
-                event.exit_code,
-                state.clone(),
-                exit_tx.clone(),
-            )
-            .await;
-        }
-    });
+    let exit_rx = harness.take_exit_rx().unwrap();
+    harness.spawn_process_exit_handler(exit_rx);
 
     harness.start_service("test").await.unwrap();
 

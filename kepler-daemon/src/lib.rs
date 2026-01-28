@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 pub mod config;
+pub mod config_actor;
+pub mod config_registry;
 pub mod deps;
 pub mod env;
 pub mod errors;
@@ -10,10 +12,12 @@ pub mod logs;
 pub mod orchestrator;
 pub mod process;
 pub mod state;
-pub mod state_actor;
 #[cfg(unix)]
 pub mod user;
 pub mod watcher;
+
+// Re-export commonly used types
+pub use config_registry::LoadedConfigInfo;
 
 const GLOBAL_STATE_DIR: &str = ".kepler";
 const KEPLER_DAEMON_PATH_ENV: &str = "KEPLER_DAEMON_PATH";

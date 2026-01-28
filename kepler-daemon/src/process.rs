@@ -6,17 +6,15 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::{
-    parse_memory_limit, resolve_log_store, LogRetention, ResourceLimits, ServiceConfig,
+    parse_memory_limit, resolve_log_store, LogConfig, ResourceLimits, ServiceConfig,
 };
-use crate::env::build_service_env;
+use crate::config_actor::{ConfigActorHandle, TaskHandleType};
 use crate::errors::{DaemonError, Result};
-use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use crate::logs::{LogStream, SharedLogBuffer};
 use crate::state::{ProcessHandle, ServiceStatus};
-use crate::state_actor::{StateHandle, TaskHandleType};
 
 /// Unified command specification for both services and hooks
 #[derive(Debug, Clone)]
@@ -505,16 +503,13 @@ pub struct ProcessExitEvent {
     pub exit_code: Option<i32>,
 }
 
-use crate::config::LogConfig;
-
 /// Parameters for spawning a service
 pub struct SpawnServiceParams<'a> {
-    pub config_path: &'a Path,
     pub service_name: &'a str,
     pub service_config: &'a ServiceConfig,
     pub config_dir: &'a Path,
     pub logs: SharedLogBuffer,
-    pub state: StateHandle,
+    pub handle: ConfigActorHandle,
     pub exit_tx: mpsc::Sender<ProcessExitEvent>,
     pub global_log_config: Option<&'a LogConfig>,
 }
@@ -522,22 +517,26 @@ pub struct SpawnServiceParams<'a> {
 /// Spawn a service process with signal-based monitoring
 pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHandle> {
     let SpawnServiceParams {
-        config_path,
         service_name,
         service_config,
         config_dir,
         logs,
-        state,
+        handle,
         exit_tx,
         global_log_config,
     } = params;
+
     let working_dir = service_config
         .working_dir
         .clone()
         .unwrap_or_else(|| config_dir.to_path_buf());
 
-    // Build environment
-    let env = build_service_env(service_config, config_dir)?;
+    // Get environment from the service context (already pre-computed)
+    let env = handle
+        .get_service_context(service_name)
+        .await
+        .map(|ctx| ctx.env)
+        .unwrap_or_default();
 
     // Validate command
     if service_config.command.is_empty() {
@@ -585,43 +584,38 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
     );
 
     // Store the PID in state immediately after spawning
-    let _ = state
-        .set_service_pid(
-            config_path.to_path_buf(),
-            service_name.to_string(),
-            pid,
-            Some(Utc::now()),
-        )
+    let _ = handle
+        .set_service_pid(service_name, pid, Some(Utc::now()))
         .await;
 
     // Create shutdown channel for graceful stop
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
     // Spawn process monitor with the Child (signal-based monitoring)
-    let config_path_clone = config_path.to_path_buf();
+    let config_path = handle.config_path().clone();
     let service_name_clone = service_name.to_string();
-    let state_clone = state.clone();
+    let handle_clone = handle.clone();
 
     tokio::spawn(async move {
         monitor_process(
-            config_path_clone,
+            config_path,
             service_name_clone,
             result.child,
             shutdown_rx,
-            state_clone,
+            handle_clone,
             exit_tx,
         )
         .await;
     });
 
     // Create ProcessHandle with output tasks and shutdown channel
-    let handle = ProcessHandle {
+    let process_handle = ProcessHandle {
         shutdown_tx: Some(shutdown_tx),
         stdout_task: result.stdout_task,
         stderr_task: result.stderr_task,
     };
 
-    Ok(handle)
+    Ok(process_handle)
 }
 
 /// Monitor a process using signal-based waiting (child.wait())
@@ -631,7 +625,7 @@ async fn monitor_process(
     service_name: String,
     mut child: Child,
     shutdown_rx: oneshot::Receiver<()>,
-    _state: StateHandle,
+    _handle: ConfigActorHandle,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
 ) {
     // Use tokio::select! to wait for either process exit or shutdown signal
@@ -701,37 +695,30 @@ async fn monitor_process(
 
 /// Stop a service process
 pub async fn stop_service(
-    config_path: &Path,
     service_name: &str,
-    state: StateHandle,
+    handle: ConfigActorHandle,
 ) -> Result<()> {
     info!("Stopping service {}", service_name);
 
     // Update status to stopping
-    let _ = state
-        .set_service_status(
-            config_path.to_path_buf(),
-            service_name.to_string(),
-            ServiceStatus::Stopping,
-        )
+    let _ = handle
+        .set_service_status(service_name, ServiceStatus::Stopping)
         .await;
 
     // Get the process handle
-    let handle = state
-        .remove_process_handle(config_path.to_path_buf(), service_name.to_string())
-        .await;
+    let process_handle = handle.remove_process_handle(service_name).await;
 
-    if let Some(handle) = handle {
+    if let Some(process_handle) = process_handle {
         // Send shutdown signal to monitor task
-        if let Some(shutdown_tx) = handle.shutdown_tx {
+        if let Some(shutdown_tx) = process_handle.shutdown_tx {
             let _ = shutdown_tx.send(());
         }
 
         // Cancel output tasks
-        if let Some(task) = handle.stdout_task {
+        if let Some(task) = process_handle.stdout_task {
             task.abort();
         }
-        if let Some(task) = handle.stderr_task {
+        if let Some(task) = process_handle.stderr_task {
             task.abort();
         }
 
@@ -740,244 +727,21 @@ pub async fn stop_service(
     }
 
     // Cancel health check
-    state
-        .cancel_task_handle(
-            config_path.to_path_buf(),
-            service_name.to_string(),
-            TaskHandleType::HealthCheck,
-        )
+    handle
+        .cancel_task_handle(service_name, TaskHandleType::HealthCheck)
         .await;
 
     // Cancel watcher
-    state
-        .cancel_task_handle(
-            config_path.to_path_buf(),
-            service_name.to_string(),
-            TaskHandleType::FileWatcher,
-        )
+    handle
+        .cancel_task_handle(service_name, TaskHandleType::FileWatcher)
         .await;
 
     // Update status to stopped
-    let _ = state
-        .set_service_status(
-            config_path.to_path_buf(),
-            service_name.to_string(),
-            ServiceStatus::Stopped,
-        )
+    let _ = handle
+        .set_service_status(service_name, ServiceStatus::Stopped)
         .await;
 
-    let _ = state
-        .set_service_pid(
-            config_path.to_path_buf(),
-            service_name.to_string(),
-            None,
-            None,
-        )
-        .await;
+    let _ = handle.set_service_pid(service_name, None, None).await;
 
     Ok(())
-}
-
-/// Handle process exit based on restart policy
-pub async fn handle_process_exit(
-    config_path: PathBuf,
-    service_name: String,
-    exit_code: Option<i32>,
-    state: StateHandle,
-    exit_tx: mpsc::Sender<ProcessExitEvent>,
-) {
-    // Get service config and state info
-    let service_config = match state
-        .get_service_config(config_path.clone(), service_name.clone())
-        .await
-    {
-        Some(sc) => sc,
-        None => return,
-    };
-
-    let config_dir = state
-        .get_config_dir(config_path.clone())
-        .await
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    let logs = match state.get_logs_buffer(config_path.clone()).await {
-        Some(l) => l,
-        None => return,
-    };
-
-    let global_log_config = state.get_global_log_config(config_path.clone()).await;
-
-    // Record process exit in state
-    let _ = state
-        .record_process_exit(config_path.clone(), service_name.clone(), exit_code)
-        .await;
-
-    // Run on_exit hook
-    let env = build_service_env(&service_config, &config_dir).unwrap_or_default();
-    let working_dir = service_config
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| config_dir.clone());
-    let hook_params = ServiceHookParams {
-        working_dir: &working_dir,
-        env: &env,
-        logs: Some(&logs),
-        service_user: service_config.user.as_deref(),
-        service_group: service_config.group.as_deref(),
-        service_log_config: service_config.logs.as_ref(),
-        global_log_config: global_log_config.as_ref(),
-    };
-
-    if let Err(e) = run_service_hook(
-        &service_config.hooks,
-        ServiceHookType::OnExit,
-        &service_name,
-        &hook_params,
-    )
-    .await
-    {
-        warn!("Hook on_exit failed for {}: {}", service_name, e);
-    }
-
-    // Clear logs based on on_exit retention policy
-    {
-        use crate::config::resolve_log_retention;
-
-        let retention = resolve_log_retention(
-            service_config.logs.as_ref(),
-            global_log_config.as_ref(),
-            |l| l.get_on_exit(),
-            LogRetention::Retain,
-        );
-        let should_clear = retention == LogRetention::Clear;
-
-        if should_clear {
-            state
-                .clear_service_logs(config_path.clone(), service_name.clone())
-                .await;
-            state
-                .clear_service_logs_prefix(
-                    config_path.clone(),
-                    format!("[{}.", service_name),
-                )
-                .await;
-        }
-    }
-
-    // Determine if we should restart
-    let should_restart = service_config.restart.should_restart_on_exit(exit_code);
-
-    if should_restart {
-        // Increment restart count and set status to starting
-        let _ = state
-            .increment_restart_count(config_path.clone(), service_name.clone())
-            .await;
-        let _ = state
-            .set_service_status(
-                config_path.clone(),
-                service_name.clone(),
-                ServiceStatus::Starting,
-            )
-            .await;
-
-        // Small delay before restart
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        info!(
-            "Restarting service {} (policy: {:?})",
-            service_name,
-            service_config.restart.policy()
-        );
-
-        // Run on_restart hook
-        if let Err(e) = run_service_hook(
-            &service_config.hooks,
-            ServiceHookType::OnRestart,
-            &service_name,
-            &hook_params,
-        )
-        .await
-        {
-            warn!("Hook on_restart failed for {}: {}", service_name, e);
-        }
-
-        // Clear logs based on on_restart retention policy
-        {
-            use crate::config::resolve_log_retention;
-
-            let retention = resolve_log_retention(
-                service_config.logs.as_ref(),
-                global_log_config.as_ref(),
-                |l| l.get_on_restart(),
-                LogRetention::Retain,
-            );
-            let should_clear = retention == LogRetention::Clear;
-
-            if should_clear {
-                state
-                    .clear_service_logs(config_path.clone(), service_name.clone())
-                    .await;
-                state
-                    .clear_service_logs_prefix(
-                        config_path.clone(),
-                        format!("[{}.", service_name),
-                    )
-                    .await;
-            }
-        }
-
-        // Spawn new process
-        let spawn_params = SpawnServiceParams {
-            config_path: &config_path,
-            service_name: &service_name,
-            service_config: &service_config,
-            config_dir: &config_dir,
-            logs,
-            state: state.clone(),
-            exit_tx,
-            global_log_config: global_log_config.as_ref(),
-        };
-
-        match spawn_service(spawn_params).await {
-            Ok(handle) => {
-                // Store process handle
-                state
-                    .store_process_handle(
-                        config_path.clone(),
-                        service_name.clone(),
-                        handle,
-                    )
-                    .await;
-
-                // Update status to Running (PID is already set by spawn_service)
-                let _ = state
-                    .set_service_status(
-                        config_path.clone(),
-                        service_name.clone(),
-                        ServiceStatus::Running,
-                    )
-                    .await;
-            }
-            Err(e) => {
-                error!("Failed to restart service {}: {}", service_name, e);
-                let _ = state
-                    .set_service_status(
-                        config_path.clone(),
-                        service_name.clone(),
-                        ServiceStatus::Failed,
-                    )
-                    .await;
-            }
-        }
-    } else {
-        // Mark as stopped or failed
-        let status = if exit_code == Some(0) {
-            ServiceStatus::Stopped
-        } else {
-            ServiceStatus::Failed
-        };
-        let _ = state
-            .set_service_status(config_path.clone(), service_name.clone(), status)
-            .await;
-    }
 }

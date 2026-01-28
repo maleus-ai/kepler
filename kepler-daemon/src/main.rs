@@ -1,8 +1,8 @@
 use clap::Parser;
+use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
 use kepler_daemon::errors::DaemonError;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::process::ProcessExitEvent;
-use kepler_daemon::state_actor::create_state_actor;
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_daemon::Daemon;
 use kepler_protocol::protocol::{LogEntry, Request, Response, ResponseData};
@@ -99,11 +99,8 @@ async fn main() -> anyhow::Result<()> {
         fs::write(&pid_file, std::process::id().to_string())?;
     }
 
-    // Create state actor and handle
-    let (state_handle, state_actor) = create_state_actor();
-
-    // Spawn the state actor
-    tokio::spawn(state_actor.run());
+    // Create config registry
+    let registry: SharedConfigRegistry = Arc::new(ConfigRegistry::new());
 
     // Create channels for process exit events
     let (exit_tx, mut exit_rx) = mpsc::channel::<ProcessExitEvent>(100);
@@ -113,18 +110,20 @@ async fn main() -> anyhow::Result<()> {
 
     // Create ServiceOrchestrator
     let orchestrator = Arc::new(ServiceOrchestrator::new(
-        state_handle.clone(),
+        registry.clone(),
         exit_tx.clone(),
         restart_tx.clone(),
     ));
 
     // Clone orchestrator for handler
     let handler_orchestrator = orchestrator.clone();
+    let handler_registry = registry.clone();
 
     // Create the async request handler
     let handler = move |request: Request, shutdown_tx: mpsc::Sender<()>| {
         let orchestrator = handler_orchestrator.clone();
-        async move { handle_request(request, orchestrator, shutdown_tx).await }
+        let registry = handler_registry.clone();
+        async move { handle_request(request, orchestrator, registry, shutdown_tx).await }
     };
 
     // Create server
@@ -168,22 +167,25 @@ async fn main() -> anyhow::Result<()> {
 async fn handle_request(
     request: Request,
     orchestrator: Arc<ServiceOrchestrator>,
+    registry: SharedConfigRegistry,
     shutdown_tx: mpsc::Sender<()>,
 ) -> Response {
-    let state = orchestrator.state();
     match request {
         Request::Ping => Response::ok_with_message("pong".to_string()),
 
         Request::Shutdown => {
             info!("Shutdown requested");
             // Stop all services first
-            let config_paths = state.shutdown().await;
+            let config_paths = registry.list_paths();
 
             for config_path in config_paths {
                 if let Err(e) = orchestrator.stop_services(&config_path, None, false).await {
                     error!("Error stopping services during shutdown: {}", e);
                 }
             }
+
+            // Shutdown all actors
+            registry.shutdown_all().await;
 
             // Signal shutdown
             let _ = shutdown_tx.send(()).await;
@@ -243,14 +245,27 @@ async fn handle_request(
         }
 
         Request::Status { config_path } => match config_path {
-            Some(path) => match state.get_service_status(path.clone(), None).await {
-                Ok(services) => Response::ok_with_data(ResponseData::ServiceStatus(services)),
-                Err(_) => Response::ok_with_data(ResponseData::ServiceStatus(HashMap::new())),
-            },
-            None => match state.get_all_status().await {
-                Ok(configs) => Response::ok_with_data(ResponseData::MultiConfigStatus(configs)),
-                Err(e) => Response::error(e.to_string()),
-            },
+            Some(path) => {
+                let path = match canonicalize_config_path(path) {
+                    Ok(p) => p,
+                    Err(e) => return Response::error(e.to_string()),
+                };
+                // Get status from specific config actor
+                match registry.get(&path) {
+                    Some(handle) => {
+                        match handle.get_service_status(None).await {
+                            Ok(services) => Response::ok_with_data(ResponseData::ServiceStatus(services)),
+                            Err(_) => Response::ok_with_data(ResponseData::ServiceStatus(HashMap::new())),
+                        }
+                    }
+                    None => Response::ok_with_data(ResponseData::ServiceStatus(HashMap::new())),
+                }
+            }
+            None => {
+                // Get status from all configs
+                let configs = registry.get_all_status().await;
+                Response::ok_with_data(ResponseData::MultiConfigStatus(configs))
+            }
         },
 
         Request::Logs {
@@ -264,16 +279,20 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
 
-            match state.get_logs(config_path, service, lines).await {
-                Ok(entries) => Response::ok_with_data(ResponseData::Logs(entries)),
-                Err(_) => Response::ok_with_data(ResponseData::Logs(Vec::new())),
+            match registry.get(&config_path) {
+                Some(handle) => {
+                    let entries = handle.get_logs(service, lines).await;
+                    Response::ok_with_data(ResponseData::Logs(entries))
+                }
+                None => Response::ok_with_data(ResponseData::Logs(Vec::new())),
             }
         }
 
-        Request::ListConfigs => match state.list_configs().await {
-            Ok(configs) => Response::ok_with_data(ResponseData::ConfigList(configs)),
-            Err(e) => Response::error(e.to_string()),
-        },
+        Request::ListConfigs => {
+            let configs = registry.list_configs().await;
+            let configs: Vec<_> = configs.into_iter().map(|c| c.into()).collect();
+            Response::ok_with_data(ResponseData::ConfigList(configs))
+        }
 
         Request::UnloadConfig { config_path } => {
             let config_path = match canonicalize_config_path(config_path) {
@@ -285,8 +304,8 @@ async fn handle_request(
                 return Response::error(format!("Failed to stop services: {}", e));
             }
 
-            // Unload config
-            state.unload_config(config_path.clone()).await;
+            // Unload config (shutdown actor)
+            registry.unload(&config_path).await;
             Response::ok_with_message(format!("Unloaded config: {}", config_path.display()))
         }
 
@@ -303,10 +322,10 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
 
-            let all_entries = state
-                .get_logs(config_path, service, usize::MAX)
-                .await
-                .unwrap_or_default();
+            let all_entries = match registry.get(&config_path) {
+                Some(handle) => handle.get_logs(service, usize::MAX).await,
+                None => Vec::new(),
+            };
 
             let total = all_entries.len();
             let entries: Vec<LogEntry> = all_entries.into_iter().skip(offset).take(limit).collect();
@@ -323,4 +342,3 @@ async fn handle_request(
         }
     }
 }
-

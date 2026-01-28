@@ -130,8 +130,8 @@ async fn test_service_log_config_overrides_global() {
 
     // Verify the config was loaded correctly
     let config = harness
-        .state()
-        .get_config(harness.config_path().to_path_buf())
+        .handle()
+        .get_config()
         .await
         .unwrap();
 
@@ -183,8 +183,8 @@ async fn test_all_log_retention_events() {
         .unwrap();
 
     let config = harness
-        .state()
-        .get_config(harness.config_path().to_path_buf())
+        .handle()
+        .get_config()
         .await
         .unwrap();
     let service_logs = config.services["test"].logs.as_ref().unwrap();

@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
@@ -6,28 +5,25 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
 use crate::config::HealthCheck;
-use crate::env::build_service_env;
+use crate::config_actor::ConfigActorHandle;
 use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use crate::state::ServiceStatus;
-use crate::state_actor::StateHandle;
 
 /// Spawn a health check monitoring task for a service
 pub fn spawn_health_checker(
-    config_path: PathBuf,
     service_name: String,
     health_config: HealthCheck,
-    state: StateHandle,
+    handle: ConfigActorHandle,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        health_check_loop(config_path, service_name, health_config, state).await;
+        health_check_loop(service_name, health_config, handle).await;
     })
 }
 
 async fn health_check_loop(
-    config_path: PathBuf,
     service_name: String,
     config: HealthCheck,
-    state: StateHandle,
+    handle: ConfigActorHandle,
 ) {
     // Wait for start_period before beginning checks
     if !config.start_period.is_zero() {
@@ -40,10 +36,7 @@ async fn health_check_loop(
 
     loop {
         // Check if service is still running
-        if !state
-            .is_service_running(config_path.clone(), service_name.clone())
-            .await
-        {
+        if !handle.is_service_running(&service_name).await {
             debug!(
                 "Health check for {} stopping - service not running",
                 service_name
@@ -55,13 +48,8 @@ async fn health_check_loop(
         let passed = run_health_check(&config.test, config.timeout).await;
 
         // Update state based on result
-        let update_result = state
-            .update_health_check(
-                config_path.clone(),
-                service_name.clone(),
-                passed,
-                config.retries,
-            )
+        let update_result = handle
+            .update_health_check(&service_name, passed, config.retries)
             .await;
 
         match update_result {
@@ -87,11 +75,10 @@ async fn health_check_loop(
                 // Run hooks if status changed
                 if update.previous_status != update.new_status {
                     run_status_change_hook(
-                        &config_path,
                         &service_name,
                         update.previous_status,
                         update.new_status,
-                        &state,
+                        &handle,
                     )
                     .await;
                 }
@@ -111,11 +98,10 @@ async fn health_check_loop(
 
 /// Run hook when health status changes
 async fn run_status_change_hook(
-    config_path: &std::path::Path,
     service_name: &str,
     previous_status: ServiceStatus,
     new_status: ServiceStatus,
-    state: &StateHandle,
+    handle: &ConfigActorHandle,
 ) {
     let hook_type = match new_status {
         ServiceStatus::Healthy
@@ -134,11 +120,8 @@ async fn run_status_change_hook(
     };
 
     if let Some(hook_type) = hook_type {
-        // Get service context (bundles service_config, config_dir, logs, global_log_config)
-        let ctx = match state
-            .get_service_context(config_path.to_path_buf(), service_name.to_string())
-            .await
-        {
+        // Get service context (single round-trip)
+        let ctx = match handle.get_service_context(service_name).await {
             Some(ctx) => ctx,
             None => return,
         };
@@ -149,23 +132,10 @@ async fn run_status_change_hook(
             .clone()
             .unwrap_or_else(|| ctx.config_dir.clone());
 
-        // Build environment for hook
-        let env = match build_service_env(&ctx.service_config, &ctx.config_dir) {
-            Ok(e) => e,
-            Err(e) => {
-                error!(
-                    "Failed to build environment for {} hook: {}",
-                    hook_type.as_str(),
-                    e
-                );
-                std::collections::HashMap::new()
-            }
-        };
-
         let hook_params = ServiceHookParams::from_service_context(
             &ctx.service_config,
             &working_dir,
-            &env,
+            &ctx.env,
             Some(&ctx.logs),
             ctx.global_log_config.as_ref(),
         );
