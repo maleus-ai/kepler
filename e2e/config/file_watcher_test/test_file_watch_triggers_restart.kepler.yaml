@@ -1,0 +1,8 @@
+services:
+  file-watch-service:
+    command: ["sh", "-c", "echo FILE_WATCH_START; sleep 300"]
+    working_dir: WATCH_DIR
+    restart:
+      policy: always
+      watch:
+        - "**/*"

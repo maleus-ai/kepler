@@ -1,0 +1,4 @@
+services:
+  no-restart-service:
+    command: ["sh", "-c", "echo NO_RESTART_START; sleep 1; exit 0"]
+    restart: no

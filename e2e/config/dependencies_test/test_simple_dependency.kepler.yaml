@@ -1,0 +1,7 @@
+services:
+  service-a:
+    command: ["sh", "-c", "echo SERVICE_A_STARTED; sleep 300"]
+  service-b:
+    command: ["sh", "-c", "echo SERVICE_B_STARTED; sleep 300"]
+    depends_on:
+      - service-a

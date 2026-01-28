@@ -1,0 +1,11 @@
+services:
+  chain-a:
+    command: ["sh", "-c", "echo CHAIN_A_STARTED; sleep 300"]
+  chain-b:
+    command: ["sh", "-c", "echo CHAIN_B_STARTED; sleep 300"]
+    depends_on:
+      - chain-a
+  chain-c:
+    command: ["sh", "-c", "echo CHAIN_C_STARTED; sleep 300"]
+    depends_on:
+      - chain-b

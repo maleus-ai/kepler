@@ -1,0 +1,9 @@
+services:
+  cycle-a:
+    command: ["sh", "-c", "echo A; sleep 300"]
+    depends_on:
+      - cycle-b
+  cycle-b:
+    command: ["sh", "-c", "echo B; sleep 300"]
+    depends_on:
+      - cycle-a

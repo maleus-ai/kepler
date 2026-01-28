@@ -1,0 +1,7 @@
+services:
+  stop-order-a:
+    command: ["sh", "-c", "echo STOP_ORDER_A_STARTED; sleep 300"]
+  stop-order-b:
+    command: ["sh", "-c", "echo STOP_ORDER_B_STARTED; sleep 300"]
+    depends_on:
+      - stop-order-a

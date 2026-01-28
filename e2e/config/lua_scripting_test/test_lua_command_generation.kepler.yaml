@@ -1,0 +1,4 @@
+services:
+  lua-command-service:
+    command: !lua |
+      return {"sh", "-c", "echo LUA_GENERATED_COMMAND; sleep 300"}

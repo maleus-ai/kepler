@@ -1,0 +1,5 @@
+services:
+  env-inline-service:
+    command: ["sh", "-c", "echo MY_VAR=$MY_VAR; sleep 300"]
+    environment:
+      - MY_VAR=hello_world

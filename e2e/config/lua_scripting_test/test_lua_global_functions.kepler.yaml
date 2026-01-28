@@ -1,0 +1,9 @@
+lua: |
+  function make_echo_command(message)
+    return {"sh", "-c", "echo " .. message .. "; sleep 300"}
+  end
+
+services:
+  lua-global-fn-service:
+    command: !lua |
+      return make_echo_command("GLOBAL_FN_RESULT")

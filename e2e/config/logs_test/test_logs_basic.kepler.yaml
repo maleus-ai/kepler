@@ -1,0 +1,3 @@
+services:
+  log-basic-service:
+    command: ["sh", "-c", "echo BASIC_LOG_MESSAGE; sleep 300"]

@@ -745,7 +745,7 @@ fn get_service_color(service: &str, color_map: &mut HashMap<String, Color>) -> C
 fn print_log_entry(entry: &kepler_protocol::protocol::LogEntry, color_map: &mut HashMap<String, Color>) {
     let timestamp_str = entry
         .timestamp
-        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
         .map(|dt| {
             let local: DateTime<Local> = dt.into();
             local.format("%Y-%m-%d %H:%M:%S").to_string()

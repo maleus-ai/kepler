@@ -1,0 +1,3 @@
+services:
+  stderr-service:
+    command: ["sh", "-c", "echo STDOUT_MESSAGE; echo STDERR_MESSAGE >&2; sleep 300"]

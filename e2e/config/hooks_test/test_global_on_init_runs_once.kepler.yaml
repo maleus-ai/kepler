@@ -1,0 +1,8 @@
+hooks:
+  on_init:
+    run: |
+      echo "ON_INIT_RAN" >> MARKER_FILE
+
+services:
+  init-hook-service:
+    command: ["sh", "-c", "echo Starting; sleep 300"]

@@ -1,0 +1,16 @@
+services:
+  diamond-a:
+    command: ["sh", "-c", "echo DIAMOND_A_STARTED; sleep 300"]
+  diamond-b:
+    command: ["sh", "-c", "echo DIAMOND_B_STARTED; sleep 300"]
+    depends_on:
+      - diamond-a
+  diamond-c:
+    command: ["sh", "-c", "echo DIAMOND_C_STARTED; sleep 300"]
+    depends_on:
+      - diamond-a
+  diamond-d:
+    command: ["sh", "-c", "echo DIAMOND_D_STARTED; sleep 300"]
+    depends_on:
+      - diamond-b
+      - diamond-c

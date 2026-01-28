@@ -1,0 +1,4 @@
+services:
+  env-file-service:
+    command: ["sh", "-c", "echo ENV_FILE_VAR=$ENV_FILE_VAR; sleep 300"]
+    env_file: ENV_FILE_PATH

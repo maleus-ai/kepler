@@ -1,0 +1,7 @@
+services:
+  service-alpha:
+    command: ["sh", "-c", "echo Alpha starting; sleep 300"]
+  service-beta:
+    command: ["sh", "-c", "echo Beta starting; sleep 300"]
+  service-gamma:
+    command: ["sh", "-c", "echo Gamma starting; sleep 300"]

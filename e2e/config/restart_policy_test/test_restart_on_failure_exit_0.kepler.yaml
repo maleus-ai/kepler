@@ -1,0 +1,4 @@
+services:
+  on-failure-exit-0:
+    command: ["sh", "-c", "echo ON_FAILURE_EXIT_0_START; sleep 1; exit 0"]
+    restart: on-failure

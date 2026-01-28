@@ -1,0 +1,6 @@
+services:
+  lua-context-service:
+    command: !lua |
+      -- The 'service' variable contains the service name
+      local svc_name = service or "unknown"
+      return {"sh", "-c", "echo SERVICE_NAME=" .. svc_name .. "; sleep 300"}

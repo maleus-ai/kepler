@@ -1,0 +1,7 @@
+services:
+  svc-stop-hook-service:
+    command: ["sh", "-c", "echo Starting; sleep 300"]
+    hooks:
+      on_stop:
+        run: |
+          echo "SERVICE_ON_STOP_RAN" >> MARKER_FILE

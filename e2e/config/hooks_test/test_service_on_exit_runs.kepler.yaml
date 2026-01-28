@@ -1,0 +1,8 @@
+services:
+  svc-exit-hook-service:
+    command: ["sh", "-c", "echo Starting; sleep 1; exit 0"]
+    restart: no
+    hooks:
+      on_exit:
+        run: |
+          echo "SERVICE_ON_EXIT_RAN" >> MARKER_FILE

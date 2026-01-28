@@ -14,6 +14,54 @@ path = "tests/stop_clean_test.rs"
 name = "prune_start_test"
 path = "tests/prune_start_test.rs"
 
+[[test]]
+name = "daemon_lifecycle_test"
+path = "tests/daemon_lifecycle_test.rs"
+
+[[test]]
+name = "service_lifecycle_test"
+path = "tests/service_lifecycle_test.rs"
+
+[[test]]
+name = "dependencies_test"
+path = "tests/dependencies_test.rs"
+
+[[test]]
+name = "restart_policy_test"
+path = "tests/restart_policy_test.rs"
+
+[[test]]
+name = "environment_test"
+path = "tests/environment_test.rs"
+
+[[test]]
+name = "logs_test"
+path = "tests/logs_test.rs"
+
+[[test]]
+name = "healthcheck_test"
+path = "tests/healthcheck_test.rs"
+
+[[test]]
+name = "file_watcher_test"
+path = "tests/file_watcher_test.rs"
+
+[[test]]
+name = "hooks_test"
+path = "tests/hooks_test.rs"
+
+[[test]]
+name = "lua_scripting_test"
+path = "tests/lua_scripting_test.rs"
+
+[[test]]
+name = "multi_config_test"
+path = "tests/multi_config_test.rs"
+
+[[test]]
+name = "integration_test"
+path = "tests/integration_test.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.49.0", features = ["full", "process", "time"] }

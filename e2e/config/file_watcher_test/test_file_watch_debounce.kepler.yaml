@@ -1,0 +1,8 @@
+services:
+  debounce-service:
+    command: ["sh", "-c", "echo DEBOUNCE_START; sleep 300"]
+    working_dir: WATCH_DIR
+    restart:
+      policy: always
+      watch:
+        - "**/*"

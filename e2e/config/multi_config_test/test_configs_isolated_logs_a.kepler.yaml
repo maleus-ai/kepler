@@ -1,0 +1,3 @@
+services:
+  isolated-a:
+    command: ["sh", "-c", "echo ISOLATED_LOG_A; sleep 300"]

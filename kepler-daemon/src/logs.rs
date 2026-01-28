@@ -105,7 +105,7 @@ impl LogBuffer {
     /// Add a log entry, appending to disk
     pub fn push(&mut self, service: String, line: String, stream: LogStream) {
         let log_file = self.log_file_path(&service);
-        let timestamp = Utc::now().timestamp();
+        let timestamp = Utc::now().timestamp_millis();
 
         // Format: {timestamp_unix}\t{stream}\t{service}\t{line}
         let entry = format!("{}\t{}\t{}\t{}\n", timestamp, stream.as_str(), service, line);
@@ -198,7 +198,7 @@ impl LogBuffer {
         Some(LogLine {
             service,
             line: content,
-            timestamp: Utc.timestamp_opt(timestamp, 0).single()?,
+            timestamp: Utc.timestamp_millis_opt(timestamp).single()?,
             stream,
         })
     }
@@ -381,7 +381,7 @@ impl From<LogLine> for LogEntry {
         LogEntry {
             service: line.service,
             line: line.line,
-            timestamp: Some(line.timestamp.timestamp()),
+            timestamp: Some(line.timestamp.timestamp_millis()),
             stream: line.stream.as_str().to_string(),
         }
     }
@@ -392,7 +392,7 @@ impl From<&LogLine> for LogEntry {
         LogEntry {
             service: line.service.clone(),
             line: line.line.clone(),
-            timestamp: Some(line.timestamp.timestamp()),
+            timestamp: Some(line.timestamp.timestamp_millis()),
             stream: line.stream.as_str().to_string(),
         }
     }

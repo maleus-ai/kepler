@@ -1,0 +1,7 @@
+services:
+  svc-start-hook-service:
+    command: ["sh", "-c", "echo Starting; sleep 300"]
+    hooks:
+      on_start:
+        run: |
+          echo "SERVICE_ON_START_RAN" >> MARKER_FILE

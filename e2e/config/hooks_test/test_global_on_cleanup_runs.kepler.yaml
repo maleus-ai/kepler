@@ -1,0 +1,8 @@
+hooks:
+  on_cleanup:
+    run: |
+      echo "ON_CLEANUP_RAN" >> MARKER_FILE
+
+services:
+  cleanup-hook-service:
+    command: ["sh", "-c", "echo Starting; sleep 300"]

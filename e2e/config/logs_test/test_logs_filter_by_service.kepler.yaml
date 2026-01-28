@@ -1,0 +1,5 @@
+services:
+  filter-service-a:
+    command: ["sh", "-c", "echo FILTER_A_MESSAGE; sleep 300"]
+  filter-service-b:
+    command: ["sh", "-c", "echo FILTER_B_MESSAGE; sleep 300"]

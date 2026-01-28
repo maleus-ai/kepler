@@ -1,0 +1,3 @@
+services:
+  stop-test-b:
+    command: ["sh", "-c", "echo B_RUNNING; sleep 300"]

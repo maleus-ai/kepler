@@ -1,0 +1,3 @@
+services:
+  stoppable-service:
+    command: ["sh", "-c", "echo Starting; sleep 300"]

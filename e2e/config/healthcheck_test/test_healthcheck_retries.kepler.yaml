@@ -1,0 +1,10 @@
+services:
+  retry-service:
+    command: ["sh", "-c", "echo Starting; sleep 300"]
+    healthcheck:
+      # Reads counter from flag file, increments it, succeeds when >= 3
+      test: ["CMD-SHELL", "count=$(cat FLAG_FILE_PATH 2>/dev/null || echo 0); count=$((count + 1)); echo $count > FLAG_FILE_PATH; [ $count -ge 3 ]"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 0s

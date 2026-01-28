@@ -1,0 +1,5 @@
+services:
+  ps-service-a:
+    command: ["sh", "-c", "echo Service A; sleep 300"]
+  ps-service-b:
+    command: ["sh", "-c", "echo Service B; sleep 300"]

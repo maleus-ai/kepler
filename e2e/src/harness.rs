@@ -296,6 +296,172 @@ impl E2eHarness {
         self.run_cli(&["-f", config_str, "stop", "--clean"]).await
     }
 
+    /// Restart all services from a config file
+    pub async fn restart_services(&self, config_path: &Path) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "restart"]).await
+    }
+
+    /// Restart a specific service
+    pub async fn restart_service(&self, config_path: &Path, service: &str) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "restart", service]).await
+    }
+
+    /// Start a specific service
+    pub async fn start_service(&self, config_path: &Path, service: &str) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "start", service]).await
+    }
+
+    /// Stop a specific service
+    pub async fn stop_service(&self, config_path: &Path, service: &str) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "stop", service]).await
+    }
+
+    /// Get daemon status
+    pub async fn daemon_status(&self) -> E2eResult<CommandOutput> {
+        self.run_cli(&["daemon", "status"]).await
+    }
+
+    /// Create a file in the temp directory (for file watcher tests)
+    pub fn create_temp_file(&self, name: &str, content: &str) -> E2eResult<PathBuf> {
+        let file_path = self.temp_dir.path().join(name);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&file_path, content)?;
+        Ok(file_path)
+    }
+
+    /// Modify a file (for file watcher tests)
+    pub fn modify_file(&self, path: &Path, content: &str) -> E2eResult<()> {
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Create a subdirectory in the temp directory
+    pub fn create_temp_dir(&self, name: &str) -> E2eResult<PathBuf> {
+        let dir_path = self.temp_dir.path().join(name);
+        std::fs::create_dir_all(&dir_path)?;
+        Ok(dir_path)
+    }
+
+    /// Get logs with timestamps
+    pub async fn get_logs_with_timestamps(
+        &self,
+        config_path: &Path,
+        service: Option<&str>,
+        lines: usize,
+    ) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+
+        let lines_str = lines.to_string();
+        let mut args = vec!["-f", config_str, "logs", "-n", &lines_str, "--timestamps"];
+        let service_owned;
+        if let Some(s) = service {
+            service_owned = s.to_string();
+            args.push(&service_owned);
+        }
+
+        self.run_cli(&args).await
+    }
+
+    /// Extract PID from ps output for a service
+    pub fn extract_pid_from_ps(&self, ps_output: &str, service: &str) -> Option<u32> {
+        for line in ps_output.lines() {
+            if line.contains(service) {
+                // Format is typically: "service_name  status  pid"
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    return parts[2].parse().ok();
+                }
+            }
+        }
+        None
+    }
+
+    /// Wait for a service to NOT be in a specific status (useful for waiting for stop)
+    pub async fn wait_for_service_not_status(
+        &self,
+        config_path: &Path,
+        service: &str,
+        status_to_avoid: &str,
+        timeout_duration: Duration,
+    ) -> E2eResult<()> {
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < timeout_duration {
+            let output = self.ps(config_path).await?;
+            if output.success() {
+                let mut found_with_status = false;
+                for line in output.stdout.lines() {
+                    if line.contains(service) && line.contains(status_to_avoid) {
+                        found_with_status = true;
+                        break;
+                    }
+                }
+                if !found_with_status {
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        Err(E2eError::Timeout(format!(
+            "service {} to leave status {}",
+            service, status_to_avoid
+        )))
+    }
+
+    /// Wait for service to reach any of several possible statuses
+    pub async fn wait_for_service_status_any(
+        &self,
+        config_path: &Path,
+        service: &str,
+        expected_statuses: &[&str],
+        timeout_duration: Duration,
+    ) -> E2eResult<String> {
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < timeout_duration {
+            let output = self.ps(config_path).await?;
+            if output.success() {
+                for line in output.stdout.lines() {
+                    if line.contains(service) {
+                        for status in expected_statuses {
+                            if line.contains(status) {
+                                return Ok(status.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        Err(E2eError::Timeout(format!(
+            "service {} to reach any of: {:?}",
+            service, expected_statuses
+        )))
+    }
+
+    /// Check if socket exists
+    pub fn socket_exists(&self) -> bool {
+        self.socket_path().exists()
+    }
+
     /// Get logs for services
     pub async fn get_logs(
         &self,

@@ -1,0 +1,3 @@
+services:
+  restartable-service:
+    command: ["sh", "-c", "echo Starting PID $$; sleep 300"]
