@@ -363,6 +363,10 @@ impl ConfigActor {
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| PathBuf::from("."));
 
+                // Copy env_files to state directory before building service envs
+                // This is needed so build_service_env can find them in the state directory
+                let _ = persistence.copy_env_files(&config.services, &config_dir);
+
                 // Initialize service states with pre-computed environment and working directory
                 let services = config
                     .services
@@ -374,7 +378,7 @@ impl ConfigActor {
                             .unwrap_or_else(|| config_dir.clone());
 
                         let computed_env =
-                            build_service_env(service_config, &config_dir).unwrap_or_default();
+                            build_service_env(service_config, name, &state_dir).unwrap_or_default();
 
                         let state = ServiceState {
                             computed_env,
@@ -681,6 +685,10 @@ impl ConfigActor {
 
         info!("Taking config snapshot");
 
+        // Copy env_files to state directory before taking snapshot
+        self.persistence
+            .copy_env_files(&self.config.services, &self.config_dir)?;
+
         // Build the snapshot
         let service_envs: HashMap<String, HashMap<String, String>> = self
             .services
@@ -801,6 +809,11 @@ impl ConfigActor {
         // Preserve service initialized states
         let old_services = std::mem::take(&mut self.services);
 
+        // Re-copy env_files to state directory (they may have changed)
+        let _ = self
+            .persistence
+            .copy_env_files(&new_config.services, &self.config_dir);
+
         // Initialize new service states
         self.services = new_config
             .services
@@ -812,7 +825,7 @@ impl ConfigActor {
                     .unwrap_or_else(|| self.config_dir.clone());
 
                 let computed_env =
-                    build_service_env(service_config, &self.config_dir).unwrap_or_default();
+                    build_service_env(service_config, name, &self.state_dir).unwrap_or_default();
 
                 let mut state = ServiceState {
                     computed_env,

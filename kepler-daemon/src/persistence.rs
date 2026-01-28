@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
-use crate::config::KeplerConfig;
+use crate::config::{KeplerConfig, ServiceConfig};
 use crate::errors::{DaemonError, Result};
 use crate::state::PersistedConfigState;
 
@@ -175,6 +175,111 @@ impl ConfigPersistence {
     }
 
     // =========================================================================
+    // Env file management
+    // =========================================================================
+
+    /// Get the path to the env_files directory.
+    fn env_files_dir(&self) -> PathBuf {
+        self.state_dir.join("env_files")
+    }
+
+    /// Copy service env_files to the state directory.
+    ///
+    /// This copies each service's env_file to the state directory so that
+    /// the env_file values are preserved even if the original file is deleted.
+    /// The env_file is used both for:
+    /// 1. Expansion context (values used to expand ${VAR} in config fields)
+    /// 2. Runtime injection (all values injected into process environment)
+    pub fn copy_env_files(
+        &self,
+        services: &HashMap<String, ServiceConfig>,
+        config_dir: &Path,
+    ) -> Result<()> {
+        let env_files_dir = self.env_files_dir();
+
+        // Create env_files directory with secure permissions
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&env_files_dir)
+                .map_err(DaemonError::Io)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(&env_files_dir).map_err(DaemonError::Io)?;
+        }
+
+        for (service_name, config) in services {
+            if let Some(ref env_file) = config.env_file {
+                // Resolve relative paths to config_dir
+                let source = if env_file.is_relative() {
+                    config_dir.join(env_file)
+                } else {
+                    env_file.clone()
+                };
+
+                if source.exists() {
+                    // Use service name as prefix to avoid conflicts
+                    let dest_name = format!(
+                        "{}_{}",
+                        service_name,
+                        env_file.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                    let dest = env_files_dir.join(&dest_name);
+
+                    // Copy with secure permissions
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        let contents = std::fs::read(&source).map_err(DaemonError::Io)?;
+                        let mut file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .mode(0o600)
+                            .open(&dest)
+                            .map_err(DaemonError::Io)?;
+                        file.write_all(&contents).map_err(DaemonError::Io)?;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        std::fs::copy(&source, &dest).map_err(DaemonError::Io)?;
+                    }
+
+                    info!(
+                        "Copied env_file for {}: {:?} -> {:?}",
+                        service_name, source, dest
+                    );
+                } else {
+                    debug!(
+                        "Env file for {} does not exist, skipping: {:?}",
+                        service_name, source
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the path to a copied env_file in the state directory.
+    ///
+    /// Returns the path where the env_file was copied for a given service.
+    pub fn get_env_file_path(&self, service_name: &str, original_env_file: &Path) -> PathBuf {
+        let dest_name = format!(
+            "{}_{}",
+            service_name,
+            original_env_file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+        self.env_files_dir().join(dest_name)
+    }
+
+    // =========================================================================
     // Snapshot management
     // =========================================================================
 
@@ -195,6 +300,13 @@ impl ConfigPersistence {
         if state_path.exists() {
             std::fs::remove_file(&state_path)?;
             debug!("Removed state: {:?}", state_path);
+        }
+
+        // Remove env_files directory
+        let env_files_dir = self.env_files_dir();
+        if env_files_dir.exists() {
+            std::fs::remove_dir_all(&env_files_dir)?;
+            debug!("Removed env_files directory: {:?}", env_files_dir);
         }
 
         Ok(())

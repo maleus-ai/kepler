@@ -1,9 +1,36 @@
 use serde::{Deserialize, Deserializer, Serializer};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::errors::{DaemonError, Result};
+
+/// Load environment variables from an env_file.
+/// Returns an empty HashMap if the file doesn't exist or can't be parsed.
+fn load_env_file(path: &Path) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    if let Ok(iter) = dotenvy::from_path_iter(path) {
+        for item in iter.flatten() {
+            env.insert(item.0, item.1);
+        }
+    }
+    env
+}
+
+/// Expand a string using the given environment context.
+/// Priority: context (env_file vars) > system env vars
+fn expand_with_context(s: &str, context: &HashMap<String, String>) -> String {
+    shellexpand::env_with_context(s, |var| -> std::result::Result<Option<Cow<'_, str>>, std::env::VarError> {
+        // First check context (env_file), then fall back to system env
+        Ok(context
+            .get(var)
+            .map(|v| Cow::Borrowed(v.as_str()))
+            .or_else(|| std::env::var(var).ok().map(Cow::Owned)))
+    })
+    .map(|expanded| expanded.into_owned())
+    .unwrap_or_else(|_| s.to_string())
+}
 
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -538,122 +565,226 @@ impl KeplerConfig {
     /// Pre-compute all environment variable expansions in the config.
     /// This expands shell-style variable references using shellexpand,
     /// supporting ${VAR}, ${VAR:-default}, ${VAR:+value}, and ~ expansion.
+    ///
+    /// For services with env_file:
+    /// 1. First expand env_file path using system env only
+    /// 2. Load env_file content
+    /// 3. Expand all other fields using env_file + system env as context
+    ///    (env_file overrides system vars for expansion)
     fn resolve_environment(&mut self) {
-        // Expand global hooks
-        if let Some(ref mut hooks) = self.hooks {
-            Self::expand_global_hooks(hooks);
+        // Process each service
+        for service in self.services.values_mut() {
+            // Step 1: Expand env_file PATH using system env only (empty context)
+            if let Some(ref mut ef) = service.env_file {
+                let expanded_path = expand_with_context(&ef.to_string_lossy(), &HashMap::new());
+                *ef = PathBuf::from(expanded_path);
+            }
+
+            // Step 2: Load env_file if specified
+            let env_file_vars = if let Some(ref ef) = service.env_file {
+                load_env_file(ef)
+            } else {
+                HashMap::new()
+            };
+
+            // Step 3: Expand all other fields using env_file + system env as context
+            // (env_file overrides system vars in the context)
+            Self::expand_service_config(service, &env_file_vars);
         }
 
-        // Expand service configs
-        for service in self.services.values_mut() {
-            Self::expand_service_config(service);
+        // Process global hooks (no env_file, just system env)
+        if let Some(ref mut hooks) = self.hooks {
+            Self::expand_global_hooks(hooks, &HashMap::new());
         }
     }
 
     /// Expand environment variables in a string using shell-style expansion.
     /// Supports ${VAR}, ${VAR:-default}, ${VAR:+value}, ~ (tilde), etc.
-    fn expand_value(s: &str) -> String {
-        shellexpand::full(s)
-            .map(|expanded| expanded.into_owned())
-            .unwrap_or_else(|_| s.to_string())
+    /// Uses the provided context for variable lookup (context overrides system env).
+    fn expand_value(s: &str, context: &HashMap<String, String>) -> String {
+        expand_with_context(s, context)
     }
 
     /// Expand environment variables in global hooks
-    fn expand_global_hooks(hooks: &mut GlobalHooks) {
+    fn expand_global_hooks(hooks: &mut GlobalHooks, context: &HashMap<String, String>) {
         if let Some(ref mut hook) = hooks.on_init {
-            Self::expand_hook_command(hook);
+            Self::expand_hook_command(hook, context);
         }
         if let Some(ref mut hook) = hooks.on_start {
-            Self::expand_hook_command(hook);
+            Self::expand_hook_command(hook, context);
         }
         if let Some(ref mut hook) = hooks.on_stop {
-            Self::expand_hook_command(hook);
+            Self::expand_hook_command(hook, context);
         }
         if let Some(ref mut hook) = hooks.on_cleanup {
-            Self::expand_hook_command(hook);
+            Self::expand_hook_command(hook, context);
         }
     }
 
     /// Expand environment variables in a hook command.
-    /// Only expands paths (working_dir, env_file).
-    /// Command/script content is NOT expanded - it's left for the shell to handle
-    /// since it may contain runtime variable references like $VAR or ${VAR}.
-    fn expand_hook_command(hook: &mut HookCommand) {
+    /// Expands: user, group, working_dir, env_file, environment.
+    /// NOTE: We intentionally do NOT expand run/command - shell variables should be
+    /// expanded by the shell at runtime using the process's environment.
+    fn expand_hook_command(hook: &mut HookCommand, context: &HashMap<String, String>) {
         match hook {
             HookCommand::Script {
+                run: _, // Intentionally not expanded - shell expands at runtime
+                user,
+                group,
                 working_dir,
+                environment,
                 env_file,
-                ..
             } => {
+                // Expand user/group
+                if let Some(u) = user {
+                    *u = Self::expand_value(u, context);
+                }
+                if let Some(g) = group {
+                    *g = Self::expand_value(g, context);
+                }
+
+                // Expand paths
                 if let Some(wd) = working_dir {
-                    *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy()));
+                    *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy(), context));
                 }
                 if let Some(ef) = env_file {
-                    *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy()));
+                    *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy(), context));
+                }
+
+                // Expand environment entries
+                for entry in environment {
+                    *entry = Self::expand_value(entry, context);
                 }
             }
             HookCommand::Command {
+                command: _, // Intentionally not expanded - shell expands at runtime
+                user,
+                group,
                 working_dir,
+                environment,
                 env_file,
-                ..
             } => {
+                // Expand user/group
+                if let Some(u) = user {
+                    *u = Self::expand_value(u, context);
+                }
+                if let Some(g) = group {
+                    *g = Self::expand_value(g, context);
+                }
+
+                // Expand paths
                 if let Some(wd) = working_dir {
-                    *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy()));
+                    *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy(), context));
                 }
                 if let Some(ef) = env_file {
-                    *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy()));
+                    *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy(), context));
+                }
+
+                // Expand environment entries
+                for entry in environment {
+                    *entry = Self::expand_value(entry, context);
                 }
             }
         }
     }
 
     /// Expand environment variables in a service config.
-    /// Only expands paths (working_dir, env_file).
-    /// Command arguments are NOT expanded - they're left for the shell to handle
-    /// since they may contain runtime variable references like $VAR or ${VAR}.
-    fn expand_service_config(service: &mut ServiceConfig) {
-        // Expand working_dir
+    /// Expands ALL string fields using the provided context (env_file vars + system env).
+    /// The env_file path should already be expanded before calling this.
+    ///
+    /// Environment entries are processed in order, with each entry's key=value
+    /// being added to the context for subsequent entries. This allows entries
+    /// to reference variables defined earlier in the same array.
+    fn expand_service_config(service: &mut ServiceConfig, context: &HashMap<String, String>) {
+        // Create a mutable copy of context for environment processing
+        let mut expanded_context = context.clone();
+
+        // NOTE: We intentionally do NOT expand service.command here.
+        // Commands should have their $VAR references expanded by the shell at runtime,
+        // using the process's environment. Values should be passed via the environment array.
+
+        // Expand working_dir (already partially expanded, but re-expand with full context)
         if let Some(ref mut wd) = service.working_dir {
-            *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy()));
+            *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy(), &expanded_context));
         }
 
-        // NOTE: Do NOT expand service.environment values here.
-        // Those are expanded at runtime in build_service_env() because they may
-        // reference variables from env_file or other environment entries.
+        // NOTE: env_file path is already expanded before this function is called
+        // (using system env only, since we need it to load the env_file first)
 
-        // Expand env_file path
-        if let Some(ref mut ef) = service.env_file {
-            *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy()));
+        // Expand user/group
+        if let Some(ref mut u) = service.user {
+            *u = Self::expand_value(u, &expanded_context);
+        }
+        if let Some(ref mut g) = service.group {
+            *g = Self::expand_value(g, &expanded_context);
+        }
+
+        // Expand environment entries IN ORDER, adding each to context for subsequent entries
+        // This allows entries like:
+        //   - BASE_VAR=base
+        //   - EXPANDED=${BASE_VAR}_suffix
+        for entry in &mut service.environment {
+            // Expand the value using current context
+            let expanded_entry = Self::expand_value(entry, &expanded_context);
+            *entry = expanded_entry.clone();
+
+            // Add this entry to context for subsequent entries
+            if let Some((key, value)) = expanded_entry.split_once('=') {
+                expanded_context.insert(key.to_string(), value.to_string());
+            }
+        }
+
+        // Expand depends_on
+        for dep in &mut service.depends_on {
+            *dep = Self::expand_value(dep, &expanded_context);
+        }
+
+        // NOTE: We intentionally do NOT expand healthcheck.test here.
+        // Healthcheck commands should have their $VAR references expanded by the shell
+        // at runtime, using the process's environment.
+
+        // Expand resource limits
+        if let Some(ref mut limits) = service.limits {
+            if let Some(ref mut mem) = limits.memory {
+                *mem = Self::expand_value(mem, &expanded_context);
+            }
+        }
+
+        // Expand restart watch patterns
+        if let RestartConfig::Extended { ref mut watch, .. } = service.restart {
+            for pattern in watch {
+                *pattern = Self::expand_value(pattern, &expanded_context);
+            }
         }
 
         // Expand service hooks
         if let Some(ref mut hooks) = service.hooks {
-            Self::expand_service_hooks(hooks);
+            Self::expand_service_hooks(hooks, &expanded_context);
         }
     }
 
     /// Expand environment variables in service hooks
-    fn expand_service_hooks(hooks: &mut ServiceHooks) {
+    fn expand_service_hooks(hooks: &mut ServiceHooks, context: &HashMap<String, String>) {
         if let Some(ref mut hook) = hooks.on_init {
-            Self::expand_hook_command(hook);
+            Self::expand_hook_command(hook, context);
         }
         if let Some(ref mut hook) = hooks.on_start {
-            Self::expand_hook_command(hook);
+            Self::expand_hook_command(hook, context);
         }
         if let Some(ref mut hook) = hooks.on_stop {
-            Self::expand_hook_command(hook);
+            Self::expand_hook_command(hook, context);
         }
         if let Some(ref mut hook) = hooks.on_restart {
-            Self::expand_hook_command(hook);
+            Self::expand_hook_command(hook, context);
         }
         if let Some(ref mut hook) = hooks.on_exit {
-            Self::expand_hook_command(hook);
+            Self::expand_hook_command(hook, context);
         }
         if let Some(ref mut hook) = hooks.on_healthcheck_success {
-            Self::expand_hook_command(hook);
+            Self::expand_hook_command(hook, context);
         }
         if let Some(ref mut hook) = hooks.on_healthcheck_fail {
-            Self::expand_hook_command(hook);
+            Self::expand_hook_command(hook, context);
         }
     }
 

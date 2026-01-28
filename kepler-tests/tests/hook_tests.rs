@@ -522,6 +522,10 @@ async fn test_hook_env_file() {
 }
 
 /// Hook's environment overrides service environment
+///
+/// NOTE: We use `printenv` instead of `echo $VAR` because shell variables in hook
+/// scripts get expanded at config load time. Using printenv reads the actual
+/// runtime environment injected into the hook process.
 #[tokio::test]
 async fn test_hook_env_overrides_service_env() {
     let temp_dir = TempDir::new().unwrap();
@@ -530,7 +534,7 @@ async fn test_hook_env_overrides_service_env() {
 
     let hooks = ServiceHooks {
         on_start: Some(HookCommand::Script {
-            run: format!("echo \"SHARED_VAR=$SHARED_VAR\" >> {}", marker_path.display()),
+            run: format!("echo SHARED_VAR=$(printenv SHARED_VAR) >> {}", marker_path.display()),
             user: None,
             group: None,
             working_dir: None,
@@ -624,6 +628,10 @@ async fn test_hook_env_expansion_with_service_env() {
 }
 
 /// Hook's env_file overrides service env_file but is overridden by hook's environment
+///
+/// NOTE: We use `printenv` instead of `echo $VAR` because shell variables in hook
+/// scripts get expanded at config load time. Using printenv reads the actual
+/// runtime environment injected into the hook process.
 #[tokio::test]
 async fn test_hook_env_priority() {
     let temp_dir = TempDir::new().unwrap();
@@ -641,7 +649,7 @@ async fn test_hook_env_priority() {
     let hooks = ServiceHooks {
         on_start: Some(HookCommand::Script {
             run: format!(
-                "echo \"VAR1=$VAR1\" >> {} && echo \"VAR2=$VAR2\" >> {} && echo \"VAR3=$VAR3\" >> {}",
+                "echo VAR1=$(printenv VAR1) >> {} && echo VAR2=$(printenv VAR2) >> {} && echo VAR3=$(printenv VAR3) >> {}",
                 marker_path.display(),
                 marker_path.display(),
                 marker_path.display()

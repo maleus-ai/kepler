@@ -61,15 +61,17 @@ pub fn load_env_file(path: &Path) -> Result<HashMap<String, String>> {
 /// Build the full environment for a service
 ///
 /// Priority (highest to lowest):
-/// 1. Service-defined environment variables
-/// 2. Variables from env_file
+/// 1. Service-defined environment variables (already expanded at config load time)
+/// 2. Variables from env_file (loaded from state directory copy)
 /// 3. Minimal system environment (PATH, HOME, USER, SHELL only)
 ///
 /// Note: Only essential system variables are inherited.
-/// Use ${VAR} syntax to reference other system variables.
+/// The env_file is loaded from the state directory (where it was copied at snapshot time),
+/// not from the original path. This ensures the snapshot is self-contained.
 pub fn build_service_env(
     config: &ServiceConfig,
-    config_dir: &Path,
+    service_name: &str,
+    state_dir: &Path,
 ) -> Result<HashMap<String, String>> {
     let mut env = HashMap::new();
 
@@ -81,18 +83,15 @@ pub fn build_service_env(
         }
     }
 
-    // Load env_file if specified
-    if let Some(env_file) = &config.env_file {
-        let env_path = if env_file.is_absolute() {
-            env_file.clone()
-        } else {
-            // Resolve relative to working_dir if set, otherwise config_dir
-            config
-                .working_dir
-                .as_ref()
-                .unwrap_or(&config_dir.to_path_buf())
-                .join(env_file)
-        };
+    // Load env_file from STATE DIRECTORY (copied at snapshot time)
+    if let Some(ref env_file) = config.env_file {
+        // Build path to the copied env_file using the same naming convention as persistence.rs
+        let env_file_name = format!(
+            "{}_{}",
+            service_name,
+            env_file.file_name().unwrap_or_default().to_string_lossy()
+        );
+        let env_path = state_dir.join("env_files").join(env_file_name);
 
         if env_path.exists() {
             let file_env = load_env_file(&env_path)?;
@@ -100,14 +99,15 @@ pub fn build_service_env(
                 env.insert(key, value);
             }
         }
-        // If file doesn't exist, silently ignore (common for optional .env files)
+        // If file doesn't exist in state dir, silently ignore
+        // (may not have been copied yet, or file didn't exist originally)
     }
 
-    // Apply service-defined environment with variable expansion
+    // Apply service-defined environment entries
+    // Note: These are already expanded at config load time, so no need to expand again
     for entry in &config.environment {
         if let Some((key, value)) = entry.split_once('=') {
-            let expanded_value = expand_env(value, &env);
-            env.insert(key.to_string(), expanded_value);
+            env.insert(key.to_string(), value.to_string());
         }
     }
 

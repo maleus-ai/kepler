@@ -114,6 +114,10 @@ async fn test_service_env_file() {
 }
 
 /// Environment array overrides env_file variables
+///
+/// NOTE: We use `printenv SHARED_VAR` instead of `echo $SHARED_VAR` because
+/// $SHARED_VAR in the command would be expanded at config load time (using
+/// env_file values). Using printenv reads the actual runtime environment.
 #[tokio::test]
 async fn test_env_array_overrides_env_file() {
     let temp_dir = TempDir::new().unwrap();
@@ -131,7 +135,7 @@ async fn test_env_array_overrides_env_file() {
                 "sh".to_string(),
                 "-c".to_string(),
                 format!(
-                    "echo \"SHARED_VAR=$SHARED_VAR\" >> {} && sleep 3600",
+                    "echo SHARED_VAR=$(printenv SHARED_VAR) >> {} && sleep 3600",
                     marker_path.display()
                 ),
             ])
@@ -303,6 +307,10 @@ async fn test_system_env_inherited() {
 }
 
 /// Service env can override inherited system environment variables
+///
+/// NOTE: We use `printenv HOME` instead of `echo $HOME` because $HOME in the
+/// command would be expanded at config load time by shellexpand. Using printenv
+/// reads the actual runtime environment injected into the process.
 #[tokio::test]
 async fn test_service_env_overrides_system_env() {
     let temp_dir = TempDir::new().unwrap();
@@ -317,7 +325,7 @@ async fn test_service_env_overrides_system_env() {
                 "sh".to_string(),
                 "-c".to_string(),
                 format!(
-                    "echo \"HOME=$HOME\" >> {} && sleep 3600",
+                    "echo HOME=$(printenv HOME) >> {} && sleep 3600",
                     marker_path.display()
                 ),
             ])
@@ -348,6 +356,11 @@ async fn test_service_env_overrides_system_env() {
 }
 
 /// Non-inherited system variables are NOT passed to service but CAN be accessed via ${VAR} expansion
+///
+/// NOTE: We use `printenv` to check if a variable exists in the runtime environment.
+/// The ${VAR} expansion happens at config load time, so if we define EXPANDED_VAR=${KEPLER_TEST_VAR}
+/// in the environment array, it becomes EXPANDED_VAR=test_value_123 at config time.
+/// But KEPLER_TEST_VAR itself is NOT passed to the process (it's not in PATH,HOME,USER,SHELL).
 #[tokio::test]
 async fn test_non_inherited_sys_var_not_passed_but_expandable() {
     let temp_dir = TempDir::new().unwrap();
@@ -367,11 +380,18 @@ async fn test_non_inherited_sys_var_not_passed_but_expandable() {
                 "sh".to_string(),
                 "-c".to_string(),
                 format!(
-                    "echo \"DIRECT=$KEPLER_TEST_VAR EXPANDED=$EXPANDED_VAR\" >> {} && sleep 3600",
+                    concat!(
+                        // Check if KEPLER_TEST_VAR exists in runtime env (should NOT)
+                        "echo DIRECT=$(printenv KEPLER_TEST_VAR 2>/dev/null || echo NOTSET) >> {} && ",
+                        // Check EXPANDED_VAR which should have the expanded value
+                        "echo EXPANDED=$(printenv EXPANDED_VAR) >> {} && ",
+                        "sleep 3600"
+                    ),
+                    marker_path.display(),
                     marker_path.display()
                 ),
             ])
-            // Use ${VAR} syntax to explicitly reference the non-inherited var
+            // Use ${VAR} syntax to explicitly reference the non-inherited var at config time
             .with_environment(vec!["EXPANDED_VAR=${KEPLER_TEST_VAR}".to_string()])
             .build(),
         )
@@ -390,17 +410,18 @@ async fn test_non_inherited_sys_var_not_passed_but_expandable() {
     assert!(content.is_some(), "Service should have written env vars");
     let content = content.unwrap();
 
-    // DIRECT access should be empty (var not inherited)
+    // KEPLER_TEST_VAR should NOT exist in process runtime environment
+    // (only PATH, HOME, USER, SHELL are inherited)
     assert!(
-        content.contains("DIRECT=") && !content.contains("DIRECT=test_value_123"),
-        "Non-inherited var should NOT be directly available. Got: {}",
+        content.contains("DIRECT=NOTSET"),
+        "Non-inherited var should NOT be directly available in runtime env. Got: {}",
         content
     );
 
-    // Expanded access via ${VAR} syntax should work
+    // EXPANDED_VAR should have the value that was expanded at config time
     assert!(
         content.contains("EXPANDED=test_value_123"),
-        "Non-inherited var should be accessible via ${{VAR}} expansion. Got: {}",
+        "Var expanded via ${{VAR}} at config time should be in runtime env. Got: {}",
         content
     );
 
@@ -414,6 +435,10 @@ async fn test_non_inherited_sys_var_not_passed_but_expandable() {
 }
 
 /// Full priority chain: system < env_file < environment array
+///
+/// NOTE: We use `printenv` to check actual runtime environment values.
+/// Using $VAR in the command would expand at config load time (using env_file
+/// + system vars as context), which is different from runtime injection.
 #[tokio::test]
 async fn test_env_merge_priority_chain() {
     let temp_dir = TempDir::new().unwrap();
@@ -435,7 +460,16 @@ async fn test_env_merge_priority_chain() {
                 "sh".to_string(),
                 "-c".to_string(),
                 format!(
-                    "echo \"VAR_ONLY_FILE=$VAR_ONLY_FILE VAR_FILE_AND_ARRAY=$VAR_FILE_AND_ARRAY VAR_ONLY_ARRAY=$VAR_ONLY_ARRAY HOME_SET=${{HOME:+yes}}\" >> {} && sleep 3600",
+                    concat!(
+                        "echo VAR_ONLY_FILE=$(printenv VAR_ONLY_FILE) >> {} && ",
+                        "echo VAR_FILE_AND_ARRAY=$(printenv VAR_FILE_AND_ARRAY) >> {} && ",
+                        "echo VAR_ONLY_ARRAY=$(printenv VAR_ONLY_ARRAY) >> {} && ",
+                        "echo HOME_SET=$(if printenv HOME > /dev/null 2>&1; then echo yes; else echo no; fi) >> {} && ",
+                        "sleep 3600"
+                    ),
+                    marker_path.display(),
+                    marker_path.display(),
+                    marker_path.display(),
                     marker_path.display()
                 ),
             ])
@@ -482,7 +516,7 @@ async fn test_env_merge_priority_chain() {
         content
     );
 
-    // System env (HOME) should still exist - using ${HOME:+yes} which returns "yes" if HOME is set
+    // System env (HOME) should still exist
     assert!(
         content.contains("HOME_SET=yes"),
         "System env (HOME) should be inherited. Got: {}",
