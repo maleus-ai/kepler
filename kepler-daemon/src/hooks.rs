@@ -6,7 +6,7 @@ use crate::config::{resolve_log_store, GlobalHooks, HookCommand, LogConfig, Serv
 use crate::env::build_hook_env;
 use crate::errors::{DaemonError, Result};
 use crate::logs::SharedLogBuffer;
-use crate::process::{spawn_command_sync, CommandSpec, SpawnMode};
+use crate::process::{spawn_blocking, BlockingMode, CommandSpec};
 
 /// Context for running a hook
 pub struct HookRunContext<'a> {
@@ -175,15 +175,15 @@ pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>) -> Result<()
         effective_group,
     );
 
-    // Spawn using unified function with logging
-    let mode = SpawnMode::SynchronousWithLogging {
+    // Spawn using blocking mode with logging
+    let mode = BlockingMode::WithLogging {
         logs: ctx.logs.cloned(),
         log_service_name: ctx.service_name.to_string(),
         store_stdout: ctx.store_stdout,
         store_stderr: ctx.store_stderr,
     };
 
-    let result = spawn_command_sync(spec, mode).await?;
+    let result = spawn_blocking(spec, mode).await?;
     if result.exit_code != Some(0) {
         return Err(DaemonError::HookFailed {
             hook_type: format!("{} {:?}", &program_and_args[0], &program_and_args[1..]),

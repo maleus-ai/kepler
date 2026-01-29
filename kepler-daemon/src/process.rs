@@ -214,13 +214,13 @@ fn apply_resource_limits(limits: &ResourceLimits) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Mode for spawning commands
+/// Mode for blocking command execution
 #[derive(Debug)]
-pub enum SpawnMode {
-    /// Wait for completion and check exit code (simple use case)
-    Synchronous,
+pub enum BlockingMode {
+    /// Wait for completion silently
+    Silent,
     /// Wait for completion with logging to tracing and SharedLogBuffer (for hooks)
-    SynchronousWithLogging {
+    WithLogging {
         logs: Option<SharedLogBuffer>,
         log_service_name: String,
         /// Whether to store stdout output
@@ -228,31 +228,22 @@ pub enum SpawnMode {
         /// Whether to store stderr output
         store_stderr: bool,
     },
-    /// Return a handle for async monitoring (for services)
-    Asynchronous {
-        logs: SharedLogBuffer,
-        log_service_name: String,
-        /// Whether to store stdout output
-        store_stdout: bool,
-        /// Whether to store stderr output
-        store_stderr: bool,
-    },
 }
 
-/// Result of spawning a command synchronously
+/// Result of spawning a blocking command
 #[derive(Debug)]
-pub struct SyncSpawnResult {
+pub struct BlockingResult {
     pub exit_code: Option<i32>,
 }
 
-/// Result of spawning a command asynchronously
-pub struct AsyncSpawnResult {
+/// Result of spawning a detached command
+pub struct DetachedResult {
     pub child: Child,
     pub stdout_task: Option<JoinHandle<()>>,
     pub stderr_task: Option<JoinHandle<()>>,
 }
 
-/// Unified command spawning function for both services and hooks
+/// Spawn a command and wait for completion
 ///
 /// This function handles all the common logic for spawning processes:
 /// - Command validation
@@ -262,10 +253,9 @@ pub struct AsyncSpawnResult {
 /// - Output capture (stdout/stderr)
 ///
 /// The `mode` parameter determines behavior:
-/// - `Synchronous`: Wait for completion and return exit code
-/// - `SynchronousWithLogging`: Wait with logging
-/// - `Asynchronous`: Return Child and tasks for later monitoring
-pub async fn spawn_command_sync(spec: CommandSpec, mode: SpawnMode) -> Result<SyncSpawnResult> {
+/// - `Silent`: Wait for completion and return exit code
+/// - `WithLogging`: Wait with logging to tracing and SharedLogBuffer
+pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<BlockingResult> {
     // Validate command
     if spec.program_and_args.is_empty() {
         return Err(DaemonError::Config("Empty command".to_string()));
@@ -320,7 +310,7 @@ pub async fn spawn_command_sync(spec: CommandSpec, mode: SpawnMode) -> Result<Sy
     debug!("Command spawned with PID {:?}", pid);
 
     match mode {
-        SpawnMode::Synchronous => {
+        BlockingMode::Silent => {
             // Capture stdout
             let stdout = child.stdout.take();
             let stdout_handle = tokio::spawn(async move {
@@ -359,11 +349,11 @@ pub async fn spawn_command_sync(spec: CommandSpec, mode: SpawnMode) -> Result<Sy
             let _ = stdout_handle.await;
             let _ = stderr_handle.await;
 
-            Ok(SyncSpawnResult {
+            Ok(BlockingResult {
                 exit_code: status.code(),
             })
         }
-        SpawnMode::SynchronousWithLogging {
+        BlockingMode::WithLogging {
             logs,
             log_service_name,
             store_stdout,
@@ -423,26 +413,21 @@ pub async fn spawn_command_sync(spec: CommandSpec, mode: SpawnMode) -> Result<Sy
             let _ = stdout_handle.await;
             let _ = stderr_handle.await;
 
-            Ok(SyncSpawnResult {
+            Ok(BlockingResult {
                 exit_code: status.code(),
             })
-        }
-        SpawnMode::Asynchronous { .. } => {
-            Err(DaemonError::Internal(
-                "Use spawn_command_async for asynchronous mode".into(),
-            ))
         }
     }
 }
 
-/// Spawn a command asynchronously, returning the Child and output tasks
-pub async fn spawn_command_async(
+/// Spawn a detached command, returning the Child and output tasks for monitoring
+pub async fn spawn_detached(
     spec: CommandSpec,
     logs: SharedLogBuffer,
     log_service_name: String,
     store_stdout: bool,
     store_stderr: bool,
-) -> Result<AsyncSpawnResult> {
+) -> Result<DetachedResult> {
     // Validate command
     if spec.program_and_args.is_empty() {
         return Err(DaemonError::Config("Empty command".to_string()));
@@ -534,7 +519,7 @@ pub async fn spawn_command_async(
         None
     };
 
-    Ok(AsyncSpawnResult {
+    Ok(DetachedResult {
         child,
         stdout_task,
         stderr_task,
@@ -618,8 +603,8 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
     let (store_stdout, store_stderr) =
         resolve_log_store(service_config.logs.as_ref(), global_log_config);
 
-    // Spawn the command asynchronously
-    let result = spawn_command_async(
+    // Spawn the command detached for monitoring
+    let result = spawn_detached(
         spec,
         logs,
         service_name.to_string(),
