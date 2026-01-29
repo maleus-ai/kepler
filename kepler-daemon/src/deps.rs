@@ -16,6 +16,98 @@ pub fn get_stop_order(services: &HashMap<String, ServiceConfig>) -> Result<Vec<S
     Ok(order)
 }
 
+/// Get services grouped by dependency level for parallel execution.
+///
+/// Services at the same level have no dependencies on each other and can be started
+/// in parallel. Services at level N only depend on services at levels < N.
+///
+/// Example: For services A (no deps), B (no deps), C (depends on A), D (depends on A, B)
+/// Returns: [[A, B], [C, D]]
+/// - Level 0: A, B (no deps, can start in parallel)
+/// - Level 1: C, D (depend only on level 0 services, can start in parallel after level 0)
+pub fn get_start_levels(services: &HashMap<String, ServiceConfig>) -> Result<Vec<Vec<String>>> {
+    let service_names: HashSet<_> = services.keys().cloned().collect();
+
+    // Validate all dependencies exist
+    for (name, config) in services {
+        for dep in &config.depends_on {
+            if !service_names.contains(dep) {
+                return Err(DaemonError::MissingDependency {
+                    service: name.clone(),
+                    dependency: dep.clone(),
+                });
+            }
+        }
+    }
+
+    // Calculate the level of each service (max depth in dependency tree)
+    let mut levels: HashMap<String, usize> = HashMap::new();
+    let mut computed: HashSet<String> = HashSet::new();
+
+    fn compute_level(
+        name: &str,
+        services: &HashMap<String, ServiceConfig>,
+        levels: &mut HashMap<String, usize>,
+        computed: &mut HashSet<String>,
+        stack: &mut HashSet<String>,
+    ) -> Result<usize> {
+        if let Some(&level) = levels.get(name) {
+            return Ok(level);
+        }
+
+        if stack.contains(name) {
+            return Err(DaemonError::DependencyCycle(format!(
+                "Cycle detected involving: {}",
+                name
+            )));
+        }
+
+        stack.insert(name.to_string());
+
+        let config = services.get(name).ok_or_else(|| {
+            DaemonError::ServiceNotFound(name.to_string())
+        })?;
+
+        let level = if config.depends_on.is_empty() {
+            0
+        } else {
+            let mut max_dep_level = 0;
+            for dep in &config.depends_on {
+                let dep_level = compute_level(dep, services, levels, computed, stack)?;
+                max_dep_level = max_dep_level.max(dep_level);
+            }
+            max_dep_level + 1
+        };
+
+        stack.remove(name);
+        levels.insert(name.to_string(), level);
+        computed.insert(name.to_string());
+
+        Ok(level)
+    }
+
+    // Compute level for each service
+    for name in services.keys() {
+        let mut stack = HashSet::new();
+        compute_level(name, services, &mut levels, &mut computed, &mut stack)?;
+    }
+
+    // Group services by level
+    let max_level = levels.values().copied().max().unwrap_or(0);
+    let mut result: Vec<Vec<String>> = vec![Vec::new(); max_level + 1];
+
+    for (name, level) in levels {
+        result[level].push(name);
+    }
+
+    // Sort each level for deterministic ordering
+    for level in &mut result {
+        level.sort();
+    }
+
+    Ok(result)
+}
+
 /// Perform topological sort using Kahn's algorithm
 fn topological_sort(services: &HashMap<String, ServiceConfig>) -> Result<Vec<String>> {
     let service_names: HashSet<_> = services.keys().cloned().collect();
@@ -155,6 +247,7 @@ mod tests {
             working_dir: None,
             environment: vec![],
             env_file: None,
+            sys_env: Default::default(),
             restart: RestartConfig::default(),
             depends_on: deps.into_iter().map(String::from).collect(),
             healthcheck: None,

@@ -66,6 +66,12 @@ pub enum ConfigCommand {
         lines: usize,
         reply: oneshot::Sender<Vec<LogEntry>>,
     },
+    GetLogsBounded {
+        service: Option<String>,
+        lines: usize,
+        max_bytes: Option<usize>,
+        reply: oneshot::Sender<Vec<LogEntry>>,
+    },
     GetServiceConfig {
         service_name: String,
         reply: oneshot::Sender<Option<ServiceConfig>>,
@@ -468,6 +474,15 @@ impl ConfigActor {
                 let result = self.get_logs(service.as_deref(), lines);
                 let _ = reply.send(result);
             }
+            ConfigCommand::GetLogsBounded {
+                service,
+                lines,
+                max_bytes,
+                reply,
+            } => {
+                let result = self.get_logs_bounded(service.as_deref(), lines, max_bytes);
+                let _ = reply.send(result);
+            }
             ConfigCommand::GetServiceConfig {
                 service_name,
                 reply,
@@ -779,6 +794,19 @@ impl ConfigActor {
             .collect()
     }
 
+    fn get_logs_bounded(
+        &self,
+        service: Option<&str>,
+        lines: usize,
+        max_bytes: Option<usize>,
+    ) -> Vec<LogEntry> {
+        self.logs
+            .tail_bounded(lines, service, max_bytes)
+            .into_iter()
+            .map(|l| l.into())
+            .collect()
+    }
+
     fn reload_config(&mut self) -> Result<()> {
         // Read original file contents
         let contents = std::fs::read(&self.config_path)?;
@@ -999,6 +1027,26 @@ impl ConfigActorHandle {
             .send(ConfigCommand::GetLogs {
                 service,
                 lines,
+                reply: reply_tx,
+            })
+            .await;
+        reply_rx.await.unwrap_or_default()
+    }
+
+    /// Get logs with bounded reading (prevents OOM with large log files)
+    pub async fn get_logs_bounded(
+        &self,
+        service: Option<String>,
+        lines: usize,
+        max_bytes: Option<usize>,
+    ) -> Vec<LogEntry> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ConfigCommand::GetLogsBounded {
+                service,
+                lines,
+                max_bytes,
                 reply: reply_tx,
             })
             .await;

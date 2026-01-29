@@ -224,9 +224,31 @@ impl FileWatcherActor {
                             config_path: self.config_path.clone(),
                             service_name: self.service_name.clone(),
                         };
-                        if self.restart_tx.send(event).await.is_err() {
-                            debug!("Restart channel closed, stopping watcher");
-                            break;
+                        // Use try_send with overflow handling
+                        match self.restart_tx.try_send(event) {
+                            Ok(_) => {}
+                            Err(mpsc::error::TrySendError::Full(event)) => {
+                                // Channel is full - log warning and try blocking send with timeout
+                                warn!(
+                                    "Restart event channel near capacity for service {}, applying backpressure",
+                                    self.service_name
+                                );
+                                let send_result = tokio::time::timeout(
+                                    tokio::time::Duration::from_secs(5),
+                                    self.restart_tx.send(event),
+                                ).await;
+
+                                if send_result.is_err() {
+                                    warn!(
+                                        "Failed to send restart event for service {} - channel timeout",
+                                        self.service_name
+                                    );
+                                }
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                debug!("Restart channel closed, stopping watcher");
+                                break;
+                            }
                         }
                     }
                 }

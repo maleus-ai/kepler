@@ -283,6 +283,7 @@ services:
 | `depends_on` | `string[]` | `[]` | Services that must be healthy first |
 | `environment` | `string[]` | `[]` | Environment variables (`KEY=value`) |
 | `env_file` | `string` | - | Path to `.env` file |
+| `sys_env` | `string` | `clear` | System env policy: `clear` or `inherit` |
 | `restart` | `string\|object` | `no` | Restart policy (see below) |
 | `healthcheck` | `object` | - | Health check config |
 | `hooks` | `object` | - | Service-specific hooks |
@@ -460,6 +461,57 @@ services:
 export KEPLER_DAEMON_PATH=/var/run/kepler
 kepler daemon start -d
 ```
+
+### Environment Inheritance
+
+By default, Kepler clears the environment before starting services and only passes explicitly configured environment variables. This is a security feature that prevents unintended environment leakage.
+
+The `sys_env` option controls this behavior:
+- `clear` (default) - Start with empty environment, only explicit vars are passed
+- `inherit` - Inherit all system environment variables from the daemon
+
+Services receive their environment from these sources (in priority order):
+1. **`environment` array** - Explicit variables in the service config
+2. **`env_file`** - Variables loaded from the specified `.env` file
+3. **System environment** - If `sys_env: inherit`, all daemon env vars are included
+
+**Example - Controlled environment (default):**
+```yaml
+services:
+  app:
+    command: ["./app"]
+    # sys_env: clear  # This is the default
+    environment:
+      - PATH=/usr/bin:/bin       # Explicit PATH
+      - NODE_ENV=production
+      - DATABASE_URL=${DB_URL}   # Expanded from system env at config time
+    env_file: .env               # Additional vars from file
+```
+
+**Example - Inherit system environment:**
+```yaml
+services:
+  legacy-app:
+    command: ["./legacy-app"]
+    sys_env: inherit  # Inherit all daemon environment variables
+    environment:
+      - EXTRA_VAR=value  # Additional vars on top of inherited
+```
+
+**If you need specific system vars (recommended over inherit):**
+```yaml
+services:
+  app:
+    command: ["./app"]
+    environment:
+      # Explicitly pass needed system vars
+      - PATH=${PATH}
+      - HOME=${HOME}
+      - USER=${USER}
+```
+
+**Security note:**
+Using `sys_env: clear` (the default) ensures sensitive variables from your shell (like `AWS_SECRET_KEY`, `API_TOKENS`, etc.) are NOT automatically passed to services. Only explicitly configured variables are available. Use `sys_env: inherit` only for legacy apps that require the full environment.
 
 ---
 

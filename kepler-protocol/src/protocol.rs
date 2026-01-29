@@ -49,6 +49,9 @@ pub enum Request {
         follow: bool,
         /// Number of lines to retrieve
         lines: usize,
+        /// Maximum bytes to read (prevents OOM with large logs)
+        #[serde(default)]
+        max_bytes: Option<usize>,
     },
     /// Get logs with pagination (for large log responses)
     LogsChunk {

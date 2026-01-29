@@ -171,6 +171,17 @@ pub fn parse_memory_limit(s: &str) -> std::result::Result<u64, String> {
     Ok(num * multiplier)
 }
 
+/// System environment inheritance policy
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SysEnvPolicy {
+    /// Clear system environment, only pass explicit environment vars (secure default)
+    #[default]
+    Clear,
+    /// Inherit all system environment variables from the daemon process
+    Inherit,
+}
+
 /// Service configuration
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct ServiceConfig {
@@ -181,6 +192,11 @@ pub struct ServiceConfig {
     pub environment: Vec<String>,
     #[serde(default)]
     pub env_file: Option<PathBuf>,
+    /// System environment inheritance policy
+    /// - `clear` (default): Start with empty environment, only explicit vars are passed
+    /// - `inherit`: Inherit all system environment variables from the daemon
+    #[serde(default)]
+    pub sys_env: SysEnvPolicy,
     #[serde(default)]
     pub restart: RestartConfig,
     #[serde(default)]
@@ -387,6 +403,43 @@ pub struct LogRetentionConfig {
     pub on_exit: Option<LogRetention>,
 }
 
+/// Log rotation configuration
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct LogRotationConfig {
+    /// Maximum size of a single log file before rotation (e.g., "10M", "100K")
+    /// Default: 10MB
+    #[serde(default = "default_max_size")]
+    pub max_size: String,
+    /// Maximum number of rotated log files to keep (e.g., .log.1, .log.2)
+    /// Default: 5
+    #[serde(default = "default_max_files")]
+    pub max_files: u32,
+}
+
+fn default_max_size() -> String {
+    "10M".to_string()
+}
+
+fn default_max_files() -> u32 {
+    5
+}
+
+impl Default for LogRotationConfig {
+    fn default() -> Self {
+        Self {
+            max_size: default_max_size(),
+            max_files: default_max_files(),
+        }
+    }
+}
+
+impl LogRotationConfig {
+    /// Parse max_size into bytes
+    pub fn max_size_bytes(&self) -> u64 {
+        parse_memory_limit(&self.max_size).unwrap_or(10 * 1024 * 1024) // 10MB default
+    }
+}
+
 /// Log configuration
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct LogConfig {
@@ -398,6 +451,9 @@ pub struct LogConfig {
     /// Nested log retention settings
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<LogRetentionConfig>,
+    /// Log rotation settings
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<LogRotationConfig>,
 }
 
 impl LogConfig {

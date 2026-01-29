@@ -227,6 +227,7 @@ impl TestServiceBuilder {
             working_dir: self.working_dir,
             environment: self.environment,
             env_file: self.env_file,
+            sys_env: Default::default(),
             restart: self.restart,
             depends_on: self.depends_on,
             healthcheck: self.healthcheck,

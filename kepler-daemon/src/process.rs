@@ -31,10 +31,13 @@ pub struct CommandSpec {
     pub group: Option<String>,
     /// Resource limits (Unix only)
     pub limits: Option<ResourceLimits>,
+    /// Whether to clear the environment before applying environment vars
+    /// If false, inherits the daemon's environment
+    pub clear_env: bool,
 }
 
 impl CommandSpec {
-    /// Create a new CommandSpec with all fields
+    /// Create a new CommandSpec with all fields (clears env by default)
     pub fn new(
         program_and_args: Vec<String>,
         working_dir: PathBuf,
@@ -49,6 +52,7 @@ impl CommandSpec {
             user,
             group,
             limits: None,
+            clear_env: true, // Secure default
         }
     }
 
@@ -68,6 +72,28 @@ impl CommandSpec {
             user,
             group,
             limits,
+            clear_env: true, // Secure default
+        }
+    }
+
+    /// Create a new CommandSpec with all options including clear_env
+    pub fn with_all_options(
+        program_and_args: Vec<String>,
+        working_dir: PathBuf,
+        environment: HashMap<String, String>,
+        user: Option<String>,
+        group: Option<String>,
+        limits: Option<ResourceLimits>,
+        clear_env: bool,
+    ) -> Self {
+        Self {
+            program_and_args,
+            working_dir,
+            environment,
+            user,
+            group,
+            limits,
+            clear_env,
         }
     }
 
@@ -86,6 +112,7 @@ pub struct CommandSpecBuilder {
     user: Option<String>,
     group: Option<String>,
     limits: Option<ResourceLimits>,
+    clear_env: bool,
 }
 
 impl CommandSpecBuilder {
@@ -98,6 +125,7 @@ impl CommandSpecBuilder {
             user: None,
             group: None,
             limits: None,
+            clear_env: true, // Secure default
         }
     }
 
@@ -131,6 +159,12 @@ impl CommandSpecBuilder {
         self
     }
 
+    /// Set whether to clear the environment (default: true)
+    pub fn clear_env(mut self, clear: bool) -> Self {
+        self.clear_env = clear;
+        self
+    }
+
     /// Build the CommandSpec (panics if working_dir not set)
     pub fn build(self) -> CommandSpec {
         CommandSpec {
@@ -140,6 +174,7 @@ impl CommandSpecBuilder {
             user: self.user,
             group: self.group,
             limits: self.limits,
+            clear_env: self.clear_env,
         }
     }
 
@@ -152,6 +187,7 @@ impl CommandSpecBuilder {
             user: self.user,
             group: self.group,
             limits: self.limits,
+            clear_env: self.clear_env,
         }
     }
 }
@@ -245,9 +281,13 @@ pub async fn spawn_command_sync(spec: CommandSpec, mode: SpawnMode) -> Result<Sy
         .current_dir(&spec.working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear()
-        .envs(&spec.environment);
+        .stderr(Stdio::piped());
+
+    // Clear environment if requested (secure default)
+    if spec.clear_env {
+        cmd.env_clear();
+    }
+    cmd.envs(&spec.environment);
 
     // Apply user/group if configured (Unix only)
     #[cfg(unix)]
@@ -418,9 +458,13 @@ pub async fn spawn_command_async(
         .current_dir(&spec.working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear()
-        .envs(&spec.environment);
+        .stderr(Stdio::piped());
+
+    // Clear environment if requested (secure default)
+    if spec.clear_env {
+        cmd.env_clear();
+    }
+    cmd.envs(&spec.environment);
 
     // Apply user/group if configured (Unix only)
     #[cfg(unix)]
@@ -555,14 +599,18 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         &service_config.command[1..]
     );
 
-    // Build CommandSpec with resource limits
-    let spec = CommandSpec::with_limits(
+    // Build CommandSpec with resource limits and environment policy
+    use crate::config::SysEnvPolicy;
+    let clear_env = service_config.sys_env == SysEnvPolicy::Clear;
+
+    let spec = CommandSpec::with_all_options(
         service_config.command.clone(),
         working_dir,
         env,
         service_config.user.clone(),
         service_config.group.clone(),
         service_config.limits.clone(),
+        clear_env,
     );
 
     // Resolve store settings
@@ -640,14 +688,39 @@ async fn monitor_process(
                 service_name, exit_code
             );
 
-            // Send exit event
-            let _ = exit_tx
-                .send(ProcessExitEvent {
-                    config_path,
-                    service_name,
-                    exit_code,
-                })
-                .await;
+            // Send exit event with overflow handling
+            let event = ProcessExitEvent {
+                config_path,
+                service_name: service_name.clone(),
+                exit_code,
+            };
+
+            // Try to send immediately, with fallback to blocking send
+            match exit_tx.try_send(event) {
+                Ok(_) => {}
+                Err(mpsc::error::TrySendError::Full(event)) => {
+                    // Channel is full - log warning and try blocking send with timeout
+                    warn!(
+                        "Exit event channel near capacity for service {}, applying backpressure",
+                        service_name
+                    );
+                    // Use send with timeout to avoid permanent blocking
+                    let send_result = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(5),
+                        exit_tx.send(event),
+                    ).await;
+
+                    if send_result.is_err() {
+                        warn!(
+                            "Failed to send exit event for service {} - channel timeout",
+                            service_name
+                        );
+                    }
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    warn!("Exit event channel closed for service {}", service_name);
+                }
+            }
         }
         // Wait for shutdown signal
         _ = shutdown_rx => {

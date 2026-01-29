@@ -166,6 +166,7 @@ async fn test_all_log_retention_events() {
             on_restart: Some(LogRetention::Retain),
             on_exit: Some(LogRetention::Retain),
         }),
+        rotation: None,
     };
 
     let config = TestConfigBuilder::new()

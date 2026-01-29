@@ -164,6 +164,7 @@ impl Client {
             service,
             follow,
             lines,
+            max_bytes: None, // Use default bounded reading
         })
         .await
     }

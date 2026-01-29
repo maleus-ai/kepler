@@ -104,11 +104,13 @@ async fn main() -> anyhow::Result<()> {
     // Create config registry
     let registry: SharedConfigRegistry = Arc::new(ConfigRegistry::new());
 
-    // Create channels for process exit events
-    let (exit_tx, mut exit_rx) = mpsc::channel::<ProcessExitEvent>(100);
+    // Create channels for process exit events with larger buffer for burst handling
+    // Using 1000 capacity to handle rapid process exits without blocking
+    let (exit_tx, mut exit_rx) = mpsc::channel::<ProcessExitEvent>(1000);
 
     // Create channels for file change events (restart triggers)
-    let (restart_tx, restart_rx) = mpsc::channel::<FileChangeEvent>(100);
+    // Using 500 capacity to handle rapid file changes
+    let (restart_tx, restart_rx) = mpsc::channel::<FileChangeEvent>(500);
 
     // Create ServiceOrchestrator
     let orchestrator = Arc::new(ServiceOrchestrator::new(
@@ -278,6 +280,7 @@ async fn handle_request(
             service,
             follow: _,
             lines,
+            max_bytes,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -286,7 +289,7 @@ async fn handle_request(
 
             match registry.get(&config_path) {
                 Some(handle) => {
-                    let entries = handle.get_logs(service, lines).await;
+                    let entries = handle.get_logs_bounded(service, lines, max_bytes).await;
                     Response::ok_with_data(ResponseData::Logs(entries))
                 }
                 None => Response::ok_with_data(ResponseData::Logs(Vec::new())),

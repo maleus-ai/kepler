@@ -13,7 +13,7 @@ use crate::config::{resolve_log_retention, KeplerConfig, LogRetention};
 use kepler_protocol::protocol::PrunedConfigInfo;
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
-use crate::deps::{get_service_with_deps, get_start_order, get_stop_order};
+use crate::deps::{get_service_with_deps, get_start_levels, get_start_order, get_stop_order};
 use crate::health::spawn_health_checker;
 use crate::hooks::{
     run_global_hook, run_service_hook, GlobalHookType, ServiceHookParams, ServiceHookType,
@@ -177,19 +177,68 @@ impl ServiceOrchestrator {
 
         let mut started = Vec::new();
 
-        // Start services in order
-        for service_name in &services_to_start {
-            // Check if already running
-            if handle.is_service_running(service_name).await {
-                debug!("Service {} is already running", service_name);
-                continue;
-            }
+        // Get services grouped by dependency level for parallel execution
+        // If starting a specific service, use sequential order (simpler)
+        if service_filter.is_some() {
+            // Sequential start for specific service + deps
+            for service_name in &services_to_start {
+                if handle.is_service_running(service_name).await {
+                    debug!("Service {} is already running", service_name);
+                    continue;
+                }
 
-            match self.start_single_service(&handle, service_name).await {
-                Ok(()) => started.push(service_name.clone()),
-                Err(e) => {
-                    error!("Failed to start service {}: {}", service_name, e);
-                    return Err(e);
+                match self.start_single_service(&handle, service_name).await {
+                    Ok(()) => started.push(service_name.clone()),
+                    Err(e) => {
+                        error!("Failed to start service {}: {}", service_name, e);
+                        return Err(e);
+                    }
+                }
+            }
+        } else {
+            // Parallel start: group services by dependency level
+            let levels = get_start_levels(&config.services)?;
+
+            for level in levels {
+                // Filter to only services that need to be started
+                let to_start: Vec<_> = level
+                    .into_iter()
+                    .filter(|name| services_to_start.contains(name))
+                    .collect();
+
+                if to_start.is_empty() {
+                    continue;
+                }
+
+                // Check which services are already running
+                let mut tasks = Vec::new();
+                for service_name in to_start {
+                    if handle.is_service_running(&service_name).await {
+                        debug!("Service {} is already running", service_name);
+                        continue;
+                    }
+
+                    // Start services at this level in parallel
+                    let handle_clone = handle.clone();
+                    let service_name_clone = service_name.clone();
+                    let self_ref = self;
+                    tasks.push(async move {
+                        (service_name_clone.clone(), self_ref.start_single_service(&handle_clone, &service_name_clone).await)
+                    });
+                }
+
+                // Wait for all services at this level to start
+                let results = futures::future::join_all(tasks).await;
+
+                // Check results and collect started services
+                for (service_name, result) in results {
+                    match result {
+                        Ok(()) => started.push(service_name),
+                        Err(e) => {
+                            error!("Failed to start service {}: {}", service_name, e);
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }
