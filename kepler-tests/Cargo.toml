@@ -22,3 +22,4 @@ parking_lot = "0.12"
 tokio = { version = "1.35", features = ["full", "test-util", "macros"] }
 libc = "0.2"
 nix = { version = "0.31.1", features = ["user"] }
+mlua = { version = "0.10", features = ["luau"] }

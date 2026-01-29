@@ -329,9 +329,7 @@ Services can run as specific user/group:
 
 ### Environment Isolation
 
-- `env_clear()` removes all inherited environment
-- Only explicitly specified variables passed to processes
-- Prevents accidental secret leakage from daemon environment
+Services receive a controlled environment built from: (1) system environment, (2) env_file variables, (3) service-defined environment - with later sources overriding earlier ones.
 
 ### Resource Limits
 

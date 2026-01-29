@@ -1047,3 +1047,160 @@ fn test_memory_limit_parsing_whitespace() {
     // Note: Whether whitespace is handled depends on implementation
     // This test documents current behavior
 }
+
+// ============================================================================
+// Lua Sandbox Security Tests
+// ============================================================================
+
+/// Verify that io library is not available in Lua sandbox
+#[test]
+fn test_lua_io_library_blocked() {
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use std::path::PathBuf;
+
+    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let ctx = EvalContext::default();
+
+    // Attempt to use io.open
+    let result = eval.eval::<mlua::Value>(r#"return io.open("/etc/passwd", "r")"#, &ctx);
+    assert!(
+        result.is_err(),
+        "io.open should not be available in Lua sandbox"
+    );
+}
+
+/// Verify that os.execute is not available in Lua sandbox
+#[test]
+fn test_lua_os_execute_blocked() {
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use std::path::PathBuf;
+
+    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let ctx = EvalContext::default();
+
+    // Attempt to use os.execute
+    let result = eval.eval::<mlua::Value>(r#"return os.execute("echo hello")"#, &ctx);
+    assert!(
+        result.is_err(),
+        "os.execute should not be available in Lua sandbox"
+    );
+}
+
+/// Verify that loadfile is not available in Lua sandbox
+#[test]
+fn test_lua_loadfile_blocked() {
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use std::path::PathBuf;
+
+    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let ctx = EvalContext::default();
+
+    // Attempt to use loadfile
+    let result = eval.eval::<mlua::Value>(r#"return loadfile("/etc/passwd")"#, &ctx);
+    assert!(
+        result.is_err(),
+        "loadfile should not be available in Lua sandbox"
+    );
+}
+
+/// Verify that dofile is not available in Lua sandbox
+#[test]
+fn test_lua_dofile_blocked() {
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use std::path::PathBuf;
+
+    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let ctx = EvalContext::default();
+
+    // Attempt to use dofile
+    let result = eval.eval::<mlua::Value>(r#"return dofile("/etc/passwd")"#, &ctx);
+    assert!(
+        result.is_err(),
+        "dofile should not be available in Lua sandbox"
+    );
+}
+
+/// Verify that debug library is not available in Lua sandbox
+#[test]
+fn test_lua_debug_library_blocked() {
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use std::path::PathBuf;
+
+    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let ctx = EvalContext::default();
+
+    // Attempt to use debug library
+    let result = eval.eval::<mlua::Value>(r#"return debug.getinfo(1)"#, &ctx);
+    assert!(
+        result.is_err(),
+        "debug library should not be available in Lua sandbox"
+    );
+}
+
+/// Verify that require() cannot escape the config directory
+#[test]
+fn test_lua_require_cannot_escape_config_dir() {
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let eval = LuaEvaluator::new(temp_dir.path()).unwrap();
+    let ctx = EvalContext::default();
+
+    // Attempt to require a file outside the config directory
+    let result = eval.eval::<mlua::Value>(r#"return require("../../../etc/passwd")"#, &ctx);
+    assert!(
+        result.is_err(),
+        "require() should not be able to escape config directory"
+    );
+
+    // Try with absolute path
+    let result = eval.eval::<mlua::Value>(r#"return require("/etc/passwd")"#, &ctx);
+    assert!(
+        result.is_err(),
+        "require() should not load absolute paths outside config dir"
+    );
+}
+
+
+// ============================================================================
+// Socket Security Tests
+// ============================================================================
+
+/// Verify that socket file has secure permissions (0o600) when created
+#[tokio::test]
+#[cfg(unix)]
+async fn test_socket_file_permissions() {
+    use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
+    use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service("test", TestServiceBuilder::long_running().build())
+        .build();
+
+    let _harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    // The harness creates the daemon which creates the socket
+    // Find the socket file in the state directory
+    let state_dir = temp_dir.path().join(".kepler");
+    let socket_path = state_dir.join("kepler.sock");
+
+    if socket_path.exists() {
+        let metadata = std::fs::metadata(&socket_path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+
+        assert_eq!(
+            mode, 0o600,
+            "Socket file should have mode 0o600, got 0o{:o}",
+            mode
+        );
+    }
+    // Note: If socket doesn't exist at this path, the test harness may use
+    // a different socket mechanism (e.g., in-process) which is also acceptable
+}

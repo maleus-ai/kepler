@@ -716,6 +716,7 @@ dependencies = [
  "kepler-daemon",
  "kepler-protocol",
  "libc",
+ "mlua",
  "nix",
  "parking_lot",
  "serde",

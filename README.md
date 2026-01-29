@@ -181,7 +181,7 @@ Commands that operate on services (require config):
 | `kepler stop [service]` | Stop all or specific service |
 | `kepler restart [service]` | Restart all or specific service |
 | `kepler status` | Show status of all loaded configs |
-| `kepler logs [-f] [service]` | View logs (`-f` to follow) |
+| `kepler logs [--follow] [service]` | View logs (`--follow` to follow) |
 
 ### Options
 
@@ -330,7 +330,6 @@ restart:
 | `retention.on_stop` | `clear\|retain` | `clear` | On service stop |
 | `retention.on_restart` | `clear\|retain` | `retain` | On restart |
 | `retention.on_exit` | `clear\|retain` | `retain` | On process exit |
-| `retention.on_cleanup` | `clear\|retain` | `clear` | On cleanup |
 
 **Example:**
 ```yaml
