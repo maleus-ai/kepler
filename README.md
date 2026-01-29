@@ -414,6 +414,8 @@ services:
 
 Kepler supports Lua scripting (using sandboxed Luau) for dynamic config generation via `!lua` and `!lua_file` YAML tags.
 
+**Single evaluation:** Lua scripts are evaluated **once** when the config is first loaded. The returned values are then "baked" into the configuration and persisted. Scripts do not re-run on service restart or daemon restart. To re-evaluate, reload the config via CLI. See [ARCHITECTURE.md](ARCHITECTURE.md#lua-scripting-security) for details on the sandbox and security model.
+
 ```yaml
 lua: |
   function get_port()

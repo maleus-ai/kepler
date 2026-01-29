@@ -89,44 +89,55 @@ The daemon uses Unix peer credentials to enforce same-user access:
 
 ## Configuration Lifecycle
 
-### Config Loading Flow
+### Daemon Startup
+
+When the daemon starts or restarts, it discovers and loads all previously known configs from their snapshots:
 
 ```mermaid
 flowchart TD
-    A[CLI Request] --> B{Snapshot exists?}
-    B -->|Yes| C[Load from snapshot]
-    B -->|No| D[Copy config to state dir]
-    D --> E[Copy env_files]
-    E --> F[Parse Lua tags]
-    F --> G[Expand env vars]
-    G --> H[Validate config]
-    H --> I[Build service environments]
-    C --> I
-    I --> J[Ready for service start]
+    A[Daemon Start/Restart] --> B[Scan state directories]
+    B --> C[For each config hash]
+    C --> D{Snapshot exists?}
+    D -->|Yes| E[Load baked snapshot]
+    D -->|No| F[Skip - wait for CLI request]
+    E --> G[Restore service states]
+    G --> H[Config ready]
 ```
 
-### Config Initialization
+### CLI Config Request
 
-When a config is loaded:
+When the CLI requests to start/restart a config:
 
-1. **CLI requests config** from daemon
-2. **Daemon checks** for existing snapshot in state directory
-3. **If no snapshot exists**:
-   - Copy config file to state directory
-   - Copy env_files to state directory
-   - Parse and expand Lua tags
-   - Expand environment variables
-   - Validate configuration
-4. **If snapshot exists**:
-   - Load from snapshot (skip re-expansion)
-   - Restore service environments from snapshot
+```mermaid
+flowchart TD
+    A[CLI: start/restart config] --> B{Snapshot exists?}
+    B -->|Yes| C[Use existing snapshot]
+    B -->|No| D[Copy config to state dir]
+    D --> E[Copy env_files to state dir]
+    E --> F[Apply shell expansion]
+    F --> G[Evaluate Lua scripts]
+    G --> H[Bake into snapshot]
+    H --> C
+    C --> I[Run services with baked config]
+```
 
-### Config Immutability ("Baking")
+### Config Baking Process
 
-- Config copied to state directory on first load
-- Original config can be modified, but daemon uses the copy
-- **Snapshot taken on first service start** - this "bakes" the config
-- To update: reload via CLI (re-copies and re-expands)
+When no snapshot exists, the config goes through a baking process:
+
+1. **Copy files**: Config and env_files copied to state directory
+2. **Shell expansion**: Environment variables expanded (see [Environment Variable Handling](#environment-variable-handling))
+3. **Lua evaluation**: `!lua` and `!lua_file` tags executed, return values substituted
+4. **Snapshot creation**: Final expanded config saved as `expanded_config.yaml`
+
+Once baked, the snapshot is immutable. Services always run using the baked snapshot, never the original config file.
+
+### Updating a Config
+
+To apply changes from the original config file:
+1. Use CLI reload command to re-copy and re-bake
+2. This creates a new snapshot, replacing the old one
+3. Running services continue with the old config until restarted
 
 ### Relevant Files
 
@@ -150,54 +161,51 @@ Kepler supports shell-style variable expansion:
 | `${VAR:+value}` | Conditional value (use if VAR is set) |
 | `~` | Home directory expansion |
 
-### Two-Stage Expansion
+### Three-Stage Expansion
+
+Shell expansion happens in three stages, each building on the previous context:
 
 ```mermaid
 flowchart TD
-    subgraph Stage1[Stage 1: env_file path]
-        A[env_file path] --> B[Expand with system env only]
-    end
-    subgraph Stage2[Stage 2: All other fields]
+    subgraph Stage1[Stage 1]
+        A[env_file path] --> B[Expand with system env]
         B --> C[Load env_file content]
-        C --> D[Expand all fields]
-        D --> E[Context: system env + env_file vars]
+    end
+    subgraph Stage2[Stage 2]
+        C --> D[environment array]
+        D --> E[Expand with system env + env_file]
+    end
+    subgraph Stage3[Stage 3]
+        E --> F[All other fields]
+        F --> G[Expand with system env + env_file + environment]
     end
 ```
 
-1. **`env_file` path expanded first** (using system env only)
-2. **All other fields expanded** (using system env + env_file vars)
+| Stage | What is expanded | Expansion context |
+|-------|------------------|-------------------|
+| 1 | `env_file` path | System environment only |
+| 2 | `environment` array entries | System env + env_file variables |
+| 3 | `working_dir`, `user`, `group`, `limits.memory`, `restart.watch` | System env + env_file + environment array |
 
-### What IS Expanded at Config Time
+### What is NOT Expanded
 
-- `working_dir`, `env_file`, `user`, `group`
-- `environment` array entries
-- `limits.memory`, `restart.watch` patterns
+These fields are intentionally **not** expanded at config time. The shell expands them at runtime using the process environment:
 
-### What is NOT Expanded (Shell Expands at Runtime)
-
-- `command` and `hooks.run/command`
+- `command`
+- `hooks.run` / `hooks.command`
 - `healthcheck.test`
 
-### Environment Priority
+This ensures commands work as users expect (shell expansion at runtime) and values are passed consistently through environment variables.
 
-When building service environment (highest to lowest priority):
+### Environment Priority (Runtime)
 
-```mermaid
-flowchart TD
-    A[System environment] --> D[Service env build]
-    B[env_file variables] --> D
-    C[environment array] --> D
-    D --> E{Priority merge}
-    E --> F[Final process environment]
-
-    style C fill:#90EE90
-    style B fill:#FFD700
-    style A fill:#87CEEB
-```
+When building the final process environment for a service (highest to lowest priority):
 
 1. **Service `environment` array** (highest priority)
 2. **Service `env_file` variables**
 3. **System environment variables** (lowest priority)
+
+Higher priority values override lower priority ones when keys conflict.
 
 ### Relevant Files
 
@@ -259,6 +267,29 @@ The Lua environment provides a **restricted subset** of the standard library:
 - No runtime re-evaluation
 - Global state persists across all evaluations in a single config load
 
+### Execution Order
+
+Lua scripts run in a specific order that mirrors shell expansion, with `ctx.env` progressively building up:
+
+| Order | Block | `ctx.env` contains |
+|-------|-------|-------------------|
+| 1 | `lua:` directive | System env only |
+| 2 | `env_file: !lua` | System env only |
+| 3 | `environment: !lua` | System env + env_file |
+| 4 | All other `!lua` blocks | System env + env_file + environment array |
+
+**Details:**
+
+1. **`lua:` directive** runs first in global scope, defining functions available to all subsequent blocks. `ctx.env` contains only system environment variables.
+
+2. **`env_file: !lua`** blocks run next (if any). `ctx.env` still contains only system environment, since env_file hasn't been loaded yet.
+
+3. **`environment: !lua`** array blocks run after env_file is loaded. `ctx.env` now contains system env merged with env_file variables.
+
+4. **All other `!lua` blocks** run in declaration order. `ctx.env` contains the full merged environment (system + env_file + environment array).
+
+This ordering ensures that each stage has access to the variables it needs while maintaining deterministic evaluation.
+
 ### Relevant Files
 
 | File | Description |
@@ -268,28 +299,6 @@ The Lua environment provides a **restricted subset** of the standard library:
 ---
 
 ## Process Security
-
-### Security Layers Overview
-
-```mermaid
-flowchart LR
-    subgraph Socket
-        A[Client UID check]
-    end
-    subgraph FileSystem
-        B[0o700 directories]
-        C[0o600 files]
-    end
-    subgraph Process
-        D[env_clear]
-        E[Privilege drop]
-        F[Resource limits]
-    end
-    subgraph Lua
-        G[Frozen tables]
-        H[Scoped require]
-    end
-```
 
 ### Root Execution Prevention
 
