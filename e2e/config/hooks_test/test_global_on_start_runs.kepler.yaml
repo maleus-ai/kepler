@@ -1,7 +1,8 @@
-hooks:
-  on_start:
-    run: |
-      echo "ON_START_RAN" >> MARKER_FILE
+kepler:
+  hooks:
+    on_start:
+      run: |
+        echo "ON_START_RAN" >> __MARKER_FILE__
 
 services:
   start-hook-service:

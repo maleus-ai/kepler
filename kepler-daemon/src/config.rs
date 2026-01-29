@@ -33,6 +33,23 @@ fn expand_with_context(s: &str, context: &HashMap<String, String>) -> String {
     .unwrap_or_else(|_| s.to_string())
 }
 
+/// Global Kepler configuration (under the `kepler` namespace)
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+pub struct KeplerGlobalConfig {
+    /// Global system environment inheritance policy
+    /// Applied to all services unless overridden at the service level
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sys_env: Option<SysEnvPolicy>,
+
+    /// Global log configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<LogConfig>,
+
+    /// Global hooks that run at daemon lifecycle events
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<GlobalHooks>,
+}
+
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct KeplerConfig {
@@ -40,10 +57,10 @@ pub struct KeplerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lua: Option<String>,
 
+    /// Global Kepler configuration (sys_env, logs, hooks)
     #[serde(default)]
-    pub hooks: Option<GlobalHooks>,
-    #[serde(default)]
-    pub logs: Option<LogConfig>,
+    pub kepler: Option<KeplerGlobalConfig>,
+
     #[serde(default)]
     pub services: HashMap<String, ServiceConfig>,
 }
@@ -478,6 +495,26 @@ impl LogConfig {
     }
 }
 
+/// Resolve sys_env policy for a service.
+/// Priority: service explicit setting > global setting > default (Clear)
+///
+/// A service's sys_env is considered "explicit" if it's not the default value.
+/// This allows services to explicitly set `sys_env: clear` to override a global
+/// `inherit` setting.
+pub fn resolve_sys_env(
+    service_sys_env: &SysEnvPolicy,
+    global_sys_env: Option<&SysEnvPolicy>,
+) -> SysEnvPolicy {
+    // Service explicit setting > Global > Default(Clear)
+    // Note: We can't distinguish between "not specified" and "specified as default"
+    // in the current config model, so we check if service_sys_env != default
+    if *service_sys_env != SysEnvPolicy::default() {
+        service_sys_env.clone()
+    } else {
+        global_sys_env.cloned().unwrap_or_default()
+    }
+}
+
 /// Resolve log retention for a specific event.
 /// Priority: service setting > global setting > default
 pub fn resolve_log_retention(
@@ -713,16 +750,21 @@ impl KeplerConfig {
                 }
             }
 
-            // Process global hooks
-            if let Some(hooks_value) = map.get_mut(&Value::String("hooks".to_string())) {
-                let sys_env = Self::get_system_env();
-                Self::process_global_hooks_lua(
-                    hooks_value,
-                    &evaluator,
-                    &sys_env,
-                    config_dir,
-                    config_path,
-                )?;
+            // Process kepler namespace (global hooks are inside kepler.hooks)
+            if let Some(kepler_value) = map.get_mut(&Value::String("kepler".to_string())) {
+                if let Value::Mapping(kepler_map) = kepler_value {
+                    // Process kepler.hooks
+                    if let Some(hooks_value) = kepler_map.get_mut(&Value::String("hooks".to_string())) {
+                        let sys_env = Self::get_system_env();
+                        Self::process_global_hooks_lua(
+                            hooks_value,
+                            &evaluator,
+                            &sys_env,
+                            config_dir,
+                            config_path,
+                        )?;
+                    }
+                }
             }
         }
 
@@ -1192,9 +1234,11 @@ impl KeplerConfig {
             Self::expand_service_config(service, &env_file_vars);
         }
 
-        // Process global hooks (no env_file, just system env)
-        if let Some(ref mut hooks) = self.hooks {
-            Self::expand_global_hooks(hooks, &HashMap::new());
+        // Process global hooks in kepler namespace (no env_file, just system env)
+        if let Some(ref mut kepler) = self.kepler {
+            if let Some(ref mut hooks) = kepler.hooks {
+                Self::expand_global_hooks(hooks, &HashMap::new());
+            }
         }
     }
 
@@ -1434,6 +1478,22 @@ impl KeplerConfig {
         Ok(())
     }
 
+    // === Accessor methods for kepler namespace ===
+
+    /// Get global hooks configuration
+    pub fn global_hooks(&self) -> Option<&GlobalHooks> {
+        self.kepler.as_ref().and_then(|k| k.hooks.as_ref())
+    }
+
+    /// Get global log configuration
+    pub fn global_logs(&self) -> Option<&LogConfig> {
+        self.kepler.as_ref().and_then(|k| k.logs.as_ref())
+    }
+
+    /// Get global sys_env policy
+    pub fn global_sys_env(&self) -> Option<&SysEnvPolicy> {
+        self.kepler.as_ref().and_then(|k| k.sys_env.as_ref())
+    }
 }
 
 #[cfg(test)]
@@ -1447,5 +1507,85 @@ mod tests {
         assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
         assert_eq!(parse_duration("100ms").unwrap(), Duration::from_millis(100));
         assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86400));
+    }
+
+    #[test]
+    fn test_resolve_sys_env_service_overrides_global() {
+        // Service explicit setting (inherit) should override global (clear)
+        let service_sys_env = SysEnvPolicy::Inherit;
+        let global_sys_env = Some(SysEnvPolicy::Clear);
+        let result = resolve_sys_env(&service_sys_env, global_sys_env.as_ref());
+        assert_eq!(result, SysEnvPolicy::Inherit);
+    }
+
+    #[test]
+    fn test_resolve_sys_env_uses_global_when_service_default() {
+        // When service uses default (Clear), global (Inherit) should apply
+        let service_sys_env = SysEnvPolicy::Clear; // default
+        let global_sys_env = Some(SysEnvPolicy::Inherit);
+        let result = resolve_sys_env(&service_sys_env, global_sys_env.as_ref());
+        assert_eq!(result, SysEnvPolicy::Inherit);
+    }
+
+    #[test]
+    fn test_resolve_sys_env_falls_back_to_default() {
+        // When both service and global are unset, should use default (Clear)
+        let service_sys_env = SysEnvPolicy::Clear;
+        let result = resolve_sys_env(&service_sys_env, None);
+        assert_eq!(result, SysEnvPolicy::Clear);
+    }
+
+    #[test]
+    fn test_kepler_namespace_parsing() {
+        let yaml = r#"
+kepler:
+  sys_env: inherit
+  logs:
+    timestamp: true
+  hooks:
+    on_init:
+      run: echo "init"
+
+services:
+  app:
+    command: ["./app"]
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        // Check kepler namespace
+        assert!(config.kepler.is_some());
+        let kepler = config.kepler.as_ref().unwrap();
+
+        // Check sys_env
+        assert_eq!(kepler.sys_env, Some(SysEnvPolicy::Inherit));
+
+        // Check logs
+        assert!(kepler.logs.is_some());
+        assert_eq!(kepler.logs.as_ref().unwrap().timestamp, Some(true));
+
+        // Check hooks
+        assert!(kepler.hooks.is_some());
+        assert!(kepler.hooks.as_ref().unwrap().on_init.is_some());
+
+        // Check accessor methods
+        assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));
+        assert!(config.global_logs().is_some());
+        assert!(config.global_hooks().is_some());
+    }
+
+    #[test]
+    fn test_kepler_namespace_empty() {
+        let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        // No kepler namespace
+        assert!(config.kepler.is_none());
+        assert!(config.global_sys_env().is_none());
+        assert!(config.global_logs().is_none());
+        assert!(config.global_hooks().is_none());
     }
 }

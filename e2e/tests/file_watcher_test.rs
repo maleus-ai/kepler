@@ -20,7 +20,7 @@ async fn test_file_watch_triggers_restart() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_file_watch_triggers_restart",
-        &[("WATCH_DIR", watch_dir.to_str().unwrap())],
+        &[("__WATCH_DIR__", watch_dir.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;
@@ -82,7 +82,7 @@ async fn test_file_watch_glob_pattern() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_file_watch_glob_pattern",
-        &[("WATCH_DIR", watch_dir.to_str().unwrap())],
+        &[("__WATCH_DIR__", watch_dir.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;
@@ -135,7 +135,7 @@ async fn test_file_watch_no_restart_unmatched() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_file_watch_no_restart_unmatched",
-        &[("WATCH_DIR", watch_dir.to_str().unwrap())],
+        &[("__WATCH_DIR__", watch_dir.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;
@@ -190,7 +190,7 @@ async fn test_file_watch_debounce() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_file_watch_debounce",
-        &[("WATCH_DIR", watch_dir.to_str().unwrap())],
+        &[("__WATCH_DIR__", watch_dir.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;

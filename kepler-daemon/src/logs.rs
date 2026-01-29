@@ -562,6 +562,101 @@ impl LogBuffer {
         entries
     }
 
+    /// Get logs with true pagination (reads from disk with offset/limit).
+    ///
+    /// This method efficiently reads only the needed portion of log files,
+    /// avoiding loading all logs into memory.
+    ///
+    /// Returns (entries, total_count) where total_count is the total number
+    /// of entries across all relevant log files.
+    pub fn get_paginated(
+        &self,
+        service: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<LogLine>, usize) {
+        // Get list of log files to read (including rotated files)
+        let files = match service {
+            Some(svc) => self.list_service_log_files(svc),
+            None => {
+                // For all services, collect all files including rotated
+                let mut all_files = Vec::new();
+                for main_file in self.list_log_files() {
+                    // Extract service name from file path
+                    if let Some(stem) = main_file.file_stem().and_then(|s| s.to_str()) {
+                        all_files.extend(self.list_service_log_files(stem));
+                    }
+                }
+                all_files
+            }
+        };
+
+        if files.is_empty() {
+            return (Vec::new(), 0);
+        }
+
+        // Count lines in each file for accurate offset calculation
+        let file_counts: Vec<(PathBuf, usize)> = files
+            .iter()
+            .map(|f| (f.clone(), self.count_lines_in_file(f)))
+            .collect();
+
+        let total: usize = file_counts.iter().map(|(_, c)| *c).sum();
+
+        if offset >= total {
+            return (Vec::new(), total);
+        }
+
+        // Read only needed files/ranges
+        let entries = self.read_range_across_files(&file_counts, service, offset, limit);
+
+        (entries, total)
+    }
+
+    /// Fast line counting for a file
+    fn count_lines_in_file(&self, path: &PathBuf) -> usize {
+        match File::open(path) {
+            Ok(file) => BufReader::new(file).lines().count(),
+            Err(_) => 0,
+        }
+    }
+
+    /// Read a range of log entries across multiple files.
+    ///
+    /// This method skips files until reaching the offset, then reads
+    /// only the needed portion of each file.
+    fn read_range_across_files(
+        &self,
+        files: &[(PathBuf, usize)],
+        service_filter: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<LogLine> {
+        // First, read all entries and sort them by timestamp
+        // This is necessary because log files may have interleaved timestamps
+        // especially when reading from multiple services
+        let mut all_entries: Vec<LogLine> = Vec::new();
+
+        for (file, _) in files {
+            let entries = self.read_log_file(file);
+            if let Some(svc) = service_filter {
+                all_entries.extend(entries.into_iter().filter(|e| e.service == svc));
+            } else {
+                all_entries.extend(entries);
+            }
+        }
+
+        // Sort by timestamp to ensure correct ordering
+        all_entries.sort_by_key(|e| e.timestamp);
+
+        // Apply offset and limit
+        all_entries
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect()
+    }
+
     /// Clear all entries (delete all log files)
     pub fn clear(&mut self) {
         for file in self.list_log_files() {
@@ -577,9 +672,25 @@ impl LogBuffer {
         self.save_sequence();
     }
 
-    /// Clear entries for a specific service (delete the log file)
+    /// Clear entries for a specific service (delete the log file and all rotated files)
     pub fn clear_service(&mut self, service: &str) {
         let log_file = self.log_file_path(service);
+
+        // Remove rotated files first (.log.1, .log.2, etc.)
+        for i in 1..=self.max_rotated_files {
+            let rotated = format!("{}.{}", log_file.display(), i);
+            let rotated_path = PathBuf::from(&rotated);
+            if rotated_path.exists() {
+                // Count entries being removed to update sequence
+                if let Ok(file) = File::open(&rotated_path) {
+                    let count = BufReader::new(file).lines().count() as u64;
+                    self.sequence = self.sequence.saturating_sub(count);
+                }
+                let _ = fs::remove_file(&rotated_path);
+            }
+        }
+
+        // Then remove the main log file
         if log_file.exists() {
             // Count entries being removed to update sequence
             if let Ok(file) = File::open(&log_file) {
@@ -591,6 +702,7 @@ impl LogBuffer {
     }
 
     /// Clear entries for services matching a prefix (e.g., "[global" clears all global hooks)
+    /// Also removes rotated log files for matching services
     pub fn clear_service_prefix(&mut self, prefix: &str) {
         // Sanitize prefix for matching filenames
         let safe_prefix = prefix.replace(['/', '\\', ':', '[', ']'], "_");
@@ -598,15 +710,32 @@ impl LogBuffer {
         if let Ok(entries) = fs::read_dir(&self.logs_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if let Some(name) = path.file_stem() {
-                    let name_str = name.to_string_lossy();
-                    if name_str.starts_with(&safe_prefix) {
-                        // Count entries being removed
-                        if let Ok(file) = File::open(&path) {
-                            let count = BufReader::new(file).lines().count() as u64;
-                            self.sequence = self.sequence.saturating_sub(count);
+                let file_name = path.file_name().map(|n| n.to_string_lossy().to_string());
+
+                if let Some(name) = file_name {
+                    // Check if this is a log file (main or rotated) for a matching service
+                    // Main files: "service.log"
+                    // Rotated files: "service.log.1", "service.log.2", etc.
+                    let is_rotated = name.contains(".log.");
+                    let base_name = if is_rotated {
+                        // Extract base name from "service.log.N"
+                        name.split(".log.").next().map(String::from)
+                    } else if name.ends_with(".log") {
+                        // Extract base name from "service.log"
+                        name.strip_suffix(".log").map(String::from)
+                    } else {
+                        None
+                    };
+
+                    if let Some(base) = base_name {
+                        if base.starts_with(&safe_prefix) {
+                            // Count entries being removed
+                            if let Ok(file) = File::open(&path) {
+                                let count = BufReader::new(file).lines().count() as u64;
+                                self.sequence = self.sequence.saturating_sub(count);
+                            }
+                            let _ = fs::remove_file(&path);
                         }
-                        let _ = fs::remove_file(path);
                     }
                 }
             }
@@ -678,6 +807,16 @@ impl SharedLogBuffer {
 
     pub fn clear_service_prefix(&self, prefix: &str) {
         self.inner.write().clear_service_prefix(prefix);
+    }
+
+    /// Get logs with true pagination
+    pub fn get_paginated(
+        &self,
+        service: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<LogLine>, usize) {
+        self.inner.read().get_paginated(service, offset, limit)
     }
 }
 

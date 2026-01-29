@@ -5,4 +5,4 @@ services:
     hooks:
       on_exit:
         run: |
-          echo "SERVICE_ON_EXIT_RAN" >> MARKER_FILE
+          echo "SERVICE_ON_EXIT_RAN" >> __MARKER_FILE__

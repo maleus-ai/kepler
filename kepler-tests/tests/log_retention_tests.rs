@@ -137,7 +137,7 @@ async fn test_service_log_config_overrides_global() {
 
     // Check global config
     assert_eq!(
-        config.logs.as_ref().unwrap().get_on_stop(),
+        config.global_logs().unwrap().get_on_stop(),
         Some(LogRetention::Clear)
     );
 
@@ -454,7 +454,7 @@ async fn test_clear_all_logs() {
     harness.stop_all().await.unwrap();
 }
 
-/// Log retention config from YAML parses correctly
+/// Log retention config from YAML parses correctly (under kepler namespace)
 #[test]
 fn test_log_retention_yaml_parsing() {
     use kepler_daemon::config::KeplerConfig;
@@ -463,13 +463,14 @@ fn test_log_retention_yaml_parsing() {
     let config_path = temp_dir.path().join("kepler.yaml");
 
     let yaml = r#"
-logs:
-  timestamp: true
-  retention:
-    on_stop: retain
-    on_start: clear
-    on_restart: retain
-    on_exit: retain
+kepler:
+  logs:
+    timestamp: true
+    retention:
+      on_stop: retain
+      on_start: clear
+      on_restart: retain
+      on_exit: retain
 
 services:
   test:
@@ -484,7 +485,7 @@ services:
     let config = KeplerConfig::load(&config_path).unwrap();
 
     // Check global config
-    let global_logs = config.logs.as_ref().unwrap();
+    let global_logs = config.global_logs().unwrap();
     assert_eq!(global_logs.timestamp, Some(true));
     assert_eq!(global_logs.get_on_stop(), Some(LogRetention::Retain));
     assert_eq!(global_logs.get_on_start(), Some(LogRetention::Clear));

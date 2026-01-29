@@ -7,7 +7,7 @@ use kepler_daemon::process::{validate_running_process, ProcessExitEvent};
 use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_daemon::Daemon;
-use kepler_protocol::protocol::{LogEntry, Request, Response, ResponseData};
+use kepler_protocol::protocol::{Request, Response, ResponseData};
 use kepler_protocol::server::Server;
 use std::collections::HashMap;
 use std::fs;
@@ -330,13 +330,11 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
 
-            let all_entries = match registry.get(&config_path) {
-                Some(handle) => handle.get_logs(service, usize::MAX).await,
-                None => Vec::new(),
+            // Use true pagination - reads efficiently from disk with offset/limit
+            let (entries, total) = match registry.get(&config_path) {
+                Some(handle) => handle.get_logs_paginated(service, offset, limit).await,
+                None => (Vec::new(), 0),
             };
-
-            let total = all_entries.len();
-            let entries: Vec<LogEntry> = all_entries.into_iter().skip(offset).take(limit).collect();
 
             let has_more = offset + entries.len() < total;
             let next_offset = offset + entries.len();

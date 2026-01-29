@@ -1,15 +1,16 @@
-hooks:
-  on_init:
-    run: |
-      echo "First run of kepler.yaml"
-  on_start:
-    run: |
-      echo "Kepler started"
-  on_stop:
-    run: |
-      echo "Kepler stopped"
-  on_cleanup:
-    command: ["echo", "Cleanup of resources"]
+kepler:
+  hooks:
+    on_init:
+      run: |
+        echo "First run of kepler.yaml"
+    on_start:
+      run: |
+        echo "Kepler started"
+    on_stop:
+      run: |
+        echo "Kepler stopped"
+    on_cleanup:
+      command: ["echo", "Cleanup of resources"]
 
 services:
   backend:

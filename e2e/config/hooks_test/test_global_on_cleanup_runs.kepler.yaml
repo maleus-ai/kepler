@@ -1,7 +1,8 @@
-hooks:
-  on_cleanup:
-    run: |
-      echo "ON_CLEANUP_RAN" >> MARKER_FILE
+kepler:
+  hooks:
+    on_cleanup:
+      run: |
+        echo "ON_CLEANUP_RAN" >> __MARKER_FILE__
 
 services:
   cleanup-hook-service:

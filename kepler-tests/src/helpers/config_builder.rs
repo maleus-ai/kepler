@@ -1,8 +1,8 @@
 //! Programmatic config creation with builder pattern
 
 use kepler_daemon::config::{
-    GlobalHooks, HealthCheck, HookCommand, KeplerConfig, LogConfig, ResourceLimits, RestartConfig,
-    RestartPolicy, ServiceConfig, ServiceHooks,
+    GlobalHooks, HealthCheck, HookCommand, KeplerConfig, KeplerGlobalConfig, LogConfig,
+    ResourceLimits, RestartConfig, RestartPolicy, ServiceConfig, ServiceHooks, SysEnvPolicy,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,6 +13,7 @@ pub struct TestConfigBuilder {
     lua: Option<String>,
     hooks: Option<GlobalHooks>,
     logs: Option<LogConfig>,
+    sys_env: Option<SysEnvPolicy>,
     services: HashMap<String, ServiceConfig>,
 }
 
@@ -22,6 +23,7 @@ impl TestConfigBuilder {
             lua: None,
             hooks: None,
             logs: None,
+            sys_env: None,
             services: HashMap::new(),
         }
     }
@@ -41,26 +43,43 @@ impl TestConfigBuilder {
         self
     }
 
+    pub fn with_global_sys_env(mut self, sys_env: SysEnvPolicy) -> Self {
+        self.sys_env = Some(sys_env);
+        self
+    }
+
     pub fn add_service(mut self, name: &str, service: ServiceConfig) -> Self {
         self.services.insert(name.to_string(), service);
         self
     }
 
+    /// Build the KeplerGlobalConfig from the builder fields
+    fn build_kepler_global(&self) -> Option<KeplerGlobalConfig> {
+        if self.hooks.is_none() && self.logs.is_none() && self.sys_env.is_none() {
+            return None;
+        }
+        Some(KeplerGlobalConfig {
+            sys_env: self.sys_env.clone(),
+            logs: self.logs.clone(),
+            hooks: self.hooks.clone(),
+        })
+    }
+
     pub fn build(self) -> KeplerConfig {
+        let kepler = self.build_kepler_global();
         KeplerConfig {
             lua: self.lua,
-            hooks: self.hooks,
-            logs: self.logs,
+            kepler,
             services: self.services,
         }
     }
 
     /// Write the config to a YAML file and return the path
     pub fn write_to_file(&self, dir: &std::path::Path) -> std::io::Result<PathBuf> {
+        let kepler = self.build_kepler_global();
         let config = KeplerConfig {
             lua: self.lua.clone(),
-            hooks: self.hooks.clone(),
-            logs: self.logs.clone(),
+            kepler,
             services: self.services.clone(),
         };
 

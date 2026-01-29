@@ -18,7 +18,7 @@ async fn test_global_on_init_runs_once() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_global_on_init_runs_once",
-        &[("MARKER_FILE", marker_file.to_str().unwrap())],
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;
@@ -80,7 +80,7 @@ async fn test_global_on_start_runs() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_global_on_start_runs",
-        &[("MARKER_FILE", marker_file.to_str().unwrap())],
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;
@@ -116,7 +116,7 @@ async fn test_global_on_stop_runs() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_global_on_stop_runs",
-        &[("MARKER_FILE", marker_file.to_str().unwrap())],
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;
@@ -154,7 +154,7 @@ async fn test_global_on_cleanup_runs() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_global_on_cleanup_runs",
-        &[("MARKER_FILE", marker_file.to_str().unwrap())],
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;
@@ -192,7 +192,7 @@ async fn test_service_on_start_runs() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_service_on_start_runs",
-        &[("MARKER_FILE", marker_file.to_str().unwrap())],
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;
@@ -244,7 +244,7 @@ async fn test_service_on_stop_runs() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_service_on_stop_runs",
-        &[("MARKER_FILE", marker_file.to_str().unwrap())],
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;
@@ -282,7 +282,7 @@ async fn test_service_on_exit_runs() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_service_on_exit_runs",
-        &[("MARKER_FILE", marker_file.to_str().unwrap())],
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;

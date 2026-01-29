@@ -1,7 +1,8 @@
-hooks:
-  on_stop:
-    run: |
-      echo "ON_STOP_RAN" >> MARKER_FILE
+kepler:
+  hooks:
+    on_stop:
+      run: |
+        echo "ON_STOP_RAN" >> __MARKER_FILE__
 
 services:
   stop-hook-service:

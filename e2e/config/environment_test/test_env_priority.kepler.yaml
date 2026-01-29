@@ -1,6 +1,6 @@
 services:
   env-priority-service:
     command: ["sh", "-c", "echo PRIORITY_VAR=$PRIORITY_VAR; sleep 300"]
-    env_file: ENV_FILE_PATH
+    env_file: __ENV_FILE_PATH__
     environment:
       - PRIORITY_VAR=from_inline

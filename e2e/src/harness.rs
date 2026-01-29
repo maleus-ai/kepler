@@ -579,6 +579,34 @@ impl E2eHarness {
         )))
     }
 
+    /// Wait for a file to contain specific text (useful for hook marker files)
+    pub async fn wait_for_file_content(
+        &self,
+        file_path: &Path,
+        expected_content: &str,
+        timeout_duration: Duration,
+    ) -> E2eResult<String> {
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < timeout_duration {
+            if let Ok(content) = std::fs::read_to_string(file_path) {
+                if content.contains(expected_content) {
+                    return Ok(content);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Return the current content (if any) in the error for debugging
+        let current_content = std::fs::read_to_string(file_path).unwrap_or_default();
+        Err(E2eError::Timeout(format!(
+            "file '{}' to contain '{}'. Current content: {}",
+            file_path.display(),
+            expected_content,
+            current_content
+        )))
+    }
+
     /// Create a test config file in a temp directory and return its path
     pub fn create_test_config(&self, content: &str) -> E2eResult<PathBuf> {
         let config_dir = self.temp_dir.path().join("test_configs");

@@ -1,13 +1,13 @@
 services:
   full-lifecycle-service:
     command: ["sh", "-c", "echo FULL_LIFECYCLE_START; sleep 300"]
-    working_dir: WATCH_DIR
+    working_dir: __WATCH_DIR__
     restart:
       policy: always
       watch:
         - "**/*"
     healthcheck:
-      test: ["CMD-SHELL", "exit 0"]
+      test: ["sh", "-c", "exit 0"]
       interval: 2s
       timeout: 5s
       retries: 2
@@ -15,10 +15,10 @@ services:
     hooks:
       on_start:
         run: |
-          echo "ON_START_HOOK" >> MARKER_FILE
+          echo "ON_START_HOOK" >> __MARKER_FILE__
       on_stop:
         run: |
-          echo "ON_STOP_HOOK" >> MARKER_FILE
+          echo "ON_STOP_HOOK" >> __MARKER_FILE__
       on_healthcheck_success:
         run: |
-          echo "HEALTHCHECK_SUCCESS" >> MARKER_FILE
+          echo "HEALTHCHECK_SUCCESS" >> __MARKER_FILE__

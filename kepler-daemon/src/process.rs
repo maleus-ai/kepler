@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 
 use crate::config::{
-    parse_memory_limit, resolve_log_store, LogConfig, ResourceLimits, ServiceConfig,
+    parse_memory_limit, resolve_log_store, resolve_sys_env, LogConfig, ResourceLimits, ServiceConfig, SysEnvPolicy,
 };
 use crate::config_actor::{ConfigActorHandle, TaskHandleType};
 use crate::errors::{DaemonError, Result};
@@ -599,9 +599,10 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         &service_config.command[1..]
     );
 
-    // Build CommandSpec with resource limits and environment policy
-    use crate::config::SysEnvPolicy;
-    let clear_env = service_config.sys_env == SysEnvPolicy::Clear;
+    // Resolve sys_env policy: service setting > global setting > default (Clear)
+    let global_sys_env = handle.get_global_sys_env().await;
+    let resolved_sys_env = resolve_sys_env(&service_config.sys_env, global_sys_env.as_ref());
+    let clear_env = resolved_sys_env == SysEnvPolicy::Clear;
 
     let spec = CommandSpec::with_all_options(
         service_config.command.clone(),

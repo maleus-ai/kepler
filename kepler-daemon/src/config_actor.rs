@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::info;
 
-use crate::config::{KeplerConfig, LogConfig, ServiceConfig};
+use crate::config::{KeplerConfig, LogConfig, ServiceConfig, SysEnvPolicy};
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
 use crate::logs::SharedLogBuffer;
@@ -72,6 +72,12 @@ pub enum ConfigCommand {
         max_bytes: Option<usize>,
         reply: oneshot::Sender<Vec<LogEntry>>,
     },
+    GetLogsPaginated {
+        service: Option<String>,
+        offset: usize,
+        limit: usize,
+        reply: oneshot::Sender<(Vec<LogEntry>, usize)>,
+    },
     GetServiceConfig {
         service_name: String,
         reply: oneshot::Sender<Option<ServiceConfig>>,
@@ -87,6 +93,9 @@ pub enum ConfigCommand {
     },
     GetGlobalLogConfig {
         reply: oneshot::Sender<Option<LogConfig>>,
+    },
+    GetGlobalSysEnv {
+        reply: oneshot::Sender<Option<SysEnvPolicy>>,
     },
     IsServiceRunning {
         service_name: String,
@@ -483,6 +492,15 @@ impl ConfigActor {
                 let result = self.get_logs_bounded(service.as_deref(), lines, max_bytes);
                 let _ = reply.send(result);
             }
+            ConfigCommand::GetLogsPaginated {
+                service,
+                offset,
+                limit,
+                reply,
+            } => {
+                let result = self.get_logs_paginated(service.as_deref(), offset, limit);
+                let _ = reply.send(result);
+            }
             ConfigCommand::GetServiceConfig {
                 service_name,
                 reply,
@@ -500,7 +518,10 @@ impl ConfigActor {
                 let _ = reply.send(self.logs.clone());
             }
             ConfigCommand::GetGlobalLogConfig { reply } => {
-                let _ = reply.send(self.config.logs.clone());
+                let _ = reply.send(self.config.global_logs().cloned());
+            }
+            ConfigCommand::GetGlobalSysEnv { reply } => {
+                let _ = reply.send(self.config.global_sys_env().cloned());
             }
             ConfigCommand::IsServiceRunning {
                 service_name,
@@ -761,7 +782,7 @@ impl ConfigActor {
             service_config,
             config_dir: self.config_dir.clone(),
             logs: self.logs.clone(),
-            global_log_config: self.config.logs.clone(),
+            global_log_config: self.config.global_logs().cloned(),
             env: service_state.computed_env.clone(),
             working_dir: service_state.working_dir.clone(),
         })
@@ -805,6 +826,16 @@ impl ConfigActor {
             .into_iter()
             .map(|l| l.into())
             .collect()
+    }
+
+    fn get_logs_paginated(
+        &self,
+        service: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<LogEntry>, usize) {
+        let (logs, total) = self.logs.get_paginated(service, offset, limit);
+        (logs.into_iter().map(|l| l.into()).collect(), total)
     }
 
     fn reload_config(&mut self) -> Result<()> {
@@ -1053,6 +1084,26 @@ impl ConfigActorHandle {
         reply_rx.await.unwrap_or_default()
     }
 
+    /// Get logs with true pagination (reads efficiently from disk with offset/limit)
+    pub async fn get_logs_paginated(
+        &self,
+        service: Option<String>,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<LogEntry>, usize) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ConfigCommand::GetLogsPaginated {
+                service,
+                offset,
+                limit,
+                reply: reply_tx,
+            })
+            .await;
+        reply_rx.await.unwrap_or_else(|_| (Vec::new(), 0))
+    }
+
     /// Get a service configuration
     pub async fn get_service_config(&self, service_name: &str) -> Option<ServiceConfig> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1102,6 +1153,16 @@ impl ConfigActorHandle {
         let _ = self
             .tx
             .send(ConfigCommand::GetGlobalLogConfig { reply: reply_tx })
+            .await;
+        reply_rx.await.ok().flatten()
+    }
+
+    /// Get global sys_env policy
+    pub async fn get_global_sys_env(&self) -> Option<SysEnvPolicy> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ConfigCommand::GetGlobalSysEnv { reply: reply_tx })
             .await;
         reply_rx.await.ok().flatten()
     }

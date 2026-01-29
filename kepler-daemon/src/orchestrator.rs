@@ -143,8 +143,8 @@ impl ServiceOrchestrator {
             .await
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
-        let global_hooks = config.hooks.clone();
-        let global_log_config = config.logs.clone();
+        let global_hooks = config.global_hooks().cloned();
+        let global_log_config = config.global_logs().cloned();
         let initialized = handle.is_config_initialized().await;
 
         // Run global on_init hook if first time
@@ -348,8 +348,8 @@ impl ServiceOrchestrator {
         };
 
         let logs = handle.get_logs_buffer().await;
-        let global_log_config = config.logs.clone();
-        let global_hooks = config.hooks.clone();
+        let global_log_config = config.global_logs().cloned();
+        let global_hooks = config.global_hooks().cloned();
 
         let mut stopped = Vec::new();
 
@@ -1052,12 +1052,12 @@ impl ServiceOrchestrator {
             let env: HashMap<String, String> = std::env::vars().collect();
 
             if let Err(e) = run_global_hook(
-                &config.hooks,
+                &config.global_hooks().cloned(),
                 GlobalHookType::OnCleanup,
                 config_dir,
                 &env,
                 None, // No log buffer for prune
-                config.logs.as_ref(),
+                config.global_logs(),
             )
             .await
             {

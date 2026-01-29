@@ -17,7 +17,7 @@ async fn test_healthcheck_with_hooks() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_healthcheck_with_hooks",
-        &[("MARKER_FILE", marker_file.to_str().unwrap())],
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;
@@ -31,11 +31,11 @@ async fn test_healthcheck_with_hooks() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "healthcheck-hooks-service", "healthy", Duration::from_secs(15))
         .await?;
 
-    // Wait a bit for the hook to run
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Wait for the on_healthcheck_success hook to write to the marker file
+    let marker_content = harness
+        .wait_for_file_content(&marker_file, "HEALTHCHECK_SUCCESS_HOOK", Duration::from_secs(10))
+        .await?;
 
-    // Check that on_healthcheck_success hook ran
-    let marker_content = std::fs::read_to_string(&marker_file)?;
     assert!(
         marker_content.contains("HEALTHCHECK_SUCCESS_HOOK"),
         "on_healthcheck_success hook should have run. Content: {}",
@@ -108,8 +108,8 @@ async fn test_full_lifecycle() -> E2eResult<()> {
         TEST_MODULE,
         "test_full_lifecycle",
         &[
-            ("WATCH_DIR", watch_dir.to_str().unwrap()),
-            ("MARKER_FILE", marker_file.to_str().unwrap()),
+            ("__WATCH_DIR__", watch_dir.to_str().unwrap()),
+            ("__MARKER_FILE__", marker_file.to_str().unwrap()),
         ],
     )?;
 
@@ -124,17 +124,20 @@ async fn test_full_lifecycle() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "full-lifecycle-service", "healthy", Duration::from_secs(15))
         .await?;
 
-    // Verify on_start hook ran
-    let marker_content = std::fs::read_to_string(&marker_file)?;
+    // Verify on_start hook ran (poll for content)
+    let marker_content = harness
+        .wait_for_file_content(&marker_file, "ON_START_HOOK", Duration::from_secs(10))
+        .await?;
     assert!(
         marker_content.contains("ON_START_HOOK"),
         "on_start hook should have run. Content: {}",
         marker_content
     );
 
-    // Wait for healthcheck success hook
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let marker_content = std::fs::read_to_string(&marker_file)?;
+    // Wait for healthcheck success hook (poll for content)
+    let marker_content = harness
+        .wait_for_file_content(&marker_file, "HEALTHCHECK_SUCCESS", Duration::from_secs(10))
+        .await?;
     assert!(
         marker_content.contains("HEALTHCHECK_SUCCESS"),
         "healthcheck success hook should have run. Content: {}",
@@ -161,9 +164,11 @@ async fn test_full_lifecycle() -> E2eResult<()> {
 
     // Stop and verify on_stop hook
     harness.stop_services(&config_path).await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let marker_content = std::fs::read_to_string(&marker_file)?;
+    // Wait for on_stop hook to complete (poll for content)
+    let marker_content = harness
+        .wait_for_file_content(&marker_file, "ON_STOP_HOOK", Duration::from_secs(10))
+        .await?;
     assert!(
         marker_content.contains("ON_STOP_HOOK"),
         "on_stop hook should have run. Content: {}",

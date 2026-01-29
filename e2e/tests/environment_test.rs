@@ -44,7 +44,7 @@ async fn test_env_file_loading() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_env_file_loading",
-        &[("ENV_FILE_PATH", env_file_path.to_str().unwrap())],
+        &[("__ENV_FILE_PATH__", env_file_path.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;
@@ -110,7 +110,7 @@ async fn test_env_priority() -> E2eResult<()> {
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_env_priority",
-        &[("ENV_FILE_PATH", env_file_path.to_str().unwrap())],
+        &[("__ENV_FILE_PATH__", env_file_path.to_str().unwrap())],
     )?;
 
     harness.start_daemon().await?;

@@ -1,7 +1,7 @@
 services:
   glob-watch-service:
     command: ["sh", "-c", "echo GLOB_WATCH_START; sleep 300"]
-    working_dir: WATCH_DIR
+    working_dir: __WATCH_DIR__
     restart:
       policy: always
       watch:

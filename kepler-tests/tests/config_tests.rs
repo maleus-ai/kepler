@@ -219,22 +219,23 @@ services:
     }
 }
 
-/// Global hooks parse correctly
+/// Global hooks parse correctly (under kepler namespace)
 #[test]
 fn test_global_hooks_parsing() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("kepler.yaml");
 
     let yaml = r#"
-hooks:
-  on_init:
-    run: echo global init
-  on_start:
-    run: echo global start
-  on_stop:
-    run: echo global stop
-  on_cleanup:
-    run: echo global cleanup
+kepler:
+  hooks:
+    on_init:
+      run: echo global init
+    on_start:
+      run: echo global start
+    on_stop:
+      run: echo global stop
+    on_cleanup:
+      run: echo global cleanup
 services:
   test:
     command: ["sleep", "3600"]
@@ -243,7 +244,7 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load(&config_path).unwrap();
 
-    let hooks = config.hooks.as_ref().unwrap();
+    let hooks = config.global_hooks().unwrap();
     assert!(hooks.on_init.is_some());
     assert!(hooks.on_start.is_some());
     assert!(hooks.on_stop.is_some());
@@ -341,18 +342,19 @@ services:
     assert!(env.contains(&"MULTI=one=two=three".to_string()));
 }
 
-/// Log config parsing
+/// Log config parsing (under kepler namespace)
 #[test]
 fn test_log_config_parsing() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("kepler.yaml");
 
     let yaml = r#"
-logs:
-  timestamp: true
-  retention:
-    on_stop: retain
-    on_start: clear
+kepler:
+  logs:
+    timestamp: true
+    retention:
+      on_stop: retain
+      on_start: clear
 services:
   test:
     command: ["sleep", "3600"]
@@ -367,7 +369,7 @@ services:
 
     use kepler_daemon::config::LogRetention;
 
-    let global_logs = config.logs.as_ref().unwrap();
+    let global_logs = config.global_logs().unwrap();
     assert_eq!(global_logs.timestamp, Some(true));
     assert_eq!(global_logs.get_on_stop(), Some(LogRetention::Retain));
     assert_eq!(global_logs.get_on_start(), Some(LogRetention::Clear));
@@ -781,7 +783,7 @@ services:
 // Log Config Restructure Tests
 // ============================================================================
 
-/// New log retention nested structure parses correctly
+/// New log retention nested structure parses correctly (under kepler namespace)
 #[test]
 fn test_log_retention_nested_structure() {
     use kepler_daemon::config::LogRetention;
@@ -790,11 +792,12 @@ fn test_log_retention_nested_structure() {
     let config_path = temp_dir.path().join("kepler.yaml");
 
     let yaml = r#"
-logs:
-  retention:
-    on_start: retain
-    on_stop: clear
-    on_restart: retain
+kepler:
+  logs:
+    retention:
+      on_start: retain
+      on_stop: clear
+      on_restart: retain
 services:
   test:
     command: ["sleep", "3600"]
@@ -807,7 +810,7 @@ services:
     let config = KeplerConfig::load(&config_path).unwrap();
 
     // Global retention via getter
-    let global_logs = config.logs.as_ref().unwrap();
+    let global_logs = config.global_logs().unwrap();
     assert_eq!(global_logs.get_on_start(), Some(LogRetention::Retain));
     assert_eq!(global_logs.get_on_stop(), Some(LogRetention::Clear));
 
@@ -816,7 +819,7 @@ services:
     assert_eq!(service_logs.get_on_stop(), Some(LogRetention::Retain));
 }
 
-/// Log store config parses correctly (simple form)
+/// Log store config parses correctly (simple form, under kepler namespace)
 #[test]
 fn test_log_store_simple_parsing() {
     use kepler_daemon::config::LogStoreConfig;
@@ -825,8 +828,9 @@ fn test_log_store_simple_parsing() {
     let config_path = temp_dir.path().join("kepler.yaml");
 
     let yaml = r#"
-logs:
-  store: false
+kepler:
+  logs:
+    store: false
 services:
   test:
     command: ["sleep", "3600"]
@@ -837,24 +841,25 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load(&config_path).unwrap();
 
-    assert_eq!(config.logs.as_ref().unwrap().store, Some(LogStoreConfig::Simple(false)));
+    assert_eq!(config.global_logs().unwrap().store, Some(LogStoreConfig::Simple(false)));
     assert_eq!(
         config.services["test"].logs.as_ref().unwrap().store,
         Some(LogStoreConfig::Simple(true))
     );
 }
 
-/// Log store config parses correctly (extended form)
+/// Log store config parses correctly (extended form, under kepler namespace)
 #[test]
 fn test_log_store_extended_parsing() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("kepler.yaml");
 
     let yaml = r#"
-logs:
-  store:
-    stdout: true
-    stderr: false
+kepler:
+  logs:
+    store:
+      stdout: true
+      stderr: false
 services:
   test:
     command: ["sleep", "3600"]
@@ -867,7 +872,7 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load(&config_path).unwrap();
 
-    let global_store = config.logs.as_ref().unwrap().store.as_ref().unwrap();
+    let global_store = config.global_logs().unwrap().store.as_ref().unwrap();
     assert!(global_store.store_stdout());
     assert!(!global_store.store_stderr());
 
