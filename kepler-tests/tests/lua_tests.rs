@@ -190,38 +190,38 @@ services:
     assert_eq!(service.command, vec!["sh", "-c", "echo hello"]);
 }
 
-/// Test: lua_import loads external Lua files into global scope
+/// Test: require() loads external Lua files
 #[test]
-fn test_lua_import() {
+fn test_lua_require() {
     let temp_dir = TempDir::new().unwrap();
 
-    // Create an external Lua file with a function
+    // Create an external Lua module
     let lua_file_path = temp_dir.path().join("helpers.lua");
     std::fs::write(
         &lua_file_path,
         r#"
-function get_default_port()
+local M = {}
+function M.get_default_port()
   return "3000"
 end
+return M
 "#,
     )
     .unwrap();
 
-    let yaml = format!(
-        r#"
-lua_import:
-  - {}
+    let yaml = r#"
+lua: |
+  local helpers = require("helpers")
+  global.port = helpers.get_default_port()
 
 services:
   test:
     command: ["echo", "hello"]
     environment: !lua |
-      return {{"PORT=" .. get_default_port()}}
-"#,
-        lua_file_path.display()
-    );
+      return {"PORT=" .. global.port}
+"#;
 
-    let config = load_config_from_string(&yaml, temp_dir.path()).unwrap();
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
     let service = config.services.get("test").unwrap();
 
     assert!(service.environment.contains(&"PORT=3000".to_string()));

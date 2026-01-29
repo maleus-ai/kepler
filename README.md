@@ -593,9 +593,10 @@ services:
 | Field | Description |
 |-------|-------------|
 | `lua:` | Inline Lua code that runs in global scope, defines functions |
-| `lua_import:` | Array of paths to external Lua files to load |
 | `!lua \|` | YAML tag for inline Lua that returns a value |
 | `!lua_file path` | YAML tag to load and execute a Lua file |
+
+External Lua files can be loaded using `require()` - the config directory is automatically added to the Lua package path.
 
 ### Available Context
 
@@ -653,15 +654,33 @@ services:
       return {"API_URL=http://localhost:" .. tostring(global.api_port)}
 ```
 
-**Using external Lua files:**
+**Using external Lua files with require():**
+
+Create a Lua module in `helpers.lua` (in the same directory as the config):
+```lua
+-- helpers.lua
+local M = {}
+function M.transform_env(env_table, opts)
+  local result = {}
+  for key, value in pairs(env_table) do
+    if string.sub(key, 1, #opts.prefix) == opts.prefix then
+      table.insert(result, key .. "=" .. value)
+    end
+  end
+  return result
+end
+return M
+```
+
+Then use it in your config:
 ```yaml
-lua_import:
-  - ./lua/helpers.lua
+lua: |
+  local helpers = require("helpers")
 
 services:
   api:
     environment: !lua |
-      return transform_env(env, {prefix = "API_"})
+      return helpers.transform_env(ctx.env, {prefix = "API_"})
 ```
 
 **Dynamic healthcheck:**

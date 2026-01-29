@@ -602,7 +602,7 @@ impl E2eHarness {
     }
 
     /// Copy a supporting file from the source config directory to the test's config directory.
-    /// This is useful for lua_import files that need to be alongside the config.
+    /// This is useful for Lua modules that need to be alongside the config for `require()`.
     ///
     /// # Arguments
     /// * `test_module` - The test module name (e.g., "lua_advanced_test")

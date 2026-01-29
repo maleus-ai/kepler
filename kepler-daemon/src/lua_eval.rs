@@ -2,6 +2,9 @@
 //!
 //! This module provides the `LuaEvaluator` struct which manages a Lua state
 //! and allows evaluation of `!lua` and `!lua_file` tagged values in configs.
+//!
+//! External Lua files can be imported using `require()` - the config directory
+//! is added to the Lua package path automatically.
 
 use mlua::{FromLua, Lua, Result as LuaResult, Table, Value};
 use std::collections::HashMap;
@@ -25,20 +28,30 @@ pub struct EvalContext {
 /// Evaluator for Lua scripts in config files.
 ///
 /// Manages a single Lua state that persists across all evaluations within
-/// a config load. Functions defined in `lua:` blocks and `lua_import` files
-/// are available to all `!lua` blocks.
+/// a config load. Functions defined in `lua:` blocks are available to all
+/// `!lua` blocks. External files can be imported using `require()`.
 pub struct LuaEvaluator {
     lua: Lua,
 }
 
 impl LuaEvaluator {
     /// Create a new Lua evaluator with a fresh Lua state.
-    pub fn new() -> LuaResult<Self> {
+    ///
+    /// The config directory is added to the Lua package path to enable
+    /// `require()` to load external Lua files relative to the config.
+    pub fn new(config_dir: &Path) -> LuaResult<Self> {
         let lua = Lua::new();
 
         // Create the shared `global` table for cross-block state
         let global_table = lua.create_table()?;
         lua.globals().set("global", global_table)?;
+
+        // Add config directory to package.path for require()
+        let package: Table = lua.globals().get("package")?;
+        let current_path: String = package.get("path").unwrap_or_default();
+        let config_path = config_dir.to_string_lossy();
+        let new_path = format!("{}/?.lua;{}/?/init.lua;{}", config_path, config_path, current_path);
+        package.set("path", new_path)?;
 
         Ok(Self { lua })
     }
@@ -48,25 +61,17 @@ impl LuaEvaluator {
         self.lua.load(code).set_name("lua").exec()
     }
 
-    /// Load a `lua_import` file - runs in global scope to define functions.
-    pub fn load_file(&self, path: &Path) -> LuaResult<()> {
-        let code = std::fs::read_to_string(path).map_err(|e| {
-            mlua::Error::RuntimeError(format!("Failed to read {}: {}", path.display(), e))
-        })?;
-        self.lua
-            .load(&code)
-            .set_name(path.to_string_lossy())
-            .exec()
-    }
-
     /// Evaluate a `!lua` block and return the result.
     ///
     /// The code runs with a custom environment containing:
-    /// - `env`: Read-only table of environment variables
+    /// - `ctx.env`: Read-only table of environment variables
+    /// - `ctx.sys_env`: Read-only table of system environment variables
+    /// - `ctx.env_file`: Read-only table of env_file variables
+    /// - `ctx.service_name`: Current service name (or nil)
+    /// - `ctx.hook_name`: Current hook name (or nil)
     /// - `global`: Shared mutable table for cross-block state
-    /// - `service`: Current service name (or nil)
-    /// - `hook`: Current hook name (or nil)
-    /// - Access to all functions defined in `lua:` and `lua_import`
+    /// - Access to all functions defined in `lua:` block and standard library
+    /// - `require()` can load files relative to the config directory
     pub fn eval<T: FromLua>(&self, code: &str, ctx: &EvalContext) -> LuaResult<T> {
         let env_table = self.build_env_table(ctx)?;
 
@@ -382,10 +387,15 @@ pub fn lua_value_to_string_vec(value: Value) -> LuaResult<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn test_config_dir() -> PathBuf {
+        PathBuf::from("/tmp")
+    }
 
     #[test]
     fn test_lua_returns_string() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
         let result: String = eval.eval(r#"return "hello""#, &ctx).unwrap();
@@ -394,7 +404,7 @@ mod tests {
 
     #[test]
     fn test_lua_returns_array() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
         let result: Value = eval.eval(r#"return {"a", "b", "c"}"#, &ctx).unwrap();
@@ -404,7 +414,7 @@ mod tests {
 
     #[test]
     fn test_lua_env_access() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let mut env = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
         let ctx = EvalContext {
@@ -418,7 +428,7 @@ mod tests {
 
     #[test]
     fn test_lua_env_readonly() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
         let result = eval.eval::<Value>(r#"ctx.env.NEW = "value""#, &ctx);
@@ -428,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_lua_global_shared() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
         // First block sets global
@@ -441,7 +451,7 @@ mod tests {
 
     #[test]
     fn test_lua_service_context() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext {
             service_name: Some("backend".to_string()),
             ..Default::default()
@@ -453,7 +463,7 @@ mod tests {
 
     #[test]
     fn test_lua_functions_available() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
 
         // Load function in global scope
         eval.load_inline(
@@ -473,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_lua_env_map_format() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
         let result: Value = eval.eval(r#"return {FOO="bar", BAZ="qux"}"#, &ctx).unwrap();
@@ -485,7 +495,7 @@ mod tests {
 
     #[test]
     fn test_lua_env_array_format() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
         let result: Value = eval
@@ -499,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_lua_hook_context() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext {
             service_name: Some("api".to_string()),
             hook_name: Some("on_start".to_string()),
@@ -512,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_lua_nil_for_missing_context() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
         // service_name should be nil when not set
@@ -522,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_lua_standard_library_available() {
-        let eval = LuaEvaluator::new().unwrap();
+        let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
         // String functions should work

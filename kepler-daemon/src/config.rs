@@ -40,10 +40,6 @@ pub struct KeplerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lua: Option<String>,
 
-    /// External Lua files to import (paths relative to config file)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lua_import: Vec<PathBuf>,
-
     #[serde(default)]
     pub hooks: Option<GlobalHooks>,
     #[serde(default)]
@@ -598,7 +594,7 @@ impl KeplerConfig {
     /// Process Lua scripts in the config value tree.
     ///
     /// This function:
-    /// 1. Extracts and loads the `lua:` block and `lua_import` files
+    /// 1. Extracts and loads the `lua:` block
     /// 2. Walks the value tree to find and evaluate `!lua` and `!lua_file` tags
     /// 3. Replaces tagged values with their Lua evaluation results
     fn process_lua_scripts(
@@ -608,38 +604,17 @@ impl KeplerConfig {
     ) -> Result<()> {
         use serde_yaml::Value;
 
-        // Extract lua: and lua_import: from the root mapping
-        let (lua_code, lua_imports) = if let Value::Mapping(map) = &*value {
-            let lua_code = map
-                .get(&Value::String("lua".to_string()))
+        // Extract lua: from the root mapping
+        let lua_code = if let Value::Mapping(map) = &*value {
+            map.get(&Value::String("lua".to_string()))
                 .and_then(|v| v.as_str())
-                .map(String::from);
-
-            let lua_imports: Vec<PathBuf> = map
-                .get(&Value::String("lua_import".to_string()))
-                .and_then(|v| v.as_sequence())
-                .map(|seq| {
-                    seq.iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| {
-                            let p = PathBuf::from(s);
-                            if p.is_relative() {
-                                config_dir.join(p)
-                            } else {
-                                p
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            (lua_code, lua_imports)
+                .map(String::from)
         } else {
-            (None, Vec::new())
+            None
         };
 
         // Create Lua evaluator and load the code
-        let evaluator = LuaEvaluator::new().map_err(|e| {
+        let evaluator = LuaEvaluator::new(config_dir).map_err(|e| {
             DaemonError::LuaError {
                 path: config_path.to_path_buf(),
                 message: e.to_string(),
@@ -652,16 +627,6 @@ impl KeplerConfig {
                 DaemonError::LuaError {
                     path: config_path.to_path_buf(),
                     message: format!("Error in lua: block: {}", e),
-                }
-            })?;
-        }
-
-        // Load lua_import files
-        for import_path in &lua_imports {
-            evaluator.load_file(import_path).map_err(|e| {
-                DaemonError::LuaError {
-                    path: config_path.to_path_buf(),
-                    message: format!("Error loading {}: {}", import_path.display(), e),
                 }
             })?;
         }

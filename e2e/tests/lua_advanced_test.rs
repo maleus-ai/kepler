@@ -115,44 +115,6 @@ async fn test_lua_env_file_injects_vars() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that lua: block runs before lua_import:
-#[tokio::test]
-async fn test_lua_block_before_import() -> E2eResult<()> {
-    let mut harness = E2eHarness::new().await?;
-
-    // Copy the lua import file and get its absolute path
-    let lua_file = harness.copy_supporting_file(TEST_MODULE, "order_tracker.lua")?;
-
-    let config_path = harness.load_config_with_replacements(
-        TEST_MODULE,
-        "test_lua_block_before_import",
-        &[("__LUA_FILE__", lua_file.to_str().unwrap())],
-    )?;
-
-    harness.start_daemon().await?;
-
-    let output = harness.start_services(&config_path).await?;
-    output.assert_success();
-
-    harness
-        .wait_for_service_status(&config_path, "import-order-service", "running", Duration::from_secs(10))
-        .await?;
-
-    // Should show lua_block comes before lua_import
-    let logs = harness
-        .wait_for_log_content(&config_path, "LOAD_ORDER=", Duration::from_secs(5))
-        .await?;
-
-    assert!(
-        logs.stdout_contains("LOAD_ORDER=lua_block,lua_import"),
-        "lua: should run before lua_import:. stdout: {}",
-        logs.stdout
-    );
-
-    harness.stop_daemon().await?;
-    Ok(())
-}
-
 /// Test that !lua blocks in hooks have access to service name
 #[tokio::test]
 async fn test_lua_service_context_in_hooks() -> E2eResult<()> {
@@ -473,44 +435,6 @@ async fn test_lua_execution_order_all_fields() -> E2eResult<()> {
     assert!(
         logs.stdout_contains("ORDER=env_file,environment"),
         "env_file and environment should be evaluated before command captures ORDER. stdout: {}",
-        logs.stdout
-    );
-
-    harness.stop_daemon().await?;
-    Ok(())
-}
-
-/// Test that lua: block is loaded before lua_import (regardless of YAML order)
-#[tokio::test]
-async fn test_lua_import_after_block() -> E2eResult<()> {
-    let mut harness = E2eHarness::new().await?;
-
-    // Copy the lua import file
-    let lua_file = harness.copy_supporting_file(TEST_MODULE, "import_order_tracker.lua")?;
-
-    let config_path = harness.load_config_with_replacements(
-        TEST_MODULE,
-        "test_lua_import_before_block",
-        &[("__LUA_FILE__", lua_file.to_str().unwrap())],
-    )?;
-
-    harness.start_daemon().await?;
-
-    let output = harness.start_services(&config_path).await?;
-    output.assert_success();
-
-    harness
-        .wait_for_service_status(&config_path, "import-first-service", "running", Duration::from_secs(10))
-        .await?;
-
-    // lua: block should run first, then lua_import
-    let logs = harness
-        .wait_for_log_content(&config_path, "LOAD_ORDER=", Duration::from_secs(5))
-        .await?;
-
-    assert!(
-        logs.stdout_contains("LOAD_ORDER=lua_block,lua_import"),
-        "lua: block should execute before lua_import. stdout: {}",
         logs.stdout
     );
 
