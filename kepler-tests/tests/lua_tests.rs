@@ -304,7 +304,7 @@ services:
     healthcheck:
       test: !lua |
         local port = ctx.env.KEPLER_HEALTH_PORT or "80"
-        return {"CMD-SHELL", "curl -f http://localhost:" .. port .. "/health"}
+        return {"sh", "-c", "curl -f http://localhost:" .. port .. "/health"}
       interval: 10s
       timeout: 5s
       retries: 3
@@ -321,7 +321,7 @@ services:
     let healthcheck = service.healthcheck.as_ref().unwrap();
     assert_eq!(
         healthcheck.test,
-        vec!["CMD-SHELL", "curl -f http://localhost:8080/health"]
+        vec!["sh", "-c", "curl -f http://localhost:8080/health"]
     );
 }
 

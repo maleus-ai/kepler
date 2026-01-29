@@ -270,43 +270,38 @@ impl TestHealthCheckBuilder {
 
     /// Create a health check that always passes (exit 0)
     pub fn always_healthy() -> Self {
-        Self::new(vec![
-            "CMD".to_string(),
-            "true".to_string(),
-        ])
+        Self::new(vec!["true".to_string()])
     }
 
     /// Create a health check that always fails (exit 1)
     pub fn always_unhealthy() -> Self {
-        Self::new(vec![
-            "CMD".to_string(),
-            "false".to_string(),
-        ])
+        Self::new(vec!["false".to_string()])
     }
 
-    /// Create a health check using CMD-SHELL format
-    pub fn cmd_shell(script: &str) -> Self {
+    /// Create a health check that runs a shell script
+    pub fn shell(script: &str) -> Self {
         Self::new(vec![
-            "CMD-SHELL".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
             script.to_string(),
         ])
     }
 
-    /// Create a health check using CMD format
-    pub fn cmd(executable: &str, args: &[&str]) -> Self {
-        let mut test = vec!["CMD".to_string(), executable.to_string()];
+    /// Create a health check that runs a command directly
+    pub fn command(executable: &str, args: &[&str]) -> Self {
+        let mut test = vec![executable.to_string()];
         test.extend(args.iter().map(|s| s.to_string()));
         Self::new(test)
     }
 
     /// Create a health check that checks for a file's existence
     pub fn file_exists(path: &str) -> Self {
-        Self::cmd_shell(&format!("test -f {}", path))
+        Self::shell(&format!("test -f {}", path))
     }
 
     /// Create a health check that times out
     pub fn slow_check(duration_secs: u64) -> Self {
-        Self::cmd_shell(&format!("sleep {}", duration_secs))
+        Self::shell(&format!("sleep {}", duration_secs))
     }
 
     pub fn with_interval(mut self, interval: Duration) -> Self {
@@ -491,7 +486,7 @@ mod tests {
             .with_retries(5)
             .build();
 
-        assert_eq!(hc.test, vec!["CMD", "true"]);
+        assert_eq!(hc.test, vec!["true"]);
         assert_eq!(hc.interval, Duration::from_secs(5));
         assert_eq!(hc.retries, 5);
     }

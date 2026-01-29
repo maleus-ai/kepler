@@ -232,9 +232,9 @@ async fn test_health_check_timeout() {
     harness.stop_service("test").await.unwrap();
 }
 
-/// `["CMD", "executable", "args"]` format works
+/// Direct command format works (e.g., `["true"]`)
 #[tokio::test]
-async fn test_cmd_format_health_check() {
+async fn test_direct_command_health_check() {
     let temp_dir = TempDir::new().unwrap();
 
     let config = TestConfigBuilder::new()
@@ -242,7 +242,7 @@ async fn test_cmd_format_health_check() {
             "test",
             TestServiceBuilder::long_running()
                 .with_healthcheck(
-                    TestHealthCheckBuilder::cmd("true", &[])
+                    TestHealthCheckBuilder::command("true", &[])
                         .with_interval(Duration::from_millis(100))
                         .with_retries(1)
                         .build(),
@@ -265,14 +265,14 @@ async fn test_cmd_format_health_check() {
     )
     .await;
 
-    assert!(result.is_ok(), "CMD format health check should work");
+    assert!(result.is_ok(), "Direct command health check should work");
 
     harness.stop_service("test").await.unwrap();
 }
 
-/// `["CMD-SHELL", "script"]` format works
+/// Shell script format works (e.g., `["sh", "-c", "exit 0"]`)
 #[tokio::test]
-async fn test_cmd_shell_format_health_check() {
+async fn test_shell_health_check() {
     let temp_dir = TempDir::new().unwrap();
 
     let config = TestConfigBuilder::new()
@@ -280,7 +280,7 @@ async fn test_cmd_shell_format_health_check() {
             "test",
             TestServiceBuilder::long_running()
                 .with_healthcheck(
-                    TestHealthCheckBuilder::cmd_shell("exit 0")
+                    TestHealthCheckBuilder::shell("exit 0")
                         .with_interval(Duration::from_millis(100))
                         .with_retries(1)
                         .build(),
@@ -303,7 +303,7 @@ async fn test_cmd_shell_format_health_check() {
     )
     .await;
 
-    assert!(result.is_ok(), "CMD-SHELL format health check should work");
+    assert!(result.is_ok(), "Shell health check should work");
 
     harness.stop_service("test").await.unwrap();
 }

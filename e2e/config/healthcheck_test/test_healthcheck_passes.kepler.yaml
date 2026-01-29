@@ -2,7 +2,7 @@ services:
   healthy-service:
     command: ["sh", "-c", "echo Starting; sleep 300"]
     healthcheck:
-      test: ["CMD-SHELL", "exit 0"]
+      test: ["sh", "-c", "exit 0"]
       interval: 2s
       timeout: 5s
       retries: 2

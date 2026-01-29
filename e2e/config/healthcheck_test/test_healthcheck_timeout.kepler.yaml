@@ -3,7 +3,7 @@ services:
     command: ["sh", "-c", "echo Starting; sleep 300"]
     healthcheck:
       # Sleep longer than timeout to trigger timeout
-      test: ["CMD-SHELL", "sleep 10"]
+      test: ["sh", "-c", "sleep 10"]
       interval: 2s
       timeout: 1s
       retries: 2

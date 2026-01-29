@@ -2,7 +2,7 @@ services:
   start-period-service:
     command: ["sh", "-c", "echo Starting; sleep 300"]
     healthcheck:
-      test: ["CMD-SHELL", "exit 1"]
+      test: ["sh", "-c", "exit 1"]
       interval: 1s
       timeout: 5s
       retries: 2

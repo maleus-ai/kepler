@@ -9,10 +9,6 @@ services:
     env_file: !lua |
       track("env_file")
       return "__ENV_FILE_PATH__"
-    environment: !lua |
-      track("environment")
-      -- Must return an array of "KEY=value" strings
-      return {"ORDER=" .. table.concat(global.exec_order, ",")}
     working_dir: !lua |
       track("working_dir")
       return "/tmp"
@@ -22,7 +18,7 @@ services:
     healthcheck:
       test: !lua |
         track("healthcheck")
-        return {"CMD-SHELL", "true"}
+        return {"sh", "-c", "true"}
       interval: 30s
     restart:
       policy: always
@@ -35,3 +31,7 @@ services:
       -- env_file,environment (other fields come later)
       -- command is evaluated after environment
       return {"sh", "-c", "echo ORDER=$ORDER FINAL_ORDER=" .. table.concat(global.exec_order, ",") .. " && sleep 30"}
+    environment: !lua |
+      track("environment")
+      -- Must return an array of "KEY=value" strings
+      return {"ORDER=" .. table.concat(global.exec_order, ",")}

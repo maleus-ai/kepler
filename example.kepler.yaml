@@ -18,7 +18,8 @@ services:
     healthcheck:
       test:
         [
-          "CMD-SHELL",
+          "sh",
+          "-c",
           "curl -f http://localhost:4000/server/health-check || exit 1",
         ]
       interval: 10s

@@ -110,7 +110,7 @@ services:
     working_dir: ./backend
     restart: always
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
+      test: ["sh", "-c", "curl -f http://localhost:3000/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -192,7 +192,7 @@ services:
     command: ["docker", "compose", "up", "postgres"]
     user: postgres              # Run as postgres user
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["pg_isready", "-U", "postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -214,7 +214,7 @@ services:
         - "**/*.ts"
         - "**/*.json"
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:4000/health"]
+      test: ["sh", "-c", "curl -f http://localhost:4000/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -511,8 +511,8 @@ hooks:
 | `start_period` | `duration` | `0s` | Grace period before checks start |
 
 **Health check test format:**
-- `["CMD-SHELL", "curl -f http://localhost/health"]` - run via shell
-- `["CMD", "pg_isready", "-U", "postgres"]` - run command directly
+- `["sh", "-c", "curl -f http://localhost/health"]` - run via shell
+- `["pg_isready", "-U", "postgres"]` - run command directly
 
 **Duration format:** `100ms`, `10s`, `5m`, `1h`, `1d`
 
@@ -671,7 +671,7 @@ services:
     healthcheck:
       test: !lua |
         local port = env.PORT or "8080"
-        return {"CMD-SHELL", "curl -f http://localhost:" .. port .. "/health"}
+        return {"sh", "-c", "curl -f http://localhost:" .. port .. "/health"}
 ```
 
 ### Type Conversion

@@ -164,26 +164,13 @@ async fn run_health_check(test: &[String], check_timeout: Duration) -> bool {
         return true;
     }
 
-    // Parse the test command
-    // Format: ["CMD-SHELL", "command"] or ["CMD", "cmd", "arg1", "arg2"]
-    let (program, args) = if test[0] == "CMD-SHELL" {
-        if test.len() < 2 {
-            return true;
-        }
-        ("sh".to_string(), vec!["-c".to_string(), test[1].clone()])
-    } else if test[0] == "CMD" {
-        if test.len() < 2 {
-            return true;
-        }
-        (test[1].clone(), test[2..].to_vec())
-    } else {
-        // Assume direct command
-        (test[0].clone(), test[1..].to_vec())
-    };
+    // Execute command directly - first element is program, rest are args
+    let program = &test[0];
+    let args = &test[1..];
 
     let result = timeout(check_timeout, async {
-        let mut cmd = Command::new(&program);
-        cmd.args(&args)
+        let mut cmd = Command::new(program);
+        cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

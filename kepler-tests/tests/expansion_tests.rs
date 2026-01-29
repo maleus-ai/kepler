@@ -125,7 +125,7 @@ async fn test_healthcheck_expansion() {
                 "sleep 3600".to_string(),
             ])
             .with_healthcheck(
-                TestHealthCheckBuilder::cmd_shell(
+                TestHealthCheckBuilder::shell(
                     // Simple healthcheck that writes to marker
                     &format!("echo 'health check ran' >> {} && true", health_marker_path.display())
                 )
