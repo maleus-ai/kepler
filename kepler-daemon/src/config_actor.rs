@@ -414,9 +414,9 @@ impl ConfigActor {
                 )
             };
 
-        // Create logs buffer
+        // Create logs buffer with rotation config if specified
         let logs_dir = state_dir.join("logs");
-        let logs = SharedLogBuffer::new(logs_dir);
+        let logs = Self::create_log_buffer(&logs_dir, &config);
 
         // Create channel
         let (tx, rx) = mpsc::channel(256);
@@ -446,6 +446,21 @@ impl ConfigActor {
         };
 
         Ok((handle, actor))
+    }
+
+    /// Create a log buffer with rotation settings from config
+    fn create_log_buffer(logs_dir: &PathBuf, config: &KeplerConfig) -> SharedLogBuffer {
+        // Get global rotation config
+        let rotation = config.global_logs().and_then(|l| l.rotation.as_ref());
+
+        match rotation {
+            Some(rot) => {
+                let max_size = rot.max_size_bytes();
+                let max_files = rot.max_files;
+                SharedLogBuffer::with_rotation(logs_dir.clone(), max_size, max_files)
+            }
+            None => SharedLogBuffer::new(logs_dir.clone()),
+        }
     }
 
     /// Run the actor event loop
