@@ -2,6 +2,36 @@
 
 A process orchestrator for managing application lifecycles. Kepler provides a single global daemon that manages multiple configuration files on demand, with support for health checks, file watching, hooks, and more.
 
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+  - [Prerequisites](#prerequisites)
+  - [Building from Source](#building-from-source)
+  - [Verifying Installation](#verifying-installation)
+  - [Running Tests](#running-tests)
+  - [Production Setup](#production-setup)
+- [Quick Start](#quick-start)
+- [CLI Reference](#cli-reference)
+  - [Daemon Commands](#daemon-commands)
+  - [Service Commands](#service-commands)
+  - [Options](#options)
+- [Configuration](#configuration)
+  - [Full Example](#full-example)
+  - [Global Hooks](#global-hooks)
+  - [Service Options](#service-options)
+  - [Restart Configuration](#restart-configuration)
+  - [Log Configuration](#log-configuration)
+  - [Service Hooks](#service-hooks)
+  - [Health Check Options](#health-check-options)
+- [Variable Expansion](#variable-expansion)
+- [Lua Scripting](#lua-scripting)
+- [Environment Variables](#environment-variables)
+- [Architecture](#architecture)
+- [License](#license)
+
+---
+
 ## Features
 
 - **Global Daemon Architecture**: Single daemon instance manages multiple config files
@@ -10,10 +40,13 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 - **Health Checks**: Docker-compatible health check configuration
 - **File Watching**: Automatic service restart on file changes
 - **Lifecycle Hooks**: Run commands at various lifecycle stages (init, start, stop, restart, cleanup)
-- **Environment Variables**: Support for env vars and `.env` files
+- **Environment Variables**: Support for env vars and `.env` files with shell-style expansion
+- **Lua Scripting**: Dynamic config generation with sandboxed Luau scripts
 - **Privilege Dropping**: Run services and hooks as specific users/groups (Unix only)
 - **Colored Logs**: Real-time log streaming with service-colored output
 - **Persistent Logs**: Logs survive daemon restarts and are stored on disk
+
+---
 
 ## Installation
 
@@ -26,26 +59,19 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 
 ### Building from Source
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/your-org/kepler.git
-   cd kepler
-   ```
+```bash
+# Clone and build
+git clone https://github.com/your-org/kepler.git
+cd kepler
+cargo build --release
 
-2. Build the release binaries:
-   ```bash
-   cargo build --release
-   ```
+# Install to ~/.cargo/bin (ensure it's in your PATH)
+cargo install --path kepler-cli
 
-3. Install the binaries (optional):
-   ```bash
-   # Install to ~/.cargo/bin (ensure it's in your PATH)
-   cargo install --path kepler-cli
-
-   # Or copy manually to a location in your PATH
-   sudo cp target/release/kepler /usr/local/bin/
-   sudo cp target/release/kepler-daemon /usr/local/bin/
-   ```
+# Or copy manually
+sudo cp target/release/kepler /usr/local/bin/
+sudo cp target/release/kepler-daemon /usr/local/bin/
+```
 
 ### Verifying Installation
 
@@ -62,21 +88,17 @@ kepler daemon stop
 cargo test --workspace
 ```
 
-### Best Practices for Setup
+### Production Setup
 
-**Run as a dedicated user (recommended for production):**
+**Run as a dedicated user (recommended):**
 ```bash
-# Create a dedicated user
 sudo useradd -r -s /bin/false kepler
-
-# Run the daemon as that user
 sudo -u kepler kepler daemon start -d
 ```
 
-**Avoid running as root:**
-The daemon will warn if started as root. Instead, use the `user:` option in your config to run specific services with elevated privileges when needed.
+**Avoid running as root** - the daemon will warn if started as root. Use the `user:` option in your config to run specific services with elevated privileges when needed.
 
-**Using systemd (recommended for production):**
+**Using systemd:**
 ```ini
 # /etc/systemd/system/kepler.service
 [Unit]
@@ -99,9 +121,11 @@ sudo systemctl enable kepler
 sudo systemctl start kepler
 ```
 
+---
+
 ## Quick Start
 
-1. Create a `kepler.yaml` configuration file:
+**1. Create a `kepler.yaml` configuration file:**
 
 ```yaml
 services:
@@ -116,61 +140,58 @@ services:
       retries: 3
 ```
 
-2. Start the global daemon:
+**2. Start the daemon and services:**
 
 ```bash
-kepler daemon start -d
+kepler daemon start -d   # Start daemon in background
+kepler start             # Start services from kepler.yaml
 ```
 
-3. Start your services:
+**3. Monitor and manage:**
 
 ```bash
-kepler start
-# Or with explicit config:
-kepler -f kepler.yaml start
+kepler status            # Show service status
+kepler logs -f           # Follow logs
+kepler stop              # Stop services
+kepler daemon stop       # Stop daemon
 ```
 
-4. Check status:
-
-```bash
-kepler status           # All loaded configs
-kepler -f kepler.yaml status  # Specific config
-kepler daemon status    # Daemon info + loaded configs
-```
-
-5. Stop services and daemon:
-
-```bash
-kepler stop
-kepler daemon stop
-```
+---
 
 ## CLI Reference
 
-### Daemon Commands (no config required)
+### Daemon Commands
 
-```bash
-kepler daemon start [-d]    # Start global daemon (-d for background)
-kepler daemon stop          # Stop daemon (stops all services first)
-kepler daemon restart [-d]  # Restart daemon
-kepler daemon status        # Show daemon info and loaded configs
-```
+Commands that manage the global daemon (no config required):
 
-### Service Commands (require config)
+| Command | Description |
+|---------|-------------|
+| `kepler daemon start [-d]` | Start daemon (`-d` for background) |
+| `kepler daemon stop` | Stop daemon (stops all services first) |
+| `kepler daemon restart [-d]` | Restart daemon |
+| `kepler daemon status` | Show daemon info and loaded configs |
 
-```bash
-kepler start [service]      # Start all or specific service
-kepler stop [service]       # Stop all or specific service
-kepler restart [service]    # Restart all or specific service
-kepler status               # Show status of all loaded configs
-kepler logs [-f] [service]  # View logs (-f to follow)
-```
+### Service Commands
+
+Commands that operate on services (require config):
+
+| Command | Description |
+|---------|-------------|
+| `kepler start [service]` | Start all or specific service |
+| `kepler stop [service]` | Stop all or specific service |
+| `kepler restart [service]` | Restart all or specific service |
+| `kepler status` | Show status of all loaded configs |
+| `kepler logs [-f] [service]` | View logs (`-f` to follow) |
 
 ### Options
 
-- `-f, --file <FILE>`: Path to config file (defaults to `kepler.yaml` in current directory)
-- `-v, --verbose`: Enable verbose output
-- `--clean`: Run cleanup hooks after stopping (with `stop` command)
+| Option | Description |
+|--------|-------------|
+| `-f, --file <FILE>` | Config file path (default: `kepler.yaml`) |
+| `-v, --verbose` | Enable verbose output |
+| `--clean` | Run cleanup hooks after stopping |
+
+---
 
 ## Configuration
 
@@ -190,7 +211,7 @@ hooks:
 services:
   database:
     command: ["docker", "compose", "up", "postgres"]
-    user: postgres              # Run as postgres user
+    user: postgres
     healthcheck:
       test: ["pg_isready", "-U", "postgres"]
       interval: 5s
@@ -201,8 +222,8 @@ services:
   backend:
     working_dir: ./apps/backend
     command: ["npm", "run", "dev"]
-    user: node                  # Run as node user
-    group: developers           # Override group
+    user: node
+    group: developers
     depends_on:
       - database
     environment:
@@ -227,12 +248,12 @@ services:
         run: echo "Backend restarting..."
       on_stop:
         run: ./cleanup.sh
-        user: daemon            # Run cleanup as daemon user (elevated)
+        user: daemon
 
   frontend:
     working_dir: ./apps/frontend
     command: ["npm", "run", "dev"]
-    user: "1000:1000"           # Run as uid:gid
+    user: "1000:1000"
     depends_on:
       - backend
     environment:
@@ -241,12 +262,10 @@ services:
     logs:
       timestamp: true
       retention:
-        on_stop: retain  # Keep logs after stopping (default: clear)
+        on_stop: retain
 ```
 
-### Configuration Reference
-
-#### Global Hooks
+### Global Hooks
 
 | Hook | Description |
 |------|-------------|
@@ -255,200 +274,79 @@ services:
 | `on_stop` | Runs when kepler stops |
 | `on_cleanup` | Runs when `--clean` flag is used |
 
-#### Service Options
+### Service Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `command` | `string[]` | - | Command to run (required) |
-| `working_dir` | `string` | config dir | Working directory for the service |
+| `command` | `string[]` | required | Command to run |
+| `working_dir` | `string` | config dir | Working directory |
 | `depends_on` | `string[]` | `[]` | Services that must be healthy first |
 | `environment` | `string[]` | `[]` | Environment variables (`KEY=value`) |
 | `env_file` | `string` | - | Path to `.env` file |
-| `restart` | `string\|object` | `no` | Restart configuration (see below) |
-| `healthcheck` | `object` | - | Health check configuration |
+| `restart` | `string\|object` | `no` | Restart policy (see below) |
+| `healthcheck` | `object` | - | Health check config |
 | `hooks` | `object` | - | Service-specific hooks |
-| `user` | `string` | - | User to run as (Unix only) |
-| `group` | `string` | - | Group override (Unix only) |
-| `logs` | `object` | - | Log configuration (see below) |
-
-#### Restart Configuration
-
-The restart configuration supports two forms:
-
-**Simple form** (just the policy):
-```yaml
-restart: always
-# or
-restart: no
-# or
-restart: on-failure
-```
-
-**Extended form** (policy + optional file watching):
-```yaml
-restart:
-  policy: always      # Required: no | always | on-failure
-  watch:              # Optional: glob patterns for file watching
-    - "src/**/*.ts"
-    - "**/*.json"
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `policy` | `no\|always\|on-failure` | `no` | Restart policy when process exits |
-| `watch` | `string[]` | `[]` | Glob patterns for file watching |
-
-**Restart policy values:**
-- `no` (default): Never restart the service when it exits
-- `always`: Always restart the service when it exits
-- `on-failure`: Restart only if the service exits with a non-zero code
-
-**File watching:**
-- When `watch` patterns are specified, the service restarts when matching files change
-- The `on_restart` hook runs before file-change restarts (same as process-exit restarts)
-- The `on_restart` log retention policy applies to file-change restarts
-
-> **⚠️ Constraint: `policy: no` cannot be combined with `watch`**
->
-> File watching requires restart to be enabled. Using `policy: no` with `watch` patterns is invalid and will be rejected during config validation with the error:
-> ```
-> watch patterns require restart to be enabled (policy: always or on-failure)
-> ```
->
-> **Invalid configuration (will fail):**
-> ```yaml
-> services:
->   invalid:
->     command: ["npm", "run", "dev"]
->     restart:
->       policy: no       # ❌ Cannot use 'no' with watch patterns
->       watch:
->         - "src/**/*.ts"
-> ```
->
-> To use file watching, set `policy` to `always` or `on-failure`.
-
-**Examples:**
-```yaml
-services:
-  # Development: restart on crashes AND file changes
-  frontend:
-    command: ["npm", "run", "dev"]
-    restart:
-      policy: always
-      watch:
-        - "src/**/*.tsx"
-
-  # Production: restart on crashes only (simple form)
-  api:
-    command: ["./api-server"]
-    restart: always
-
-  # Restart on failure OR file changes
-  backend:
-    command: ["cargo", "run"]
-    restart:
-      policy: on-failure
-      watch:
-        - "src/**/*.rs"
-
-  # Never restart (default behavior)
-  one-shot:
-    command: ["./migrate.sh"]
-    # No restart config = no restarts
-```
+| `user` | `string` | - | User to run as (Unix) |
+| `group` | `string` | - | Group override (Unix) |
+| `logs` | `object` | - | Log configuration |
 
 **User format** (Unix only):
-- `"username"` - resolve user by name (uses user's primary group)
-- `"1000"` - numeric uid (gid defaults to same value)
-- `"1000:1000"` - explicit uid:gid pair
+- `"username"` - resolve by name
+- `"1000"` - numeric uid
+- `"1000:1000"` - explicit uid:gid
 
-#### Log Configuration
+### Restart Configuration
+
+**Simple form:**
+```yaml
+restart: always    # or: no, on-failure
+```
+
+**Extended form with file watching:**
+```yaml
+restart:
+  policy: always      # no | always | on-failure
+  watch:              # Glob patterns for auto-restart
+    - "src/**/*.ts"
+```
+
+| Policy | Description |
+|--------|-------------|
+| `no` | Never restart (default) |
+| `always` | Always restart on exit |
+| `on-failure` | Restart only on non-zero exit |
+
+> **Note:** `policy: no` cannot be combined with `watch` patterns.
+
+### Log Configuration
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `timestamp` | `bool` | `false` | Include timestamps in log output |
-| `store` | `bool` or `object` | `true` | Whether to store logs to disk |
-| `store.stdout` | `bool` | `true` | Store stdout logs |
-| `store.stderr` | `bool` | `true` | Store stderr logs |
-| `retention.on_start` | `clear\|retain` | `retain` | Log retention when service starts |
-| `retention.on_stop` | `clear\|retain` | `clear` | Log retention when service stops |
-| `retention.on_restart` | `clear\|retain` | `retain` | Log retention when service restarts |
-| `retention.on_exit` | `clear\|retain` | `retain` | Log retention when service process exits |
-| `retention.on_cleanup` | `clear\|retain` | `clear` | Log retention on cleanup |
+| `timestamp` | `bool` | `false` | Include timestamps |
+| `store` | `bool\|object` | `true` | Store logs to disk |
+| `store.stdout` | `bool` | `true` | Store stdout |
+| `store.stderr` | `bool` | `true` | Store stderr |
+| `retention.on_start` | `clear\|retain` | `retain` | On service start |
+| `retention.on_stop` | `clear\|retain` | `clear` | On service stop |
+| `retention.on_restart` | `clear\|retain` | `retain` | On restart |
+| `retention.on_exit` | `clear\|retain` | `retain` | On process exit |
+| `retention.on_cleanup` | `clear\|retain` | `clear` | On cleanup |
 
-**Log storage (`store`):**
-
-The `store` option controls whether stdout/stderr output from services and hooks is captured and stored in the log buffer. This can be specified in two forms:
-
-**Simple form** - enable or disable all log storage:
-```yaml
-logs:
-  store: false  # Disable all log storage
-```
-
-**Extended form** - granular control over stdout/stderr:
+**Example:**
 ```yaml
 logs:
   store:
-    stdout: true   # Store stdout
-    stderr: false  # Don't store stderr
+    stdout: false    # Don't store stdout
+    stderr: true     # Only store errors
+  retention:
+    on_stop: retain  # Keep logs after stopping
 ```
 
-This is useful for:
-- **Noisy services**: Disable logging for services that produce excessive output
-- **Error-only logging**: Store only stderr to capture errors while ignoring verbose stdout
-- **Performance**: Reduce memory and disk usage for high-throughput services
-
-**Log retention values:**
-- `retain`: Keep logs when the event occurs (default for `on_start`, `on_restart`, `on_exit`)
-- `clear`: Clear logs when the event occurs (default for `on_stop`, `on_cleanup`)
-
-**Inheritance priority** (lowest to highest):
-1. **Built-in default** - The default value shown in the table above
-2. **Global-level setting** - Setting in the top-level `logs:` block
-3. **Service-level setting** - Explicit setting in the service's `logs:` block
-
-Each level overrides the previous one. Service settings override global settings, which override built-in defaults.
-
-**Examples:**
-```yaml
-# Disable all log storage globally
-logs:
-  store: false
-
-# Store only stderr (errors) globally
-logs:
-  store:
-    stdout: false
-    stderr: true
-
-services:
-  noisy-service:
-    command: ["./verbose-app"]
-    logs:
-      store: false  # Disable logs for this service only
-
-  important-service:
-    command: ["./critical-app"]
-    logs:
-      store:
-        stdout: false  # Don't store stdout
-        stderr: true   # Only store errors
-
-  backend:
-    command: ["npm", "run", "dev"]
-    logs:
-      retention:
-        on_stop: clear   # Service override: clear instead of global retain
-        # on_start: not set → inherits global or built-in default
-```
-
-#### Service Hooks
+### Service Hooks
 
 | Hook | Description |
 |------|-------------|
-| `on_init` | Runs once when service is first started |
+| `on_init` | Runs once when service first starts |
 | `on_start` | Runs before service starts |
 | `on_stop` | Runs before service stops |
 | `on_restart` | Runs before service restarts |
@@ -460,336 +358,136 @@ services:
 ```yaml
 hooks:
   on_start:
-    run: echo "starting"           # Shell script format
+    run: echo "starting"           # Shell script
   on_stop:
-    command: ["echo", "stopping"]  # Command array format
+    command: ["echo", "stopping"]  # Command array
   on_restart:
     run: ./notify.sh
-    user: admin                    # Run hook as specific user
-    group: developers              # Override group (Unix only)
-  on_init:
-    run: ./setup.sh
-    working_dir: ./scripts         # Override working directory
-    environment:                   # Hook-specific environment variables
+    user: admin                    # Run as specific user
+    working_dir: ./scripts         # Override working dir
+    environment:
       - SETUP_MODE=full
-      - DEBUG=true
-    env_file: .env.hooks           # Hook-specific env file
+    env_file: .env.hooks
 ```
 
-**Hook environment variables:**
-- Hooks inherit the service's environment (including minimal system env and service env_file)
-- `environment:` defines hook-specific variables that override inherited ones
-- `env_file:` loads additional variables from a file (relative to working_dir)
-- Environment merging priority (lowest to highest):
-  1. Minimal system environment (PATH, HOME, USER, SHELL)
-  2. Service's `env_file` variables
-  3. Service's `environment` array
-  4. Hook's `env_file` variables
-  5. Hook's `environment` array
+Hooks inherit the service's environment and user by default.
 
-**Note:** Only essential system variables (PATH, HOME, USER, SHELL) are inherited. Use `${VAR}` syntax to reference other system variables in your `environment` arrays.
-
-**Hook user/group behavior** (Unix only):
-- By default, hooks inherit the service's `user:` and `group:` settings
-- `user: daemon` runs as the kepler daemon user (for elevated privileges)
-- `user: <name>` runs as a specific user
-- `group: <name>` overrides the group (defaults to service's group if not set)
-
-**Hook working directory:**
-- By default, hooks run in the service's `working_dir`
-- `working_dir: <path>` overrides the working directory for that hook
-- Relative paths are resolved relative to the service's working_dir
-
-#### Health Check Options
+### Health Check Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `test` | `string[]` | - | Health check command |
+| `test` | `string[]` | required | Health check command |
 | `interval` | `duration` | `30s` | Time between checks |
-| `timeout` | `duration` | `30s` | Timeout for each check |
+| `timeout` | `duration` | `30s` | Timeout per check |
 | `retries` | `int` | `3` | Failures before unhealthy |
-| `start_period` | `duration` | `0s` | Grace period before checks start |
-
-**Health check test format:**
-- `["sh", "-c", "curl -f http://localhost/health"]` - run via shell
-- `["pg_isready", "-U", "postgres"]` - run command directly
+| `start_period` | `duration` | `0s` | Grace period before checks |
 
 **Duration format:** `100ms`, `10s`, `5m`, `1h`, `1d`
 
+---
+
 ## Variable Expansion
 
-Kepler supports `${VAR}` syntax for expanding environment variables in config values. However, **commands are NOT expanded** at config time—they are left for the shell to expand at runtime.
+Kepler supports shell-style variable expansion (`${VAR}`, `${VAR:-default}`, `~`) in config values.
 
-### What IS expanded at config load time:
+**Expanded at config load time:**
+- `working_dir`, `env_file`, `user`, `group`
+- `environment` entries
+- `limits.memory`, `restart.watch` patterns
 
-| Field | Example |
-|-------|---------|
-| `working_dir` | `working_dir: ${PROJECT_ROOT}/app` |
-| `env_file` | `env_file: ${CONFIG_DIR}/.env` |
-| `user`, `group` | `user: ${SERVICE_USER}` |
-| `environment` entries | `- DATABASE_URL=postgres://${DB_HOST}:${DB_PORT}/db` |
-| `limits.memory` | `memory: ${MEM_LIMIT}` |
-| `restart.watch` patterns | `- ${SRC_DIR}/**/*.ts` |
+**NOT expanded (shell expands at runtime):**
+- `command`, `hooks.run/command`, `healthcheck.test`
 
-### What is NOT expanded (shell expands at runtime):
-
-| Field | Why |
-|-------|-----|
-| `command` | Shell expands `$VAR` from process environment |
-| `hooks.run` / `hooks.command` | Shell expands `$VAR` from process environment |
-| `healthcheck.test` | Shell expands `$VAR` from process environment |
-
-### Expansion context
-
-At config load time, expansion uses:
-1. System environment variables (all of them)
-2. `env_file` variables (if specified) — these **override** system vars for expansion
-
-### Passing values to commands
-
-Instead of relying on config-time expansion in commands, pass values via the `environment` array:
-
+**Pass values to commands via environment:**
 ```yaml
 services:
   app:
-    command: ["sh", "-c", "echo Hello $NAME"]  # Shell expands $NAME at runtime
+    command: ["sh", "-c", "echo Hello $NAME"]  # Shell expands at runtime
     environment:
-      - NAME=World                             # Injected into process env
-      - DB_URL=postgres://${DB_HOST}/db        # ${DB_HOST} expanded at config time
+      - NAME=World                             # Set in process env
+      - DB_URL=postgres://${DB_HOST}/db        # Expanded at config time
 ```
 
-This design ensures:
-- Commands work as users expect (shell expansion at runtime)
-- Clear separation between config-time expansion and runtime environment
-- Values are passed consistently through environment variables
+---
 
 ## Lua Scripting
 
-Kepler supports Lua scripting (using Luau) for dynamic config generation via the `!lua` and `!lua_file` YAML tags. This enables conditional configs, environment transformation, and reusable functions.
-
-### Basic Usage
+Kepler supports Lua scripting (using sandboxed Luau) for dynamic config generation via `!lua` and `!lua_file` YAML tags.
 
 ```yaml
 lua: |
   function get_port()
-    return env.PORT or "8080"
+    return ctx.env.PORT or "8080"
   end
 
 services:
   backend:
     command: !lua |
       return {"node", "server.js", "--port", get_port()}
-
     environment: !lua |
       local result = {"NODE_ENV=production"}
-      if env.DEBUG then
+      if ctx.env.DEBUG then
         table.insert(result, "DEBUG=true")
       end
       return result
 ```
 
-### Config Structure
+**Available in `!lua` blocks:**
 
-| Field | Description |
-|-------|-------------|
-| `lua:` | Inline Lua code that runs in global scope, defines functions |
-| `!lua \|` | YAML tag for inline Lua that returns a value |
-| `!lua_file path` | YAML tag to load and execute a Lua file |
+| Variable | Description |
+|----------|-------------|
+| `ctx.env` | Read-only environment table |
+| `ctx.sys_env` | Read-only system environment |
+| `ctx.env_file` | Read-only env_file variables |
+| `ctx.service_name` | Current service name (or nil) |
+| `ctx.hook_name` | Current hook name (or nil) |
+| `global` | Shared mutable table for cross-block state |
 
-External Lua files can be loaded using `require()` - the config directory is automatically added to the Lua package path.
+**External files:** Use `require()` to load Lua modules from the config directory.
 
-### Available Context
+**Type conversion:** Use `tostring()` for numbers in string arrays (commands, environment).
 
-In `!lua` blocks, these variables are available:
+---
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| `env` | table | Read-only table of environment variables |
-| `service` | string | Current service name (nil in global hooks) |
-| `hook` | string | Current hook name (nil outside hooks) |
-| `global` | table | Shared mutable table for cross-block state |
-
-The `env` table includes all system environment variables, plus any loaded from `env_file`, plus any defined in `environment` (in that order of precedence).
-
-### Examples
-
-**Conditional env_file:**
-```yaml
-services:
-  api:
-    env_file: !lua |
-      if env.NODE_ENV == "production" then
-        return "prod.env"
-      end
-      return "dev.env"
-```
-
-**Environment transformation:**
-```yaml
-services:
-  backend:
-    environment: !lua |
-      local result = {}
-      for key, value in pairs(env) do
-        if string.sub(key, 1, 8) == "BACKEND_" then
-          local new_key = string.sub(key, 9)  -- Remove prefix
-          table.insert(result, new_key .. "=" .. value)
-        end
-      end
-      return result
-```
-
-**Shared state between services:**
-```yaml
-lua: |
-  global.api_port = 8080
-
-services:
-  api:
-    environment: !lua |
-      return {"PORT=" .. tostring(global.api_port)}
-
-  worker:
-    environment: !lua |
-      return {"API_URL=http://localhost:" .. tostring(global.api_port)}
-```
-
-**Using external Lua files with require():**
-
-Create a Lua module in `helpers.lua` (in the same directory as the config):
-```lua
--- helpers.lua
-local M = {}
-function M.transform_env(env_table, opts)
-  local result = {}
-  for key, value in pairs(env_table) do
-    if string.sub(key, 1, #opts.prefix) == opts.prefix then
-      table.insert(result, key .. "=" .. value)
-    end
-  end
-  return result
-end
-return M
-```
-
-Then use it in your config:
-```yaml
-lua: |
-  local helpers = require("helpers")
-
-services:
-  api:
-    environment: !lua |
-      return helpers.transform_env(ctx.env, {prefix = "API_"})
-```
-
-**Dynamic healthcheck:**
-```yaml
-services:
-  api:
-    healthcheck:
-      test: !lua |
-        local port = env.PORT or "8080"
-        return {"sh", "-c", "curl -f http://localhost:" .. port .. "/health"}
-```
-
-### Type Conversion
-
-| Lua Type | YAML/Config Type |
-|----------|------------------|
-| string | string |
-| number | number (use `tostring()` for string fields) |
-| boolean | boolean (use `tostring()` for string fields) |
-| table (array) | array |
-| table (map) | map (for most fields, use array format for `environment`) |
-| nil | null |
-
-**Note:** For `command` and `environment` arrays, return strings:
-```yaml
-# Correct
-command: !lua |
-  return {"sleep", tostring(10)}
-
-# Incorrect (will fail)
-command: !lua |
-  return {"sleep", 10}
-```
-
-### Helper Functions
-
-Functions defined in `lua:` blocks must receive `env` as a parameter if they need to access environment variables:
-
-```yaml
-lua: |
-  -- Functions capture their definition environment, not the caller's
-  -- So pass env explicitly when needed
-  function filter_env(env_table, prefix)
-    local result = {}
-    for key, value in pairs(env_table) do
-      if string.sub(key, 1, #prefix) == prefix then
-        table.insert(result, key .. "=" .. value)
-      end
-    end
-    return result
-  end
-
-services:
-  api:
-    environment: !lua |
-      return filter_env(env, "API_")  -- Pass env explicitly
-```
-
-### Error Handling
-
-Lua errors during config loading will prevent the config from loading:
-
-```
-Lua error in config '/path/to/kepler.yaml': runtime error at line 3: attempt to call nil value
-```
-
-Make sure to:
-- Return the correct type for each field
-- Use `tostring()` for numbers in string arrays
-- Handle nil values with `or` defaults: `env.PORT or "8080"`
-
-## Kepler Environment Variables
+## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `KEPLER_DAEMON_PATH` | `~/.kepler` | Override the global state directory where the daemon stores its socket, PID file, and per-config state |
+| `KEPLER_DAEMON_PATH` | `~/.kepler` | Override state directory location |
 
-**Example:**
 ```bash
-# Use a custom state directory
 export KEPLER_DAEMON_PATH=/var/run/kepler
 kepler daemon start -d
 ```
 
-This is useful for:
-- Running multiple isolated daemon instances
-- Storing state in a different location (e.g., `/var/run` for system services)
-- Testing without affecting the default daemon
+---
 
 ## Architecture
 
+Kepler uses a global daemon architecture with per-config isolation:
+
 ```
-~/.kepler/                 # Or $KEPLER_DAEMON_PATH if set
-├── kepler.sock            # Global daemon socket
-├── kepler.pid             # Global daemon PID
-└── configs/               # Per-config state (hash-based)
+~/.kepler/                    # Or $KEPLER_DAEMON_PATH
+├── kepler.sock               # Unix domain socket
+├── kepler.pid                # Daemon PID file
+└── configs/                  # Per-config state directories
     └── <config-hash>/
-        ├── config_path    # Original config file path
-        ├── state.json     # Service states
-        ├── pids/          # Service PID files
-        └── logs/          # Service log files
+        ├── config.yaml       # Copied config (immutable)
+        ├── expanded_config.yaml
+        ├── state.json
+        └── logs/
 ```
 
-The global daemon:
-1. Listens on `~/.kepler/kepler.sock`
-2. Loads configs on-demand when first referenced
-3. Each config gets its own ProcessManager, StateManager, and file watcher
-4. Multiple configs can run simultaneously without interference
-5. Logs are persisted to disk and survive daemon restarts
+**How it works:**
+1. Single daemon listens on `~/.kepler/kepler.sock`
+2. Configs are loaded on-demand when first referenced
+3. Each config gets its own isolated state directory
+4. Multiple configs can run simultaneously
+5. Logs persist to disk and survive daemon restarts
+
+For implementation details, security measures, and design decisions, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
 
 ## License
 
