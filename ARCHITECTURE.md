@@ -110,20 +110,43 @@ When the CLI requests to start/restart a config:
 
 ```mermaid
 flowchart TD
-    A[CLI: start/restart config] --> B{Snapshot exists?}
-    B -->|Yes| C[Use existing snapshot]
-    B -->|No| D[Copy config to state dir]
-    D --> E[Copy env_files to state dir]
-    E --> F[Apply shell expansion]
-    F --> G[Evaluate Lua scripts]
-    G --> H[Bake into snapshot]
-    H --> C
-    C --> I[Run services with baked config]
+    A[CLI: start/restart] --> B[Daemon]
+    B --> C{Snapshot exists?}
+    C -->|Yes| D[Use existing snapshot]
+    C -->|No| E[Copy config to state dir]
+    E --> F[Copy env_files to state dir]
+    F --> G[Apply shell expansion]
+    G --> H[Evaluate Lua scripts]
+    H --> I[Bake into snapshot]
+    I --> D
+    D --> J[Run services with baked config]
 ```
+
+### CLI Recreate Command
+
+The `recreate` command forces a full re-bake, discarding the existing snapshot:
+
+```mermaid
+flowchart TD
+    A[CLI: recreate] --> B[Daemon]
+    B --> C[Stop running services]
+    C --> D[Delete existing snapshot]
+    D --> E[Copy config to state dir]
+    E --> F[Copy env_files to state dir]
+    F --> G[Apply shell expansion]
+    G --> H[Evaluate Lua scripts]
+    H --> I[Bake into new snapshot]
+    I --> J[Run services with new config]
+```
+
+Use `recreate` when:
+- The original config file has changed
+- Environment variables have changed
+- env_files have been modified
 
 ### Config Baking Process
 
-When no snapshot exists, the config goes through a baking process:
+When no snapshot exists (or after `recreate`), the config goes through a baking process:
 
 1. **Copy files**: Config and env_files copied to state directory
 2. **Shell expansion**: Environment variables expanded (see [Environment Variable Handling](#environment-variable-handling))
@@ -131,13 +154,6 @@ When no snapshot exists, the config goes through a baking process:
 4. **Snapshot creation**: Final expanded config saved as `expanded_config.yaml`
 
 Once baked, the snapshot is immutable. Services always run using the baked snapshot, never the original config file.
-
-### Updating a Config
-
-To apply changes from the original config file:
-1. Use CLI reload command to re-copy and re-bake
-2. This creates a new snapshot, replacing the old one
-3. Running services continue with the old config until restarted
 
 ### Relevant Files
 
