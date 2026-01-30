@@ -68,7 +68,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Ensure state directory exists with secure permissions (0o700)
-    let state_dir = Daemon::global_state_dir();
+    let state_dir = match Daemon::global_state_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            eprintln!("Hint: Set KEPLER_DAEMON_PATH=/path/to/state");
+            std::process::exit(1);
+        }
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -83,7 +90,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Write PID file with secure permissions (0o600)
-    let pid_file = Daemon::get_pid_file();
+    let pid_file = Daemon::get_pid_file().unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    });
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -131,7 +141,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Create server
-    let socket_path = Daemon::get_socket_path();
+    let socket_path = Daemon::get_socket_path().unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    });
     let server = Server::new(socket_path.clone(), handler)?;
 
     // Discover and restore existing configs from persisted snapshots
@@ -382,7 +395,13 @@ async fn handle_request(
 /// 3. Validate that any recorded running processes are still alive
 /// 4. Mark processes as stopped if they're no longer running
 async fn discover_existing_configs(registry: &SharedConfigRegistry) {
-    let configs_dir = kepler_daemon::global_state_dir().join("configs");
+    let configs_dir = match kepler_daemon::global_state_dir() {
+        Ok(dir) => dir.join("configs"),
+        Err(e) => {
+            warn!("Cannot determine state directory: {}", e);
+            return;
+        }
+    };
 
     if !configs_dir.exists() {
         debug!("No configs directory found, skipping discovery");

@@ -48,9 +48,12 @@ impl LuaEvaluator {
 
         // Add config directory to package.path for require()
         let package: Table = lua.globals().get("package")?;
-        let current_path: String = package.get("path").unwrap_or_default();
+        let existing_path: String = package.get("path").unwrap_or_default();
         let config_path = config_dir.to_string_lossy();
-        let new_path = format!("{}/?.lua;{}/?/init.lua;{}", config_path, config_path, current_path);
+        let new_path = format!(
+            "{}/?.lua;{}/?/init.lua;{}",
+            config_path, config_path, existing_path
+        );
         package.set("path", new_path)?;
 
         Ok(Self { lua })

@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -256,7 +256,7 @@ impl ConfigActor {
         };
 
         // Create state directory for this config
-        let state_dir = crate::global_state_dir().join("configs").join(&hash);
+        let state_dir = crate::global_state_dir()?.join("configs").join(&hash);
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -292,8 +292,8 @@ impl ConfigActor {
                 let services = snapshot
                     .config
                     .services
-                    .iter()
-                    .map(|(name, _service_config)| {
+                    .keys()
+                    .map(|name| {
                         let computed_env = snapshot
                             .service_envs
                             .get(name)
@@ -449,7 +449,7 @@ impl ConfigActor {
     }
 
     /// Create a log buffer with rotation settings from config
-    fn create_log_buffer(logs_dir: &PathBuf, config: &KeplerConfig) -> SharedLogBuffer {
+    fn create_log_buffer(logs_dir: &Path, config: &KeplerConfig) -> SharedLogBuffer {
         // Get global rotation config
         let rotation = config.global_logs().and_then(|l| l.rotation.as_ref());
 
@@ -457,9 +457,9 @@ impl ConfigActor {
             Some(rot) => {
                 let max_size = rot.max_size_bytes();
                 let max_files = rot.max_files;
-                SharedLogBuffer::with_rotation(logs_dir.clone(), max_size, max_files)
+                SharedLogBuffer::with_rotation(logs_dir.to_path_buf(), max_size, max_files)
             }
-            None => SharedLogBuffer::new(logs_dir.clone()),
+            None => SharedLogBuffer::new(logs_dir.to_path_buf()),
         }
     }
 

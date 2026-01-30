@@ -37,14 +37,14 @@ async fn test_environment_inline() -> E2eResult<()> {
 async fn test_env_file_loading() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
 
-    // Create the env file first
-    let env_file_path = harness.create_temp_file("test.env", "ENV_FILE_VAR=from_env_file\nANOTHER_VAR=another_value\n")?;
+    // Create the env file in the config directory (so it's accessible via relative path)
+    harness.create_config_file("test.env", "ENV_FILE_VAR=from_env_file\nANOTHER_VAR=another_value\n")?;
 
-    // Load config with the env file path substituted
+    // Load config with relative env_file path
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_env_file_loading",
-        &[("__ENV_FILE_PATH__", env_file_path.to_str().unwrap())],
+        &[("__ENV_FILE_PATH__", "test.env")],
     )?;
 
     harness.start_daemon().await?;
@@ -103,14 +103,14 @@ async fn test_shell_expansion() -> E2eResult<()> {
 async fn test_env_priority() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
 
-    // Create env file with a variable
-    let env_file_path = harness.create_temp_file("priority.env", "PRIORITY_VAR=from_file\n")?;
+    // Create env file in the config directory (so it's accessible via relative path)
+    harness.create_config_file("priority.env", "PRIORITY_VAR=from_file\n")?;
 
-    // Load config with the env file path substituted
+    // Load config with relative env_file path
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
         "test_env_priority",
-        &[("__ENV_FILE_PATH__", env_file_path.to_str().unwrap())],
+        &[("__ENV_FILE_PATH__", "priority.env")],
     )?;
 
     harness.start_daemon().await?;

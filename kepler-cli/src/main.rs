@@ -62,7 +62,8 @@ async fn run() -> Result<()> {
     }
 
     // For other commands, we need the daemon to be running
-    let daemon_socket = Daemon::get_socket_path();
+    let daemon_socket = Daemon::get_socket_path()
+        .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
     let mut client = match Client::connect(&daemon_socket).await {
         Ok(c) => c,
         Err(kepler_protocol::errors::ClientError::Connect(_)) => {
@@ -152,7 +153,8 @@ fn handle_response(response: Response) {
 }
 
 async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
-    let daemon_socket = Daemon::get_socket_path();
+    let daemon_socket = Daemon::get_socket_path()
+        .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
 
     match command {
         DaemonCommands::Start { detach } => {
@@ -163,7 +165,8 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
             }
 
             // Ensure state directory exists
-            let state_dir = Daemon::global_state_dir();
+            let state_dir = Daemon::global_state_dir()
+                .map_err(|e| CliError::Server(format!("Cannot determine state directory: {}", e)))?;
             std::fs::create_dir_all(&state_dir)?;
 
             if *detach {
@@ -658,7 +661,13 @@ async fn handle_logs(
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
             // Re-connect for each request (simple approach)
-            let daemon_socket = Daemon::get_socket_path();
+            let daemon_socket = match Daemon::get_socket_path() {
+                Ok(path) => path,
+                Err(_) => {
+                    eprintln!("\nCannot determine daemon socket path");
+                    break;
+                }
+            };
             let mut client = match Client::connect(&daemon_socket).await {
                 Ok(c) => c,
                 Err(_) => {

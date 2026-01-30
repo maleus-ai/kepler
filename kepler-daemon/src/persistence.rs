@@ -214,7 +214,7 @@ impl ConfigPersistence {
 
         for (service_name, config) in services {
             if let Some(ref env_file) = config.env_file {
-                // Resolve relative paths to config_dir
+                // Resolve the env_file path (relative to config dir, or absolute as-is)
                 let source = if env_file.is_relative() {
                     config_dir.join(env_file)
                 } else {
@@ -222,6 +222,10 @@ impl ConfigPersistence {
                 };
 
                 if source.exists() {
+                    debug!(
+                        "Service '{}': Copying env_file {:?} to state directory",
+                        service_name, source
+                    );
                     // Use service name as prefix to avoid conflicts
                     let dest_name = format!(
                         "{}_{}",

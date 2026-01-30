@@ -4,7 +4,7 @@ use parking_lot::RwLock;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Default maximum bytes to read when tailing logs (10MB)
@@ -120,7 +120,7 @@ impl LogBuffer {
     }
 
     /// Sequence metadata file path
-    fn sequence_file_path(logs_dir: &PathBuf) -> PathBuf {
+    fn sequence_file_path(logs_dir: &Path) -> PathBuf {
         logs_dir.join(".sequence")
     }
 
@@ -128,7 +128,7 @@ impl LogBuffer {
     ///
     /// This is much faster than counting all lines on startup.
     /// Uses file size as an approximation when the metadata file doesn't exist.
-    fn load_or_estimate_sequence(logs_dir: &PathBuf) -> u64 {
+    fn load_or_estimate_sequence(logs_dir: &Path) -> u64 {
         let seq_file = Self::sequence_file_path(logs_dir);
 
         // Try to load from metadata file first (O(1))
@@ -215,9 +215,9 @@ impl LogBuffer {
         // Format: {timestamp_unix}\t{stream}\t{service}\t{line}
         // Use pre-allocated buffer to reduce allocations
         self.format_buffer.clear();
-        let _ = write!(
+        let _ = writeln!(
             self.format_buffer,
-            "{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}",
             timestamp,
             stream.as_str(),
             service,

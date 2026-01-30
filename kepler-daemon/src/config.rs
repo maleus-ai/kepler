@@ -699,7 +699,7 @@ impl KeplerConfig {
 
         // Extract lua: from the root mapping
         let lua_code = if let Value::Mapping(map) = &*value {
-            map.get(&Value::String("lua".to_string()))
+            map.get(Value::String("lua".to_string()))
                 .and_then(|v| v.as_str())
                 .map(String::from)
         } else {
@@ -727,7 +727,7 @@ impl KeplerConfig {
         // Now process the services
         if let Value::Mapping(map) = value {
             if let Some(Value::Mapping(services)) =
-                map.get_mut(&Value::String("services".to_string()))
+                map.get_mut(Value::String("services".to_string()))
             {
                 // Collect service names first to avoid borrowing issues
                 let service_names: Vec<String> = services
@@ -737,7 +737,7 @@ impl KeplerConfig {
 
                 for service_name in service_names {
                     if let Some(service_value) =
-                        services.get_mut(&Value::String(service_name.clone()))
+                        services.get_mut(Value::String(service_name.clone()))
                     {
                         Self::process_service_lua(
                             service_value,
@@ -751,19 +751,17 @@ impl KeplerConfig {
             }
 
             // Process kepler namespace (global hooks are inside kepler.hooks)
-            if let Some(kepler_value) = map.get_mut(&Value::String("kepler".to_string())) {
-                if let Value::Mapping(kepler_map) = kepler_value {
-                    // Process kepler.hooks
-                    if let Some(hooks_value) = kepler_map.get_mut(&Value::String("hooks".to_string())) {
-                        let sys_env = Self::get_system_env();
-                        Self::process_global_hooks_lua(
-                            hooks_value,
-                            &evaluator,
-                            &sys_env,
-                            config_dir,
-                            config_path,
-                        )?;
-                    }
+            if let Some(Value::Mapping(kepler_map)) = map.get_mut(Value::String("kepler".to_string())) {
+                // Process kepler.hooks
+                if let Some(hooks_value) = kepler_map.get_mut(Value::String("hooks".to_string())) {
+                    let sys_env = Self::get_system_env();
+                    Self::process_global_hooks_lua(
+                        hooks_value,
+                        &evaluator,
+                        &sys_env,
+                        config_dir,
+                        config_path,
+                    )?;
                 }
             }
         }
@@ -796,7 +794,7 @@ impl KeplerConfig {
         let sys_env = Self::get_system_env();
 
         // Step 2: Evaluate env_file if it's a Lua tag (only sys_env available)
-        if let Some(env_file_value) = service_map.get_mut(&Value::String("env_file".to_string())) {
+        if let Some(env_file_value) = service_map.get_mut(Value::String("env_file".to_string())) {
             let ctx = EvalContext {
                 sys_env: sys_env.clone(),
                 env_file: HashMap::new(),
@@ -809,7 +807,7 @@ impl KeplerConfig {
 
         // Step 3: Load env_file content if specified (into ctx.env_file)
         let env_file_vars = if let Some(Value::String(env_file_path)) =
-            service_map.get(&Value::String("env_file".to_string()))
+            service_map.get(Value::String("env_file".to_string()))
         {
             let path = if PathBuf::from(env_file_path).is_relative() {
                 config_dir.join(env_file_path)
@@ -829,7 +827,7 @@ impl KeplerConfig {
 
         // Step 4: Evaluate environment if it's a Lua tag (sys_env + env_file available)
         if let Some(environment_value) =
-            service_map.get_mut(&Value::String("environment".to_string()))
+            service_map.get_mut(Value::String("environment".to_string()))
         {
             let ctx = EvalContext {
                 sys_env: sys_env.clone(),
@@ -850,7 +848,7 @@ impl KeplerConfig {
         // Step 5: Merge environment array into full env (sys_env + env_file + environment)
         let mut full_env = env_for_environment;
         if let Some(Value::Sequence(environment)) =
-            service_map.get(&Value::String("environment".to_string()))
+            service_map.get(Value::String("environment".to_string()))
         {
             for entry in environment {
                 if let Value::String(s) = entry {
@@ -922,7 +920,7 @@ impl KeplerConfig {
             .collect();
 
         for hook_name in hook_names {
-            if let Some(hook_value) = hooks_map.get_mut(&Value::String(hook_name.clone())) {
+            if let Some(hook_value) = hooks_map.get_mut(Value::String(hook_name.clone())) {
                 let ctx = EvalContext {
                     sys_env: base_ctx.sys_env.clone(),
                     env_file: base_ctx.env_file.clone(),
@@ -965,7 +963,7 @@ impl KeplerConfig {
             .collect();
 
         for hook_name in hook_names {
-            if let Some(hook_value) = hooks_map.get_mut(&Value::String(hook_name.clone())) {
+            if let Some(hook_value) = hooks_map.get_mut(Value::String(hook_name.clone())) {
                 let ctx = EvalContext {
                     sys_env: sys_env.clone(),
                     env_file: HashMap::new(),
@@ -1118,7 +1116,7 @@ impl KeplerConfig {
             mlua::Value::Number(n) => {
                 // Convert float to YAML number
                 Ok(Value::Number(
-                    serde_yaml::Number::from(n as f64),
+                    serde_yaml::Number::from(n),
                 ))
             }
             mlua::Value::String(s) => {

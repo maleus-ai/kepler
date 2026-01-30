@@ -42,12 +42,16 @@ where
     }
 
     pub async fn run(mut self) -> Result<()> {
-        // Remove stale socket file
-        if self.socket_path.exists() {
-            std::fs::remove_file(&self.socket_path).map_err(|e| ServerError::StaleSocket {
-                socket_path: self.socket_path.clone(),
-                source: e,
-            })?;
+        // Remove stale socket file (atomic - avoid TOCTOU race)
+        match std::fs::remove_file(&self.socket_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(ServerError::StaleSocket {
+                    socket_path: self.socket_path.clone(),
+                    source: e,
+                })
+            }
         }
 
         let listener = UnixListener::bind(&self.socket_path).map_err(|e| ServerError::Bind {

@@ -464,7 +464,18 @@ impl ServiceOrchestrator {
         // This makes `stop --clean` behave like `prune` - complete cleanup
         if service_filter.is_none() && clean {
             let config_hash = handle.config_hash();
-            let state_dir = crate::global_state_dir().join("configs").join(&config_hash);
+            let state_dir = match crate::global_state_dir() {
+                Ok(dir) => dir.join("configs").join(config_hash),
+                Err(e) => {
+                    warn!("Cannot determine state directory for cleanup: {}", e);
+                    // Continue without cleanup - services were still stopped
+                    if stopped.is_empty() {
+                        return Ok("No services were running".to_string());
+                    } else {
+                        return Ok(format!("Stopped services: {}", stopped.join(", ")));
+                    }
+                }
+            };
 
             // Remove entire state directory (logs, config snapshots, env_files, etc.)
             if state_dir.exists() {
@@ -932,7 +943,7 @@ impl ServiceOrchestrator {
     ) -> Result<Vec<PrunedConfigInfo>, OrchestratorError> {
         use crate::persistence::ConfigPersistence;
 
-        let configs_dir = crate::global_state_dir().join("configs");
+        let configs_dir = crate::global_state_dir()?.join("configs");
 
         if !configs_dir.exists() {
             return Ok(Vec::new());

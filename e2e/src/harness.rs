@@ -343,6 +343,16 @@ impl E2eHarness {
         Ok(file_path)
     }
 
+    /// Create a file in the config directory (for env_file tests).
+    /// This places the file alongside config files so env_file can use relative paths.
+    pub fn create_config_file(&self, name: &str, content: &str) -> E2eResult<PathBuf> {
+        let config_dir = self.temp_dir.path().join("test_configs");
+        std::fs::create_dir_all(&config_dir)?;
+        let file_path = config_dir.join(name);
+        std::fs::write(&file_path, content)?;
+        Ok(file_path)
+    }
+
     /// Modify a file (for file watcher tests)
     pub fn modify_file(&self, path: &Path, content: &str) -> E2eResult<()> {
         std::fs::write(path, content)?;

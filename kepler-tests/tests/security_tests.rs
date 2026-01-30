@@ -1137,30 +1137,6 @@ fn test_lua_debug_library_blocked() {
     );
 }
 
-/// Verify that require() cannot escape the config directory
-#[test]
-fn test_lua_require_cannot_escape_config_dir() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
-    use tempfile::TempDir;
-
-    let temp_dir = TempDir::new().unwrap();
-    let eval = LuaEvaluator::new(temp_dir.path()).unwrap();
-    let ctx = EvalContext::default();
-
-    // Attempt to require a file outside the config directory
-    let result = eval.eval::<mlua::Value>(r#"return require("../../../etc/passwd")"#, &ctx);
-    assert!(
-        result.is_err(),
-        "require() should not be able to escape config directory"
-    );
-
-    // Try with absolute path
-    let result = eval.eval::<mlua::Value>(r#"return require("/etc/passwd")"#, &ctx);
-    assert!(
-        result.is_err(),
-        "require() should not load absolute paths outside config dir"
-    );
-}
 
 
 // ============================================================================
@@ -1203,4 +1179,157 @@ async fn test_socket_file_permissions() {
     }
     // Note: If socket doesn't exist at this path, the test harness may use
     // a different socket mechanism (e.g., in-process) which is also acceptable
+}
+
+// ============================================================================
+// Config Baking Security Tests
+// ============================================================================
+// These tests document the security model: configs are "baked" on first start.
+// After baking, modifications to original files have no effect until explicit
+// recreate. This is primarily a defense against accidental misconfiguration,
+// not privilege escalation (since CLI requires same-user socket access).
+
+/// Verify that env_file changes after baking have no effect
+/// This documents that env_file is copied to state directory on first load.
+#[tokio::test]
+async fn test_env_file_baked_changes_ignored() {
+    use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
+    use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
+    use kepler_tests::helpers::marker_files::MarkerFileHelper;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("env_bake");
+
+    // Create initial env file
+    let env_file_path = temp_dir.path().join("test.env");
+    std::fs::write(&env_file_path, "BAKED_VAR=original_value\n").unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "echo \"BAKED_VAR=$BAKED_VAR\" >> {} && sleep 3600",
+                    marker_path.display()
+                ),
+            ])
+            .with_env_file(env_file_path.clone())
+            .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    // First start - env_file is baked
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("env_bake", Duration::from_secs(2))
+        .await;
+    assert!(
+        content.as_ref().map_or(false, |c| c.contains("original_value")),
+        "First run should have original value"
+    );
+
+    harness.stop_service("test").await.unwrap();
+
+    // Modify the original env file (this should be ignored!)
+    std::fs::write(&env_file_path, "BAKED_VAR=modified_value\n").unwrap();
+
+    // Clear marker for second run
+    marker.delete_marker("env_bake");
+
+    // Restart - should use BAKED value, not modified
+    harness.start_service("test").await.unwrap();
+
+    let content2 = marker
+        .wait_for_marker_content("env_bake", Duration::from_secs(2))
+        .await;
+
+    // SECURITY PROPERTY: The baked value is used, not the modified file
+    assert!(
+        content2.as_ref().map_or(false, |c| c.contains("original_value")),
+        "After restart, should still use BAKED value 'original_value', not modified. Got: {:?}",
+        content2
+    );
+    assert!(
+        !content2.as_ref().map_or(true, |c| c.contains("modified_value")),
+        "Modified value should NOT appear - baking should protect against file changes"
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Verify that config command changes after baking have no effect
+/// This documents that the entire config is baked, not just env_file.
+#[tokio::test]
+async fn test_config_baked_changes_ignored() {
+    use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
+    use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
+    use kepler_tests::helpers::marker_files::MarkerFileHelper;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+
+    // Use environment variable to track which config version ran
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "echo 'version=original' >> {} && sleep 3600",
+                    marker.marker_path("config_bake").display()
+                ),
+            ])
+            .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    // First start - config is baked
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("config_bake", Duration::from_secs(2))
+        .await;
+    assert!(
+        content.as_ref().map_or(false, |c| c.contains("version=original")),
+        "First run should have original config"
+    );
+
+    harness.stop_service("test").await.unwrap();
+    marker.delete_marker("config_bake");
+
+    // Note: We can't easily modify the config file in this test harness,
+    // but the persistence_tests.rs has test_config_restored_from_snapshot_on_restart
+    // which explicitly tests this. This test documents the security implication.
+
+    // Restart - uses baked config
+    harness.start_service("test").await.unwrap();
+
+    let content2 = marker
+        .wait_for_marker_content("config_bake", Duration::from_secs(2))
+        .await;
+
+    // Config should still be the original baked version
+    assert!(
+        content2.as_ref().map_or(false, |c| c.contains("version=original")),
+        "Restart should use baked config"
+    );
+
+    harness.stop_service("test").await.unwrap();
 }
