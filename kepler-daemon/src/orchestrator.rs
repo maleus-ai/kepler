@@ -118,11 +118,12 @@ impl ServiceOrchestrator {
         &self,
         config_path: &Path,
         service_filter: Option<&str>,
+        sys_env: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
         // Get or create the config actor
         let handle = self
             .registry
-            .get_or_create(config_path.to_path_buf())
+            .get_or_create(config_path.to_path_buf(), sys_env.clone())
             .await?;
 
         let config_dir = handle.get_config_dir().await;
@@ -149,7 +150,7 @@ impl ServiceOrchestrator {
 
         // Run global on_init hook if first time
         if !initialized {
-            let env = std::env::vars().collect();
+            let env = sys_env.clone().unwrap_or_else(|| std::env::vars().collect());
             run_global_hook(
                 &global_hooks,
                 GlobalHookType::OnInit,
@@ -164,7 +165,7 @@ impl ServiceOrchestrator {
         }
 
         // Run global on_start hook
-        let env = std::env::vars().collect();
+        let env = sys_env.clone().unwrap_or_else(|| std::env::vars().collect());
         run_global_hook(
             &global_hooks,
             GlobalHookType::OnStart,
@@ -321,7 +322,7 @@ impl ServiceOrchestrator {
 
         // Get or create the actor (needed for cleanup hooks even if not started)
         let handle = if clean {
-            Some(self.registry.get_or_create(config_path.to_path_buf()).await?)
+            Some(self.registry.get_or_create(config_path.to_path_buf(), None).await?)
         } else {
             self.registry.get(&config_path.to_path_buf())
         };
@@ -500,88 +501,29 @@ impl ServiceOrchestrator {
     /// Restart services for a config
     ///
     /// If `service_filter` is provided, only restarts that service.
-    /// Otherwise restarts all services.
+    /// Otherwise restarts all services with fresh config (re-expands environment variables).
+    ///
+    /// This method now incorporates the old "recreate" behavior:
+    /// 1. Stop services
+    /// 2. Clear config snapshot to force re-expansion
+    /// 3. Unload config actor
+    /// 4. Start services with fresh sys_env
     pub async fn restart_services(
         &self,
         config_path: &Path,
         service_filter: Option<&str>,
+        sys_env: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
-        // Get or create the config actor (also reloads config)
-        let handle = self
-            .registry
-            .get_or_create(config_path.to_path_buf())
-            .await?;
-
-        // Get services to restart
-        let config = handle
-            .get_config()
-            .await
-            .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
-
-        let services_to_restart = match service_filter {
-            Some(name) => {
-                if !config.services.contains_key(name) {
-                    return Err(OrchestratorError::ServiceNotFound(name.to_string()));
-                }
-                vec![name.to_string()]
-            }
-            None => get_start_order(&config.services)?,
-        };
-
-        // Run on_restart hooks and apply retention
-        for service_name in &services_to_restart {
-            if let Some(ctx) = handle.get_service_context(service_name).await {
-                // Run on_restart hook
-                if let Err(e) = self
-                    .run_service_hook(&ctx, service_name, ServiceHookType::OnRestart)
-                    .await
-                {
-                    warn!("Hook on_restart failed for {}: {}", service_name, e);
-                }
-
-                // Apply on_restart log retention
-                self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart)
-                    .await;
-            }
-        }
-
-        // Stop services
-        self.stop_services(config_path, service_filter, false).await?;
-
-        // Small delay between stop and start
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-        // Start services
-        self.start_services(config_path, service_filter).await
-    }
-
-    /// Recreate services with fresh config (re-expands environment variables).
-    ///
-    /// This is used when the user wants to apply changes to environment variables
-    /// or configuration that wouldn't normally take effect until daemon restart.
-    ///
-    /// The process:
-    /// 1. Stop all services (or specific service)
-    /// 2. Clear the config snapshot (forces re-expansion of env vars)
-    /// 3. Unload the config actor
-    /// 4. Reload the config (will parse fresh from source)
-    /// 5. Start services
-    pub async fn recreate_services(
-        &self,
-        config_path: &Path,
-        service_filter: Option<&str>,
-    ) -> Result<String, OrchestratorError> {
-        info!("Recreating services for {:?}", config_path);
+        info!("Restarting services for {:?}", config_path);
 
         // Stop services first
         let stop_result = self.stop_services(config_path, service_filter, false).await;
         if let Err(e) = &stop_result {
-            warn!("Error stopping services during recreate: {}", e);
+            warn!("Error stopping services during restart: {}", e);
         }
 
-        // Get the existing handle to clear snapshot
+        // Clear snapshot to force re-expansion with new env
         if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
-            // Clear the snapshot to force re-expansion
             if let Err(e) = handle.clear_snapshot().await {
                 warn!("Failed to clear snapshot: {}", e);
             }
@@ -590,12 +532,12 @@ impl ServiceOrchestrator {
         // Unload the config actor completely
         self.registry.unload(&config_path.to_path_buf()).await;
 
-        // Small delay
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-        // Start services (this will reload the config fresh from source)
-        self.start_services(config_path, service_filter).await
+        // Start services with fresh config and sys_env
+        self.start_services(config_path, service_filter, sys_env).await
     }
+
 
     /// Restart a single service (used by file watcher)
     pub async fn restart_single_service(
@@ -975,7 +917,8 @@ impl ServiceOrchestrator {
                 _ => {
                     // No source_path.txt or failed to read - check if config.yaml is readable
                     let config_file = state_dir.join("config.yaml");
-                    if config_file.exists() && KeplerConfig::load(&config_file).is_ok() {
+                    let empty_env = HashMap::new();
+                    if config_file.exists() && KeplerConfig::load(&config_file, &empty_env).is_ok() {
                         // Config is readable but no source path - treat as orphaned
                         ("unknown (orphaned)".to_string(), true)
                     } else {
@@ -1058,7 +1001,9 @@ impl ServiceOrchestrator {
 
     /// Run cleanup hook before pruning
     async fn run_cleanup_hook_for_prune(&self, config_file: &Path) {
-        if let Ok(config) = KeplerConfig::load(config_file) {
+        // Use daemon's current environment for cleanup hooks during prune
+        let daemon_env: HashMap<String, String> = std::env::vars().collect();
+        if let Ok(config) = KeplerConfig::load(config_file, &daemon_env) {
             let config_dir = config_file.parent().unwrap_or(Path::new("."));
             let env: HashMap<String, String> = std::env::vars().collect();
 

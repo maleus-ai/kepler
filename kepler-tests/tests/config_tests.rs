@@ -42,7 +42,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hc = config.services["test"].healthcheck.as_ref().unwrap();
     assert_eq!(hc.interval, Duration::from_secs(30)); // Default
@@ -70,7 +70,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hc = config.services["test"].healthcheck.as_ref().unwrap();
     assert_eq!(hc.interval, Duration::from_secs(5));
@@ -97,7 +97,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
 
@@ -130,7 +130,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let result = KeplerConfig::load(&config_path);
+    let result = KeplerConfig::load_without_sys_env(&config_path);
 
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -154,7 +154,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let result = KeplerConfig::load(&config_path);
+    let result = KeplerConfig::load_without_sys_env(&config_path);
 
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -181,7 +181,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
     match hooks.on_start.as_ref().unwrap() {
@@ -208,7 +208,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
     match hooks.on_start.as_ref().unwrap() {
@@ -242,7 +242,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.global_hooks().unwrap();
     assert!(hooks.on_init.is_some());
@@ -271,7 +271,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     use kepler_daemon::config::RestartPolicy;
 
@@ -307,7 +307,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     use kepler_daemon::config::RestartPolicy;
 
@@ -333,7 +333,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let env = &config.services["test"].environment;
     assert_eq!(env.len(), 3);
@@ -365,7 +365,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     use kepler_daemon::config::LogRetention;
 
@@ -393,7 +393,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let working_dir = config.services["test"].working_dir.as_ref().unwrap();
     assert_eq!(working_dir.to_string_lossy(), "/tmp/test");
@@ -420,7 +420,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     assert_eq!(config.services.len(), 3);
     assert!(config.services.contains_key("frontend"));
@@ -451,7 +451,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let watch = config.services["test"].restart.watch_patterns();
     assert_eq!(watch.len(), 3);
@@ -477,7 +477,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     use kepler_daemon::config::RestartPolicy;
 
@@ -503,7 +503,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let result = KeplerConfig::load(&config_path);
+    let result = KeplerConfig::load_without_sys_env(&config_path);
 
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -542,7 +542,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
     assert!(hooks.on_init.is_some());
@@ -580,7 +580,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     // User by name
     assert_eq!(config.services["web"].user.as_deref(), Some("www-data"));
@@ -626,7 +626,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
 
@@ -673,7 +673,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
 
@@ -720,7 +720,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let result = KeplerConfig::load(&config_path);
+    let result = KeplerConfig::load_without_sys_env(&config_path);
     assert!(result.is_ok());
 }
 
@@ -737,7 +737,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let result = KeplerConfig::load(&config_path);
+    let result = KeplerConfig::load_without_sys_env(&config_path);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("invalid characters"), "Error: {}", err);
@@ -756,7 +756,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let result = KeplerConfig::load(&config_path);
+    let result = KeplerConfig::load_without_sys_env(&config_path);
     assert!(result.is_err());
 }
 
@@ -773,7 +773,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let result = KeplerConfig::load(&config_path);
+    let result = KeplerConfig::load_without_sys_env(&config_path);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("empty"), "Error: {}", err);
@@ -807,7 +807,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     // Global retention via getter
     let global_logs = config.global_logs().unwrap();
@@ -839,7 +839,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     assert_eq!(config.global_logs().unwrap().store, Some(LogStoreConfig::Simple(false)));
     assert_eq!(
@@ -870,7 +870,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let global_store = config.global_logs().unwrap().store.as_ref().unwrap();
     assert!(global_store.store_stdout());
@@ -913,7 +913,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let limits = config.services["test"].limits.as_ref().unwrap();
     assert_eq!(limits.memory.as_deref(), Some("512M"));

@@ -35,7 +35,7 @@ fn create_actor_with_state_dir(
         std::env::set_var("KEPLER_DAEMON_PATH", &state_dir);
     }
 
-    let (handle, actor) = ConfigActor::create(config_path)?;
+    let (handle, actor) = ConfigActor::create(config_path, None)?;
     let task = tokio::spawn(actor.run());
     Ok((handle, task))
 }

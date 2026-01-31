@@ -239,7 +239,15 @@ impl ConfigActor {
     /// This method implements Docker-like immutable config persistence:
     /// - If an expanded config snapshot exists, load from it (don't re-expand env vars)
     /// - If no snapshot exists, parse fresh from source (snapshot taken on first start)
-    pub fn create(config_path: PathBuf) -> Result<(ConfigActorHandle, Self)> {
+    ///
+    /// The `sys_env` parameter provides system environment variables captured from the CLI.
+    /// If None, the daemon's current environment is used.
+    pub fn create(
+        config_path: PathBuf,
+        sys_env: Option<HashMap<String, String>>,
+    ) -> Result<(ConfigActorHandle, Self)> {
+        // Use provided sys_env or fall back to current daemon environment
+        let sys_env = sys_env.unwrap_or_else(|| std::env::vars().collect());
         // Canonicalize path first
         let canonical_path = std::fs::canonicalize(&config_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -369,8 +377,8 @@ impl ConfigActor {
                         .map_err(DaemonError::ConfigCopy)?;
                 }
 
-                // Parse config from the secure copy
-                let config = KeplerConfig::load(&copied_config_path)?;
+                // Parse config from the secure copy (baking with sys_env)
+                let config = KeplerConfig::load(&copied_config_path, &sys_env)?;
 
                 // Get config directory
                 let config_dir = canonical_path
@@ -383,6 +391,7 @@ impl ConfigActor {
                 let _ = persistence.copy_env_files(&config.services, &config_dir);
 
                 // Initialize service states with pre-computed environment and working directory
+                // Note: The config is already "baked" with sys_env applied (if inherit policy)
                 let services = config
                     .services
                     .iter()
@@ -854,42 +863,28 @@ impl ConfigActor {
     }
 
     fn reload_config(&mut self) -> Result<()> {
-        // Read original file contents
-        let contents = std::fs::read(&self.config_path)?;
-
-        // Copy to secure location
-        let copied_config_path = self.state_dir.join("config.yaml");
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&copied_config_path)
-                .map_err(DaemonError::ConfigCopy)?;
-            file.write_all(&contents).map_err(DaemonError::ConfigCopy)?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(&copied_config_path, &contents).map_err(DaemonError::ConfigCopy)?;
-        }
-
-        // Parse config
-        let new_config = KeplerConfig::load(&copied_config_path)?;
+        // In the immutable snapshot model, once a config is baked, it should not
+        // be reloaded from source. The snapshot contains the fully baked config
+        // with sys_env already applied.
+        //
+        // To pick up config changes, use the restart command which:
+        // 1. Stops services
+        // 2. Clears the snapshot
+        // 3. Reloads with fresh sys_env from CLI
+        //
+        // This method now only rebuilds service states from the existing baked config,
+        // which is useful for picking up env_file changes that were copied to state dir.
 
         // Preserve service initialized states
         let old_services = std::mem::take(&mut self.services);
 
-        // Re-copy env_files to state directory (they may have changed)
+        // Re-copy env_files to state directory (they may have changed on disk)
         let _ = self
             .persistence
-            .copy_env_files(&new_config.services, &self.config_dir);
+            .copy_env_files(&self.config.services, &self.config_dir);
 
-        // Initialize new service states
-        self.services = new_config
+        // Rebuild service states from existing baked config
+        self.services = self.config
             .services
             .iter()
             .map(|(name, service_config)| {
@@ -916,7 +911,6 @@ impl ConfigActor {
             })
             .collect();
 
-        self.config = new_config;
         Ok(())
     }
 

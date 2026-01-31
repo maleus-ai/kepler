@@ -93,7 +93,8 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Commands::Start { service } => {
-            let response = client.start(canonical_path, service).await?;
+            let sys_env: HashMap<String, String> = std::env::vars().collect();
+            let response = client.start(canonical_path, service, Some(sys_env)).await?;
             handle_response(response);
         }
 
@@ -103,7 +104,8 @@ async fn run() -> Result<()> {
         }
 
         Commands::Restart { service } => {
-            let response = client.restart(canonical_path, service).await?;
+            let sys_env: HashMap<String, String> = std::env::vars().collect();
+            let response = client.restart(canonical_path, service, Some(sys_env)).await?;
             handle_response(response);
         }
 
@@ -129,10 +131,6 @@ async fn run() -> Result<()> {
             unreachable!()
         }
 
-        Commands::Recreate { service } => {
-            let response = client.recreate(canonical_path, service).await?;
-            handle_response(response);
-        }
     }
 
     Ok(())

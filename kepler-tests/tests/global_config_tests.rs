@@ -24,7 +24,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     // Check that global sys_env is set to inherit
     assert_eq!(
@@ -59,7 +59,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     assert_eq!(
         config.global_sys_env(),
@@ -88,7 +88,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     // Global should be inherit
     assert_eq!(
@@ -150,7 +150,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     // Verify kepler namespace
     assert!(config.kepler.is_some(), "kepler namespace should exist");
@@ -192,7 +192,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     // No kepler namespace - should fall back to defaults
     assert!(config.kepler.is_none() || config.global_sys_env().is_none());
@@ -226,7 +226,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     // sys_env should be set
     assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));

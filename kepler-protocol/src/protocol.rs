@@ -17,6 +17,9 @@ pub enum Request {
         config_path: PathBuf,
         /// Service name (None = all services)
         service: Option<String>,
+        /// System environment variables captured from CLI
+        #[serde(default)]
+        sys_env: Option<HashMap<String, String>>,
     },
     /// Stop service(s)
     Stop {
@@ -33,6 +36,9 @@ pub enum Request {
         config_path: PathBuf,
         /// Service name (None = all services)
         service: Option<String>,
+        /// System environment variables captured from CLI (for re-baking config snapshot)
+        #[serde(default)]
+        sys_env: Option<HashMap<String, String>>,
     },
     /// Get status of services
     Status {
@@ -81,13 +87,6 @@ pub enum Request {
         force: bool,
         /// Show what would be pruned without deleting
         dry_run: bool,
-    },
-    /// Recreate services with fresh config (re-expands environment variables)
-    Recreate {
-        /// Path to the config file
-        config_path: PathBuf,
-        /// Service name (None = all services)
-        service: Option<String>,
     },
 }
 

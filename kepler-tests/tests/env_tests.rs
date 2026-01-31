@@ -1,5 +1,6 @@
 //! Environment variable handling and merging tests
 
+use kepler_daemon::config::SysEnvPolicy;
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -381,7 +382,7 @@ async fn test_system_var_passed_and_expandable() {
                 "-c".to_string(),
                 format!(
                     concat!(
-                        // Check if KEPLER_TEST_VAR exists in runtime env (should exist - all vars inherited)
+                        // Check if KEPLER_TEST_VAR exists in runtime env (should exist with sys_env: inherit)
                         "echo DIRECT=$(printenv KEPLER_TEST_VAR 2>/dev/null || echo NOTSET) >> {} && ",
                         // Check EXPANDED_VAR which should have the expanded value
                         "echo EXPANDED=$(printenv EXPANDED_VAR) >> {} && ",
@@ -393,6 +394,8 @@ async fn test_system_var_passed_and_expandable() {
             ])
             // Use ${VAR} syntax to explicitly reference the var at config time
             .with_environment(vec!["EXPANDED_VAR=${KEPLER_TEST_VAR}".to_string()])
+            // Enable sys_env inheritance to get system vars in runtime env
+            .with_sys_env(SysEnvPolicy::Inherit)
             .build(),
         )
         .build();
@@ -478,6 +481,8 @@ async fn test_env_merge_priority_chain() {
                 "VAR_FILE_AND_ARRAY=from_array".to_string(),
                 "VAR_ONLY_ARRAY=only_in_array".to_string(),
             ])
+            // Enable sys_env inheritance to get system vars (like HOME) in runtime env
+            .with_sys_env(SysEnvPolicy::Inherit)
             .build(),
         )
         .build();

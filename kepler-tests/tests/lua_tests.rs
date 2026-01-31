@@ -3,14 +3,17 @@
 //! Tests the !lua and !lua_file YAML tags for dynamic config generation.
 
 use kepler_daemon::config::KeplerConfig;
+use std::collections::HashMap;
 use std::path::Path;
 use tempfile::TempDir;
 
-/// Helper to write a config file and load it
+/// Helper to write a config file and load it with test process's environment
 fn load_config_from_string(yaml: &str, dir: &Path) -> Result<KeplerConfig, String> {
     let config_path = dir.join("kepler.yaml");
     std::fs::write(&config_path, yaml).map_err(|e| e.to_string())?;
-    KeplerConfig::load(&config_path).map_err(|e| e.to_string())
+    // Capture test process's environment for Lua scripts to access
+    let sys_env: HashMap<String, String> = std::env::vars().collect();
+    KeplerConfig::load(&config_path, &sys_env).map_err(|e| e.to_string())
 }
 
 /// Basic test: !lua tag returns a simple string

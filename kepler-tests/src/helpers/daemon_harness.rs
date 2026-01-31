@@ -49,7 +49,7 @@ impl TestDaemonHarness {
                 std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
             }
 
-            ConfigActor::create(config_path.clone())
+            ConfigActor::create(config_path.clone(), None)
                 .map_err(|e| std::io::Error::other(e.to_string()))?
         };
         tokio::spawn(actor.run());
@@ -89,7 +89,7 @@ impl TestDaemonHarness {
                 std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
             }
 
-            ConfigActor::create(config_path.clone())
+            ConfigActor::create(config_path.clone(), None)
                 .map_err(|e| std::io::Error::other(e.to_string()))?
         };
         tokio::spawn(actor.run());

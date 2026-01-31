@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use tokio::{
@@ -99,10 +100,12 @@ impl Client {
         &mut self,
         config_path: PathBuf,
         service: Option<String>,
+        sys_env: Option<HashMap<String, String>>,
     ) -> Result<Response> {
         self.send_request(&Request::Start {
             config_path,
             service,
+            sys_env,
         })
         .await
     }
@@ -127,10 +130,12 @@ impl Client {
         &mut self,
         config_path: PathBuf,
         service: Option<String>,
+        sys_env: Option<HashMap<String, String>>,
     ) -> Result<Response> {
         self.send_request(&Request::Restart {
             config_path,
             service,
+            sys_env,
         })
         .await
     }
@@ -202,16 +207,4 @@ impl Client {
         self.send_request(&Request::Prune { force, dry_run }).await
     }
 
-    /// Recreate services with fresh config (re-expands environment variables)
-    pub async fn recreate(
-        &mut self,
-        config_path: PathBuf,
-        service: Option<String>,
-    ) -> Result<Response> {
-        self.send_request(&Request::Recreate {
-            config_path,
-            service,
-        })
-        .await
-    }
 }

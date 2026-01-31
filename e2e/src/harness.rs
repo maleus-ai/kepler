@@ -202,6 +202,51 @@ impl E2eHarness {
         Ok(())
     }
 
+    /// Start the daemon process with a clean environment.
+    /// Only essential variables (PATH, HOME, etc.) and KEPLER_DAEMON_PATH are set.
+    /// This is useful for testing that CLI environment is used, not daemon's.
+    pub async fn start_daemon_with_clean_env(&mut self, excluded_vars: &[&str]) -> E2eResult<()> {
+        if self.daemon_process.is_some() {
+            return Ok(()); // Already running
+        }
+
+        let mut cmd = Command::new(&self.daemon_bin);
+
+        // Clear environment and only set essential variables
+        cmd.env_clear();
+
+        // Inherit essential system variables
+        for key in ["PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL"] {
+            if let Ok(value) = std::env::var(key) {
+                cmd.env(key, value);
+            }
+        }
+
+        // Set the daemon path
+        cmd.env("KEPLER_DAEMON_PATH", self.temp_dir.path());
+
+        // Inherit other env vars EXCEPT the excluded ones
+        for (key, value) in std::env::vars() {
+            if !excluded_vars.contains(&key.as_str())
+                && !["PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL", "KEPLER_DAEMON_PATH"].contains(&key.as_str())
+            {
+                cmd.env(key, value);
+            }
+        }
+
+        let child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        self.daemon_process = Some(child);
+
+        // Wait for the socket to appear
+        self.wait_for_socket(Duration::from_secs(10)).await?;
+
+        Ok(())
+    }
+
     /// Wait for the daemon socket to be available
     async fn wait_for_socket(&self, timeout_duration: Duration) -> E2eResult<()> {
         let socket = self.socket_path();
@@ -240,6 +285,65 @@ impl E2eHarness {
     /// Run the kepler CLI with the given arguments
     pub async fn run_cli(&self, args: &[&str]) -> E2eResult<CommandOutput> {
         self.run_cli_with_timeout(args, Duration::from_secs(30)).await
+    }
+
+    /// Run the kepler CLI with custom environment variables.
+    /// The provided env vars are set IN ADDITION to the harness's base env.
+    pub async fn run_cli_with_env(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> E2eResult<CommandOutput> {
+        self.run_cli_with_env_and_timeout(args, env, Duration::from_secs(30)).await
+    }
+
+    /// Run the kepler CLI with custom environment variables and timeout.
+    pub async fn run_cli_with_env_and_timeout(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        timeout_duration: Duration,
+    ) -> E2eResult<CommandOutput> {
+        let result = timeout(timeout_duration, async {
+            let mut cmd = Command::new(&self.kepler_bin);
+            cmd.args(args)
+                .env("KEPLER_DAEMON_PATH", self.temp_dir.path());
+
+            // Add custom environment variables
+            for (key, value) in env {
+                cmd.env(key, value);
+            }
+
+            let output = cmd.output().await?;
+
+            Ok::<CommandOutput, E2eError>(CommandOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                exit_code: output.status.code().unwrap_or(-1),
+            })
+        })
+        .await;
+
+        match result {
+            Ok(r) => r,
+            Err(_) => Err(E2eError::Timeout(format!(
+                "CLI command: {:?}",
+                args.join(" ")
+            ))),
+        }
+    }
+
+    /// Start services with custom environment variables for the CLI.
+    /// This tests that the CLI's environment is used, not the daemon's.
+    pub async fn start_services_with_env(
+        &self,
+        config_path: &Path,
+        env: &[(&str, &str)],
+    ) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli_with_env(&["-f", config_str, "start"], env).await
     }
 
     /// Run the kepler CLI with the given arguments and a custom timeout

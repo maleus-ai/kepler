@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,7 +39,14 @@ impl ConfigRegistry {
     /// Get or create a config actor for a path.
     /// If the actor already exists, returns the existing handle.
     /// Otherwise, creates a new actor, spawns it, and returns the handle.
-    pub async fn get_or_create(&self, config_path: PathBuf) -> Result<ConfigActorHandle> {
+    ///
+    /// The `sys_env` parameter provides the system environment variables captured
+    /// from the CLI. If None, the daemon's current environment is used.
+    pub async fn get_or_create(
+        &self,
+        config_path: PathBuf,
+        sys_env: Option<HashMap<String, String>>,
+    ) -> Result<ConfigActorHandle> {
         // Canonicalize path first
         let canonical_path = std::fs::canonicalize(&config_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -56,7 +64,7 @@ impl ConfigRegistry {
         }
 
         // Create new actor
-        let (handle, actor) = ConfigActor::create(config_path)?;
+        let (handle, actor) = ConfigActor::create(config_path, sys_env)?;
 
         // Spawn the actor
         tokio::spawn(actor.run());

@@ -1,0 +1,8 @@
+# Test that sys_env comes from CLI, not daemon
+# The service should see CLI_TEST_VAR which is set when the CLI runs,
+# but NOT set in the daemon's environment.
+services:
+  env-checker:
+    command: ["sh", "-c", "echo CLI_TEST_VAR=$CLI_TEST_VAR && sleep 30"]
+    sys_env: inherit
+    restart: no

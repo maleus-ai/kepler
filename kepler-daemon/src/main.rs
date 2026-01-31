@@ -215,13 +215,14 @@ async fn handle_request(
         Request::Start {
             config_path,
             service,
+            sys_env,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
             match orchestrator
-                .start_services(&config_path, service.as_deref())
+                .start_services(&config_path, service.as_deref(), sys_env)
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -250,13 +251,14 @@ async fn handle_request(
         Request::Restart {
             config_path,
             service,
+            sys_env,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
             match orchestrator
-                .restart_services(&config_path, service.as_deref())
+                .restart_services(&config_path, service.as_deref(), sys_env)
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -367,22 +369,6 @@ async fn handle_request(
             }
         }
 
-        Request::Recreate {
-            config_path,
-            service,
-        } => {
-            let config_path = match canonicalize_config_path(config_path) {
-                Ok(p) => p,
-                Err(e) => return Response::error(e.to_string()),
-            };
-            match orchestrator
-                .recreate_services(&config_path, service.as_deref())
-                .await
-            {
-                Ok(msg) => Response::ok_with_message(msg),
-                Err(e) => Response::error(e.to_string()),
-            }
-        }
     }
 }
 
@@ -465,7 +451,7 @@ async fn discover_existing_configs(registry: &SharedConfigRegistry) {
 
         // Load the config (will restore from snapshot)
         info!("Restoring config from {:?}", source_path);
-        match registry.get_or_create(source_path.clone()).await {
+        match registry.get_or_create(source_path.clone(), None).await {
             Ok(handle) => {
                 restored += 1;
 

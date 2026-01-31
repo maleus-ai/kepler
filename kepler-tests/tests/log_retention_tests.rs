@@ -482,7 +482,7 @@ services:
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load(&config_path).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     // Check global config
     let global_logs = config.global_logs().unwrap();

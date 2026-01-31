@@ -19,15 +19,15 @@ fn load_env_file(path: &Path) -> HashMap<String, String> {
     env
 }
 
-/// Expand a string using the given environment context.
-/// Priority: context (env_file vars) > system env vars
-fn expand_with_context(s: &str, context: &HashMap<String, String>) -> String {
+/// Expand a string using the given environment context and sys_env.
+/// Priority: context (env_file vars) > sys_env (CLI environment)
+fn expand_with_context(s: &str, context: &HashMap<String, String>, sys_env: &HashMap<String, String>) -> String {
     shellexpand::env_with_context(s, |var| -> std::result::Result<Option<Cow<'_, str>>, std::env::VarError> {
-        // First check context (env_file), then fall back to system env
+        // First check context (env_file), then fall back to sys_env (captured CLI environment)
         Ok(context
             .get(var)
             .map(|v| Cow::Borrowed(v.as_str()))
-            .or_else(|| std::env::var(var).ok().map(Cow::Owned)))
+            .or_else(|| sys_env.get(var).map(|v| Cow::Borrowed(v.as_str()))))
     })
     .map(|expanded| expanded.into_owned())
     .unwrap_or_else(|_| s.to_string())
@@ -635,8 +635,16 @@ fn validate_service_name(name: &str) -> std::result::Result<(), String> {
 }
 
 impl KeplerConfig {
-    /// Load configuration from a YAML file
-    pub fn load(path: &std::path::Path) -> Result<Self> {
+    /// Load configuration from a YAML file with system environment for baking.
+    ///
+    /// The `sys_env` parameter provides the system environment variables captured from the CLI.
+    /// These are used for:
+    /// 1. Shell expansion of `${VAR}` references in the config
+    /// 2. Lua script evaluation context
+    /// 3. If `sys_env: inherit` policy, these vars are baked into the service's environment
+    ///
+    /// After loading, the config is fully "baked" - no further sys_env access is needed.
+    pub fn load(path: &std::path::Path, sys_env: &HashMap<String, String>) -> Result<Self> {
         let contents = std::fs::read_to_string(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 DaemonError::ConfigNotFound(path.to_path_buf())
@@ -659,8 +667,8 @@ impl KeplerConfig {
                     source: e,
                 })?;
 
-            // Process Lua scripts
-            Self::process_lua_scripts(&mut value, config_dir, path)?;
+            // Process Lua scripts with sys_env context
+            Self::process_lua_scripts(&mut value, config_dir, path, sys_env)?;
 
             // Now deserialize the processed value
             serde_yaml::from_value(value).map_err(|e| DaemonError::ConfigParse {
@@ -675,13 +683,22 @@ impl KeplerConfig {
             })?
         };
 
-        // Pre-compute all environment variable expansions
-        config.resolve_environment();
+        // Pre-compute all environment variable expansions using sys_env
+        config.resolve_environment(sys_env);
 
         // Validate the config
         config.validate(path)?;
 
         Ok(config)
+    }
+
+    /// Load configuration from a YAML file without sys_env.
+    ///
+    /// This is a convenience method that loads config without any system environment
+    /// for baking. Useful for tests and validation where sys_env isn't needed.
+    /// For production use with CLI-captured environment, use `load()` instead.
+    pub fn load_without_sys_env(path: &std::path::Path) -> Result<Self> {
+        Self::load(path, &HashMap::new())
     }
 
     /// Process Lua scripts in the config value tree.
@@ -694,6 +711,7 @@ impl KeplerConfig {
         value: &mut serde_yaml::Value,
         config_dir: &Path,
         config_path: &Path,
+        sys_env: &HashMap<String, String>,
     ) -> Result<()> {
         use serde_yaml::Value;
 
@@ -745,6 +763,7 @@ impl KeplerConfig {
                             &evaluator,
                             config_dir,
                             config_path,
+                            sys_env,
                         )?;
                     }
                 }
@@ -754,11 +773,10 @@ impl KeplerConfig {
             if let Some(Value::Mapping(kepler_map)) = map.get_mut(Value::String("kepler".to_string())) {
                 // Process kepler.hooks
                 if let Some(hooks_value) = kepler_map.get_mut(Value::String("hooks".to_string())) {
-                    let sys_env = Self::get_system_env();
                     Self::process_global_hooks_lua(
                         hooks_value,
                         &evaluator,
-                        &sys_env,
+                        sys_env,
                         config_dir,
                         config_path,
                     )?;
@@ -782,6 +800,7 @@ impl KeplerConfig {
         evaluator: &LuaEvaluator,
         config_dir: &Path,
         config_path: &Path,
+        sys_env: &HashMap<String, String>,
     ) -> Result<()> {
         use serde_yaml::Value;
 
@@ -789,9 +808,6 @@ impl KeplerConfig {
             Value::Mapping(map) => map,
             _ => return Ok(()),
         };
-
-        // Step 1: Get system environment (ctx.sys_env)
-        let sys_env = Self::get_system_env();
 
         // Step 2: Evaluate env_file if it's a Lua tag (only sys_env available)
         if let Some(env_file_value) = service_map.get_mut(Value::String("env_file".to_string())) {
@@ -861,7 +877,7 @@ impl KeplerConfig {
 
         // Step 6: Evaluate all other Lua tags with full context
         let ctx = EvalContext {
-            sys_env,
+            sys_env: sys_env.clone(),
             env_file: env_file_vars,
             env: full_env,
             service_name: Some(service_name.to_string()),
@@ -1197,26 +1213,25 @@ impl KeplerConfig {
         }
     }
 
-    /// Get all system environment variables as a HashMap.
-    fn get_system_env() -> HashMap<String, String> {
-        std::env::vars().collect()
-    }
-
     /// Pre-compute all environment variable expansions in the config.
     /// This expands shell-style variable references using shellexpand,
     /// supporting ${VAR}, ${VAR:-default}, ${VAR:+value}, and ~ expansion.
     ///
     /// For services with env_file:
-    /// 1. First expand env_file path using system env only
+    /// 1. First expand env_file path using sys_env only
     /// 2. Load env_file content
-    /// 3. Expand all other fields using env_file + system env as context
-    ///    (env_file overrides system vars for expansion)
-    fn resolve_environment(&mut self) {
+    /// 3. Expand all other fields using env_file + sys_env as context
+    ///    (env_file overrides sys_env vars for expansion)
+    /// 4. Apply sys_env policy: if inherit, bake sys_env into environment array
+    fn resolve_environment(&mut self, sys_env: &HashMap<String, String>) {
+        // Get global sys_env policy
+        let global_sys_env_policy = self.global_sys_env().cloned();
+
         // Process each service
         for service in self.services.values_mut() {
-            // Step 1: Expand env_file PATH using system env only (empty context)
+            // Step 1: Expand env_file PATH using sys_env only (empty context)
             if let Some(ref mut ef) = service.env_file {
-                let expanded_path = expand_with_context(&ef.to_string_lossy(), &HashMap::new());
+                let expanded_path = expand_with_context(&ef.to_string_lossy(), &HashMap::new(), sys_env);
                 *ef = PathBuf::from(expanded_path);
             }
 
@@ -1227,39 +1242,51 @@ impl KeplerConfig {
                 HashMap::new()
             };
 
-            // Step 3: Expand all other fields using env_file + system env as context
-            // (env_file overrides system vars in the context)
-            Self::expand_service_config(service, &env_file_vars);
+            // Step 3: Expand all other fields using env_file + sys_env as context
+            // (env_file overrides sys_env vars in the context)
+            Self::expand_service_config(service, &env_file_vars, sys_env);
+
+            // Step 4: Apply sys_env policy - bake sys_env into environment if inherit
+            let effective_policy = resolve_sys_env(&service.sys_env, global_sys_env_policy.as_ref());
+            if effective_policy == SysEnvPolicy::Inherit {
+                // Prepend sys_env vars to environment array (service vars take priority)
+                let mut new_env: Vec<String> = sys_env
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect();
+                new_env.extend(service.environment.drain(..));
+                service.environment = new_env;
+            }
         }
 
-        // Process global hooks in kepler namespace (no env_file, just system env)
+        // Process global hooks in kepler namespace (no env_file, just sys_env)
         if let Some(ref mut kepler) = self.kepler {
             if let Some(ref mut hooks) = kepler.hooks {
-                Self::expand_global_hooks(hooks, &HashMap::new());
+                Self::expand_global_hooks(hooks, &HashMap::new(), sys_env);
             }
         }
     }
 
     /// Expand environment variables in a string using shell-style expansion.
     /// Supports ${VAR}, ${VAR:-default}, ${VAR:+value}, ~ (tilde), etc.
-    /// Uses the provided context for variable lookup (context overrides system env).
-    fn expand_value(s: &str, context: &HashMap<String, String>) -> String {
-        expand_with_context(s, context)
+    /// Uses the provided context for variable lookup (context overrides sys_env).
+    fn expand_value(s: &str, context: &HashMap<String, String>, sys_env: &HashMap<String, String>) -> String {
+        expand_with_context(s, context, sys_env)
     }
 
     /// Expand environment variables in global hooks
-    fn expand_global_hooks(hooks: &mut GlobalHooks, context: &HashMap<String, String>) {
+    fn expand_global_hooks(hooks: &mut GlobalHooks, context: &HashMap<String, String>, sys_env: &HashMap<String, String>) {
         if let Some(ref mut hook) = hooks.on_init {
-            Self::expand_hook_command(hook, context);
+            Self::expand_hook_command(hook, context, sys_env);
         }
         if let Some(ref mut hook) = hooks.on_start {
-            Self::expand_hook_command(hook, context);
+            Self::expand_hook_command(hook, context, sys_env);
         }
         if let Some(ref mut hook) = hooks.on_stop {
-            Self::expand_hook_command(hook, context);
+            Self::expand_hook_command(hook, context, sys_env);
         }
         if let Some(ref mut hook) = hooks.on_cleanup {
-            Self::expand_hook_command(hook, context);
+            Self::expand_hook_command(hook, context, sys_env);
         }
     }
 
@@ -1267,7 +1294,7 @@ impl KeplerConfig {
     /// Expands: user, group, working_dir, env_file, environment.
     /// NOTE: We intentionally do NOT expand run/command - shell variables should be
     /// expanded by the shell at runtime using the process's environment.
-    fn expand_hook_command(hook: &mut HookCommand, context: &HashMap<String, String>) {
+    fn expand_hook_command(hook: &mut HookCommand, context: &HashMap<String, String>, sys_env: &HashMap<String, String>) {
         match hook {
             HookCommand::Script {
                 run: _, // Intentionally not expanded - shell expands at runtime
@@ -1279,23 +1306,23 @@ impl KeplerConfig {
             } => {
                 // Expand user/group
                 if let Some(u) = user {
-                    *u = Self::expand_value(u, context);
+                    *u = Self::expand_value(u, context, sys_env);
                 }
                 if let Some(g) = group {
-                    *g = Self::expand_value(g, context);
+                    *g = Self::expand_value(g, context, sys_env);
                 }
 
                 // Expand paths
                 if let Some(wd) = working_dir {
-                    *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy(), context));
+                    *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy(), context, sys_env));
                 }
                 if let Some(ef) = env_file {
-                    *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy(), context));
+                    *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy(), context, sys_env));
                 }
 
                 // Expand environment entries
                 for entry in environment {
-                    *entry = Self::expand_value(entry, context);
+                    *entry = Self::expand_value(entry, context, sys_env);
                 }
             }
             HookCommand::Command {
@@ -1308,36 +1335,36 @@ impl KeplerConfig {
             } => {
                 // Expand user/group
                 if let Some(u) = user {
-                    *u = Self::expand_value(u, context);
+                    *u = Self::expand_value(u, context, sys_env);
                 }
                 if let Some(g) = group {
-                    *g = Self::expand_value(g, context);
+                    *g = Self::expand_value(g, context, sys_env);
                 }
 
                 // Expand paths
                 if let Some(wd) = working_dir {
-                    *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy(), context));
+                    *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy(), context, sys_env));
                 }
                 if let Some(ef) = env_file {
-                    *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy(), context));
+                    *ef = PathBuf::from(Self::expand_value(&ef.to_string_lossy(), context, sys_env));
                 }
 
                 // Expand environment entries
                 for entry in environment {
-                    *entry = Self::expand_value(entry, context);
+                    *entry = Self::expand_value(entry, context, sys_env);
                 }
             }
         }
     }
 
     /// Expand environment variables in a service config.
-    /// Expands ALL string fields using the provided context (env_file vars + system env).
+    /// Expands ALL string fields using the provided context (env_file vars) and sys_env.
     /// The env_file path should already be expanded before calling this.
     ///
     /// Environment entries are processed in order, with each entry's key=value
     /// being added to the context for subsequent entries. This allows entries
     /// to reference variables defined earlier in the same array.
-    fn expand_service_config(service: &mut ServiceConfig, context: &HashMap<String, String>) {
+    fn expand_service_config(service: &mut ServiceConfig, context: &HashMap<String, String>, sys_env: &HashMap<String, String>) {
         // Create a mutable copy of context for environment processing
         let mut expanded_context = context.clone();
 
@@ -1347,18 +1374,18 @@ impl KeplerConfig {
 
         // Expand working_dir (already partially expanded, but re-expand with full context)
         if let Some(ref mut wd) = service.working_dir {
-            *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy(), &expanded_context));
+            *wd = PathBuf::from(Self::expand_value(&wd.to_string_lossy(), &expanded_context, sys_env));
         }
 
         // NOTE: env_file path is already expanded before this function is called
-        // (using system env only, since we need it to load the env_file first)
+        // (using sys_env only, since we need it to load the env_file first)
 
         // Expand user/group
         if let Some(ref mut u) = service.user {
-            *u = Self::expand_value(u, &expanded_context);
+            *u = Self::expand_value(u, &expanded_context, sys_env);
         }
         if let Some(ref mut g) = service.group {
-            *g = Self::expand_value(g, &expanded_context);
+            *g = Self::expand_value(g, &expanded_context, sys_env);
         }
 
         // Expand environment entries IN ORDER, adding each to context for subsequent entries
@@ -1367,7 +1394,7 @@ impl KeplerConfig {
         //   - EXPANDED=${BASE_VAR}_suffix
         for entry in &mut service.environment {
             // Expand the value using current context
-            let expanded_entry = Self::expand_value(entry, &expanded_context);
+            let expanded_entry = Self::expand_value(entry, &expanded_context, sys_env);
             *entry = expanded_entry.clone();
 
             // Add this entry to context for subsequent entries
@@ -1378,7 +1405,7 @@ impl KeplerConfig {
 
         // Expand depends_on
         for dep in &mut service.depends_on {
-            *dep = Self::expand_value(dep, &expanded_context);
+            *dep = Self::expand_value(dep, &expanded_context, sys_env);
         }
 
         // NOTE: We intentionally do NOT expand healthcheck.test here.
@@ -1388,45 +1415,45 @@ impl KeplerConfig {
         // Expand resource limits
         if let Some(ref mut limits) = service.limits {
             if let Some(ref mut mem) = limits.memory {
-                *mem = Self::expand_value(mem, &expanded_context);
+                *mem = Self::expand_value(mem, &expanded_context, sys_env);
             }
         }
 
         // Expand restart watch patterns
         if let RestartConfig::Extended { ref mut watch, .. } = service.restart {
             for pattern in watch {
-                *pattern = Self::expand_value(pattern, &expanded_context);
+                *pattern = Self::expand_value(pattern, &expanded_context, sys_env);
             }
         }
 
         // Expand service hooks
         if let Some(ref mut hooks) = service.hooks {
-            Self::expand_service_hooks(hooks, &expanded_context);
+            Self::expand_service_hooks(hooks, &expanded_context, sys_env);
         }
     }
 
     /// Expand environment variables in service hooks
-    fn expand_service_hooks(hooks: &mut ServiceHooks, context: &HashMap<String, String>) {
+    fn expand_service_hooks(hooks: &mut ServiceHooks, context: &HashMap<String, String>, sys_env: &HashMap<String, String>) {
         if let Some(ref mut hook) = hooks.on_init {
-            Self::expand_hook_command(hook, context);
+            Self::expand_hook_command(hook, context, sys_env);
         }
         if let Some(ref mut hook) = hooks.on_start {
-            Self::expand_hook_command(hook, context);
+            Self::expand_hook_command(hook, context, sys_env);
         }
         if let Some(ref mut hook) = hooks.on_stop {
-            Self::expand_hook_command(hook, context);
+            Self::expand_hook_command(hook, context, sys_env);
         }
         if let Some(ref mut hook) = hooks.on_restart {
-            Self::expand_hook_command(hook, context);
+            Self::expand_hook_command(hook, context, sys_env);
         }
         if let Some(ref mut hook) = hooks.on_exit {
-            Self::expand_hook_command(hook, context);
+            Self::expand_hook_command(hook, context, sys_env);
         }
         if let Some(ref mut hook) = hooks.on_healthcheck_success {
-            Self::expand_hook_command(hook, context);
+            Self::expand_hook_command(hook, context, sys_env);
         }
         if let Some(ref mut hook) = hooks.on_healthcheck_fail {
-            Self::expand_hook_command(hook, context);
+            Self::expand_hook_command(hook, context, sys_env);
         }
     }
 

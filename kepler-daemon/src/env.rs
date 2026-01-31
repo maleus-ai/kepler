@@ -60,12 +60,15 @@ pub fn load_env_file(path: &Path) -> Result<HashMap<String, String>> {
 
 /// Build the full environment for a service
 ///
-/// Priority (highest to lowest):
-/// 1. Service-defined environment variables (already expanded at config load time)
-/// 2. Variables from env_file (loaded from state directory copy)
-/// 3. ALL system environment variables
+/// The environment is fully baked at config load time:
+/// - If `sys_env: inherit`, CLI environment vars are already in the environment array
+/// - If `sys_env: clear`, only explicitly defined vars are in the environment array
+/// - All shell expansions have been resolved
 ///
-/// Note: All system variables are now inherited to support Lua scripting.
+/// This function merges:
+/// 1. Variables from env_file (loaded from state directory copy)
+/// 2. Service-defined environment variables (already baked)
+///
 /// The env_file is loaded from the state directory (where it was copied at snapshot time),
 /// not from the original path. This ensures the snapshot is self-contained.
 pub fn build_service_env(
@@ -74,11 +77,6 @@ pub fn build_service_env(
     state_dir: &Path,
 ) -> Result<HashMap<String, String>> {
     let mut env = HashMap::new();
-
-    // Start with ALL system environment variables
-    for (key, value) in std::env::vars() {
-        env.insert(key, value);
-    }
 
     // Load env_file from STATE DIRECTORY (copied at snapshot time)
     if let Some(ref env_file) = config.env_file {
@@ -100,7 +98,7 @@ pub fn build_service_env(
         // (may not have been copied yet, or file didn't exist originally)
     }
 
-    // Apply service-defined environment entries
+    // Apply service-defined environment entries (already baked with sys_env if inherit policy)
     // Note: These are already expanded at config load time, so no need to expand again
     for entry in &config.environment {
         if let Some((key, value)) = entry.split_once('=') {
