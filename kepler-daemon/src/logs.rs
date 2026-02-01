@@ -68,8 +68,16 @@ pub struct LogBuffer {
     max_rotated_files: u32,
     /// Pre-allocated buffer for formatting log entries (reduces allocations)
     format_buffer: String,
-    /// Cached file handles - writes go directly to disk (no buffering)
+    /// Cached file handles for writing
     open_files: std::collections::HashMap<String, File>,
+    /// Per-service write buffers (only used when buffer_size > 0)
+    write_buffers: std::collections::HashMap<String, Vec<u8>>,
+    /// Maximum buffer size per service before flushing (0 = write directly, no buffering)
+    buffer_size: usize,
+    /// Bytes written per service since last rotation (avoids fs::metadata on every write)
+    bytes_written: std::collections::HashMap<String, u64>,
+    /// Next rotation index per service (1 to max_rotated_files, cycling)
+    rotation_index: std::collections::HashMap<String, u32>,
 }
 
 impl std::fmt::Debug for LogBuffer {
@@ -80,16 +88,35 @@ impl std::fmt::Debug for LogBuffer {
             .field("max_log_size", &self.max_log_size)
             .field("max_rotated_files", &self.max_rotated_files)
             .field("open_files_count", &self.open_files.len())
+            .field("buffer_size", &self.buffer_size)
+            .field("buffered_services", &self.write_buffers.len())
+            .field("tracked_services", &self.bytes_written.len())
             .finish()
     }
 }
 
 impl LogBuffer {
     pub fn new(logs_dir: PathBuf) -> Self {
-        Self::with_rotation(logs_dir, DEFAULT_MAX_LOG_SIZE, DEFAULT_MAX_ROTATED_FILES)
+        Self::with_options(logs_dir, DEFAULT_MAX_LOG_SIZE, DEFAULT_MAX_ROTATED_FILES, 0)
     }
 
     pub fn with_rotation(logs_dir: PathBuf, max_log_size: u64, max_rotated_files: u32) -> Self {
+        Self::with_options(logs_dir, max_log_size, max_rotated_files, 0)
+    }
+
+    /// Create a LogBuffer with all options including buffer size.
+    ///
+    /// # Arguments
+    /// * `logs_dir` - Directory to store log files
+    /// * `max_log_size` - Maximum size of a log file before rotation
+    /// * `max_rotated_files` - Number of rotated files to keep
+    /// * `buffer_size` - Bytes to buffer per service before flushing (0 = no buffering)
+    pub fn with_options(
+        logs_dir: PathBuf,
+        max_log_size: u64,
+        max_rotated_files: u32,
+        buffer_size: usize,
+    ) -> Self {
         // Create logs directory if it doesn't exist with secure permissions (0o700)
         #[cfg(unix)]
         {
@@ -121,6 +148,13 @@ impl LogBuffer {
             format_buffer: String::with_capacity(256),
             // Cache file handles for ~10 services
             open_files: std::collections::HashMap::with_capacity(16),
+            // Per-service write buffers
+            write_buffers: std::collections::HashMap::with_capacity(16),
+            buffer_size,
+            // Track bytes written per service (initialized lazily on first write)
+            bytes_written: std::collections::HashMap::with_capacity(16),
+            // Track rotation index per service
+            rotation_index: std::collections::HashMap::with_capacity(16),
         }
     }
 
@@ -209,20 +243,15 @@ impl LogBuffer {
         self.logs_dir.join(format!("{}.log", safe_name))
     }
 
-    /// Add a log entry, appending to disk with rotation if needed
+    /// Add a log entry, appending to disk with rotation if needed.
+    ///
+    /// If `buffer_size > 0`, entries are buffered per-service and flushed when
+    /// the buffer exceeds `buffer_size` bytes. If `buffer_size == 0`, entries
+    /// are written directly to disk.
     pub fn push(&mut self, service: &str, line: String, stream: LogStream) {
-        let log_file = self.log_file_path(service);
         let timestamp = Utc::now().timestamp_millis();
 
-        // Check if rotation is needed - must close handle first
-        if self.needs_rotation(&log_file) {
-            // Remove and drop the cached handle before rotation
-            self.open_files.remove(service);
-            self.rotate_log_file(&log_file);
-        }
-
         // Format: {timestamp_unix}\t{stream}\t{service}\t{line}
-        // Use pre-allocated buffer to reduce allocations
         self.format_buffer.clear();
         let _ = writeln!(
             self.format_buffer,
@@ -233,8 +262,55 @@ impl LogBuffer {
             line
         );
 
-        // Get or create the file handle
+        self.sequence += 1;
+
+        if self.buffer_size == 0 {
+            // No buffering - write directly to disk
+            // Copy bytes to avoid borrow conflict (format_buffer borrows self immutably)
+            let data = self.format_buffer.as_bytes().to_vec();
+            self.write_to_disk(service, &data);
+        } else {
+            // Buffer the entry
+            let buffer = self
+                .write_buffers
+                .entry(service.to_string())
+                .or_insert_with(|| Vec::with_capacity(self.buffer_size));
+
+            buffer.extend_from_slice(self.format_buffer.as_bytes());
+
+            // Flush if buffer exceeds size
+            if buffer.len() >= self.buffer_size {
+                self.flush_service(service);
+            }
+        }
+
+        // Periodically save sequence to disk (every 100 entries)
+        if self.sequence % 100 == 0 {
+            self.save_sequence();
+        }
+    }
+
+    /// Write data directly to disk for a service
+    fn write_to_disk(&mut self, service: &str, data: &[u8]) {
+        let log_file = self.log_file_path(service);
         let service_key = service.to_string();
+
+        // Initialize bytes_written if first write to this service
+        // Check existing file size once (only on first write per service)
+        let current_bytes = *self
+            .bytes_written
+            .entry(service_key.clone())
+            .or_insert_with(|| fs::metadata(&log_file).map(|m| m.len()).unwrap_or(0));
+
+        // Check if rotation is needed based on tracked bytes (no fs::metadata call)
+        if current_bytes >= self.max_log_size {
+            self.open_files.remove(service);
+            self.rotate_log_file(service, &log_file);
+            // Reset bytes written after rotation
+            self.bytes_written.insert(service_key.clone(), 0);
+        }
+
+        // Get or create the file handle
         let log_file_clone = log_file.clone();
         let file = self.open_files.entry(service_key.clone()).or_insert_with(|| {
             #[cfg(unix)]
@@ -247,7 +323,6 @@ impl LogBuffer {
                     .open(&log_file_clone)
                     .unwrap_or_else(|e| {
                         tracing::warn!("Failed to open log file {:?}: {}", log_file_clone, e);
-                        // Return a file that will fail writes gracefully
                         File::open("/dev/null").expect("Failed to open /dev/null")
                     })
             }
@@ -261,51 +336,56 @@ impl LogBuffer {
             }
         });
 
-        // Write immediately to disk - no buffering
-        if let Err(e) = file.write_all(self.format_buffer.as_bytes()) {
+        if let Err(e) = file.write_all(data) {
             tracing::warn!("Failed to write log entry: {}", e);
-            // Remove broken handle so next write reopens
             self.open_files.remove(&service_key);
-        }
-
-        self.sequence += 1;
-
-        // Periodically save sequence to disk (every 100 entries)
-        if self.sequence % 100 == 0 {
-            self.save_sequence();
+        } else {
+            // Update bytes written (no syscall, just memory)
+            *self.bytes_written.get_mut(&service_key).unwrap() += data.len() as u64;
         }
     }
 
-    /// Check if log file needs rotation
-    fn needs_rotation(&self, log_file: &PathBuf) -> bool {
-        match fs::metadata(log_file) {
-            Ok(m) => m.len() >= self.max_log_size,
-            Err(_) => false,
+    /// Flush buffered entries for a specific service to disk
+    pub fn flush_service(&mut self, service: &str) {
+        if let Some(buffer) = self.write_buffers.remove(service) {
+            if !buffer.is_empty() {
+                self.write_to_disk(service, &buffer);
+            }
+        }
+    }
+
+    /// Flush all buffered entries to disk
+    pub fn flush_all(&mut self) {
+        let services: Vec<String> = self.write_buffers.keys().cloned().collect();
+        for service in services {
+            self.flush_service(&service);
         }
     }
 
     /// Close all cached file handles for graceful shutdown
     pub fn close_all(&mut self) {
+        // Flush any remaining buffered data first
+        self.flush_all();
         self.open_files.clear(); // File handles are flushed on drop
     }
 
-    /// Rotate a log file: .log -> .log.1, .log.1 -> .log.2, etc.
-    fn rotate_log_file(&self, log_file: &PathBuf) {
-        tracing::debug!("Rotating log file {:?}", log_file);
+    /// Rotate a log file using cycling index (single rename, no cascade)
+    ///
+    /// Instead of shifting all files (.log.1 -> .log.2, etc.), we use a cycling
+    /// index that overwrites the oldest file directly. This reduces rotation
+    /// from O(max_rotated_files) renames to O(1).
+    fn rotate_log_file(&mut self, service: &str, log_file: &PathBuf) {
+        // Get next rotation index (1 to max_rotated_files, cycling)
+        let index = self
+            .rotation_index
+            .entry(service.to_string())
+            .or_insert(0);
+        *index = (*index % self.max_rotated_files) + 1;
 
-        // Delete oldest rotated file if at max
-        let oldest = format!("{}.{}", log_file.display(), self.max_rotated_files);
-        let _ = fs::remove_file(&oldest);
+        let rotated = format!("{}.{}", log_file.display(), *index);
+        tracing::debug!("Rotating log file {:?} -> {}", log_file, rotated);
 
-        // Shift existing rotated files: .log.N -> .log.N+1
-        for i in (1..self.max_rotated_files).rev() {
-            let old_name = format!("{}.{}", log_file.display(), i);
-            let new_name = format!("{}.{}", log_file.display(), i + 1);
-            let _ = fs::rename(&old_name, &new_name);
-        }
-
-        // Rotate current file: .log -> .log.1
-        let rotated = format!("{}.1", log_file.display());
+        // Single rename (overwrites if target exists)
         if let Err(e) = fs::rename(log_file, &rotated) {
             tracing::warn!("Failed to rotate log file {:?}: {}", log_file, e);
         }
@@ -346,25 +426,50 @@ impl LogBuffer {
     }
 
     /// List all log files for a service including rotated files
-    /// Returns files in order: oldest rotated (.log.N) to newest (.log)
+    /// Returns files sorted by first log entry timestamp (oldest first, newest last)
     fn list_service_log_files(&self, service: &str) -> Vec<PathBuf> {
         let main_file = self.log_file_path(service);
         let mut files = Vec::with_capacity(self.max_rotated_files as usize + 1);
 
-        // Add rotated files in reverse order (oldest first)
-        for i in (1..=self.max_rotated_files).rev() {
+        // Collect all rotated files
+        for i in 1..=self.max_rotated_files {
             let rotated = PathBuf::from(format!("{}.{}", main_file.display(), i));
             if rotated.exists() {
                 files.push(rotated);
             }
         }
 
-        // Add main file last (newest)
+        // Add main file if exists
         if main_file.exists() {
             files.push(main_file);
         }
 
+        // Sort by first log entry timestamp (more accurate than file modification time)
+        // This is necessary because rotation uses a cycling index
+        files.sort_by(|a, b| {
+            let ts_a = Self::first_entry_timestamp(a);
+            let ts_b = Self::first_entry_timestamp(b);
+            ts_a.cmp(&ts_b)
+        });
+
         files
+    }
+
+    /// Read the timestamp from the first log entry in a file
+    fn first_entry_timestamp(path: &PathBuf) -> i64 {
+        if let Ok(file) = File::open(path) {
+            let mut reader = BufReader::new(file);
+            let mut first_line = String::new();
+            if reader.read_line(&mut first_line).is_ok() {
+                // Log format: "TIMESTAMP\tSTREAM\tSERVICE\tMESSAGE"
+                if let Some(ts_str) = first_line.split('\t').next() {
+                    if let Ok(ts) = ts_str.parse::<i64>() {
+                        return ts;
+                    }
+                }
+            }
+        }
+        0 // Default to 0 if we can't read the timestamp
     }
 
     /// Read log entries from a file
@@ -666,6 +771,9 @@ impl LogBuffer {
     pub fn clear(&mut self) {
         // Close all cached file handles before deleting
         self.open_files.clear();
+        // Reset tracking state
+        self.bytes_written.clear();
+        self.rotation_index.clear();
 
         for file in self.list_log_files() {
             // Remove rotated files first
@@ -684,6 +792,9 @@ impl LogBuffer {
     pub fn clear_service(&mut self, service: &str) {
         // Close cached file handle before deleting
         self.open_files.remove(service);
+        // Reset tracking state for this service
+        self.bytes_written.remove(service);
+        self.rotation_index.remove(service);
 
         let log_file = self.log_file_path(service);
 
@@ -718,6 +829,15 @@ impl LogBuffer {
         // Close cached file handles for matching services before deleting
         let sanitized_prefix = prefix.replace(['/', '\\', ':', '[', ']'], "_");
         self.open_files.retain(|k, _| {
+            let sanitized_key = k.replace(['/', '\\', ':', '[', ']'], "_");
+            !sanitized_key.starts_with(&sanitized_prefix)
+        });
+        // Reset tracking state for matching services
+        self.bytes_written.retain(|k, _| {
+            let sanitized_key = k.replace(['/', '\\', ':', '[', ']'], "_");
+            !sanitized_key.starts_with(&sanitized_prefix)
+        });
+        self.rotation_index.retain(|k, _| {
             let sanitized_key = k.replace(['/', '\\', ':', '[', ']'], "_");
             !sanitized_key.starts_with(&sanitized_prefix)
         });
@@ -784,6 +904,29 @@ impl SharedLogBuffer {
         }
     }
 
+    /// Create a SharedLogBuffer with all options including buffer size.
+    ///
+    /// # Arguments
+    /// * `logs_dir` - Directory to store log files
+    /// * `max_log_size` - Maximum size of a log file before rotation
+    /// * `max_rotated_files` - Number of rotated files to keep
+    /// * `buffer_size` - Bytes to buffer per service before flushing (0 = no buffering)
+    pub fn with_options(
+        logs_dir: PathBuf,
+        max_log_size: u64,
+        max_rotated_files: u32,
+        buffer_size: usize,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(LogBuffer::with_options(
+                logs_dir,
+                max_log_size,
+                max_rotated_files,
+                buffer_size,
+            ))),
+        }
+    }
+
     pub fn push(&self, service: &str, line: String, stream: LogStream) {
         self.inner.write().push(service, line, stream);
     }
@@ -793,6 +936,8 @@ impl SharedLogBuffer {
     }
 
     pub fn tail(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
+        // Flush buffers first to ensure we read the latest data
+        self.inner.write().flush_all();
         self.inner.read().tail(count, service)
     }
 
@@ -802,10 +947,14 @@ impl SharedLogBuffer {
         service: Option<&str>,
         max_bytes: Option<usize>,
     ) -> Vec<LogLine> {
+        // Flush buffers first to ensure we read the latest data
+        self.inner.write().flush_all();
         self.inner.read().tail_bounded(count, service, max_bytes)
     }
 
     pub fn entries_since(&self, since_seq: u64, service: Option<&str>) -> Vec<LogLine> {
+        // Flush buffers first to ensure we read the latest data
+        self.inner.write().flush_all();
         let buffer = self.inner.read();
         let entries = buffer.entries_since(since_seq);
         if let Some(svc) = service {
@@ -834,7 +983,19 @@ impl SharedLogBuffer {
         offset: usize,
         limit: usize,
     ) -> (Vec<LogLine>, usize) {
+        // Flush buffers first to ensure we read the latest data
+        self.inner.write().flush_all();
         self.inner.read().get_paginated(service, offset, limit)
+    }
+
+    /// Flush all buffered entries to disk
+    pub fn flush_all(&self) {
+        self.inner.write().flush_all();
+    }
+
+    /// Flush buffered entries for a specific service to disk
+    pub fn flush_service(&self, service: &str) {
+        self.inner.write().flush_service(service);
     }
 }
 

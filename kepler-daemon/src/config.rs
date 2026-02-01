@@ -471,6 +471,11 @@ pub struct LogConfig {
     /// Log rotation settings
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<LogRotationConfig>,
+    /// Buffer size in bytes before flushing to disk.
+    /// 0 = write directly to disk (no buffering, default)
+    /// Higher values batch writes for better throughput but risk data loss on crash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buffer_size: Option<usize>,
 }
 
 impl LogConfig {

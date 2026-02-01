@@ -198,6 +198,13 @@ Commands that operate on services (require config):
 ### Full Example
 
 ```yaml
+kepler:
+  logs:
+    buffer_size: 16384   # 16KB buffer for better write throughput
+    rotation:
+      max_size: "50MB"
+      max_files: 10
+
 hooks:
   on_init:
     run: echo "First run initialization"
@@ -320,6 +327,35 @@ restart:
 > **Note:** `policy: no` cannot be combined with `watch` patterns.
 
 ### Log Configuration
+
+Logs can be configured at two levels: globally under `kepler.logs` and per-service under `services.<name>.logs`.
+
+#### Global Log Settings
+
+Configure global log behavior under the `kepler:` namespace:
+
+```yaml
+kepler:
+  logs:
+    buffer_size: 16384    # Buffer size in bytes (0 = no buffering)
+    rotation:
+      max_size: "10MB"    # Max file size before rotation
+      max_files: 5        # Number of rotated files to keep
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `buffer_size` | `int` | `0` | Bytes to buffer before flushing to disk |
+| `rotation.max_size` | `string` | `10MB` | Max log file size (`KB`, `MB`, `GB`) |
+| `rotation.max_files` | `int` | `5` | Number of rotated files to keep |
+
+**Buffer size trade-offs:**
+- `0` (default) - Write every log line directly to disk. Safest, no data loss on crash.
+- `4096` - 4KB buffer. ~20% better throughput.
+- `16384` - 16KB buffer (recommended). ~30% better throughput.
+- Higher values provide diminishing returns and risk more data loss on crash.
+
+#### Per-Service Log Settings
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|

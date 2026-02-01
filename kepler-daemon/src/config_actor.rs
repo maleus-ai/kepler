@@ -457,19 +457,22 @@ impl ConfigActor {
         Ok((handle, actor))
     }
 
-    /// Create a log buffer with rotation settings from config
+    /// Create a log buffer with rotation and buffer settings from config
     fn create_log_buffer(logs_dir: &Path, config: &KeplerConfig) -> SharedLogBuffer {
-        // Get global rotation config
-        let rotation = config.global_logs().and_then(|l| l.rotation.as_ref());
+        use crate::logs::{DEFAULT_MAX_LOG_SIZE, DEFAULT_MAX_ROTATED_FILES};
 
-        match rotation {
-            Some(rot) => {
-                let max_size = rot.max_size_bytes();
-                let max_files = rot.max_files;
-                SharedLogBuffer::with_rotation(logs_dir.to_path_buf(), max_size, max_files)
-            }
-            None => SharedLogBuffer::new(logs_dir.to_path_buf()),
-        }
+        let global_logs = config.global_logs();
+
+        // Get rotation config (or defaults)
+        let (max_size, max_files) = match global_logs.and_then(|l| l.rotation.as_ref()) {
+            Some(rot) => (rot.max_size_bytes(), rot.max_files),
+            None => (DEFAULT_MAX_LOG_SIZE, DEFAULT_MAX_ROTATED_FILES),
+        };
+
+        // Get buffer size (0 = no buffering, default)
+        let buffer_size = global_logs.and_then(|l| l.buffer_size).unwrap_or(0);
+
+        SharedLogBuffer::with_options(logs_dir.to_path_buf(), max_size, max_files, buffer_size)
     }
 
     /// Run the actor event loop
