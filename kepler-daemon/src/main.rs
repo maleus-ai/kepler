@@ -3,7 +3,7 @@ use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
 use kepler_daemon::errors::DaemonError;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::persistence::ConfigPersistence;
-use kepler_daemon::process::{validate_running_process, ProcessExitEvent};
+use kepler_daemon::process::{kill_process_by_pid, validate_running_process, ProcessExitEvent};
 use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_daemon::Daemon;
@@ -148,7 +148,8 @@ async fn main() -> anyhow::Result<()> {
     let server = Server::new(socket_path.clone(), handler)?;
 
     // Discover and restore existing configs from persisted snapshots
-    discover_existing_configs(&registry).await;
+    // Kill orphaned processes and respawn services that were previously running
+    discover_existing_configs(&registry, &orchestrator).await;
 
     info!("Daemon listening on {:?}", socket_path);
 
@@ -378,9 +379,12 @@ async fn handle_request(
 /// expanded config snapshots. For each config:
 /// 1. Check if source config still exists
 /// 2. Load the config (uses cached snapshot if available)
-/// 3. Validate that any recorded running processes are still alive
-/// 4. Mark processes as stopped if they're no longer running
-async fn discover_existing_configs(registry: &SharedConfigRegistry) {
+/// 3. Kill any orphaned processes that were previously running
+/// 4. Respawn services that were in a running state
+async fn discover_existing_configs(
+    registry: &SharedConfigRegistry,
+    orchestrator: &Arc<ServiceOrchestrator>,
+) {
     let configs_dir = match kepler_daemon::global_state_dir() {
         Ok(dir) => dir.join("configs"),
         Err(e) => {
@@ -455,8 +459,36 @@ async fn discover_existing_configs(registry: &SharedConfigRegistry) {
             Ok(handle) => {
                 restored += 1;
 
-                // Validate running processes
-                validate_restored_processes(&handle).await;
+                // Kill orphaned processes and get list of services to respawn
+                let services_to_respawn =
+                    kill_orphaned_processes_and_get_respawn_list(&handle).await;
+
+                // Respawn services that were previously running
+                if !services_to_respawn.is_empty() {
+                    info!(
+                        "Respawning {} services for {:?}: {:?}",
+                        services_to_respawn.len(),
+                        source_path,
+                        services_to_respawn
+                    );
+
+                    for service_name in &services_to_respawn {
+                        match orchestrator
+                            .start_services(&source_path, Some(service_name), None)
+                            .await
+                        {
+                            Ok(_) => {
+                                info!("Respawned service {} for {:?}", service_name, source_path);
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to respawn service {} for {:?}: {}",
+                                    service_name, source_path, e
+                                );
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 error!("Failed to restore config {:?}: {}", source_path, e);
@@ -472,15 +504,23 @@ async fn discover_existing_configs(registry: &SharedConfigRegistry) {
     }
 }
 
-/// Validate that processes recorded as running are still alive.
+/// Kill orphaned processes and return list of services to respawn.
 ///
-/// For each service that was recorded as running, check if the process
-/// is still alive. If not, mark the service as stopped.
-async fn validate_restored_processes(handle: &kepler_daemon::config_actor::ConfigActorHandle) {
+/// For each service that was recorded as running:
+/// 1. Kill the process if it's still alive
+/// 2. Mark the service as stopped
+/// 3. Add to respawn list
+///
+/// Returns a list of service names that should be respawned.
+async fn kill_orphaned_processes_and_get_respawn_list(
+    handle: &kepler_daemon::config_actor::ConfigActorHandle,
+) -> Vec<String> {
+    let mut services_to_respawn = Vec::new();
+
     // Get all service statuses
     let services = match handle.get_service_status(None).await {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return services_to_respawn,
     };
 
     for (service_name, info) in services {
@@ -494,35 +534,38 @@ async fn validate_restored_processes(handle: &kepler_daemon::config_actor::Confi
             continue;
         }
 
-        // Check if the recorded PID is still alive
+        // This service was running before daemon restart - it needs to be respawned
+        services_to_respawn.push(service_name.clone());
+
+        // Kill the process if it's still alive
         if let Some(pid) = info.pid {
             let is_alive = validate_running_process(pid, info.started_at);
 
-            if !is_alive {
+            if is_alive {
                 info!(
-                    "Service {} (PID {}) is no longer running, marking as stopped",
+                    "Service {} (PID {}) is still running, killing for respawn",
                     service_name, pid
                 );
-
-                // Mark as stopped (PID was reused or process exited)
-                let _ = handle
-                    .set_service_status(&service_name, ServiceStatus::Stopped)
-                    .await;
-                let _ = handle.set_service_pid(&service_name, None, None).await;
+                kill_process_by_pid(pid).await;
             } else {
                 info!(
-                    "Service {} (PID {}) is still running, reconnecting",
+                    "Service {} (PID {}) is no longer running, will respawn",
                     service_name, pid
                 );
-                // Note: We can't fully reconnect to the process (no Child handle),
-                // but we preserve the state so the user sees the correct status.
-                // The process will continue running independently.
             }
         } else {
-            // No PID recorded but status says running - mark as stopped
-            let _ = handle
-                .set_service_status(&service_name, ServiceStatus::Stopped)
-                .await;
+            info!(
+                "Service {} has no PID recorded, will respawn",
+                service_name
+            );
         }
+
+        // Mark as stopped (will be restarted after)
+        let _ = handle
+            .set_service_status(&service_name, ServiceStatus::Stopped)
+            .await;
+        let _ = handle.set_service_pid(&service_name, None, None).await;
     }
+
+    services_to_respawn
 }

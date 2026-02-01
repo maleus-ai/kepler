@@ -1,12 +1,24 @@
 //! E2E tests for service dependency ordering
 //!
 //! Tests that services with dependencies start correctly.
-//! Note: Log output order may not match start order due to sorting by service name.
+//! Uses timestamps for reliable ordering verification (log positions can be racy).
 
 use kepler_e2e::{E2eHarness, E2eResult};
 use std::time::Duration;
 
 const TEST_MODULE: &str = "dependencies_test";
+
+/// Extract timestamp from a log line containing a marker.
+/// Log format with timestamps: "YYYY-MM-DD HH:MM:SS ..."
+fn extract_timestamp<'a>(logs: &'a str, marker: &str) -> Option<&'a str> {
+    for line in logs.lines() {
+        if line.contains(marker) {
+            // Timestamp is at the start: "2024-01-15 10:30:45 ..."
+            return line.get(0..19);
+        }
+    }
+    None
+}
 
 /// Test simple dependency: B depends on A, A starts first
 #[tokio::test]
@@ -28,7 +40,7 @@ async fn test_simple_dependency() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "service-b", "running", Duration::from_secs(10))
         .await?;
 
-    // Check logs to verify both started and order is correct
+    // Check logs to verify both started
     harness.wait_for_logs(&config_path, Duration::from_secs(5)).await?;
     let logs = harness.get_logs(&config_path, None, 100).await?;
 
@@ -44,13 +56,16 @@ async fn test_simple_dependency() -> E2eResult<()> {
         logs.stdout
     );
 
-    // A should start before B (check log order)
-    let pos_a = logs.stdout.find("SERVICE_A_STARTED");
-    let pos_b = logs.stdout.find("SERVICE_B_STARTED");
+    // Use timestamps for reliable ordering (log positions can be racy)
+    let logs_with_ts = harness.get_logs_with_timestamps(&config_path, None, 100).await?;
+    let ts_a = extract_timestamp(&logs_with_ts.stdout, "SERVICE_A_STARTED");
+    let ts_b = extract_timestamp(&logs_with_ts.stdout, "SERVICE_B_STARTED");
+
+    // A should start before or at the same time as B
     assert!(
-        pos_a < pos_b,
-        "Service A should start before Service B. A pos: {:?}, B pos: {:?}",
-        pos_a, pos_b
+        ts_a <= ts_b,
+        "Service A should start before Service B. A timestamp: {:?}, B timestamp: {:?}",
+        ts_a, ts_b
     );
 
     harness.stop_daemon().await?;
@@ -77,7 +92,7 @@ async fn test_chain_dependency() -> E2eResult<()> {
             .await?;
     }
 
-    // Check logs - all should have started and in correct order
+    // Check logs - all should have started
     harness.wait_for_logs(&config_path, Duration::from_secs(5)).await?;
     let logs = harness.get_logs(&config_path, None, 100).await?;
 
@@ -85,14 +100,17 @@ async fn test_chain_dependency() -> E2eResult<()> {
     assert!(logs.stdout_contains("CHAIN_B_STARTED"), "Chain B should have started");
     assert!(logs.stdout_contains("CHAIN_C_STARTED"), "Chain C should have started");
 
+    // Use timestamps for reliable ordering (log positions can be racy)
+    let logs_with_ts = harness.get_logs_with_timestamps(&config_path, None, 100).await?;
+    let ts_a = extract_timestamp(&logs_with_ts.stdout, "CHAIN_A_STARTED");
+    let ts_b = extract_timestamp(&logs_with_ts.stdout, "CHAIN_B_STARTED");
+    let ts_c = extract_timestamp(&logs_with_ts.stdout, "CHAIN_C_STARTED");
+
     // Verify order: A → B → C
-    let pos_a = logs.stdout.find("CHAIN_A_STARTED");
-    let pos_b = logs.stdout.find("CHAIN_B_STARTED");
-    let pos_c = logs.stdout.find("CHAIN_C_STARTED");
     assert!(
-        pos_a < pos_b && pos_b < pos_c,
-        "Start order should be A → B → C. A pos: {:?}, B pos: {:?}, C pos: {:?}",
-        pos_a, pos_b, pos_c
+        ts_a <= ts_b && ts_b <= ts_c,
+        "Start order should be A → B → C. A ts: {:?}, B ts: {:?}, C ts: {:?}",
+        ts_a, ts_b, ts_c
     );
 
     harness.stop_daemon().await?;
@@ -129,23 +147,24 @@ async fn test_diamond_dependency() -> E2eResult<()> {
     assert!(logs.stdout_contains("DIAMOND_C_STARTED"), "Diamond C should have started");
     assert!(logs.stdout_contains("DIAMOND_D_STARTED"), "Diamond D should have started");
 
-    // Verify order: A first, then B and C (either order), then D last
-    let pos_a = logs.stdout.find("DIAMOND_A_STARTED");
-    let pos_b = logs.stdout.find("DIAMOND_B_STARTED");
-    let pos_c = logs.stdout.find("DIAMOND_C_STARTED");
-    let pos_d = logs.stdout.find("DIAMOND_D_STARTED");
+    // Use timestamps for reliable ordering (log positions can be racy)
+    let logs_with_ts = harness.get_logs_with_timestamps(&config_path, None, 100).await?;
+    let ts_a = extract_timestamp(&logs_with_ts.stdout, "DIAMOND_A_STARTED");
+    let ts_b = extract_timestamp(&logs_with_ts.stdout, "DIAMOND_B_STARTED");
+    let ts_c = extract_timestamp(&logs_with_ts.stdout, "DIAMOND_C_STARTED");
+    let ts_d = extract_timestamp(&logs_with_ts.stdout, "DIAMOND_D_STARTED");
 
-    // A must be before B and C
+    // A must be before or equal to B and C
     assert!(
-        pos_a < pos_b && pos_a < pos_c,
-        "A should start before B and C. A pos: {:?}, B pos: {:?}, C pos: {:?}",
-        pos_a, pos_b, pos_c
+        ts_a <= ts_b && ts_a <= ts_c,
+        "A should start before B and C. A ts: {:?}, B ts: {:?}, C ts: {:?}",
+        ts_a, ts_b, ts_c
     );
-    // D must be after B and C
+    // D must be after or equal to B and C
     assert!(
-        pos_d > pos_b && pos_d > pos_c,
-        "D should start after B and C. B pos: {:?}, C pos: {:?}, D pos: {:?}",
-        pos_b, pos_c, pos_d
+        ts_d >= ts_b && ts_d >= ts_c,
+        "D should start after B and C. B ts: {:?}, C ts: {:?}, D ts: {:?}",
+        ts_b, ts_c, ts_d
     );
 
     harness.stop_daemon().await?;

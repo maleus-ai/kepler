@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::config::{
     parse_memory_limit, resolve_log_store, resolve_sys_env, LogConfig, ResourceLimits, ServiceConfig, SysEnvPolicy,
@@ -920,4 +920,78 @@ fn get_clock_ticks_per_sec() -> u64 {
     // sysconf(_SC_CLK_TCK) typically returns 100 on Linux
     // We could use libc::sysconf but 100 is the common default
     100
+}
+
+/// Kill a process by PID.
+///
+/// This is used during daemon restart to kill orphaned processes that were
+/// previously managed by the daemon. Sends SIGTERM first, waits briefly,
+/// then sends SIGKILL if the process is still alive.
+///
+/// # Arguments
+/// * `pid` - The process ID to kill
+///
+/// # Returns
+/// * `true` if the process was killed or doesn't exist
+/// * `false` if the process couldn't be killed
+pub async fn kill_process_by_pid(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+
+        let nix_pid = Pid::from_raw(pid as i32);
+
+        // Check if process exists
+        if kill(nix_pid, None).is_err() {
+            // Process doesn't exist, nothing to kill
+            return true;
+        }
+
+        info!("Killing orphaned process {} (SIGTERM)", pid);
+
+        // Send SIGTERM for graceful shutdown
+        if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
+            warn!("Failed to send SIGTERM to process {}: {}", pid, e);
+            return false;
+        }
+
+        // Wait up to 5 seconds for graceful shutdown
+        for _ in 0..50 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+            // Check if process is still alive
+            if kill(nix_pid, None).is_err() {
+                debug!("Process {} terminated gracefully", pid);
+                return true;
+            }
+        }
+
+        // Process still alive, send SIGKILL
+        warn!("Process {} did not respond to SIGTERM, sending SIGKILL", pid);
+        if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
+            warn!("Failed to send SIGKILL to process {}: {}", pid, e);
+            return false;
+        }
+
+        // Wait a bit for SIGKILL to take effect
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Verify process is gone
+        if kill(nix_pid, None).is_err() {
+            debug!("Process {} killed with SIGKILL", pid);
+            true
+        } else {
+            error!("Process {} survived SIGKILL", pid);
+            false
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // On non-Unix platforms, we can't easily kill processes by PID
+        let _ = pid;
+        warn!("kill_process_by_pid not supported on this platform");
+        false
+    }
 }
