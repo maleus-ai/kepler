@@ -10,7 +10,7 @@ use crate::lua_eval::{EvalContext, LuaEvaluator};
 /// Load environment variables from an env_file.
 /// Returns an empty HashMap if the file doesn't exist or can't be parsed.
 fn load_env_file(path: &Path) -> HashMap<String, String> {
-    let mut env = HashMap::new();
+    let mut env = HashMap::with_capacity(32); // Typical env file ~20-30 vars
     if let Ok(iter) = dotenvy::from_path_iter(path) {
         for item in iter.flatten() {
             env.insert(item.0, item.1);
@@ -358,7 +358,7 @@ pub struct ServiceHooks {
 }
 
 /// Log retention policy on service stop
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LogRetention {
     #[default]
@@ -476,22 +476,22 @@ pub struct LogConfig {
 impl LogConfig {
     /// Get on_stop retention from nested retention config
     pub fn get_on_stop(&self) -> Option<LogRetention> {
-        self.retention.as_ref().and_then(|r| r.on_stop.clone())
+        self.retention.as_ref().and_then(|r| r.on_stop)
     }
 
     /// Get on_start retention from nested retention config
     pub fn get_on_start(&self) -> Option<LogRetention> {
-        self.retention.as_ref().and_then(|r| r.on_start.clone())
+        self.retention.as_ref().and_then(|r| r.on_start)
     }
 
     /// Get on_restart retention from nested retention config
     pub fn get_on_restart(&self) -> Option<LogRetention> {
-        self.retention.as_ref().and_then(|r| r.on_restart.clone())
+        self.retention.as_ref().and_then(|r| r.on_restart)
     }
 
     /// Get on_exit retention from nested retention config
     pub fn get_on_exit(&self) -> Option<LogRetention> {
-        self.retention.as_ref().and_then(|r| r.on_exit.clone())
+        self.retention.as_ref().and_then(|r| r.on_exit)
     }
 }
 
@@ -1254,7 +1254,7 @@ impl KeplerConfig {
                     .iter()
                     .map(|(k, v)| format!("{}={}", k, v))
                     .collect();
-                new_env.extend(service.environment.drain(..));
+                new_env.append(&mut service.environment);
                 service.environment = new_env;
             }
         }

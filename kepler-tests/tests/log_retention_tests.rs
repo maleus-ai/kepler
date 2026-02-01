@@ -30,8 +30,8 @@ async fn test_default_clears_logs_on_stop() {
     logs.clear();
 
     // Add some log entries
-    logs.push("default_clear_test".to_string(), "log line 1".to_string(), LogStream::Stdout);
-    logs.push("default_clear_test".to_string(), "log line 2".to_string(), LogStream::Stdout);
+    logs.push("default_clear_test", "log line 1".to_string(), LogStream::Stdout);
+    logs.push("default_clear_test", "log line 2".to_string(), LogStream::Stdout);
 
     // Verify logs exist
     let entries = logs.tail(10, Some("default_clear_test"));
@@ -78,8 +78,8 @@ async fn test_retain_logs_on_stop() {
     logs.clear();
 
     // Add some log entries
-    logs.push("retain_test".to_string(), "log line 1".to_string(), LogStream::Stdout);
-    logs.push("retain_test".to_string(), "log line 2".to_string(), LogStream::Stdout);
+    logs.push("retain_test", "log line 1".to_string(), LogStream::Stdout);
+    logs.push("retain_test", "log line 2".to_string(), LogStream::Stdout);
 
     // Verify logs exist
     let entries = logs.tail(10, Some("retain_test"));
@@ -217,9 +217,9 @@ async fn test_log_buffer_operations() {
     logs.clear();
 
     // Push some logs
-    logs.push("buffer_ops_test".to_string(), "line 1".to_string(), LogStream::Stdout);
-    logs.push("buffer_ops_test".to_string(), "line 2".to_string(), LogStream::Stderr);
-    logs.push("buffer_ops_test".to_string(), "line 3".to_string(), LogStream::Stdout);
+    logs.push("buffer_ops_test", "line 1".to_string(), LogStream::Stdout);
+    logs.push("buffer_ops_test", "line 2".to_string(), LogStream::Stderr);
+    logs.push("buffer_ops_test", "line 3".to_string(), LogStream::Stdout);
 
     // Test tail
     let entries = logs.tail(10, Some("buffer_ops_test"));
@@ -259,8 +259,8 @@ async fn test_log_stream_types() {
     // Clear any existing logs first
     logs.clear();
 
-    logs.push("stream_types_test".to_string(), "stdout line".to_string(), LogStream::Stdout);
-    logs.push("stream_types_test".to_string(), "stderr line".to_string(), LogStream::Stderr);
+    logs.push("stream_types_test", "stdout line".to_string(), LogStream::Stdout);
+    logs.push("stream_types_test", "stderr line".to_string(), LogStream::Stderr);
 
     let entries = logs.tail(10, Some("stream_types_test"));
     assert_eq!(entries.len(), 2);
@@ -293,9 +293,9 @@ async fn test_multiple_services_logs() {
     logs.clear();
 
     // Add logs for each service
-    logs.push("multi_svc1".to_string(), "s1 line 1".to_string(), LogStream::Stdout);
-    logs.push("multi_svc2".to_string(), "s2 line 1".to_string(), LogStream::Stdout);
-    logs.push("multi_svc1".to_string(), "s1 line 2".to_string(), LogStream::Stdout);
+    logs.push("multi_svc1", "s1 line 1".to_string(), LogStream::Stdout);
+    logs.push("multi_svc2", "s2 line 1".to_string(), LogStream::Stdout);
+    logs.push("multi_svc1", "s1 line 2".to_string(), LogStream::Stdout);
 
     // Check service1 logs
     let s1_entries = logs.tail(10, Some("multi_svc1"));
@@ -340,11 +340,11 @@ async fn test_clear_service_prefix() {
     logs.clear();
 
     // Add regular service logs
-    logs.push("prefix_svc".to_string(), "service log".to_string(), LogStream::Stdout);
+    logs.push("prefix_svc", "service log".to_string(), LogStream::Stdout);
 
     // Add hook logs (using the format from hooks.rs)
-    logs.push("[prefix_svc.on_start]".to_string(), "hook log 1".to_string(), LogStream::Stdout);
-    logs.push("[prefix_svc.on_stop]".to_string(), "hook log 2".to_string(), LogStream::Stdout);
+    logs.push("[prefix_svc.on_start]", "hook log 1".to_string(), LogStream::Stdout);
+    logs.push("[prefix_svc.on_stop]", "hook log 2".to_string(), LogStream::Stdout);
 
     // Verify all logs exist
     let all_entries = logs.tail(10, None);
@@ -390,8 +390,8 @@ async fn test_log_entries_since() {
     assert_eq!(seq1, 0);
 
     // Add some logs
-    logs.push("entries_since_test".to_string(), "line 1".to_string(), LogStream::Stdout);
-    logs.push("entries_since_test".to_string(), "line 2".to_string(), LogStream::Stdout);
+    logs.push("entries_since_test", "line 1".to_string(), LogStream::Stdout);
+    logs.push("entries_since_test", "line 2".to_string(), LogStream::Stdout);
 
     let seq2 = logs.current_sequence();
     assert_eq!(seq2, seq1 + 2);
@@ -401,7 +401,7 @@ async fn test_log_entries_since() {
     assert_eq!(entries.len(), 2);
 
     // Add more logs
-    logs.push("entries_since_test".to_string(), "line 3".to_string(), LogStream::Stdout);
+    logs.push("entries_since_test", "line 3".to_string(), LogStream::Stdout);
 
     // Get entries since seq2
     let entries = logs.entries_since(seq2, Some("entries_since_test"));
@@ -434,8 +434,8 @@ async fn test_clear_all_logs() {
     logs.clear();
 
     // Add logs for both services
-    logs.push("clearall_svc1".to_string(), "s1 log".to_string(), LogStream::Stdout);
-    logs.push("clearall_svc2".to_string(), "s2 log".to_string(), LogStream::Stdout);
+    logs.push("clearall_svc1", "s1 log".to_string(), LogStream::Stdout);
+    logs.push("clearall_svc2", "s2 log".to_string(), LogStream::Stdout);
 
     // Verify logs exist
     let all_entries = logs.tail(10, None);

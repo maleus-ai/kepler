@@ -68,6 +68,8 @@ pub struct LogBuffer {
     max_rotated_files: u32,
     /// Pre-allocated buffer for formatting log entries (reduces allocations)
     format_buffer: String,
+    /// Cached file handles - writes go directly to disk (no buffering)
+    open_files: std::collections::HashMap<String, File>,
 }
 
 impl std::fmt::Debug for LogBuffer {
@@ -77,6 +79,7 @@ impl std::fmt::Debug for LogBuffer {
             .field("sequence", &self.sequence)
             .field("max_log_size", &self.max_log_size)
             .field("max_rotated_files", &self.max_rotated_files)
+            .field("open_files_count", &self.open_files.len())
             .finish()
     }
 }
@@ -116,6 +119,8 @@ impl LogBuffer {
             max_rotated_files,
             // Pre-allocate buffer for typical log line (256 bytes should cover most cases)
             format_buffer: String::with_capacity(256),
+            // Cache file handles for ~10 services
+            open_files: std::collections::HashMap::with_capacity(16),
         }
     }
 
@@ -205,12 +210,16 @@ impl LogBuffer {
     }
 
     /// Add a log entry, appending to disk with rotation if needed
-    pub fn push(&mut self, service: String, line: String, stream: LogStream) {
-        let log_file = self.log_file_path(&service);
+    pub fn push(&mut self, service: &str, line: String, stream: LogStream) {
+        let log_file = self.log_file_path(service);
         let timestamp = Utc::now().timestamp_millis();
 
-        // Check if rotation is needed before writing
-        self.maybe_rotate(&log_file);
+        // Check if rotation is needed - must close handle first
+        if self.needs_rotation(&log_file) {
+            // Remove and drop the cached handle before rotation
+            self.open_files.remove(service);
+            self.rotate_log_file(&log_file);
+        }
 
         // Format: {timestamp_unix}\t{stream}\t{service}\t{line}
         // Use pre-allocated buffer to reduce allocations
@@ -223,44 +232,40 @@ impl LogBuffer {
             service,
             line
         );
-        let entry = &self.format_buffer;
 
-        // Append to file with secure permissions (0o600)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            match OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .open(&log_file)
+        // Get or create the file handle
+        let service_key = service.to_string();
+        let log_file_clone = log_file.clone();
+        let file = self.open_files.entry(service_key.clone()).or_insert_with(|| {
+            #[cfg(unix)]
             {
-                Ok(mut file) => {
-                    if let Err(e) = file.write_all(entry.as_bytes()) {
-                        tracing::warn!("Failed to write log entry to {:?}: {}", log_file, e);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to open log file {:?}: {}", log_file, e);
-                }
+                use std::os::unix::fs::OpenOptionsExt;
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .mode(0o600)
+                    .open(&log_file_clone)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Failed to open log file {:?}: {}", log_file_clone, e);
+                        // Return a file that will fail writes gracefully
+                        File::open("/dev/null").expect("Failed to open /dev/null")
+                    })
             }
-        }
-        #[cfg(not(unix))]
-        {
-            match OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_file)
+            #[cfg(not(unix))]
             {
-                Ok(mut file) => {
-                    if let Err(e) = file.write_all(entry.as_bytes()) {
-                        tracing::warn!("Failed to write log entry to {:?}: {}", log_file, e);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to open log file {:?}: {}", log_file, e);
-                }
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_file_clone)
+                    .expect("Failed to open log file")
             }
+        });
+
+        // Write immediately to disk - no buffering
+        if let Err(e) = file.write_all(self.format_buffer.as_bytes()) {
+            tracing::warn!("Failed to write log entry: {}", e);
+            // Remove broken handle so next write reopens
+            self.open_files.remove(&service_key);
         }
 
         self.sequence += 1;
@@ -271,17 +276,17 @@ impl LogBuffer {
         }
     }
 
-    /// Check if log file needs rotation and rotate if necessary
-    fn maybe_rotate(&self, log_file: &PathBuf) {
-        // Check current file size
-        let file_size = match fs::metadata(log_file) {
-            Ok(m) => m.len(),
-            Err(_) => return, // File doesn't exist, no rotation needed
-        };
-
-        if file_size >= self.max_log_size {
-            self.rotate_log_file(log_file);
+    /// Check if log file needs rotation
+    fn needs_rotation(&self, log_file: &PathBuf) -> bool {
+        match fs::metadata(log_file) {
+            Ok(m) => m.len() >= self.max_log_size,
+            Err(_) => false,
         }
+    }
+
+    /// Close all cached file handles for graceful shutdown
+    pub fn close_all(&mut self) {
+        self.open_files.clear(); // File handles are flushed on drop
     }
 
     /// Rotate a log file: .log -> .log.1, .log.1 -> .log.2, etc.
@@ -328,7 +333,7 @@ impl LogBuffer {
 
     /// List all log files in the directory (main files only, not rotated)
     fn list_log_files(&self) -> Vec<PathBuf> {
-        let mut files = Vec::new();
+        let mut files = Vec::with_capacity(16); // Typical ~10 services
         if let Ok(entries) = fs::read_dir(&self.logs_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -344,7 +349,7 @@ impl LogBuffer {
     /// Returns files in order: oldest rotated (.log.N) to newest (.log)
     fn list_service_log_files(&self, service: &str) -> Vec<PathBuf> {
         let main_file = self.log_file_path(service);
-        let mut files = Vec::new();
+        let mut files = Vec::with_capacity(self.max_rotated_files as usize + 1);
 
         // Add rotated files in reverse order (oldest first)
         for i in (1..=self.max_rotated_files).rev() {
@@ -377,7 +382,7 @@ impl LogBuffer {
         max_bytes: Option<usize>,
         max_lines: Option<usize>,
     ) -> Vec<LogLine> {
-        let mut entries = Vec::new();
+        let mut entries = Vec::with_capacity(256); // Reasonable default
         let file = match File::open(path) {
             Ok(f) => f,
             Err(_) => return entries,
@@ -461,7 +466,7 @@ impl LogBuffer {
         }
 
         // Read all entries and sort by timestamp
-        let mut all_entries = Vec::new();
+        let mut all_entries = Vec::with_capacity(256);
         for file in self.list_log_files() {
             all_entries.extend(self.read_log_file(&file));
         }
@@ -517,7 +522,7 @@ impl LogBuffer {
         };
 
         // Read and parse entries from each file with bounds
-        let mut entries = Vec::new();
+        let mut entries = Vec::with_capacity(count); // Pre-allocate for expected result size
         for file in files {
             let file_entries = self.read_log_file_bounded(&file, Some(per_file_max_bytes), None);
             // Filter by service if specified (in case filename doesn't exactly match)
@@ -659,6 +664,9 @@ impl LogBuffer {
 
     /// Clear all entries (delete all log files)
     pub fn clear(&mut self) {
+        // Close all cached file handles before deleting
+        self.open_files.clear();
+
         for file in self.list_log_files() {
             // Remove rotated files first
             for i in 1..=self.max_rotated_files {
@@ -674,6 +682,9 @@ impl LogBuffer {
 
     /// Clear entries for a specific service (delete the log file and all rotated files)
     pub fn clear_service(&mut self, service: &str) {
+        // Close cached file handle before deleting
+        self.open_files.remove(service);
+
         let log_file = self.log_file_path(service);
 
         // Remove rotated files first (.log.1, .log.2, etc.)
@@ -704,6 +715,13 @@ impl LogBuffer {
     /// Clear entries for services matching a prefix (e.g., "[global" clears all global hooks)
     /// Also removes rotated log files for matching services
     pub fn clear_service_prefix(&mut self, prefix: &str) {
+        // Close cached file handles for matching services before deleting
+        let sanitized_prefix = prefix.replace(['/', '\\', ':', '[', ']'], "_");
+        self.open_files.retain(|k, _| {
+            let sanitized_key = k.replace(['/', '\\', ':', '[', ']'], "_");
+            !sanitized_key.starts_with(&sanitized_prefix)
+        });
+
         // Sanitize prefix for matching filenames
         let safe_prefix = prefix.replace(['/', '\\', ':', '[', ']'], "_");
 
@@ -766,7 +784,7 @@ impl SharedLogBuffer {
         }
     }
 
-    pub fn push(&self, service: String, line: String, stream: LogStream) {
+    pub fn push(&self, service: &str, line: String, stream: LogStream) {
         self.inner.write().push(service, line, stream);
     }
 

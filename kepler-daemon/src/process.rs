@@ -374,7 +374,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
                             info!(target: "hook", "[{}] {}", service_name_stdout, line);
                             // Also capture in log buffer
                             if let Some(ref logs) = logs_for_stdout {
-                                logs.push(service_name_stdout.clone(), line, LogStream::Stdout);
+                                logs.push(&service_name_stdout, line, LogStream::Stdout);
                             }
                         }
                     }
@@ -396,7 +396,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
                             info!(target: "hook", "[{}] {}", service_name_stderr, line);
                             // Also capture in log buffer
                             if let Some(ref logs) = logs_for_stderr {
-                                logs.push(service_name_stderr.clone(), line, LogStream::Stderr);
+                                logs.push(&service_name_stderr, line, LogStream::Stderr);
                             }
                         }
                     }
@@ -492,7 +492,7 @@ pub async fn spawn_detached(
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if should_store {
-                    logs_clone.push(service_name_clone.clone(), line, LogStream::Stdout);
+                    logs_clone.push(&service_name_clone, line, LogStream::Stdout);
                 }
             }
         }))
@@ -511,7 +511,7 @@ pub async fn spawn_detached(
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if should_store {
-                    logs_clone.push(service_name_clone.clone(), line, LogStream::Stderr);
+                    logs_clone.push(&service_name_clone, line, LogStream::Stderr);
                 }
             }
         }))

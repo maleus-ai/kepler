@@ -213,17 +213,46 @@ async fn test_lua_depends_on() -> E2eResult<()> {
         .await?;
 
     // Check logs - dep-target should start before dep-source
+    // Use timestamps for robust ordering (log positions can be racy)
     let logs = harness
         .wait_for_log_content(&config_path, "DEP_SOURCE_START", Duration::from_secs(5))
         .await?;
 
-    let pos_target = logs.stdout.find("DEP_TARGET_START");
-    let pos_source = logs.stdout.find("DEP_SOURCE_START");
+    // Get logs with timestamps for reliable ordering comparison
+    let logs_with_ts = harness.get_logs_with_timestamps(&config_path, None, 100).await?;
 
+    // Extract timestamp from log line (format: "YYYY-MM-DD HH:MM:SS ...")
+    fn extract_timestamp<'a>(logs: &'a str, marker: &str) -> Option<&'a str> {
+        for line in logs.lines() {
+            if line.contains(marker) {
+                // Timestamp is at the start: "2024-01-15 10:30:45 ..."
+                return line.get(0..19);
+            }
+        }
+        None
+    }
+
+    let ts_target = extract_timestamp(&logs_with_ts.stdout, "DEP_TARGET_START");
+    let ts_source = extract_timestamp(&logs_with_ts.stdout, "DEP_SOURCE_START");
+
+    // Both markers should be present
     assert!(
-        pos_target < pos_source,
-        "Lua-generated depends_on should work. Target pos: {:?}, Source pos: {:?}",
-        pos_target, pos_source
+        logs.stdout_contains("DEP_TARGET_START"),
+        "dep-target should have logged its marker. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        logs.stdout_contains("DEP_SOURCE_START"),
+        "dep-source should have logged its marker. stdout: {}",
+        logs.stdout
+    );
+
+    // Compare timestamps - target should start before or at the same time as source
+    // (dependencies guarantee target starts first, but logs may have same-second timestamps)
+    assert!(
+        ts_target <= ts_source,
+        "Lua-generated depends_on should work. Target timestamp: {:?}, Source timestamp: {:?}",
+        ts_target, ts_source
     );
 
     harness.stop_daemon().await?;

@@ -76,7 +76,7 @@ pub fn build_service_env(
     service_name: &str,
     state_dir: &Path,
 ) -> Result<HashMap<String, String>> {
-    let mut env = HashMap::new();
+    let mut env = HashMap::with_capacity(64); // sys_env + env_file + config
 
     // Load env_file from STATE DIRECTORY (copied at snapshot time)
     if let Some(ref env_file) = config.env_file {

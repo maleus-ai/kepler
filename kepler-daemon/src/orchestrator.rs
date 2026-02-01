@@ -224,7 +224,8 @@ impl ServiceOrchestrator {
                     let service_name_clone = service_name.clone();
                     let self_ref = self;
                     tasks.push(async move {
-                        (service_name_clone.clone(), self_ref.start_single_service(&handle_clone, &service_name_clone).await)
+                        let result = self_ref.start_single_service(&handle_clone, &service_name_clone).await;
+                        (service_name_clone, result) // Move instead of clone
                     });
                 }
 

@@ -27,7 +27,7 @@ fn test_large_log_file_bounded_read() {
     let num_lines = 50_000;
     for i in 0..num_lines {
         buffer.push(
-            "test-service".to_string(),
+            "test-service",
             format!("Log line {} with some content to make it realistic", i),
             LogStream::Stdout,
         );
@@ -59,7 +59,7 @@ fn test_log_rotation_under_load() {
     // Write enough data to trigger multiple rotations
     for i in 0..1000 {
         buffer.push(
-            "test-service".to_string(),
+            "test-service",
             format!("Log line {} with some padding to fill up the file quickly: {}", i, "x".repeat(100)),
             LogStream::Stdout,
         );
@@ -96,7 +96,7 @@ fn test_sequence_persistence() {
         let mut buffer = LogBuffer::new(logs_dir.clone());
         for i in 0..500 {
             buffer.push(
-                "test-service".to_string(),
+                "test-service",
                 format!("Line {}", i),
                 LogStream::Stdout,
             );
@@ -183,7 +183,7 @@ fn test_bounded_read_respects_limits() {
     // Write some logs
     for i in 0..1000 {
         shared_buffer.push(
-            "test-service".to_string(),
+            "test-service",
             format!("Line {}", i),
             LogStream::Stdout,
         );
@@ -216,7 +216,7 @@ fn test_clear_during_heavy_writes() {
     for cycle in 0..10 {
         for i in 0..100 {
             shared_buffer.push(
-                "test-service".to_string(),
+                "test-service",
                 format!("Cycle {} Line {}", cycle, i),
                 LogStream::Stdout,
             );
@@ -293,7 +293,7 @@ fn test_format_buffer_reuse() {
     // Write many entries - format buffer should be reused
     for i in 0..1000 {
         buffer.push(
-            "test".to_string(),
+            "test",
             format!("Line {}", i),
             LogStream::Stdout,
         );
@@ -327,7 +327,7 @@ fn test_rotated_logs_merged_correctly() {
     let total_lines = lines_per_file * 6;
     for i in 0..total_lines {
         buffer.push(
-            "test-service".to_string(),
+            "test-service",
             format!(
                 "Log line {:06} with padding to fill up the file quickly: {}",
                 i,
@@ -499,7 +499,7 @@ fn test_rotated_logs_timestamp_ordering() {
     for batch in 0..total_batches {
         for i in 0..lines_per_batch {
             buffer.push(
-                "timestamp-test".to_string(),
+                "timestamp-test",
                 format!("B{:02}L{:03}", batch, i),
                 LogStream::Stdout,
             );
@@ -614,7 +614,7 @@ fn test_log_pagination_offset_limit() {
     // Write 100 log lines
     for i in 0..100 {
         buffer.push(
-            "pagination-test".to_string(),
+            "pagination-test",
             format!("Line {:03}", i),
             LogStream::Stdout,
         );
@@ -664,7 +664,7 @@ fn test_log_pagination_across_rotated_files() {
 
     for i in 0..total_lines {
         buffer.push(
-            "rotated-pagination".to_string(),
+            "rotated-pagination",
             format!("Line {:04} with padding: {}", i, "y".repeat(40)),
             LogStream::Stdout,
         );
@@ -773,7 +773,7 @@ fn test_log_pagination_total_count_accurate() {
     let expected_count = 123;
     for i in 0..expected_count {
         buffer.push(
-            "count-test".to_string(),
+            "count-test",
             format!("Entry {}", i),
             LogStream::Stdout,
         );
@@ -816,7 +816,7 @@ fn test_clear_service_removes_rotated_logs() {
 
     for i in 0..total_lines {
         buffer.push(
-            "retention-test".to_string(),
+            "retention-test",
             format!("Line {:04} padding: {}", i, "z".repeat(20)),
             LogStream::Stdout,
         );
@@ -898,18 +898,18 @@ fn test_clear_service_prefix_removes_rotated_logs() {
 
     for i in 0..total_lines {
         buffer.push(
-            "_prefix_.hook1".to_string(),
+            "_prefix_.hook1",
             format!("Hook1 line {:04} pad: {}", i, "a".repeat(20)),
             LogStream::Stdout,
         );
         buffer.push(
-            "_prefix_.hook2".to_string(),
+            "_prefix_.hook2",
             format!("Hook2 line {:04} pad: {}", i, "b".repeat(20)),
             LogStream::Stdout,
         );
         // Also write to a service that should NOT be cleared
         buffer.push(
-            "other-service".to_string(),
+            "other-service",
             format!("Other line {:04} pad: {}", i, "c".repeat(20)),
             LogStream::Stdout,
         );
@@ -996,12 +996,12 @@ fn test_clear_all_removes_all_rotated_logs() {
 
     for i in 0..total_lines {
         buffer.push(
-            "service-a".to_string(),
+            "service-a",
             format!("A line {:04} padding: {}", i, "x".repeat(25)),
             LogStream::Stdout,
         );
         buffer.push(
-            "service-b".to_string(),
+            "service-b",
             format!("B line {:04} padding: {}", i, "y".repeat(25)),
             LogStream::Stdout,
         );
