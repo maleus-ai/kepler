@@ -267,14 +267,17 @@ The Lua environment provides a **restricted subset** of the standard library:
 | `ctx.service_name` | Current service name (nil if global) |
 | `ctx.hook_name` | Current hook name (nil outside hooks) |
 | `global` | Mutable shared table for cross-block state |
-| `require()` | Load Lua files **only** from config directory |
+| `require()` | Load Lua modules from config directory (checked first) or system Lua paths |
 
 ### Security Measures
 
 - **Environment tables frozen** via metatable proxy pattern
 - **Writes to `ctx.*` tables raise runtime errors**
 - **Metatables protected** from removal
-- **`require()` path scoped** to config directory only (cannot escape to parent directories)
+- **`require()` path includes config directory** (prepended to system Lua paths for convenient module loading). This is safe because:
+  - Lua is evaluated **once** during config baking, not at runtime
+  - Users running configs must have the same access as the Daemon
+  - Luau's sandbox prevents filesystem and network access regardless of loaded modules
 
 ### Single Evaluation
 

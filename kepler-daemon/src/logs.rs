@@ -7,6 +7,20 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Validate that a path is not a symlink (security measure to prevent symlink attacks)
+#[cfg(unix)]
+fn validate_not_symlink(path: &std::path::Path) -> std::io::Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Log path is a symlink: {:?}", path),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Default maximum bytes to read when tailing logs (10MB)
 pub const DEFAULT_MAX_BYTES: usize = 10 * 1024 * 1024;
 
@@ -266,9 +280,11 @@ impl LogBuffer {
 
         if self.buffer_size == 0 {
             // No buffering - write directly to disk
-            // Copy bytes to avoid borrow conflict (format_buffer borrows self immutably)
-            let data = self.format_buffer.as_bytes().to_vec();
-            self.write_to_disk(service, &data);
+            // Take ownership of format_buffer to avoid allocation
+            let formatted = std::mem::take(&mut self.format_buffer);
+            self.write_to_disk(service, formatted.as_bytes());
+            self.format_buffer = formatted;
+            self.format_buffer.clear();
         } else {
             // Buffer the entry
             let buffer = self
@@ -313,6 +329,13 @@ impl LogBuffer {
         // Get or create the file handle
         let log_file_clone = log_file.clone();
         let file = self.open_files.entry(service_key.clone()).or_insert_with(|| {
+            // Validate existing path is not a symlink
+            #[cfg(unix)]
+            if let Err(e) = validate_not_symlink(&log_file_clone) {
+                tracing::warn!("Refusing to open log file: {}", e);
+                return File::open("/dev/null").expect("Failed to open /dev/null");
+            }
+
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
@@ -320,6 +343,7 @@ impl LogBuffer {
                     .create(true)
                     .append(true)
                     .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW) // Don't follow symlinks on open
                     .open(&log_file_clone)
                     .unwrap_or_else(|e| {
                         tracing::warn!("Failed to open log file {:?}: {}", log_file_clone, e);
@@ -356,9 +380,12 @@ impl LogBuffer {
 
     /// Flush all buffered entries to disk
     pub fn flush_all(&mut self) {
-        let services: Vec<String> = self.write_buffers.keys().cloned().collect();
-        for service in services {
-            self.flush_service(&service);
+        // Drain buffers without cloning keys
+        let buffers = std::mem::take(&mut self.write_buffers);
+        for (service, buffer) in buffers {
+            if !buffer.is_empty() {
+                self.write_to_disk(&service, &buffer);
+            }
         }
     }
 
@@ -375,6 +402,13 @@ impl LogBuffer {
     /// index that overwrites the oldest file directly. This reduces rotation
     /// from O(max_rotated_files) renames to O(1).
     fn rotate_log_file(&mut self, service: &str, log_file: &PathBuf) {
+        // Validate source before rotation
+        #[cfg(unix)]
+        if let Err(e) = validate_not_symlink(log_file) {
+            tracing::error!("Cannot rotate: {}", e);
+            return;
+        }
+
         // Get next rotation index (1 to max_rotated_files, cycling)
         let index = self
             .rotation_index

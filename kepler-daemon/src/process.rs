@@ -838,19 +838,37 @@ pub fn validate_running_process(pid: u32, expected_start_time: Option<i64>) -> b
             return false;
         }
 
-        // If we have an expected start time, validate against /proc/{pid}/stat
+        // Verify process is owned by daemon user (prevents cross-user confusion)
+        let daemon_uid = nix::unistd::getuid().as_raw();
+        if let Some(proc_uid) = get_process_uid(pid) {
+            if proc_uid != daemon_uid {
+                trace!(
+                    "Process {} owned by UID {} but daemon runs as UID {}",
+                    pid, proc_uid, daemon_uid
+                );
+                return false;
+            }
+        }
+
+        // Validate start time - CRITICAL for daemon restart safety
         if let Some(expected_ts) = expected_start_time {
             if let Some(actual_ts) = get_process_start_time(pid) {
-                // Allow some tolerance (5 seconds) for timestamp differences
                 let diff = (expected_ts - actual_ts).abs();
-                if diff > 5 {
+                if diff > 1 {  // Tight 1-second tolerance
                     trace!(
-                        "Process {} start time mismatch: expected {}, got {} (diff {})",
+                        "Process {} start time mismatch: expected {}, got {} (diff {}s) - likely PID reuse",
                         pid, expected_ts, actual_ts, diff
                     );
                     return false;
                 }
+            } else {
+                // Cannot read start time - don't trust this PID
+                trace!("Cannot verify start time for PID {}, rejecting", pid);
+                return false;
             }
+        } else {
+            // No expected start time provided - warn but allow for backwards compatibility
+            warn!("No expected_start_time for PID {} - state may be incomplete", pid);
         }
 
         true
@@ -863,6 +881,19 @@ pub fn validate_running_process(pid: u32, expected_start_time: Option<i64>) -> b
         let _ = (pid, expected_start_time);
         false
     }
+}
+
+/// Get process UID from /proc/{pid}/status
+#[cfg(unix)]
+fn get_process_uid(pid: u32) -> Option<u32> {
+    let status_path = format!("/proc/{}/status", pid);
+    let content = std::fs::read_to_string(&status_path).ok()?;
+
+    content
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u32>().ok())
 }
 
 /// Get the start time of a process from /proc/{pid}/stat.

@@ -1081,13 +1081,9 @@ fn test_buffer_size_nonzero_buffers_until_flush() {
 
     // The file shouldn't have existed before flush (unless it was created empty)
     if file_exists_before_flush {
-        // If file existed, it should have been empty or very small
-        let size_before = std::fs::metadata(&log_file)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        // After flush, file should be larger
+        // After flush, file should have content
         assert!(
-            content.len() > 0,
+            !content.is_empty(),
             "File should have content after flush"
         );
     }
