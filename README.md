@@ -70,10 +70,10 @@ git clone https://github.com/your-org/kepler.git
 cd kepler
 cargo build --release
 
-# Install to ~/.cargo/bin (ensure it's in your PATH)
-cargo install --path kepler-cli
+# Install kepler CLI to ~/.cargo/bin (ensure it's in your PATH)
+cargo install --path kepler-cli  # Installs as 'kepler'
 
-# Or copy manually
+# Or copy binaries manually
 sudo cp target/release/kepler /usr/local/bin/
 sudo cp target/release/kepler-daemon /usr/local/bin/
 ```
