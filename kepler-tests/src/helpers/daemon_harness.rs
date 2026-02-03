@@ -370,7 +370,7 @@ impl TestDaemonHarness {
                     if should_clear {
                         let reader = LogReader::new(
                             ctx.log_config.logs_dir.clone(),
-                            ctx.log_config.max_rotated_files,
+                            0,
                         );
                         reader.clear_service(&event.service_name);
                         reader.clear_service_prefix(&format!("[{}.", event.service_name));
@@ -461,7 +461,7 @@ impl TestDaemonHarness {
                     if should_clear {
                         let reader = LogReader::new(
                             ctx.log_config.logs_dir.clone(),
-                            ctx.log_config.max_rotated_files,
+                            0,
                         );
                         reader.clear_service(&event.service_name);
                         reader.clear_service_prefix(&format!("[{}.", event.service_name));
@@ -499,7 +499,7 @@ impl TestDaemonHarness {
                         if should_clear {
                             let reader = LogReader::new(
                                 ctx.log_config.logs_dir.clone(),
-                                ctx.log_config.max_rotated_files,
+                                0,
                             );
                             reader.clear_service(&event.service_name);
                             reader.clear_service_prefix(&format!("[{}.", event.service_name));
@@ -575,7 +575,7 @@ impl TestLogHelper {
     pub fn tail(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
         let reader = LogReader::new(
             self.config.logs_dir.clone(),
-            self.config.max_rotated_files,
+            0,
         );
         reader.tail(count, service)
     }
@@ -584,7 +584,7 @@ impl TestLogHelper {
     pub fn clear(&self) {
         let reader = LogReader::new(
             self.config.logs_dir.clone(),
-            self.config.max_rotated_files,
+            0,
         );
         reader.clear();
         self.sequence.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -594,7 +594,7 @@ impl TestLogHelper {
     pub fn clear_service(&self, service: &str) {
         let reader = LogReader::new(
             self.config.logs_dir.clone(),
-            self.config.max_rotated_files,
+            0,
         );
         reader.clear_service(service);
     }
@@ -603,7 +603,7 @@ impl TestLogHelper {
     pub fn clear_service_prefix(&self, prefix: &str) {
         let reader = LogReader::new(
             self.config.logs_dir.clone(),
-            self.config.max_rotated_files,
+            0,
         );
         reader.clear_service_prefix(prefix);
     }
@@ -617,7 +617,7 @@ impl TestLogHelper {
     pub fn entries_since(&self, since: u64, service: Option<&str>) -> Vec<LogLine> {
         let reader = LogReader::new(
             self.config.logs_dir.clone(),
-            self.config.max_rotated_files,
+            0,
         );
         // Get all entries and filter by index
         // Note: this is less efficient than the old approach but maintains API compatibility

@@ -24,8 +24,7 @@ fn test_write_single_line() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        1024 * 1024, // 1MB max
-        5,           // 5 rotated files
+        Some(1024 * 1024), // 1MB max
         0,           // No buffering - write immediately
     );
 
@@ -49,8 +48,7 @@ fn test_write_adds_timestamp() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        1024 * 1024,
-        5,
+        Some(1024 * 1024),
         0, // No buffering
     );
 
@@ -89,8 +87,7 @@ fn test_buffer_flushes_at_size() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        1024 * 1024,
-        5,
+        Some(1024 * 1024),
         buffer_size,
     );
 
@@ -115,7 +112,7 @@ fn test_buffer_flushes_at_size() {
 }
 
 #[test]
-fn test_rotation_when_max_size_reached() {
+fn test_truncation_when_max_size_reached() {
     let temp_dir = setup_test_dir();
     let logs_dir = temp_dir.path().to_path_buf();
 
@@ -124,66 +121,68 @@ fn test_rotation_when_max_size_reached() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        max_log_size,
-        5,
+        Some(max_log_size),
         0, // No buffering
     );
 
     let log_path = logs_dir.join("test-service.stdout.log");
-    let rotated_path = logs_dir.join("test-service.stdout.log.1");
 
-    // Write until rotation occurs
+    // Write until truncation occurs
     for i in 0..20 {
         writer.write(&format!("Log message number {}", i));
     }
     drop(writer);
 
-    // Both main and rotated files should exist
+    // Main log file should exist
     assert!(log_path.exists(), "Main log file should exist");
-    assert!(rotated_path.exists(), "Rotated log file should exist");
+
+    // With truncation, file size should be at most max_size + one line
+    let metadata = fs::metadata(&log_path).unwrap();
+    let file_size = metadata.len();
+    assert!(
+        file_size <= max_log_size + 100, // Allow margin for one more line
+        "Log file should be truncated, got {} bytes",
+        file_size
+    );
+
+    // No rotated files should exist
+    let rotated_path = logs_dir.join("test-service.stdout.log.1");
+    assert!(!rotated_path.exists(), "Rotated log file should not exist with truncation model");
 }
 
 #[test]
-fn test_rotation_cycling_overwrites_oldest() {
+fn test_truncation_preserves_recent_data() {
     let temp_dir = setup_test_dir();
     let logs_dir = temp_dir.path().to_path_buf();
 
-    let max_log_size = 100; // Very small to force many rotations
-    let max_rotated = 3;    // Only keep 3 rotated files
+    let max_log_size = 100; // Very small to force truncation
     let mut writer = BufferedLogWriter::new(
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        max_log_size,
-        max_rotated,
+        Some(max_log_size),
         0, // No buffering
     );
 
-    // Write many messages to cause multiple rotations
+    // Write many messages to cause truncation
     for i in 0..100 {
         writer.write(&format!("Long message {} with padding", i));
     }
     drop(writer);
 
-    // Check that only max_rotated files exist (plus main file)
+    // Check that log file exists
     let log_path = logs_dir.join("test-service.stdout.log");
     assert!(log_path.exists(), "Main log file should exist");
 
-    // Count rotated files
-    let mut rotated_count = 0;
+    // No rotated files should exist with the new truncation model
     for i in 1..=10 {
         let rotated = logs_dir.join(format!("test-service.stdout.log.{}", i));
-        if rotated.exists() {
-            rotated_count += 1;
-        }
+        assert!(
+            !rotated.exists(),
+            "Rotated file {} should not exist with truncation model",
+            i
+        );
     }
-
-    assert!(
-        rotated_count <= max_rotated as usize,
-        "Should have at most {} rotated files, found {}",
-        max_rotated,
-        rotated_count
-    );
 }
 
 #[test]
@@ -198,8 +197,7 @@ fn test_flush_on_drop() {
             &logs_dir,
             "test-service",
             LogStream::Stdout,
-            1024 * 1024,
-            5,
+            Some(1024 * 1024),
             1024, // Buffer enabled
         );
 
@@ -240,8 +238,7 @@ fn test_symlink_protection() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        1024 * 1024,
-        5,
+        Some(1024 * 1024),
         0, // No buffering
     );
 
@@ -265,8 +262,7 @@ fn test_separate_stdout_stderr_files() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        1024 * 1024,
-        5,
+        Some(1024 * 1024),
         0,
     );
 
@@ -274,8 +270,7 @@ fn test_separate_stdout_stderr_files() {
         &logs_dir,
         "test-service",
         LogStream::Stderr,
-        1024 * 1024,
-        5,
+        Some(1024 * 1024),
         0,
     );
 
@@ -311,8 +306,7 @@ fn test_service_name_sanitization() {
         &logs_dir,
         "service/with:special[chars]",
         LogStream::Stdout,
-        1024 * 1024,
-        5,
+        Some(1024 * 1024),
         0,
     );
 
@@ -332,8 +326,7 @@ fn test_from_config() {
     let temp_dir = setup_test_dir();
     let config = LogWriterConfig::with_options(
         temp_dir.path().to_path_buf(),
-        512 * 1024, // 512KB
-        3,
+        Some(512 * 1024), // 512KB
         4096,
     );
 
@@ -354,8 +347,7 @@ fn test_multiple_writes_preserve_order() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        1024 * 1024,
-        5,
+        Some(1024 * 1024),
         0, // No buffering
     );
 
@@ -365,7 +357,7 @@ fn test_multiple_writes_preserve_order() {
     drop(writer);
 
     // Read and verify order
-    let reader = LogReader::new(logs_dir.clone(), 5);
+    let reader = LogReader::new(logs_dir.clone(), 0);
     let logs = reader.tail(200, Some("test-service"));
 
     assert_eq!(logs.len(), 100, "Should have all 100 lines");
@@ -385,23 +377,25 @@ fn test_bytes_written_tracking() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        max_log_size,
-        5,
+        Some(max_log_size),
         0, // No buffering to get accurate byte tracking
     );
 
-    // Write exactly enough to trigger rotation
+    // Write enough to trigger truncation
     // Each line is: TIMESTAMP\tMESSAGE\n (about 25-30 bytes for "Line X")
     for i in 0..30 {
         writer.write(&format!("Line {}", i));
     }
     drop(writer);
 
-    // Verify rotation happened
-    let rotated_path = logs_dir.join("test-service.stdout.log.1");
+    // Verify file exists and is within expected size after truncation
+    let log_path = logs_dir.join("test-service.stdout.log");
+    assert!(log_path.exists(), "Log file should exist");
+
+    let metadata = fs::metadata(&log_path).unwrap();
     assert!(
-        rotated_path.exists(),
-        "Should have rotated after exceeding max size"
+        metadata.len() <= max_log_size + 100,
+        "File should be truncated to roughly max size"
     );
 }
 
@@ -414,8 +408,7 @@ fn test_empty_message() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        1024 * 1024,
-        5,
+        Some(1024 * 1024),
         0,
     );
 
@@ -438,8 +431,7 @@ fn test_multiline_message() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        1024 * 1024,
-        5,
+        Some(1024 * 1024),
         0,
     );
 
@@ -450,7 +442,7 @@ fn test_multiline_message() {
     writer.write("Single line message without newlines");
     drop(writer);
 
-    let reader = LogReader::new(logs_dir.clone(), 5);
+    let reader = LogReader::new(logs_dir.clone(), 0);
     let logs = reader.tail(10, Some("test-service"));
 
     assert_eq!(logs.len(), 1, "Should have exactly one log entry");

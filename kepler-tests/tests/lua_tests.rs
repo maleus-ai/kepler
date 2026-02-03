@@ -569,3 +569,74 @@ services:
     assert!(service.environment.contains(&"FOO=bar".to_string()));
     assert!(service.environment.contains(&"BAZ=qux".to_string()));
 }
+
+/// Test: !lua tag works for global logs configuration (kepler.logs)
+#[test]
+fn test_lua_global_logs_config() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Set env vars for Lua scripts to use
+    unsafe {
+        std::env::set_var("KEPLER_LOG_MAX_SIZE", "50M");
+        std::env::set_var("KEPLER_LOG_BUFFER", "16384");
+    }
+
+    let yaml = r#"
+kepler:
+  logs:
+    max_size: !lua |
+      return ctx.env.KEPLER_LOG_MAX_SIZE or "10M"
+    buffer_size: !lua |
+      return tonumber(ctx.env.KEPLER_LOG_BUFFER) or 8192
+
+services:
+  test:
+    command: ["echo", "hello"]
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+
+    // Cleanup
+    unsafe {
+        std::env::remove_var("KEPLER_LOG_MAX_SIZE");
+        std::env::remove_var("KEPLER_LOG_BUFFER");
+    }
+
+    let logs = config.global_logs().expect("kepler.logs should exist");
+    assert_eq!(logs.max_size, Some("50M".to_string()));
+    assert_eq!(logs.buffer_size, Some(16384));
+}
+
+/// Test: !lua tag works for service-level logs configuration
+#[test]
+fn test_lua_service_logs_config() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Set env vars for Lua scripts to use
+    unsafe {
+        std::env::set_var("KEPLER_SERVICE_MAX_SIZE", "100M");
+    }
+
+    let yaml = r#"
+services:
+  test:
+    command: ["echo", "hello"]
+    logs:
+      max_size: !lua |
+        return ctx.env.KEPLER_SERVICE_MAX_SIZE or "20M"
+      buffer_size: !lua |
+        return 0  -- sync writes for this service
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+
+    // Cleanup
+    unsafe {
+        std::env::remove_var("KEPLER_SERVICE_MAX_SIZE");
+    }
+
+    let service = config.services.get("test").unwrap();
+    let logs = service.logs.as_ref().expect("service.logs should exist");
+    assert_eq!(logs.max_size, Some("100M".to_string()));
+    assert_eq!(logs.buffer_size, Some(0));
+}

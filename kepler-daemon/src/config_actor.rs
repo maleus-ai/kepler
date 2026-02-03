@@ -11,15 +11,18 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::info;
 
-use crate::config::{KeplerConfig, LogConfig, ServiceConfig, SysEnvPolicy};
+use crate::config::{
+    resolve_log_buffer_size, resolve_log_max_size, KeplerConfig, LogConfig, ServiceConfig,
+    SysEnvPolicy,
+};
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
-use crate::logs::{LogReader, LogWriterConfig, DEFAULT_MAX_LOG_SIZE, DEFAULT_MAX_ROTATED_FILES, DEFAULT_BUFFER_SIZE};
+use crate::logs::{DEFAULT_BUFFER_SIZE, LogReader, LogWriterConfig};
 use crate::persistence::{ConfigPersistence, ExpandedConfigSnapshot};
 use crate::state::{
     PersistedConfigState, PersistedServiceState, ProcessHandle, ServiceState, ServiceStatus,
 };
-use kepler_protocol::protocol::{LogEntry, ServiceInfo};
+use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
 
 /// Type of task handle stored in state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -70,6 +73,13 @@ pub enum ConfigCommand {
         service: Option<String>,
         lines: usize,
         max_bytes: Option<usize>,
+        reply: oneshot::Sender<Vec<LogEntry>>,
+    },
+    GetLogsWithMode {
+        service: Option<String>,
+        lines: usize,
+        max_bytes: Option<usize>,
+        mode: LogMode,
         reply: oneshot::Sender<Vec<LogEntry>>,
     },
     GetLogsPaginated {
@@ -302,11 +312,8 @@ impl ConfigActor {
                     .services
                     .keys()
                     .map(|name| {
-                        let computed_env = snapshot
-                            .service_envs
-                            .get(name)
-                            .cloned()
-                            .unwrap_or_default();
+                        let computed_env =
+                            snapshot.service_envs.get(name).cloned().unwrap_or_default();
                         let working_dir = snapshot
                             .service_working_dirs
                             .get(name)
@@ -346,8 +353,8 @@ impl ConfigActor {
                     snapshot.config_dir,
                     services,
                     initialized,
-                    true,  // snapshot was already taken
-                    true,  // restored from snapshot
+                    true, // snapshot was already taken
+                    true, // restored from snapshot
                 )
             } else {
                 // No snapshot - parse fresh from source
@@ -414,10 +421,7 @@ impl ConfigActor {
                     .collect();
 
                 (
-                    config,
-                    config_dir,
-                    services,
-                    false, // not initialized
+                    config, config_dir, services, false, // not initialized
                     false, // snapshot not yet taken
                     false, // not restored from snapshot
                 )
@@ -457,22 +461,18 @@ impl ConfigActor {
         Ok((handle, actor))
     }
 
-    /// Create a log config with rotation and buffer settings from config
+    /// Create a log config with size and buffer settings from config.
+    /// Uses truncation if max_size is specified, otherwise unbounded.
     fn create_log_config(logs_dir: &Path, config: &KeplerConfig) -> LogWriterConfig {
         let global_logs = config.global_logs();
 
-        // Get rotation config (or defaults)
-        let (max_size, max_files) = match global_logs.and_then(|l| l.rotation.as_ref()) {
-            Some(rot) => (rot.max_size_bytes(), rot.max_files),
-            None => (DEFAULT_MAX_LOG_SIZE, DEFAULT_MAX_ROTATED_FILES),
-        };
+        // Get max size from global config (None = unbounded)
+        let max_size = resolve_log_max_size(None, global_logs);
 
-        // Get buffer size (default to 64KB for better performance)
-        let buffer_size = global_logs
-            .and_then(|l| l.buffer_size)
-            .unwrap_or(DEFAULT_BUFFER_SIZE);
+        // Get buffer size (default to 8KB for better performance)
+        let buffer_size = resolve_log_buffer_size(None, global_logs, DEFAULT_BUFFER_SIZE);
 
-        LogWriterConfig::with_options(logs_dir.to_path_buf(), max_size, max_files, buffer_size)
+        LogWriterConfig::with_options(logs_dir.to_path_buf(), max_size, buffer_size)
     }
 
     /// Run the actor event loop
@@ -517,6 +517,16 @@ impl ConfigActor {
                 reply,
             } => {
                 let result = self.get_logs_bounded(service.as_deref(), lines, max_bytes);
+                let _ = reply.send(result);
+            }
+            ConfigCommand::GetLogsWithMode {
+                service,
+                lines,
+                max_bytes,
+                mode,
+                reply,
+            } => {
+                let result = self.get_logs_with_mode(service.as_deref(), lines, max_bytes, mode);
                 let _ = reply.send(result);
             }
             ConfigCommand::GetLogsPaginated {
@@ -661,17 +671,11 @@ impl ConfigActor {
                 let _ = reply.send(result);
             }
             ConfigCommand::ClearServiceLogs { service_name } => {
-                let reader = LogReader::new(
-                    self.log_config.logs_dir.clone(),
-                    self.log_config.max_rotated_files,
-                );
+                let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
                 reader.clear_service(&service_name);
             }
             ConfigCommand::ClearServiceLogsPrefix { prefix } => {
-                let reader = LogReader::new(
-                    self.log_config.logs_dir.clone(),
-                    self.log_config.max_rotated_files,
-                );
+                let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
                 reader.clear_service_prefix(&prefix);
             }
 
@@ -843,10 +847,7 @@ impl ConfigActor {
     }
 
     fn get_logs(&self, service: Option<&str>, lines: usize) -> Vec<LogEntry> {
-        let reader = LogReader::new(
-            self.log_config.logs_dir.clone(),
-            self.log_config.max_rotated_files,
-        );
+        let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
         reader
             .tail(lines, service)
             .into_iter()
@@ -860,15 +861,35 @@ impl ConfigActor {
         lines: usize,
         max_bytes: Option<usize>,
     ) -> Vec<LogEntry> {
-        let reader = LogReader::new(
-            self.log_config.logs_dir.clone(),
-            self.log_config.max_rotated_files,
-        );
+        let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
         reader
             .tail_bounded(lines, service, max_bytes)
             .into_iter()
             .map(|l| l.into())
             .collect()
+    }
+
+    fn get_logs_with_mode(
+        &self,
+        service: Option<&str>,
+        lines: usize,
+        max_bytes: Option<usize>,
+        mode: LogMode,
+    ) -> Vec<LogEntry> {
+        let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
+        match mode {
+            LogMode::Head => reader
+                .head(lines, service)
+                .into_iter()
+                .map(|l| l.into())
+                .collect(),
+            LogMode::Tail => reader
+                .tail_bounded(lines, service, max_bytes)
+                .into_iter()
+                .map(|l| l.into())
+                .collect(),
+            LogMode::All => reader.iter(service).take(lines).map(|l| l.into()).collect(),
+        }
     }
 
     fn get_logs_paginated(
@@ -877,10 +898,7 @@ impl ConfigActor {
         offset: usize,
         limit: usize,
     ) -> (Vec<LogEntry>, usize) {
-        let reader = LogReader::new(
-            self.log_config.logs_dir.clone(),
-            self.log_config.max_rotated_files,
-        );
+        let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
         let (logs, total) = reader.get_paginated(service, offset, limit);
         (logs.into_iter().map(|l| l.into()).collect(), total)
     }
@@ -907,7 +925,8 @@ impl ConfigActor {
             .copy_env_files(&self.config.services, &self.config_dir);
 
         // Rebuild service states from existing baked config
-        self.services = self.config
+        self.services = self
+            .config
             .services
             .iter()
             .map(|(name, service_config)| {
@@ -1116,6 +1135,28 @@ impl ConfigActorHandle {
         reply_rx.await.unwrap_or_default()
     }
 
+    /// Get logs with mode support (head, tail, or all)
+    pub async fn get_logs_with_mode(
+        &self,
+        service: Option<String>,
+        lines: usize,
+        max_bytes: Option<usize>,
+        mode: LogMode,
+    ) -> Vec<LogEntry> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ConfigCommand::GetLogsWithMode {
+                service,
+                lines,
+                max_bytes,
+                mode,
+                reply: reply_tx,
+            })
+            .await;
+        reply_rx.await.unwrap_or_default()
+    }
+
     /// Get logs with true pagination (reads efficiently from disk with offset/limit)
     pub async fn get_logs_paginated(
         &self,
@@ -1134,6 +1175,19 @@ impl ConfigActorHandle {
             })
             .await;
         reply_rx.await.unwrap_or_else(|_| (Vec::new(), 0))
+    }
+
+    /// Get logs for follow mode (deprecated - use cursor-based streaming via LogsCursor request)
+    ///
+    /// This method is kept for backward compatibility but returns empty data.
+    /// New code should use the LogsCursor request instead.
+    pub async fn get_logs_follow(
+        &self,
+        _service: Option<String>,
+        _cursor: Option<String>,
+    ) -> (Vec<LogEntry>, String) {
+        // Return empty data - use LogsCursor request for cursor-based streaming
+        (Vec::new(), String::new())
     }
 
     /// Get a service configuration
@@ -1315,7 +1369,11 @@ impl ConfigActorHandle {
     }
 
     /// Record that a process exited
-    pub async fn record_process_exit(&self, service_name: &str, exit_code: Option<i32>) -> Result<()> {
+    pub async fn record_process_exit(
+        &self,
+        service_name: &str,
+        exit_code: Option<i32>,
+    ) -> Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ConfigCommand::RecordProcessExit {

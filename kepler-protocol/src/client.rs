@@ -8,7 +8,7 @@ use tokio::{
 
 use crate::{
     errors::ClientError,
-    protocol::{FRAME_DELIMITER, MAX_MESSAGE_SIZE, Request, Response, decode_response, encode_request},
+    protocol::{FRAME_DELIMITER, LogMode, MAX_MESSAGE_SIZE, Request, Response, decode_response, encode_request},
 };
 
 pub type Result<T> = std::result::Result<T, ClientError>;
@@ -163,6 +163,7 @@ impl Client {
         service: Option<String>,
         follow: bool,
         lines: usize,
+        mode: LogMode,
     ) -> Result<Response> {
         self.send_request(&Request::Logs {
             config_path,
@@ -170,6 +171,7 @@ impl Client {
             follow,
             lines,
             max_bytes: None, // Use default bounded reading
+            mode,
         })
         .await
     }
@@ -207,4 +209,44 @@ impl Client {
         self.send_request(&Request::Prune { force, dry_run }).await
     }
 
+    /// Get new log entries since last cursor (for follow mode)
+    ///
+    /// Pass `None` for cursor to start from the end of current files.
+    /// Returns entries and a new cursor to use for subsequent requests.
+    pub async fn logs_follow(
+        &mut self,
+        config_path: PathBuf,
+        service: Option<String>,
+        cursor: Option<String>,
+    ) -> Result<Response> {
+        self.send_request(&Request::LogsFollow {
+            config_path,
+            service,
+            cursor,
+        })
+        .await
+    }
+
+    /// Cursor-based log streaming (for 'all' and 'follow' modes)
+    ///
+    /// - Pass `None` for `cursor_id` to create a new cursor
+    /// - Pass `true` for `from_start` to start at beginning of files ('all' mode)
+    /// - Pass `false` for `from_start` to start at end of files ('follow' mode)
+    ///
+    /// Returns entries, cursor_id for next request, and has_more flag.
+    pub async fn logs_cursor(
+        &mut self,
+        config_path: PathBuf,
+        service: Option<String>,
+        cursor_id: Option<String>,
+        from_start: bool,
+    ) -> Result<Response> {
+        self.send_request(&Request::LogsCursor {
+            config_path,
+            service,
+            cursor_id,
+            from_start,
+        })
+        .await
+    }
 }

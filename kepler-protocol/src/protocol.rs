@@ -7,6 +7,25 @@ use crate::errors::ProtocolError;
 /// Maximum message size (1MB)
 pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
+/// Maximum lines for one-shot queries (head/tail)
+pub const MAX_LINES_ONE_SHOT: usize = 10_000;
+
+/// Maximum entries per cursor batch (for all/follow modes)
+pub const MAX_CURSOR_BATCH_SIZE: usize = 1_000;
+
+/// Log reading mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LogMode {
+    /// Read all logs chronologically using forward iterator (default)
+    #[default]
+    All,
+    /// Return the last N lines (newest entries, in chronological order)
+    Tail,
+    /// Return the first N lines (oldest first)
+    Head,
+}
+
 /// Request sent from CLI to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -58,6 +77,9 @@ pub enum Request {
         /// Maximum bytes to read (prevents OOM with large logs)
         #[serde(default)]
         max_bytes: Option<usize>,
+        /// Log reading mode (head or tail)
+        #[serde(default)]
+        mode: LogMode,
     },
     /// Get logs with pagination (for large log responses)
     LogsChunk {
@@ -87,6 +109,27 @@ pub enum Request {
         force: bool,
         /// Show what would be pruned without deleting
         dry_run: bool,
+    },
+    /// Get new log entries since last cursor position (for follow mode)
+    LogsFollow {
+        /// Path to the config file
+        config_path: PathBuf,
+        /// Service name (None = all services)
+        service: Option<String>,
+        /// Cursor from previous response (None = start from end of current files)
+        cursor: Option<String>,
+    },
+    /// Cursor-based log streaming (for 'all' and 'follow' modes)
+    LogsCursor {
+        /// Path to the config file
+        config_path: PathBuf,
+        /// Service name (None = all services)
+        service: Option<String>,
+        /// Cursor ID from previous response (None = create new cursor)
+        cursor_id: Option<String>,
+        /// If true, start cursor at beginning of files (for 'all' mode)
+        /// If false, start cursor at end of files (for 'follow' mode)
+        from_start: bool,
     },
 }
 
@@ -158,6 +201,10 @@ pub enum ResponseData {
     Logs(Vec<LogEntry>),
     /// Log entries chunk (for large log responses)
     LogChunk(LogChunkData),
+    /// Log entries for follow mode (includes cursor for next request)
+    LogFollow(LogFollowData),
+    /// Log entries for cursor-based streaming (all/follow modes)
+    LogCursor(LogCursorData),
     /// Daemon info
     DaemonInfo(DaemonInfo),
     /// Pruned configs info
@@ -188,6 +235,26 @@ pub struct LogChunkData {
     pub next_offset: usize,
     /// Total number of entries (if known)
     pub total: Option<usize>,
+}
+
+/// Log entries for follow mode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogFollowData {
+    /// New log entries since last cursor
+    pub entries: Vec<LogEntry>,
+    /// Cursor for next request (serialized file positions)
+    pub cursor: String,
+}
+
+/// Log entries for cursor-based streaming (all/follow modes)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogCursorData {
+    /// Log entries in this batch
+    pub entries: Vec<LogEntry>,
+    /// Cursor ID to use for next request
+    pub cursor_id: String,
+    /// Whether there are more entries to read (false when EOF reached for 'all' mode)
+    pub has_more: bool,
 }
 
 /// Status information for a single config

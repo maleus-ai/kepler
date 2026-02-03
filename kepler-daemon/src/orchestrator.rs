@@ -425,7 +425,7 @@ impl ServiceOrchestrator {
         // Apply log retention using LogReader
         if let Some(ref log_cfg) = log_config {
             use crate::logs::LogReader;
-            let reader = LogReader::new(log_cfg.logs_dir.clone(), log_cfg.max_rotated_files);
+            let reader = LogReader::new(log_cfg.logs_dir.clone(), 0);
 
             for service_name in &stopped {
                 // When clean is true, always clear logs (no retention policy check)

@@ -420,42 +420,6 @@ pub struct LogRetentionConfig {
     pub on_exit: Option<LogRetention>,
 }
 
-/// Log rotation configuration
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-pub struct LogRotationConfig {
-    /// Maximum size of a single log file before rotation (e.g., "10M", "100K")
-    /// Default: 10MB
-    #[serde(default = "default_max_size")]
-    pub max_size: String,
-    /// Maximum number of rotated log files to keep (e.g., .log.1, .log.2)
-    /// Default: 5
-    #[serde(default = "default_max_files")]
-    pub max_files: u32,
-}
-
-fn default_max_size() -> String {
-    "10M".to_string()
-}
-
-fn default_max_files() -> u32 {
-    5
-}
-
-impl Default for LogRotationConfig {
-    fn default() -> Self {
-        Self {
-            max_size: default_max_size(),
-            max_files: default_max_files(),
-        }
-    }
-}
-
-impl LogRotationConfig {
-    /// Parse max_size into bytes
-    pub fn max_size_bytes(&self) -> u64 {
-        parse_memory_limit(&self.max_size).unwrap_or(10 * 1024 * 1024) // 10MB default
-    }
-}
 
 /// Log configuration
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
@@ -468,12 +432,13 @@ pub struct LogConfig {
     /// Nested log retention settings
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<LogRetentionConfig>,
-    /// Log rotation settings
+    /// Maximum size of a single log file before truncation (e.g., "10M", "100K")
+    /// If not specified, logs are unbounded (no truncation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rotation: Option<LogRotationConfig>,
+    pub max_size: Option<String>,
     /// Buffer size in bytes before flushing to disk.
-    /// 0 = write directly to disk (no buffering, default)
-    /// Higher values batch writes for better throughput but risk data loss on crash.
+    /// Default: 8KB (8192 bytes) for better performance.
+    /// 0 = write directly to disk (synchronous writes, safest for crash recovery).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer_size: Option<usize>,
 }
@@ -497,6 +462,11 @@ impl LogConfig {
     /// Get on_exit retention from nested retention config
     pub fn get_on_exit(&self) -> Option<LogRetention> {
         self.retention.as_ref().and_then(|r| r.on_exit)
+    }
+
+    /// Parse max_size into bytes. Returns None if max_size is not specified (unbounded).
+    pub fn max_size_bytes(&self) -> Option<u64> {
+        self.max_size.as_ref().and_then(|s| parse_memory_limit(s).ok())
     }
 }
 
@@ -549,6 +519,31 @@ pub fn resolve_log_store(
         Some(c) => (c.store_stdout(), c.store_stderr()),
         None => (true, true), // Default: store both
     }
+}
+
+/// Resolve log max_size setting.
+/// Priority: service setting > global setting > None (unbounded)
+/// Returns bytes if specified, None for unbounded.
+pub fn resolve_log_max_size(
+    service_logs: Option<&LogConfig>,
+    global_logs: Option<&LogConfig>,
+) -> Option<u64> {
+    service_logs
+        .and_then(|l| l.max_size_bytes())
+        .or_else(|| global_logs.and_then(|l| l.max_size_bytes()))
+}
+
+/// Resolve log buffer_size setting.
+/// Priority: service setting > global setting > default (8KB)
+pub fn resolve_log_buffer_size(
+    service_logs: Option<&LogConfig>,
+    global_logs: Option<&LogConfig>,
+    default_buffer_size: usize,
+) -> usize {
+    service_logs
+        .and_then(|l| l.buffer_size)
+        .or_else(|| global_logs.and_then(|l| l.buffer_size))
+        .unwrap_or(default_buffer_size)
 }
 
 /// Deserialize duration from string like "10s", "5m", "1h"
@@ -774,8 +769,26 @@ impl KeplerConfig {
                 }
             }
 
-            // Process kepler namespace (global hooks are inside kepler.hooks)
+            // Process kepler namespace (global hooks and logs)
             if let Some(Value::Mapping(kepler_map)) = map.get_mut(Value::String("kepler".to_string())) {
+                // Process kepler.logs (with sys_env only, before services)
+                if let Some(logs_value) = kepler_map.get_mut(Value::String("logs".to_string())) {
+                    let ctx = EvalContext {
+                        sys_env: sys_env.clone(),
+                        env_file: HashMap::new(),
+                        env: sys_env.clone(),
+                        service_name: None,
+                        hook_name: None,
+                    };
+                    Self::process_lua_tags_recursive(
+                        logs_value,
+                        &evaluator,
+                        &ctx,
+                        config_dir,
+                        config_path,
+                    )?;
+                }
+
                 // Process kepler.hooks
                 if let Some(hooks_value) = kepler_map.get_mut(Value::String("hooks".to_string())) {
                     Self::process_global_hooks_lua(

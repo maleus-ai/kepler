@@ -4,31 +4,36 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 
 ## Table of Contents
 
-- [Features](#features)
-- [Installation](#installation)
-  - [Prerequisites](#prerequisites)
-  - [Building from Source](#building-from-source)
-  - [Verifying Installation](#verifying-installation)
-  - [Running Tests](#running-tests)
-  - [Production Setup](#production-setup)
-- [Quick Start](#quick-start)
-- [CLI Reference](#cli-reference)
-  - [Daemon Commands](#daemon-commands)
-  - [Service Commands](#service-commands)
-  - [Options](#options)
-- [Configuration](#configuration)
-  - [Full Example](#full-example)
-  - [Global Hooks](#global-hooks)
-  - [Service Options](#service-options)
-  - [Restart Configuration](#restart-configuration)
-  - [Log Configuration](#log-configuration)
-  - [Service Hooks](#service-hooks)
-  - [Health Check Options](#health-check-options)
-- [Variable Expansion](#variable-expansion)
-- [Lua Scripting](#lua-scripting)
-- [Environment Variables](#environment-variables)
-- [Architecture](#architecture)
-- [License](#license)
+- [Kepler](#kepler)
+  - [Table of Contents](#table-of-contents)
+  - [Features](#features)
+  - [Installation](#installation)
+    - [Prerequisites](#prerequisites)
+    - [Building from Source](#building-from-source)
+    - [Verifying Installation](#verifying-installation)
+    - [Running Tests](#running-tests)
+    - [Production Setup](#production-setup)
+  - [Quick Start](#quick-start)
+  - [CLI Reference](#cli-reference)
+    - [Daemon Commands](#daemon-commands)
+    - [Service Commands](#service-commands)
+    - [Options](#options)
+  - [Configuration](#configuration)
+    - [Full Example](#full-example)
+    - [Global Hooks](#global-hooks)
+    - [Service Options](#service-options)
+    - [Restart Configuration](#restart-configuration)
+    - [Log Configuration](#log-configuration)
+      - [Global Log Settings](#global-log-settings)
+      - [Per-Service Log Settings](#per-service-log-settings)
+    - [Service Hooks](#service-hooks)
+    - [Health Check Options](#health-check-options)
+  - [Variable Expansion](#variable-expansion)
+  - [Lua Scripting](#lua-scripting)
+  - [Environment Variables](#environment-variables)
+    - [Environment Inheritance](#environment-inheritance)
+  - [Architecture](#architecture)
+  - [License](#license)
 
 ---
 
@@ -201,9 +206,7 @@ Commands that operate on services (require config):
 kepler:
   logs:
     buffer_size: 16384   # 16KB buffer for better write throughput
-    rotation:
-      max_size: "50MB"
-      max_files: 10
+    max_size: "50MB"     # Truncate logs when they exceed this size
 
 hooks:
   on_init:
@@ -328,7 +331,7 @@ restart:
 
 ### Log Configuration
 
-Logs can be configured at two levels: globally under `kepler.logs` and per-service under `services.<name>.logs`.
+Logs can be configured at two levels: globally under `kepler.logs` and per-service under `services.<name>.logs`. Per-service settings override global settings.
 
 #### Global Log Settings
 
@@ -337,28 +340,37 @@ Configure global log behavior under the `kepler:` namespace:
 ```yaml
 kepler:
   logs:
-    buffer_size: 16384    # Buffer size in bytes (0 = no buffering)
-    rotation:
-      max_size: "10MB"    # Max file size before rotation
-      max_files: 5        # Number of rotated files to keep
+    max_size: "50MB"     # Truncate logs when they exceed this size
+    buffer_size: 16384   # 16KB buffer for better write throughput
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `buffer_size` | `int` | `0` | Bytes to buffer before flushing to disk |
-| `rotation.max_size` | `string` | `10MB` | Max log file size (`KB`, `MB`, `GB`) |
-| `rotation.max_files` | `int` | `5` | Number of rotated files to keep |
+| `max_size` | `string` | unbounded | Max log file size before truncation (`K`, `KB`, `M`, `MB`, `G`, `GB`) |
+| `buffer_size` | `int` | `8192` | Bytes to buffer before flushing to disk (0 = synchronous writes) |
+
+**Truncation behavior:**
+When `max_size` is specified and a log file exceeds this limit, it is truncated from the beginning, keeping only the most recent logs:
+- Single file per service/stream (`service.stdout.log`, `service.stderr.log`)
+- Oldest logs are discarded when the limit is reached
+- Predictable disk usage per service
+
+If `max_size` is not specified, logs grow unbounded (no truncation).
 
 **Buffer size trade-offs:**
-- `0` (default) - Write every log line directly to disk. Safest, no data loss on crash.
-- `4096` - 4KB buffer. ~20% better throughput.
-- `16384` - 16KB buffer (recommended). ~30% better throughput.
+- `0` - Write every log line directly to disk (synchronous). Safest, no data loss on crash.
+- `8192` (default) - 8KB buffer. Good balance of performance and safety.
+- `16384` - 16KB buffer. ~30% better throughput, slightly higher crash risk.
 - Higher values provide diminishing returns and risk more data loss on crash.
 
 #### Per-Service Log Settings
 
+Per-service settings override global settings for `max_size` and `buffer_size`:
+
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| `max_size` | `string` | global | Max file size before truncation (overrides global) |
+| `buffer_size` | `int` | global | Buffer size in bytes (overrides global) |
 | `timestamp` | `bool` | `false` | Include timestamps |
 | `store` | `bool\|object` | `true` | Store logs to disk |
 | `store.stdout` | `bool` | `true` | Store stdout |
@@ -370,12 +382,17 @@ kepler:
 
 **Example:**
 ```yaml
-logs:
-  store:
-    stdout: false    # Don't store stdout
-    stderr: true     # Only store errors
-  retention:
-    on_stop: retain  # Keep logs after stopping
+services:
+  app:
+    command: ["./app"]
+    logs:
+      max_size: "100MB"    # Override global max_size for this service
+      buffer_size: 0       # Synchronous writes for this service
+      store:
+        stdout: false      # Don't store stdout
+        stderr: true       # Only store errors
+      retention:
+        on_stop: retain    # Keep logs after stopping
 ```
 
 ### Service Hooks

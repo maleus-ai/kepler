@@ -743,7 +743,7 @@ async fn test_log_output_disabled() {
             timestamp: None,
             store: Some(LogStoreConfig::Simple(false)),
             retention: None,
-            rotation: None,
+            max_size: None,
             buffer_size: None,
         })
         .add_service(
@@ -807,7 +807,7 @@ async fn test_log_output_enabled() {
             timestamp: None,
             store: Some(LogStoreConfig::Simple(true)),
             retention: None,
-            rotation: None,
+            max_size: None,
             buffer_size: None,
         })
         .add_service(

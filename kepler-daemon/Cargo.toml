@@ -32,6 +32,8 @@ mlua = { version = "0.10", features = ["luau", "serialize"] }
 clap = { version = "4.4", features = ["derive"] }
 dashmap = "5"
 futures = "0.3"
+memchr = "2.7"
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

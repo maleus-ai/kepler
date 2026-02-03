@@ -1,12 +1,10 @@
-# Test config for multi-service log rotation and reconciliation
-# Uses very small rotation size to force multiple rotations quickly
+# Test config for multi-service log merging and ordering
+# Uses small max_size to verify truncation behavior
 
 kepler:
   logs:
     buffer_size: 0     # Disable buffering for immediate writes
-    rotation:
-      max_size: "1K"   # Very small (1KB) to force many rotations
-      max_files: 3     # Keep only 3 rotated files to test wrap-around
+    max_size: "10K"    # Very small (10KB) to force truncation
 
 services:
   log-rotation-a:

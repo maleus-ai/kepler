@@ -13,7 +13,7 @@ use colored::{Color, Colorize};
 use kepler_daemon::Daemon;
 use kepler_protocol::{
     client::Client,
-    protocol::{ConfigStatus, Response, ResponseData, ServiceInfo},
+    protocol::{ConfigStatus, LogCursorData, LogMode, Response, ResponseData, ServiceInfo},
 };
 use tracing_subscriber::EnvFilter;
 
@@ -113,8 +113,17 @@ async fn run() -> Result<()> {
             service,
             follow,
             lines,
+            head,
+            tail,
         } => {
-            handle_logs(&mut client, canonical_path, service, follow, lines).await?;
+            let mode = if head {
+                LogMode::Head
+            } else if tail {
+                LogMode::Tail
+            } else {
+                LogMode::All // Default: read all logs chronologically
+            };
+            handle_logs(&mut client, canonical_path, service, follow, lines, mode).await?;
         }
 
         Commands::PS { .. } => {
@@ -617,86 +626,116 @@ async fn handle_logs(
     service: Option<String>,
     follow: bool,
     lines: usize,
+    mode: LogMode,
 ) -> Result<()> {
-    // Get initial logs
-    let response = client
-        .logs(config_path.clone(), service.clone(), follow, lines)
-        .await?;
-
     let mut color_map: HashMap<String, Color> = HashMap::new();
 
-    // Extract entries from response (handles both Logs and LogChunk variants)
-    let entries = match response {
-        Response::Ok {
-            data: Some(ResponseData::Logs(entries)),
-            ..
-        } => entries,
-        Response::Ok {
-            data: Some(ResponseData::LogChunk(chunk)),
-            ..
-        } => chunk.entries,
-        Response::Error { message } => {
-            eprintln!("Error: {}", message);
-            std::process::exit(1);
-        }
-        _ => {
-            if !follow {
-                println!("No logs available");
-            }
-            return Ok(());
-        }
-    };
+    // For head/tail modes, use one-shot request
+    if mode == LogMode::Head || mode == LogMode::Tail {
+        let response = client
+            .logs(config_path.clone(), service.clone(), false, lines, mode)
+            .await?;
 
-    for entry in &entries {
-        print_log_entry(entry, &mut color_map);
+        let entries = match response {
+            Response::Ok {
+                data: Some(ResponseData::Logs(entries)),
+                ..
+            } => entries,
+            Response::Ok {
+                data: Some(ResponseData::LogChunk(chunk)),
+                ..
+            } => chunk.entries,
+            Response::Error { message } => {
+                eprintln!("Error: {}", message);
+                std::process::exit(1);
+            }
+            _ => {
+                println!("No logs available");
+                return Ok(());
+            }
+        };
+
+        for entry in &entries {
+            print_log_entry(entry, &mut color_map);
+        }
+
+        return Ok(());
     }
 
-    if follow {
-        // Enter follow mode - poll for new logs
-        let mut last_timestamp = entries.last().and_then(|e| e.timestamp).unwrap_or(0);
+    // For 'all' mode (default) and 'follow' mode, use cursor-based streaming
+    // from_start=true for 'all' mode (read from beginning)
+    // from_start=false for 'follow' mode (read from end)
+    let from_start = !follow;
+    let mut cursor_id: Option<String> = None;
 
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    loop {
+        // Re-connect for each request
+        let daemon_socket = match Daemon::get_socket_path() {
+            Ok(path) => path,
+            Err(_) => {
+                eprintln!("\nCannot determine daemon socket path");
+                break;
+            }
+        };
+        let mut client = match Client::connect(&daemon_socket).await {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("\nDaemon disconnected");
+                break;
+            }
+        };
 
-            // Re-connect for each request (simple approach)
-            let daemon_socket = match Daemon::get_socket_path() {
-                Ok(path) => path,
-                Err(_) => {
-                    eprintln!("\nCannot determine daemon socket path");
-                    break;
+        let response = client
+            .logs_cursor(
+                config_path.clone(),
+                service.clone(),
+                cursor_id.clone(),
+                from_start,
+            )
+            .await?;
+
+        match response {
+            Response::Ok {
+                data: Some(ResponseData::LogCursor(LogCursorData {
+                    entries,
+                    cursor_id: new_cursor_id,
+                    has_more,
+                })),
+                ..
+            } => {
+                cursor_id = Some(new_cursor_id);
+
+                for entry in &entries {
+                    print_log_entry(entry, &mut color_map);
                 }
-            };
-            let mut client = match Client::connect(&daemon_socket).await {
-                Ok(c) => c,
-                Err(_) => {
-                    eprintln!("\nDaemon disconnected");
-                    break;
-                }
-            };
 
-            let response = client
-                .logs(config_path.clone(), service.clone(), true, 1000)
-                .await?;
-
-            let new_entries = match response {
-                Response::Ok {
-                    data: Some(ResponseData::Logs(entries)),
-                    ..
-                } => entries,
-                Response::Ok {
-                    data: Some(ResponseData::LogChunk(chunk)),
-                    ..
-                } => chunk.entries,
-                _ => continue,
-            };
-
-            for entry in new_entries {
-                if let Some(ts) = entry.timestamp {
-                    if ts > last_timestamp {
-                        print_log_entry(&entry, &mut color_map);
-                        last_timestamp = ts;
+                if follow {
+                    // Follow mode: continue polling with short delay
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                } else {
+                    // All mode: continue until no more entries
+                    if !has_more {
+                        break;
                     }
                 }
+            }
+            Response::Error { message } => {
+                // Check if cursor expired
+                if message.contains("Cursor expired") || message.contains("cursor") {
+                    // Reset cursor and retry
+                    cursor_id = None;
+                    continue;
+                }
+                eprintln!("Error: {}", message);
+                std::process::exit(1);
+            }
+            _ => {
+                if !follow {
+                    // In 'all' mode with no data, we're done
+                    break;
+                }
+                // In follow mode, keep polling
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             }
         }
     }

@@ -1,5 +1,6 @@
 use clap::Parser;
 use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
+use kepler_daemon::cursor::CursorManager;
 use kepler_daemon::errors::DaemonError;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::persistence::ConfigPersistence;
@@ -13,6 +14,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -129,15 +131,35 @@ async fn main() -> anyhow::Result<()> {
         restart_tx.clone(),
     ));
 
+    // Create CursorManager for log streaming
+    // TTL configurable via KEPLER_CURSOR_TTL env var (default 300 seconds = 5 minutes)
+    let cursor_ttl_seconds = std::env::var("KEPLER_CURSOR_TTL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    let cursor_manager = Arc::new(CursorManager::new(cursor_ttl_seconds));
+
+    // Spawn cursor cleanup task (runs every 60 seconds)
+    let cleanup_manager = cursor_manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_manager.cleanup_stale();
+        }
+    });
+
     // Clone orchestrator for handler
     let handler_orchestrator = orchestrator.clone();
     let handler_registry = registry.clone();
+    let handler_cursor_manager = cursor_manager.clone();
 
     // Create the async request handler
     let handler = move |request: Request, shutdown_tx: mpsc::Sender<()>| {
         let orchestrator = handler_orchestrator.clone();
         let registry = handler_registry.clone();
-        async move { handle_request(request, orchestrator, registry, shutdown_tx).await }
+        let cursor_manager = handler_cursor_manager.clone();
+        async move { handle_request(request, orchestrator, registry, cursor_manager, shutdown_tx).await }
     };
 
     // Create server
@@ -189,6 +211,7 @@ async fn handle_request(
     request: Request,
     orchestrator: Arc<ServiceOrchestrator>,
     registry: SharedConfigRegistry,
+    cursor_manager: Arc<CursorManager>,
     shutdown_tx: mpsc::Sender<()>,
 ) -> Response {
     match request {
@@ -297,6 +320,7 @@ async fn handle_request(
             follow: _,
             lines,
             max_bytes,
+            mode,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -305,7 +329,7 @@ async fn handle_request(
 
             match registry.get(&config_path) {
                 Some(handle) => {
-                    let entries = handle.get_logs_bounded(service, lines, max_bytes).await;
+                    let entries = handle.get_logs_with_mode(service, lines, max_bytes, mode).await;
                     Response::ok_with_data(ResponseData::Logs(entries))
                 }
                 None => Response::ok_with_data(ResponseData::Logs(Vec::new())),
@@ -370,6 +394,79 @@ async fn handle_request(
             }
         }
 
+        Request::LogsFollow {
+            config_path,
+            service,
+            cursor,
+        } => {
+            use kepler_protocol::protocol::LogFollowData;
+
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+
+            match registry.get(&config_path) {
+                Some(handle) => {
+                    let (entries, new_cursor) = handle.get_logs_follow(service, cursor).await;
+                    Response::ok_with_data(ResponseData::LogFollow(LogFollowData {
+                        entries,
+                        cursor: new_cursor,
+                    }))
+                }
+                None => Response::ok_with_data(ResponseData::LogFollow(LogFollowData {
+                    entries: Vec::new(),
+                    cursor: String::new(),
+                })),
+            }
+        }
+
+        Request::LogsCursor {
+            config_path,
+            service,
+            cursor_id,
+            from_start,
+        } => {
+            use kepler_protocol::protocol::LogCursorData;
+
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+
+            // Get logs directory from config actor
+            let logs_dir = match registry.get(&config_path) {
+                Some(handle) => match handle.get_log_config().await {
+                    Some(config) => config.logs_dir,
+                    None => return Response::error("Config not loaded"),
+                },
+                None => return Response::error("Config not loaded"),
+            };
+
+            // Create new cursor or use existing one
+            let cursor_id = match cursor_id {
+                Some(id) => id,
+                None => cursor_manager.create_cursor(
+                    config_path.clone(),
+                    logs_dir,
+                    service,
+                    from_start,
+                ),
+            };
+
+            // Read entries from cursor
+            match cursor_manager.read_entries(&cursor_id, &config_path) {
+                Ok((entries, has_more)) => {
+                    let entries = entries.into_iter().map(|l| l.into()).collect();
+                    Response::ok_with_data(ResponseData::LogCursor(LogCursorData {
+                        entries,
+                        cursor_id,
+                        has_more,
+                    }))
+                }
+                Err(e) => Response::error(e.to_string()),
+            }
+        }
     }
 }
 

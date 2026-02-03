@@ -38,6 +38,14 @@ pub enum Commands {
         /// Number of lines to show
         #[arg(short = 'n', long, default_value = "100")]
         lines: usize,
+
+        /// Show first N lines (oldest first)
+        #[arg(long, conflicts_with = "tail")]
+        head: bool,
+
+        /// Show last N lines (newest last) - this is the default
+        #[arg(long)]
+        tail: bool,
     },
     /// List all services and their states
     PS {

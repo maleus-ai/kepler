@@ -11,6 +11,7 @@ This document describes Kepler's internal implementation, security measures, and
 - [Environment Variable Handling](#environment-variable-handling)
 - [Lua Scripting Security](#lua-scripting-security)
 - [Process Security](#process-security)
+- [Log Storage](#log-storage)
 
 ---
 
@@ -354,6 +355,83 @@ Applied via `pre_exec` before process execution:
 
 ---
 
+## Log Storage
+
+### File Structure
+
+Logs are stored in the config's state directory under `logs/`:
+
+```
+~/.kepler/configs/<config-hash>/logs/
+├── service-name.stdout.log    # Standard output
+└── service-name.stderr.log    # Standard error
+```
+
+Each service has two log files: one for stdout and one for stderr. Log files are timestamped line-by-line with microsecond precision.
+
+### Log Size Management
+
+By default, log files grow unbounded. When `max_size` is configured, Kepler uses truncation to manage disk usage:
+
+- **Single file per stream**: One file per service/stream (`service.stdout.log`, `service.stderr.log`)
+- **Optional truncation**: When a log file exceeds `max_size`, it is truncated from the beginning
+- **Recent logs preserved**: Only the oldest logs are discarded when truncating
+- **Predictable disk usage**: When `max_size` is set, disk usage per service is bounded
+
+Settings can be configured globally under `kepler.logs` or per-service under `services.<name>.logs`. Per-service settings override global settings.
+
+### Buffered Writing
+
+Log writes are buffered for performance:
+
+1. **Lock-free buffer**: Each writer uses a per-service buffer to batch writes
+2. **Configurable size**: `buffer_size` controls how many bytes are buffered before flushing (default: 8KB)
+3. **Automatic flush**: Buffers are flushed on service stop or when full
+
+Trade-offs:
+- `buffer_size: 0` - Synchronous writes, safest for crash recovery
+- `buffer_size: 8192` (default) - 8KB buffer, good balance of performance and safety
+- `buffer_size: 16384` - 16KB buffer, ~30% better throughput
+
+### Cursor-Based Streaming
+
+Log retrieval uses server-side cursors for efficient streaming:
+
+```
+CLI                              Daemon
+ |                                  |
+ |-- LogsCursor(cursor_id: None) -->|  Create cursor
+ |<-- (entries, cursor_id, more) ---|
+ |                                  |
+ |-- LogsCursor(cursor_id: X) ----->|  Continue reading
+ |<-- (entries, cursor_id, more) ---|
+ |                                  |
+```
+
+**Cursor features:**
+- **Position tracking**: Each cursor tracks byte offsets per log file
+- **Truncation detection**: Cursors detect when files are truncated and reset
+- **TTL cleanup**: Stale cursors are automatically cleaned up (default: 5 minutes)
+- **Chronological merging**: Logs from multiple services are merged by timestamp
+
+**Modes:**
+| Mode | CLI Flag | Behavior |
+|------|----------|----------|
+| head | `--head` | Return first N lines (one-shot) |
+| tail | `--tail` | Return last N lines (one-shot) |
+| all | (default) | Stream all existing logs, then exit |
+| follow | `--follow` | Stream existing + new logs continuously |
+
+### Relevant Files
+
+| File | Description |
+|------|-------------|
+| `kepler-daemon/src/logs/writer.rs` | Buffered log writer with truncation |
+| `kepler-daemon/src/logs/reader.rs` | Log file reader and merged iterators |
+| `kepler-daemon/src/cursor.rs` | CursorManager for streaming |
+
+---
+
 ## Key Files Reference
 
 | Component | File | Description |
@@ -366,3 +444,6 @@ Applied via `pre_exec` before process execution:
 | Env building | `kepler-daemon/src/env.rs` | Priority merging |
 | Lua evaluation | `kepler-daemon/src/lua_eval.rs` | Sandbox implementation |
 | Process spawning | `kepler-daemon/src/process.rs` | Security controls |
+| Log writing | `kepler-daemon/src/logs/writer.rs` | Buffered log writer with truncation |
+| Log reading | `kepler-daemon/src/logs/reader.rs` | Log file reader with merged iterators |
+| Log cursors | `kepler-daemon/src/cursor.rs` | Server-side cursor management for streaming |

@@ -166,7 +166,7 @@ async fn test_all_log_retention_events() {
             on_restart: Some(LogRetention::Retain),
             on_exit: Some(LogRetention::Retain),
         }),
-        rotation: None,
+        max_size: None,
         buffer_size: None,
     };
 
@@ -307,12 +307,12 @@ async fn test_multiple_services_logs() {
     // Check service1 logs
     let s1_entries = logs.tail(10, Some("multi_svc1"));
     assert_eq!(s1_entries.len(), 2);
-    assert!(s1_entries.iter().all(|e| e.service == "multi_svc1"));
+    assert!(s1_entries.iter().all(|e| &*e.service == "multi_svc1"));
 
     // Check service2 logs
     let s2_entries = logs.tail(10, Some("multi_svc2"));
     assert_eq!(s2_entries.len(), 1);
-    assert!(s2_entries.iter().all(|e| e.service == "multi_svc2"));
+    assert!(s2_entries.iter().all(|e| &*e.service == "multi_svc2"));
 
     // Clear service1 logs, service2 should be unaffected
     logs.clear_service("multi_svc1");

@@ -131,9 +131,7 @@ kepler:
     retention:
       on_stop: retain
       on_start: retain
-    rotation:
-      max_size: 10M
-      max_files: 5
+    max_size: 10M
   hooks:
     on_init:
       run: echo "Kepler starting"
@@ -163,9 +161,8 @@ services:
     assert!(kepler.logs.is_some(), "kepler.logs should exist");
     let logs = kepler.logs.as_ref().unwrap();
     assert_eq!(logs.timestamp, Some(true));
-    assert!(logs.rotation.is_some(), "rotation config should exist");
-    let rotation = logs.rotation.as_ref().unwrap();
-    assert_eq!(rotation.max_files, 5);
+    assert!(logs.max_size.is_some(), "max_size config should exist");
+    assert_eq!(logs.max_size, Some("10M".to_string()));
 
     // Verify hooks
     assert!(kepler.hooks.is_some(), "kepler.hooks should exist");

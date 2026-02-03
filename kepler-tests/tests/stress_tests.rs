@@ -9,7 +9,6 @@
 use kepler_daemon::logs::{BufferedLogWriter, LogReader, LogStream, DEFAULT_MAX_BYTES};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
-use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -25,8 +24,7 @@ fn test_large_log_file_bounded_read() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        10 * 1024 * 1024, // 10MB max
-        5,
+        Some(10 * 1024 * 1024), // 10MB max (truncate when exceeded)
         64 * 1024, // 64KB buffer
     );
 
@@ -37,7 +35,7 @@ fn test_large_log_file_bounded_read() {
     drop(writer); // Flush
 
     // Read with bounded tail should not OOM
-    let reader = LogReader::new(logs_dir.clone(), 5);
+    let reader = LogReader::new(logs_dir.clone(), 0);
     let entries = reader.tail(1000, Some("test-service"));
     assert_eq!(entries.len(), 1000);
 
@@ -53,38 +51,40 @@ fn test_log_rotation_under_load() {
     let logs_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&logs_dir).unwrap();
 
-    // Create a writer with small rotation size (10KB)
+    // Create a writer with small truncation size (10KB)
     let mut writer = BufferedLogWriter::new(
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        10 * 1024,  // 10KB max size
-        3,          // Keep 3 rotated files
+        Some(10 * 1024),  // 10KB max size (truncate when exceeded)
         0,          // No buffering (write directly)
     );
 
-    // Write enough data to trigger multiple rotations
+    // Write enough data to trigger truncation
     for i in 0..1000 {
         writer.write(&format!("Log line {} with some padding to fill up the file quickly: {}", i, "x".repeat(100)));
     }
     drop(writer); // Flush
 
-    // Check that rotated files exist
+    // Check that log file exists and is within expected size
     let log_file = logs_dir.join("test-service.stdout.log");
     assert!(log_file.exists(), "Main log file should exist");
 
-    // At least one rotated file should exist
-    let rotated_1 = format!("{}.1", log_file.display());
+    // With truncation, file size should be at most max_size + one line
+    let metadata = std::fs::metadata(&log_file).unwrap();
+    let file_size = metadata.len();
+    // File should be relatively small after truncation (not much larger than max_size)
     assert!(
-        std::path::Path::new(&rotated_1).exists(),
-        "At least one rotated file should exist"
+        file_size <= 15 * 1024, // Allow some margin for last line
+        "Log file should be truncated to roughly max size, got {} bytes",
+        file_size
     );
 
-    // Old rotations beyond max_files should be cleaned up (cycling overwrites)
-    let rotated_4 = format!("{}.4", log_file.display());
+    // No rotated files should exist with the new truncation model
+    let rotated_1 = format!("{}.1", log_file.display());
     assert!(
-        !std::path::Path::new(&rotated_4).exists(),
-        "Rotated file beyond max should not exist"
+        !std::path::Path::new(&rotated_1).exists(),
+        "Rotated files should not exist with truncation model"
     );
 }
 
@@ -160,8 +160,7 @@ fn test_bounded_read_respects_limits() {
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        10 * 1024 * 1024,
-        5,
+        Some(10 * 1024 * 1024),
         0,
     );
 
@@ -171,7 +170,7 @@ fn test_bounded_read_respects_limits() {
     drop(writer);
 
     // Request more lines than the default limit - should be capped
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir, 0);
     let entries = reader.tail_bounded(
         100_000, // Way more than DEFAULT_MAX_LINES
         Some("test-service"),
@@ -192,7 +191,7 @@ fn test_clear_during_heavy_writes() {
     let logs_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&logs_dir).unwrap();
 
-    let reader = LogReader::new(logs_dir.clone(), 5);
+    let reader = LogReader::new(logs_dir.clone(), 0);
 
     // Write logs and clear repeatedly
     for cycle in 0..10 {
@@ -200,8 +199,7 @@ fn test_clear_during_heavy_writes() {
             &logs_dir,
             "test-service",
             LogStream::Stdout,
-            10 * 1024 * 1024,
-            5,
+            Some(10 * 1024 * 1024),
             0,
         );
         for i in 0..100 {
@@ -268,34 +266,26 @@ fn test_dependency_levels() {
     assert!(levels[2].contains(&"e".to_string()));
 }
 
-/// Test that rotated logs are properly merged with correct timestamp ordering
+/// Test that truncated logs maintain timestamp ordering
 #[test]
-fn test_rotated_logs_merged_correctly() {
+fn test_truncated_logs_maintain_ordering() {
     let temp_dir = TempDir::new().unwrap();
     let logs_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&logs_dir).unwrap();
 
-    // Create a writer with very small rotation (2KB) to guarantee multiple rotations
-    let rotation_size = 2 * 1024; // 2KB
-    let max_rotated_files = 5;
-
-    // Calculate approximate lines per file (each line ~120 bytes with padding)
-    let line_size = 120;
-    let lines_per_file = rotation_size as usize / line_size;
-
-    // Write enough lines to fill at least 4 rotated files
-    let total_lines = lines_per_file * 6;
+    // Create a writer with small size to trigger truncation
+    let max_size = 2 * 1024; // 2KB
 
     let mut writer = BufferedLogWriter::new(
         &logs_dir,
         "test-service",
         LogStream::Stdout,
-        rotation_size,
-        max_rotated_files,
+        Some(max_size),
         0, // No buffering
     );
 
-    for i in 0..total_lines {
+    // Write enough lines to trigger truncation
+    for i in 0..100 {
         writer.write(&format!(
             "Log line {:06} with padding to fill up the file quickly: {}",
             i,
@@ -308,36 +298,27 @@ fn test_rotated_logs_merged_correctly() {
     let log_file = logs_dir.join("test-service.stdout.log");
     assert!(log_file.exists(), "Main log file should exist");
 
-    // Count how many rotated files actually exist
-    let mut rotated_count = 0;
-    for i in 1..=max_rotated_files {
+    // No rotated files should exist with truncation model
+    for i in 1..=5 {
         let rotated = format!("{}.{}", log_file.display(), i);
-        if std::path::Path::new(&rotated).exists() {
-            rotated_count += 1;
-        }
+        assert!(
+            !std::path::Path::new(&rotated).exists(),
+            "Rotated file {} should not exist with truncation model",
+            i
+        );
     }
 
-    // We must have at least 2 rotated files to test reconciliation
+    // Read back remaining logs
+    let reader = LogReader::new(logs_dir, 0);
+    let all_entries = reader.tail(1000, Some("test-service"));
+
+    // Should have some entries (older ones truncated)
     assert!(
-        rotated_count >= 2,
-        "Test requires at least 2 rotated files to verify reconciliation, but only found {}. \
-         This means the rotation didn't create enough files.",
-        rotated_count
+        !all_entries.is_empty(),
+        "Should have some entries after truncation"
     );
 
-    // Now test the actual reconciliation: tail() should merge all files correctly
-    let reader = LogReader::new(logs_dir, max_rotated_files);
-    let all_entries = reader.tail(total_lines * 2, Some("test-service"));
-
-    // Verify we got entries (accounting for rotation cleanup - oldest files are deleted)
-    assert!(
-        all_entries.len() >= lines_per_file,
-        "Should have entries from at least one file, got {} (expected >= {})",
-        all_entries.len(),
-        lines_per_file
-    );
-
-    // Primary test: verify entries are sorted by timestamp (oldest to newest)
+    // Verify entries are sorted by timestamp (oldest to newest)
     for i in 1..all_entries.len() {
         assert!(
             all_entries[i - 1].timestamp <= all_entries[i].timestamp,
@@ -369,8 +350,7 @@ fn test_log_pagination_offset_limit() {
         &logs_dir,
         "pagination-test",
         LogStream::Stdout,
-        10 * 1024 * 1024,
-        5,
+        Some(10 * 1024 * 1024),
         0,
     );
     for i in 0..100 {
@@ -407,22 +387,18 @@ fn test_clear_service_removes_rotated_logs() {
     let logs_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&logs_dir).unwrap();
 
-    // Create writer with small rotation to create multiple files
-    let rotation_size = 1024; // 1KB
-    let max_rotated_files = 4;
+    // Create writer with small max size to test truncation
+    let max_log_size = 1024; // 1KB
 
-    // Write enough data to create multiple rotated files
-    // Each line is ~50 bytes, so 1KB holds ~20 lines
-    let lines_per_file = 20;
-    let total_lines = lines_per_file * 6;
+    // Write enough data to trigger truncation
+    let total_lines = 100;
 
     let mut writer = BufferedLogWriter::new(
         &logs_dir,
         "retention-test",
         LogStream::Stdout,
-        rotation_size,
-        max_rotated_files,
-        0,
+        Some(max_log_size),
+        0, // No buffering
     );
 
     for i in 0..total_lines {
@@ -430,26 +406,19 @@ fn test_clear_service_removes_rotated_logs() {
     }
     drop(writer);
 
-    // Verify we have rotated files
+    // Verify log file exists
     let log_file = logs_dir.join("retention-test.stdout.log");
     assert!(log_file.exists(), "Main log file should exist");
 
-    let mut rotated_files_before = Vec::new();
-    for i in 1..=max_rotated_files {
-        let rotated = PathBuf::from(format!("{}.{}", log_file.display(), i));
-        if rotated.exists() {
-            rotated_files_before.push(rotated);
-        }
-    }
-
+    // No rotated files should exist with the new truncation model
+    let rotated_1 = logs_dir.join("retention-test.stdout.log.1");
     assert!(
-        rotated_files_before.len() >= 2,
-        "Test requires at least 2 rotated files, found {}",
-        rotated_files_before.len()
+        !rotated_1.exists(),
+        "Rotated files should not exist with truncation model"
     );
 
     // Now clear the service logs (simulating log retention policy)
-    let reader = LogReader::new(logs_dir.clone(), max_rotated_files);
+    let reader = LogReader::new(logs_dir.clone(), 0);
     reader.clear_service("retention-test");
 
     // Verify main log file is gone
@@ -457,15 +426,6 @@ fn test_clear_service_removes_rotated_logs() {
         !log_file.exists(),
         "Main log file should be removed after clear_service"
     );
-
-    // Verify ALL rotated files are gone
-    for rotated in &rotated_files_before {
-        assert!(
-            !rotated.exists(),
-            "Rotated file {:?} should be removed after clear_service",
-            rotated
-        );
-    }
 
     // Double-check by scanning the directory
     let remaining_files: Vec<_> = std::fs::read_dir(&logs_dir)
@@ -485,30 +445,25 @@ fn test_clear_service_removes_rotated_logs() {
     );
 }
 
-/// Test that clear_service_prefix removes rotated logs for all matching services
+/// Test that clear_service_prefix removes logs for all matching services
 #[test]
-fn test_clear_service_prefix_removes_rotated_logs() {
+fn test_clear_service_prefix_removes_logs() {
     let temp_dir = TempDir::new().unwrap();
     let logs_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&logs_dir).unwrap();
 
-    let rotation_size = 1024; // 1KB
-    let max_rotated_files = 3;
+    let max_log_size = 10 * 1024; // 10KB
 
     // Write logs for multiple services with a common prefix
-    let lines_per_file = 20;
-    let total_lines = lines_per_file * 4;
-
     for service in ["_prefix_.hook1", "_prefix_.hook2", "other-service"] {
         let mut writer = BufferedLogWriter::new(
             &logs_dir,
             service,
             LogStream::Stdout,
-            rotation_size,
-            max_rotated_files,
-            0,
+            Some(max_log_size),
+            0, // No buffering
         );
-        for i in 0..total_lines {
+        for i in 0..50 {
             writer.write(&format!("{} line {:04} pad: {}", service, i, "a".repeat(20)));
         }
     }
@@ -523,10 +478,10 @@ fn test_clear_service_prefix_removes_rotated_logs() {
     assert!(other_log.exists(), "other-service main log should exist");
 
     // Clear all services with the prefix
-    let reader = LogReader::new(logs_dir.clone(), max_rotated_files);
+    let reader = LogReader::new(logs_dir.clone(), 0);
     reader.clear_service_prefix("_prefix_");
 
-    // Verify hook1 and hook2 files are ALL gone (main + rotated)
+    // Verify hook1 and hook2 files are gone
     assert!(
         !hook1_log.exists(),
         "hook1 main log should be removed"
@@ -550,30 +505,25 @@ fn test_clear_service_prefix_removes_rotated_logs() {
     );
 }
 
-/// Test that clear (clear all) removes all rotated logs for all services
+/// Test that clear (clear all) removes all logs for all services
 #[test]
-fn test_clear_all_removes_all_rotated_logs() {
+fn test_clear_all_removes_all_logs() {
     let temp_dir = TempDir::new().unwrap();
     let logs_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&logs_dir).unwrap();
 
-    let rotation_size = 1024; // 1KB
-    let max_rotated_files = 3;
+    let max_log_size = 10 * 1024; // 10KB
 
     // Write logs for multiple services
-    let lines_per_file = 20;
-    let total_lines = lines_per_file * 5;
-
     for service in ["service-a", "service-b"] {
         let mut writer = BufferedLogWriter::new(
             &logs_dir,
             service,
             LogStream::Stdout,
-            rotation_size,
-            max_rotated_files,
-            0,
+            Some(max_log_size),
+            0, // No buffering
         );
-        for i in 0..total_lines {
+        for i in 0..50 {
             writer.write(&format!("{} line {:04} padding: {}", service, i, "x".repeat(25)));
         }
     }
@@ -597,7 +547,7 @@ fn test_clear_all_removes_all_rotated_logs() {
     );
 
     // Clear all logs
-    let reader = LogReader::new(logs_dir.clone(), max_rotated_files);
+    let reader = LogReader::new(logs_dir.clone(), 0);
     reader.clear();
 
     // Verify logs directory is empty (or only contains non-log files like metadata)
@@ -638,8 +588,7 @@ fn test_buffer_size_zero_writes_immediately() {
         &logs_dir,
         "immediate-test",
         LogStream::Stdout,
-        10 * 1024 * 1024, // 10MB max
-        5,
+        Some(10 * 1024 * 1024), // 10MB max
         0, // No buffering
     );
 
@@ -669,9 +618,8 @@ fn test_buffer_size_nonzero_buffers_until_flush() {
         &logs_dir,
         "buffered-test",
         LogStream::Stdout,
-        10 * 1024 * 1024,
-        5,
-        1024, // 1KB buffer
+        Some(10 * 1024 * 1024), // 10MB max
+        1024,             // 1KB buffer
     );
 
     // Write a small log entry (won't exceed buffer)
@@ -715,9 +663,8 @@ fn test_buffer_flushes_when_size_exceeded() {
         &logs_dir,
         "overflow-test",
         LogStream::Stdout,
-        10 * 1024 * 1024,
-        5,
-        100, // Very small buffer
+        Some(10 * 1024 * 1024), // 10MB max
+        100,              // Very small buffer
     );
 
     let log_file = logs_dir.join("overflow-test.stdout.log");
@@ -747,45 +694,53 @@ fn test_buffer_flushes_when_size_exceeded() {
     );
 }
 
-/// Test buffer behavior with rotation
+/// Test buffer behavior with truncation
 #[test]
-fn test_buffer_with_rotation() {
+fn test_buffer_with_truncation() {
     let temp_dir = TempDir::new().unwrap();
     let logs_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&logs_dir).unwrap();
 
-    // Create writer with small rotation size and moderate buffer
+    // Create writer with small max size and moderate buffer
     let mut writer = BufferedLogWriter::new(
         &logs_dir,
-        "rotate-buffer",
+        "truncate-buffer",
         LogStream::Stdout,
-        500,  // 500 bytes before rotation
-        3,    // Keep 3 rotated files
+        Some(500),  // 500 bytes before truncation
         200,  // 200 byte buffer
     );
 
-    // Write enough to trigger multiple rotations
-    // Each line is ~50 bytes, buffer holds ~4 lines, rotation at ~10 lines
+    // Write enough to trigger truncation
+    // Each line is ~50 bytes, buffer holds ~4 lines, truncation at ~10 lines
     for i in 0..50 {
-        writer.write(&format!("Rotation test line {:03}", i));
+        writer.write(&format!("Truncation test line {:03}", i));
     }
 
     // Flush any remaining buffer
     drop(writer);
 
-    // Check that rotation happened
-    let main_log = logs_dir.join("rotate-buffer.stdout.log");
-    let rotated_1 = logs_dir.join("rotate-buffer.stdout.log.1");
-
+    // Check that log file exists
+    let main_log = logs_dir.join("truncate-buffer.stdout.log");
     assert!(main_log.exists(), "Main log file should exist");
-    assert!(rotated_1.exists(), "At least one rotated file should exist");
 
-    // Verify we can read all entries back
-    let reader = LogReader::new(logs_dir, 3);
-    let entries = reader.tail(100, Some("rotate-buffer"));
+    // No rotated files should exist with truncation model
+    let rotated_1 = logs_dir.join("truncate-buffer.stdout.log.1");
+    assert!(!rotated_1.exists(), "Rotated file should not exist with truncation model");
+
+    // File should be within max size + margin
+    let metadata = std::fs::metadata(&main_log).unwrap();
     assert!(
-        entries.len() >= 20,
-        "Should have many entries from rotated files, got {}",
+        metadata.len() <= 800,
+        "File should be truncated to roughly max size, got {} bytes",
+        metadata.len()
+    );
+
+    // Verify we can read entries back
+    let reader = LogReader::new(logs_dir, 0);
+    let entries = reader.tail(100, Some("truncate-buffer"));
+    assert!(
+        !entries.is_empty(),
+        "Should have entries after truncation, got {}",
         entries.len()
     );
 }
@@ -817,9 +772,8 @@ fn test_concurrent_writers_no_contention() {
                 &logs_dir,
                 &service_name,
                 LogStream::Stdout,
-                10 * 1024 * 1024,
-                5,
-                64 * 1024, // 64KB buffer
+                Some(10 * 1024 * 1024), // 10MB max
+                64 * 1024,        // 64KB buffer
             );
 
             for i in 0..lines_per_thread {
@@ -838,7 +792,7 @@ fn test_concurrent_writers_no_contention() {
     assert_eq!(completed.load(Ordering::SeqCst), num_threads);
 
     // Verify all services have their logs
-    let reader = LogReader::new((*logs_dir).clone(), 5);
+    let reader = LogReader::new((*logs_dir).clone(), 0);
     for thread_id in 0..num_threads {
         let service_name = format!("service-{}", thread_id);
         let entries = reader.tail(lines_per_thread * 2, Some(&service_name));

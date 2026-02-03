@@ -17,8 +17,7 @@ fn write_log_entries(logs_dir: &std::path::Path, service: &str, stream: LogStrea
         logs_dir,
         service,
         stream,
-        10 * 1024 * 1024, // 10MB
-        5,
+        Some(10 * 1024 * 1024), // 10MB
         0, // No buffering
     );
 
@@ -50,7 +49,7 @@ fn test_read_single_file() {
 
     // All should be from the same service
     for log in &logs {
-        assert_eq!(log.service, "my-service");
+        assert_eq!(&*log.service, "my-service");
         assert_eq!(log.stream, LogStream::Stdout);
     }
 }
@@ -90,8 +89,7 @@ fn test_merge_stdout_stderr_chronologically() {
         &logs_dir,
         "my-service",
         LogStream::Stdout,
-        10 * 1024 * 1024,
-        5,
+        Some(10 * 1024 * 1024),
         0,
     );
 
@@ -99,8 +97,7 @@ fn test_merge_stdout_stderr_chronologically() {
         &logs_dir,
         "my-service",
         LogStream::Stderr,
-        10 * 1024 * 1024,
-        5,
+        Some(10 * 1024 * 1024),
         0,
     );
 
@@ -211,38 +208,41 @@ fn test_pagination_offset_limit() {
 }
 
 #[test]
-fn test_rotated_files_read_in_order() {
+fn test_truncated_file_continues_working() {
     let temp_dir = setup_test_dir();
     let logs_dir = temp_dir.path().to_path_buf();
 
-    let max_log_size = 100; // Small to force rotation
-    let max_rotated = 5;
+    let max_log_size = 100; // Small to force truncation
 
     let mut writer = BufferedLogWriter::new(
         &logs_dir,
         "my-service",
         LogStream::Stdout,
-        max_log_size,
-        max_rotated,
+        Some(max_log_size),
         0, // No buffering
     );
 
-    // Write messages that will span multiple rotated files
+    // Write messages that will cause truncation
     for i in 0..50 {
         writer.write(&format!("Message {}", i));
         thread::sleep(Duration::from_millis(1));
     }
     drop(writer);
 
-    // Verify rotation happened
+    // Verify file exists
     let main_file = logs_dir.join("my-service.stdout.log");
     assert!(main_file.exists(), "Main log file should exist");
 
+    // File should be truncated (no rotated files)
+    let rotated_1 = logs_dir.join("my-service.stdout.log.1");
+    assert!(!rotated_1.exists(), "No rotated files should exist with truncation model");
+
     // Read back all logs
-    let reader = LogReader::new(logs_dir, max_rotated);
+    let reader = LogReader::new(logs_dir, 0);
     let logs = reader.tail(1000, Some("my-service"));
 
-    // Verify timestamps are in chronological order
+    // Some logs will be lost due to truncation, but remaining should be valid
+    // and timestamps should be in chronological order
     for i in 1..logs.len() {
         assert!(
             logs[i].timestamp >= logs[i - 1].timestamp,
@@ -270,17 +270,17 @@ fn test_filter_by_service() {
     let web_logs = reader.tail(100, Some("web"));
     assert_eq!(web_logs.len(), 2);
     for log in &web_logs {
-        assert_eq!(log.service, "web");
+        assert_eq!(&*log.service, "web");
     }
 
     let api_logs = reader.tail(100, Some("api"));
     assert_eq!(api_logs.len(), 1);
-    assert_eq!(api_logs[0].service, "api");
+    assert_eq!(&*api_logs[0].service, "api");
 
     let worker_logs = reader.tail(100, Some("worker"));
     assert_eq!(worker_logs.len(), 3);
     for log in &worker_logs {
-        assert_eq!(log.service, "worker");
+        assert_eq!(&*log.service, "worker");
     }
 
     // Non-existent service
@@ -421,7 +421,7 @@ fn test_log_line_metadata() {
     assert_eq!(logs.len(), 1);
     let log = &logs[0];
 
-    assert_eq!(log.service, "test-svc");
+    assert_eq!(&*log.service, "test-svc");
     assert_eq!(log.line, "test message");
     assert_eq!(log.stream, LogStream::Stdout);
 
@@ -458,30 +458,22 @@ fn test_multiple_rotated_files() {
     let temp_dir = setup_test_dir();
     let logs_dir = temp_dir.path().to_path_buf();
 
-    // Create multiple rotated files manually to test reading
+    // With truncation model, only main file is read (rotation files ignored)
     let base_path = logs_dir.join("manual-service.stdout.log");
 
     fs::create_dir_all(&logs_dir).unwrap();
 
-    // Create rotated file .3 (oldest)
-    let rotated3 = format!("{}.3", base_path.display());
-    fs::write(&rotated3, "1000\tOldest message\n").unwrap();
+    // Create main file with multiple entries
+    fs::write(&base_path, "1000\tOldest message\n2000\tMiddle message\n3000\tRecent message\n4000\tNewest message\n").unwrap();
 
-    // Create rotated file .2
-    let rotated2 = format!("{}.2", base_path.display());
-    fs::write(&rotated2, "2000\tMiddle message\n").unwrap();
-
-    // Create rotated file .1
+    // Legacy rotation files are ignored
     let rotated1 = format!("{}.1", base_path.display());
-    fs::write(&rotated1, "3000\tRecent message\n").unwrap();
+    fs::write(&rotated1, "500\tLegacy rotated file\n").unwrap();
 
-    // Create main file (newest)
-    fs::write(&base_path, "4000\tNewest message\n").unwrap();
-
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir, 0);
     let logs = reader.tail(100, Some("manual-service"));
 
-    assert_eq!(logs.len(), 4, "Should read all 4 files");
+    assert_eq!(logs.len(), 4, "Should read all 4 entries from main file");
 
     // Verify chronological order
     assert_eq!(logs[0].line, "Oldest message");
@@ -495,115 +487,80 @@ fn test_reader_from_config() {
     let temp_dir = setup_test_dir();
     let config = LogWriterConfig::with_options(
         temp_dir.path().to_path_buf(),
-        1024 * 1024,
-        3,
+        Some(1024 * 1024),
         4096,
     );
 
     write_log_entries(&config.logs_dir, "test-svc", LogStream::Stdout, &["test"]);
 
-    let reader = LogReader::new(config.logs_dir.clone(), config.max_rotated_files);
+    let reader = LogReader::new(config.logs_dir.clone(), 0);
     let logs = reader.tail(10, Some("test-svc"));
 
     assert_eq!(logs.len(), 1);
 }
 
-/// Test rotation wrap-around: when rotation has cycled more than once,
-/// file index order doesn't match timestamp order.
-///
-/// With max_rotated_files=3:
-/// - Fill log -> rotate to .1 (ts=1000)
-/// - Fill log -> rotate to .2 (ts=2000)
-/// - Fill log -> rotate to .3 (ts=3000)
-/// - Fill log -> rotate to .1 (overwrites, ts=4000) <- .1 is now NEWER than .3
-/// - Fill log -> rotate to .2 (overwrites, ts=5000)
-/// - Current log (ts=6000)
-///
-/// Reading order should be: .3 (3000) -> .1 (4000) -> .2 (5000) -> current (6000)
+/// Test that truncation model ignores legacy rotation files.
+/// With truncation, only the main file is read - any .1, .2, etc files are ignored.
 #[test]
-fn test_rotation_wraparound_ordering() {
+fn test_truncation_ignores_legacy_rotation_files() {
     let temp_dir = setup_test_dir();
     let logs_dir = temp_dir.path().to_path_buf();
-    let base_path = logs_dir.join("wraparound-test.stdout.log");
+    let base_path = logs_dir.join("truncation-test.stdout.log");
 
     fs::create_dir_all(&logs_dir).unwrap();
 
-    // Simulate wrap-around: .1 and .2 are NEWER than .3
-    // This happens after rotation has cycled more than once
+    // Create main file with multiple entries
+    fs::write(&base_path, "3000\tEntry 1\n4000\tEntry 2\n5000\tEntry 3\n6000\tEntry 4\n").unwrap();
 
-    // .3 - oldest (from first rotation cycle)
-    let rotated3 = format!("{}.3", base_path.display());
-    fs::write(&rotated3, "3000\tFile 3 - oldest from first cycle\n").unwrap();
-
-    // .1 - newer (from second rotation cycle, overwrote old .1)
+    // Create legacy rotation files (these should be ignored)
     let rotated1 = format!("{}.1", base_path.display());
-    fs::write(&rotated1, "4000\tFile 1 - newer from second cycle\n").unwrap();
+    fs::write(&rotated1, "1000\tLegacy rotated 1\n").unwrap();
 
-    // .2 - even newer (from second rotation cycle)
     let rotated2 = format!("{}.2", base_path.display());
-    fs::write(&rotated2, "5000\tFile 2 - newer from second cycle\n").unwrap();
+    fs::write(&rotated2, "2000\tLegacy rotated 2\n").unwrap();
 
-    // Current log - newest
-    fs::write(&base_path, "6000\tCurrent file - newest\n").unwrap();
+    let reader = LogReader::new(logs_dir, 0);
+    let logs = reader.tail(100, Some("truncation-test"));
 
-    let reader = LogReader::new(logs_dir, 3);
-    let logs = reader.tail(100, Some("wraparound-test"));
+    // Only main file is read (4 entries)
+    assert_eq!(logs.len(), 4, "Should read only main file entries");
 
-    assert_eq!(logs.len(), 4, "Should read all 4 files");
-
-    // Verify chronological order (NOT file index order!)
-    assert_eq!(logs[0].line, "File 3 - oldest from first cycle");
+    // Verify chronological order from main file only
+    assert_eq!(logs[0].line, "Entry 1");
     assert_eq!(logs[0].timestamp.timestamp_millis(), 3000);
 
-    assert_eq!(logs[1].line, "File 1 - newer from second cycle");
+    assert_eq!(logs[1].line, "Entry 2");
     assert_eq!(logs[1].timestamp.timestamp_millis(), 4000);
 
-    assert_eq!(logs[2].line, "File 2 - newer from second cycle");
+    assert_eq!(logs[2].line, "Entry 3");
     assert_eq!(logs[2].timestamp.timestamp_millis(), 5000);
 
-    assert_eq!(logs[3].line, "Current file - newest");
+    assert_eq!(logs[3].line, "Entry 4");
     assert_eq!(logs[3].timestamp.timestamp_millis(), 6000);
 }
 
-/// Test that multiple services with rotation and wrap-around are reconciled correctly.
-/// This simulates a realistic scenario where multiple services are logging concurrently
-/// and their rotations happen at different times.
+/// Test that multiple services are merged chronologically.
+/// With truncation model, only main files are read per service.
 #[test]
-fn test_multi_service_rotation_reconciliation() {
+fn test_multi_service_chronological_merge() {
     let temp_dir = setup_test_dir();
     let logs_dir = temp_dir.path().to_path_buf();
 
     fs::create_dir_all(&logs_dir).unwrap();
 
-    // Service A: has wrap-around (.1 is newer than .2)
+    // Service A: stdout with multiple entries
     let svc_a_base = logs_dir.join("service-a.stdout.log");
-    fs::write(
-        format!("{}.2", svc_a_base.display()),
-        "1000\tA-file2-oldest\n",
-    ).unwrap();
-    fs::write(
-        format!("{}.1", svc_a_base.display()),
-        "3000\tA-file1-wrapped\n",
-    ).unwrap();
-    fs::write(&svc_a_base, "5000\tA-current\n").unwrap();
+    fs::write(&svc_a_base, "1000\tA-first\n3000\tA-second\n5000\tA-third\n").unwrap();
 
-    // Service B: normal order (no wrap-around)
+    // Service B: stdout with interleaved timestamps
     let svc_b_base = logs_dir.join("service-b.stdout.log");
-    fs::write(
-        format!("{}.2", svc_b_base.display()),
-        "2000\tB-file2\n",
-    ).unwrap();
-    fs::write(
-        format!("{}.1", svc_b_base.display()),
-        "4000\tB-file1\n",
-    ).unwrap();
-    fs::write(&svc_b_base, "6000\tB-current\n").unwrap();
+    fs::write(&svc_b_base, "2000\tB-first\n4000\tB-second\n6000\tB-third\n").unwrap();
 
-    // Service C: only stderr, interleaved timestamps
+    // Service C: only stderr, interleaved timestamp
     let svc_c_base = logs_dir.join("service-c.stderr.log");
     fs::write(&svc_c_base, "2500\tC-stderr\n").unwrap();
 
-    let reader = LogReader::new(logs_dir, 3);
+    let reader = LogReader::new(logs_dir, 0);
 
     // Read all services - should be chronologically merged
     let all_logs = reader.tail(100, None);
@@ -612,18 +569,18 @@ fn test_multi_service_rotation_reconciliation() {
 
     // Verify chronological order across all services
     let expected_order = [
-        ("service-a", "A-file2-oldest", 1000),
-        ("service-b", "B-file2", 2000),
+        ("service-a", "A-first", 1000),
+        ("service-b", "B-first", 2000),
         ("service-c", "C-stderr", 2500),
-        ("service-a", "A-file1-wrapped", 3000),
-        ("service-b", "B-file1", 4000),
-        ("service-a", "A-current", 5000),
-        ("service-b", "B-current", 6000),
+        ("service-a", "A-second", 3000),
+        ("service-b", "B-second", 4000),
+        ("service-a", "A-third", 5000),
+        ("service-b", "B-third", 6000),
     ];
 
     for (i, (exp_service, exp_line, exp_ts)) in expected_order.iter().enumerate() {
         assert_eq!(
-            all_logs[i].service, *exp_service,
+            &*all_logs[i].service, *exp_service,
             "Entry {} service mismatch: expected {}, got {}",
             i, exp_service, all_logs[i].service
         );
@@ -647,24 +604,20 @@ fn test_multi_service_rotation_reconciliation() {
     assert_eq!(svc_a_only[2].timestamp.timestamp_millis(), 5000);
 }
 
-/// Test heavy rotation with multiple cycles to ensure nothing is lost or corrupted
+/// Test truncation with repeated writes to ensure data integrity
 #[test]
-fn test_heavy_multi_cycle_rotation() {
+fn test_truncation_maintains_integrity() {
     let temp_dir = setup_test_dir();
     let logs_dir = temp_dir.path().to_path_buf();
 
-    let rotation_size = 500;  // Very small to force many rotations
-    let max_rotated = 3;
+    let max_log_size = 500;  // Very small to force truncation
 
-    // Write enough to cycle through rotations multiple times
-    // Each message is ~50 bytes, so 500 bytes = ~10 messages per file
-    // Writing 100 messages = 10 files worth = ~3+ full cycles
+    // Write enough to trigger multiple truncations
     let mut writer = BufferedLogWriter::new(
         &logs_dir,
-        "heavy-rotation",
+        "heavy-truncation",
         LogStream::Stdout,
-        rotation_size,
-        max_rotated,
+        Some(max_log_size),
         0, // No buffering
     );
 
@@ -675,16 +628,14 @@ fn test_heavy_multi_cycle_rotation() {
     drop(writer);
 
     // Read back
-    let reader = LogReader::new(logs_dir.clone(), max_rotated);
-    let logs = reader.tail(1000, Some("heavy-rotation"));
+    let reader = LogReader::new(logs_dir.clone(), 0);
+    let logs = reader.tail(1000, Some("heavy-truncation"));
 
-    // We should have logs from max_rotated files + current file
-    // Each file holds ~10 messages, so we should have ~40 messages
-    // (but could be less if rotation timing varies)
+    // With truncation, we'll have fewer logs since old ones are discarded
+    // File will contain only the most recent messages that fit
     assert!(
-        logs.len() >= 20,
-        "Should have at least 20 entries, got {}",
-        logs.len()
+        !logs.is_empty(),
+        "Should have some entries after truncation"
     );
 
     // Verify timestamps are in chronological order
@@ -696,11 +647,14 @@ fn test_heavy_multi_cycle_rotation() {
         );
     }
 
-    // Verify the last entries are the most recent ones written
-    let last_log = logs.last().unwrap();
-    assert!(
-        last_log.line.contains("Message 009") || last_log.line.contains("Message 0"),
-        "Last entry should be a recent message, got: {}",
-        last_log.line
-    );
+    // No rotated files should exist
+    let log_file = logs_dir.join("heavy-truncation.stdout.log");
+    for i in 1..=5 {
+        let rotated = format!("{}.{}", log_file.display(), i);
+        assert!(
+            !std::path::Path::new(&rotated).exists(),
+            "Rotated file {} should not exist with truncation model",
+            i
+        );
+    }
 }

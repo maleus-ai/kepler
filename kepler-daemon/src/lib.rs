@@ -5,6 +5,7 @@ use crate::errors::{DaemonError, Result};
 pub mod config;
 pub mod config_actor;
 pub mod config_registry;
+pub mod cursor;
 pub mod deps;
 pub mod env;
 pub mod errors;

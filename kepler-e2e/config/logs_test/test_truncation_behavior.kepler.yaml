@@ -1,0 +1,13 @@
+# Test config for log truncation behavior
+# Uses very small max_size to verify truncation happens correctly
+
+kepler:
+  logs:
+    buffer_size: 0     # Disable buffering for immediate writes
+    max_size: "2K"     # Very small (2KB) to force frequent truncation
+
+services:
+  truncation-test:
+    command: ["bash", "-c", "i=1; while [ $i -le 500 ]; do echo \"LINE_$i padding_to_fill_log_quickly_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; i=$((i+1)); sleep 0.01; done; echo TRUNCATION_DONE; sleep 300"]
+    logs:
+      store: true
