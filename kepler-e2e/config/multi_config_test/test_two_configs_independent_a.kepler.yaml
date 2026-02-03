@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   config-a-service:
     command: ["sh", "-c", "echo CONFIG_A_RUNNING; sleep 300"]

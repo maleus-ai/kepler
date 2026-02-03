@@ -14,7 +14,7 @@ use tracing::info;
 use crate::config::{KeplerConfig, LogConfig, ServiceConfig, SysEnvPolicy};
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
-use crate::logs::SharedLogBuffer;
+use crate::logs::{LogReader, LogWriterConfig, DEFAULT_MAX_LOG_SIZE, DEFAULT_MAX_ROTATED_FILES, DEFAULT_BUFFER_SIZE};
 use crate::persistence::{ConfigPersistence, ExpandedConfigSnapshot};
 use crate::state::{
     PersistedConfigState, PersistedServiceState, ProcessHandle, ServiceState, ServiceStatus,
@@ -30,12 +30,12 @@ pub enum TaskHandleType {
 
 /// Context for a service that bundles commonly fetched together data.
 /// This reduces the pattern of making multiple separate calls for
-/// service_config, config_dir, logs, and global_log_config.
+/// service_config, config_dir, log_config, and global_log_config.
 #[derive(Clone)]
 pub struct ServiceContext {
     pub service_config: ServiceConfig,
     pub config_dir: PathBuf,
-    pub logs: SharedLogBuffer,
+    pub log_config: LogWriterConfig,
     pub global_log_config: Option<LogConfig>,
     /// Pre-computed environment variables from state
     pub env: HashMap<String, String>,
@@ -88,8 +88,8 @@ pub enum ConfigCommand {
     GetConfigDir {
         reply: oneshot::Sender<PathBuf>,
     },
-    GetLogsBuffer {
-        reply: oneshot::Sender<SharedLogBuffer>,
+    GetLogConfig {
+        reply: oneshot::Sender<LogWriterConfig>,
     },
     GetGlobalLogConfig {
         reply: oneshot::Sender<Option<LogConfig>>,
@@ -215,7 +215,7 @@ pub struct ConfigActor {
     config_dir: PathBuf,
     state_dir: PathBuf,
     services: HashMap<String, ServiceState>,
-    logs: SharedLogBuffer,
+    log_config: LogWriterConfig,
     initialized: bool,
 
     // Process and task handles (moved from DaemonState)
@@ -423,9 +423,9 @@ impl ConfigActor {
                 )
             };
 
-        // Create logs buffer with rotation config if specified
+        // Create log config (writers are created per-task, no shared state)
         let logs_dir = state_dir.join("logs");
-        let logs = Self::create_log_buffer(&logs_dir, &config);
+        let log_config = Self::create_log_config(&logs_dir, &config);
 
         // Create channel
         let (tx, rx) = mpsc::channel(256);
@@ -443,7 +443,7 @@ impl ConfigActor {
             config_dir,
             state_dir,
             services,
-            logs,
+            log_config,
             initialized,
             processes: HashMap::new(),
             watchers: HashMap::new(),
@@ -457,10 +457,8 @@ impl ConfigActor {
         Ok((handle, actor))
     }
 
-    /// Create a log buffer with rotation and buffer settings from config
-    fn create_log_buffer(logs_dir: &Path, config: &KeplerConfig) -> SharedLogBuffer {
-        use crate::logs::{DEFAULT_MAX_LOG_SIZE, DEFAULT_MAX_ROTATED_FILES};
-
+    /// Create a log config with rotation and buffer settings from config
+    fn create_log_config(logs_dir: &Path, config: &KeplerConfig) -> LogWriterConfig {
         let global_logs = config.global_logs();
 
         // Get rotation config (or defaults)
@@ -469,10 +467,12 @@ impl ConfigActor {
             None => (DEFAULT_MAX_LOG_SIZE, DEFAULT_MAX_ROTATED_FILES),
         };
 
-        // Get buffer size (0 = no buffering, default)
-        let buffer_size = global_logs.and_then(|l| l.buffer_size).unwrap_or(0);
+        // Get buffer size (default to 64KB for better performance)
+        let buffer_size = global_logs
+            .and_then(|l| l.buffer_size)
+            .unwrap_or(DEFAULT_BUFFER_SIZE);
 
-        SharedLogBuffer::with_options(logs_dir.to_path_buf(), max_size, max_files, buffer_size)
+        LogWriterConfig::with_options(logs_dir.to_path_buf(), max_size, max_files, buffer_size)
     }
 
     /// Run the actor event loop
@@ -541,8 +541,8 @@ impl ConfigActor {
             ConfigCommand::GetConfigDir { reply } => {
                 let _ = reply.send(self.config_dir.clone());
             }
-            ConfigCommand::GetLogsBuffer { reply } => {
-                let _ = reply.send(self.logs.clone());
+            ConfigCommand::GetLogConfig { reply } => {
+                let _ = reply.send(self.log_config.clone());
             }
             ConfigCommand::GetGlobalLogConfig { reply } => {
                 let _ = reply.send(self.config.global_logs().cloned());
@@ -661,10 +661,18 @@ impl ConfigActor {
                 let _ = reply.send(result);
             }
             ConfigCommand::ClearServiceLogs { service_name } => {
-                self.logs.clear_service(&service_name);
+                let reader = LogReader::new(
+                    self.log_config.logs_dir.clone(),
+                    self.log_config.max_rotated_files,
+                );
+                reader.clear_service(&service_name);
             }
             ConfigCommand::ClearServiceLogsPrefix { prefix } => {
-                self.logs.clear_service_prefix(&prefix);
+                let reader = LogReader::new(
+                    self.log_config.logs_dir.clone(),
+                    self.log_config.max_rotated_files,
+                );
+                reader.clear_service_prefix(&prefix);
             }
 
             // === Process Handle Commands ===
@@ -808,7 +816,7 @@ impl ConfigActor {
         Some(ServiceContext {
             service_config,
             config_dir: self.config_dir.clone(),
-            logs: self.logs.clone(),
+            log_config: self.log_config.clone(),
             global_log_config: self.config.global_logs().cloned(),
             env: service_state.computed_env.clone(),
             working_dir: service_state.working_dir.clone(),
@@ -835,7 +843,11 @@ impl ConfigActor {
     }
 
     fn get_logs(&self, service: Option<&str>, lines: usize) -> Vec<LogEntry> {
-        self.logs
+        let reader = LogReader::new(
+            self.log_config.logs_dir.clone(),
+            self.log_config.max_rotated_files,
+        );
+        reader
             .tail(lines, service)
             .into_iter()
             .map(|l| l.into())
@@ -848,7 +860,11 @@ impl ConfigActor {
         lines: usize,
         max_bytes: Option<usize>,
     ) -> Vec<LogEntry> {
-        self.logs
+        let reader = LogReader::new(
+            self.log_config.logs_dir.clone(),
+            self.log_config.max_rotated_files,
+        );
+        reader
             .tail_bounded(lines, service, max_bytes)
             .into_iter()
             .map(|l| l.into())
@@ -861,7 +877,11 @@ impl ConfigActor {
         offset: usize,
         limit: usize,
     ) -> (Vec<LogEntry>, usize) {
-        let (logs, total) = self.logs.get_paginated(service, offset, limit);
+        let reader = LogReader::new(
+            self.log_config.logs_dir.clone(),
+            self.log_config.max_rotated_files,
+        );
+        let (logs, total) = reader.get_paginated(service, offset, limit);
         (logs.into_iter().map(|l| l.into()).collect(), total)
     }
 
@@ -1149,12 +1169,12 @@ impl ConfigActorHandle {
         reply_rx.await.unwrap_or_else(|_| PathBuf::from("."))
     }
 
-    /// Get logs buffer
-    pub async fn get_logs_buffer(&self) -> Option<SharedLogBuffer> {
+    /// Get log config
+    pub async fn get_log_config(&self) -> Option<LogWriterConfig> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(ConfigCommand::GetLogsBuffer { reply: reply_tx })
+            .send(ConfigCommand::GetLogConfig { reply: reply_tx })
             .await;
         reply_rx.await.ok()
     }

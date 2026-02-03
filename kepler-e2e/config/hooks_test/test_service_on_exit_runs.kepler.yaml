@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   svc-exit-hook-service:
     command: ["sh", "-c", "echo Starting; sleep 1; exit 0"]

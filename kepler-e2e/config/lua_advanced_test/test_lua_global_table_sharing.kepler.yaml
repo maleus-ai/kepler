@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 lua: |
   global.shared = "shared_data"
 

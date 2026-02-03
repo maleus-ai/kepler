@@ -136,7 +136,7 @@ async fn run_status_change_hook(
             &ctx.service_config,
             &working_dir,
             &ctx.env,
-            Some(&ctx.logs),
+            Some(&ctx.log_config),
             ctx.global_log_config.as_ref(),
         );
 

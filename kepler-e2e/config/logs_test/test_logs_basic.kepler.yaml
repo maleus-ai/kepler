@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0  # Disable buffering for immediate writes
+
 services:
   log-basic-service:
     command: ["sh", "-c", "echo BASIC_LOG_MESSAGE; sleep 300"]

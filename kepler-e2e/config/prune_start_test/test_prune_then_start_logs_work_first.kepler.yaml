@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   logger-service:
     command: ["sh", "-c", "echo FIRST_RUN_MARKER; sleep 300"]

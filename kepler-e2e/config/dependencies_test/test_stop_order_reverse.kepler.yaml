@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   stop-order-a:
     command: ["sh", "-c", "echo STOP_ORDER_A_STARTED; sleep 300"]

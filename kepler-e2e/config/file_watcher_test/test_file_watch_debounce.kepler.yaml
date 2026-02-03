@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   debounce-service:
     command: ["sh", "-c", "echo DEBOUNCE_START; sleep 300"]

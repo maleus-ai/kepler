@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   healthy-service:
     command: ["sh", "-c", "echo Starting; sleep 300"]

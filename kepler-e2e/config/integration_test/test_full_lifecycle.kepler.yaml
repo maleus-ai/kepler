@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   full-lifecycle-service:
     command: ["sh", "-c", "echo FULL_LIFECYCLE_START; sleep 300"]

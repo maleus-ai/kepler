@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   isolated-b:
     command: ["sh", "-c", "echo ISOLATED_LOG_B; sleep 300"]

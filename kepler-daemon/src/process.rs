@@ -13,7 +13,7 @@ use crate::config::{
 };
 use crate::config_actor::{ConfigActorHandle, TaskHandleType};
 use crate::errors::{DaemonError, Result};
-use crate::logs::{LogStream, SharedLogBuffer};
+use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
 use crate::state::{ProcessHandle, ServiceStatus};
 
 /// Unified command specification for both services and hooks
@@ -219,9 +219,9 @@ fn apply_resource_limits(limits: &ResourceLimits) -> std::io::Result<()> {
 pub enum BlockingMode {
     /// Wait for completion silently
     Silent,
-    /// Wait for completion with logging to tracing and SharedLogBuffer (for hooks)
+    /// Wait for completion with logging to tracing and disk (for hooks)
     WithLogging {
-        logs: Option<SharedLogBuffer>,
+        log_config: Option<LogWriterConfig>,
         log_service_name: String,
         /// Whether to store stdout output
         store_stdout: bool,
@@ -254,7 +254,7 @@ pub struct DetachedResult {
 ///
 /// The `mode` parameter determines behavior:
 /// - `Silent`: Wait for completion and return exit code
-/// - `WithLogging`: Wait with logging to tracing and SharedLogBuffer
+/// - `WithLogging`: Wait with logging to tracing and BufferedLogWriter
 pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<BlockingResult> {
     // Validate command
     if spec.program_and_args.is_empty() {
@@ -354,52 +354,64 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
             })
         }
         BlockingMode::WithLogging {
-            logs,
+            log_config,
             log_service_name,
             store_stdout,
             store_stderr,
         } => {
             // Capture stdout with conditional logging
             let stdout = child.stdout.take();
-            let logs_for_stdout = if store_stdout { logs.clone() } else { None };
+            let config_for_stdout = if store_stdout { log_config.clone() } else { None };
             let service_name_stdout = log_service_name.clone();
             let should_store_stdout = store_stdout;
             let stdout_handle = tokio::spawn(async move {
                 if let Some(stdout) = stdout {
+                    // Create per-task BufferedLogWriter - no shared state
+                    let mut writer = config_for_stdout.map(|cfg| {
+                        BufferedLogWriter::from_config(&cfg, &service_name_stdout, LogStream::Stdout)
+                    });
+
                     let reader = BufReader::new(stdout);
                     let mut lines = reader.lines();
                     while let Ok(Some(line)) = lines.next_line().await {
                         if should_store_stdout {
                             // Log to daemon's log output
                             info!(target: "hook", "[{}] {}", service_name_stdout, line);
-                            // Also capture in log buffer
-                            if let Some(ref logs) = logs_for_stdout {
-                                logs.push(&service_name_stdout, line, LogStream::Stdout);
+                            // Write to log file
+                            if let Some(ref mut w) = writer {
+                                w.write(&line);
                             }
                         }
                     }
+                    // writer.flush() called by Drop
                 }
             });
 
             // Capture stderr with conditional logging
             let stderr = child.stderr.take();
-            let logs_for_stderr = if store_stderr { logs.clone() } else { None };
+            let config_for_stderr = if store_stderr { log_config.clone() } else { None };
             let service_name_stderr = log_service_name.clone();
             let should_store_stderr = store_stderr;
             let stderr_handle = tokio::spawn(async move {
                 if let Some(stderr) = stderr {
+                    // Create per-task BufferedLogWriter - no shared state
+                    let mut writer = config_for_stderr.map(|cfg| {
+                        BufferedLogWriter::from_config(&cfg, &service_name_stderr, LogStream::Stderr)
+                    });
+
                     let reader = BufReader::new(stderr);
                     let mut lines = reader.lines();
                     while let Ok(Some(line)) = lines.next_line().await {
                         if should_store_stderr {
                             // Log to daemon's log output
                             info!(target: "hook", "[{}] {}", service_name_stderr, line);
-                            // Also capture in log buffer
-                            if let Some(ref logs) = logs_for_stderr {
-                                logs.push(&service_name_stderr, line, LogStream::Stderr);
+                            // Write to log file
+                            if let Some(ref mut w) = writer {
+                                w.write(&line);
                             }
                         }
                     }
+                    // writer.flush() called by Drop
                 }
             });
 
@@ -423,7 +435,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
 /// Spawn a detached command, returning the Child and output tasks for monitoring
 pub async fn spawn_detached(
     spec: CommandSpec,
-    logs: SharedLogBuffer,
+    log_config: LogWriterConfig,
     log_service_name: String,
     store_stdout: bool,
     store_stderr: bool,
@@ -481,39 +493,55 @@ pub async fn spawn_detached(
     let pid = child.id();
     debug!("Command spawned with PID {:?}", pid);
 
-    // Capture stdout
+    // Capture stdout - each task gets its own BufferedLogWriter (no shared state)
     let stdout = child.stdout.take();
     let stdout_task = if let Some(stdout) = stdout {
-        let logs_clone = logs.clone();
+        let config_clone = log_config.clone();
         let service_name_clone = log_service_name.clone();
         let should_store = store_stdout;
         Some(tokio::spawn(async move {
+            // Create per-task BufferedLogWriter - no locks, no contention
+            let mut writer = if should_store {
+                Some(BufferedLogWriter::from_config(&config_clone, &service_name_clone, LogStream::Stdout))
+            } else {
+                None
+            };
+
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                if should_store {
-                    logs_clone.push(&service_name_clone, line, LogStream::Stdout);
+                if let Some(ref mut w) = writer {
+                    w.write(&line);
                 }
             }
+            // writer.flush() called by Drop
         }))
     } else {
         None
     };
 
-    // Capture stderr
+    // Capture stderr - each task gets its own BufferedLogWriter (no shared state)
     let stderr = child.stderr.take();
     let stderr_task = if let Some(stderr) = stderr {
-        let logs_clone = logs.clone();
+        let config_clone = log_config.clone();
         let service_name_clone = log_service_name.clone();
         let should_store = store_stderr;
         Some(tokio::spawn(async move {
+            // Create per-task BufferedLogWriter - no locks, no contention
+            let mut writer = if should_store {
+                Some(BufferedLogWriter::from_config(&config_clone, &service_name_clone, LogStream::Stderr))
+            } else {
+                None
+            };
+
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                if should_store {
-                    logs_clone.push(&service_name_clone, line, LogStream::Stderr);
+                if let Some(ref mut w) = writer {
+                    w.write(&line);
                 }
             }
+            // writer.flush() called by Drop
         }))
     } else {
         None
@@ -539,7 +567,7 @@ pub struct SpawnServiceParams<'a> {
     pub service_name: &'a str,
     pub service_config: &'a ServiceConfig,
     pub config_dir: &'a Path,
-    pub logs: SharedLogBuffer,
+    pub log_config: LogWriterConfig,
     pub handle: ConfigActorHandle,
     pub exit_tx: mpsc::Sender<ProcessExitEvent>,
     pub global_log_config: Option<&'a LogConfig>,
@@ -551,7 +579,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         service_name,
         service_config,
         config_dir,
-        logs,
+        log_config,
         handle,
         exit_tx,
         global_log_config,
@@ -606,7 +634,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
     // Spawn the command detached for monitoring
     let result = spawn_detached(
         spec,
-        logs,
+        log_config,
         service_name.to_string(),
         store_stdout,
         store_stderr,

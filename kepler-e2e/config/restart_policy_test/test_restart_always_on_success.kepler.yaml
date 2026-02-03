@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   always-restart-success:
     command: ["sh", "-c", "echo ALWAYS_SUCCESS_START; sleep 1; exit 0"]

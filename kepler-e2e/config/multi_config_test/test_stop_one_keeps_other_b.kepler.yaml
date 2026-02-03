@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   stop-test-b:
     command: ["sh", "-c", "echo B_RUNNING; sleep 300"]

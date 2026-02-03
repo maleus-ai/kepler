@@ -5,14 +5,14 @@ use tracing::{debug, error, info};
 use crate::config::{resolve_log_store, GlobalHooks, HookCommand, LogConfig, ServiceHooks};
 use crate::env::build_hook_env;
 use crate::errors::{DaemonError, Result};
-use crate::logs::SharedLogBuffer;
+use crate::logs::LogWriterConfig;
 use crate::process::{spawn_blocking, BlockingMode, CommandSpec};
 
 /// Context for running a hook
 pub struct HookRunContext<'a> {
     pub base_working_dir: &'a Path,
     pub env: &'a HashMap<String, String>,
-    pub logs: Option<&'a SharedLogBuffer>,
+    pub log_config: Option<&'a LogWriterConfig>,
     pub service_name: &'a str,
     pub service_user: Option<&'a str>,
     pub service_group: Option<&'a str>,
@@ -24,7 +24,7 @@ pub struct HookRunContext<'a> {
 pub struct ServiceHookParams<'a> {
     pub working_dir: &'a Path,
     pub env: &'a HashMap<String, String>,
-    pub logs: Option<&'a SharedLogBuffer>,
+    pub log_config: Option<&'a LogWriterConfig>,
     pub service_user: Option<&'a str>,
     pub service_group: Option<&'a str>,
     pub service_log_config: Option<&'a LogConfig>,
@@ -40,13 +40,13 @@ impl<'a> ServiceHookParams<'a> {
         service_config: &'a crate::config::ServiceConfig,
         working_dir: &'a Path,
         env: &'a HashMap<String, String>,
-        logs: Option<&'a SharedLogBuffer>,
+        log_config: Option<&'a LogWriterConfig>,
         global_log_config: Option<&'a LogConfig>,
     ) -> Self {
         Self {
             working_dir,
             env,
-            logs,
+            log_config,
             service_user: service_config.user.as_deref(),
             service_group: service_config.group.as_deref(),
             service_log_config: service_config.logs.as_ref(),
@@ -177,7 +177,7 @@ pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>) -> Result<()
 
     // Spawn using blocking mode with logging
     let mode = BlockingMode::WithLogging {
-        logs: ctx.logs.cloned(),
+        log_config: ctx.log_config.cloned(),
         log_service_name: ctx.service_name.to_string(),
         store_stdout: ctx.store_stdout,
         store_stderr: ctx.store_stderr,
@@ -209,7 +209,7 @@ pub async fn run_global_hook(
     hook_type: GlobalHookType,
     working_dir: &Path,
     env: &HashMap<String, String>,
-    logs: Option<&SharedLogBuffer>,
+    log_config: Option<&LogWriterConfig>,
     global_log_config: Option<&LogConfig>,
 ) -> Result<()> {
     let hooks = match hooks {
@@ -233,7 +233,7 @@ pub async fn run_global_hook(
         let ctx = HookRunContext {
             base_working_dir: working_dir,
             env,
-            logs,
+            log_config,
             service_name: &service_name,
             service_user: None,
             service_group: None,
@@ -285,7 +285,7 @@ pub async fn run_service_hook(
         let ctx = HookRunContext {
             base_working_dir: params.working_dir,
             env: params.env,
-            logs: params.logs,
+            log_config: params.log_config,
             service_name: &log_name,
             service_user: params.service_user,
             service_group: params.service_group,

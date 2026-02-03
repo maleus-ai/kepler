@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   hook-wd-service:
     env_file: __ENV_FILE__

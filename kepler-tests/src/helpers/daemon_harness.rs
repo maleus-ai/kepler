@@ -4,7 +4,7 @@ use kepler_daemon::config::{KeplerConfig, LogRetention};
 use kepler_daemon::config_actor::{ConfigActor, ConfigActorHandle, TaskHandleType};
 use kepler_daemon::health::spawn_health_checker;
 use kepler_daemon::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
-use kepler_daemon::logs::SharedLogBuffer;
+use kepler_daemon::logs::{BufferedLogWriter, LogReader, LogStream, LogWriterConfig, LogLine};
 use kepler_daemon::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
 use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
@@ -160,7 +160,7 @@ impl TestDaemonHarness {
             &ctx.service_config,
             &ctx.working_dir,
             &ctx.env,
-            Some(&ctx.logs),
+            Some(&ctx.log_config),
             ctx.global_log_config.as_ref(),
         );
 
@@ -193,7 +193,7 @@ impl TestDaemonHarness {
             service_name,
             service_config: &ctx.service_config,
             config_dir: &ctx.config_dir,
-            logs: ctx.logs.clone(),
+            log_config: ctx.log_config.clone(),
             handle: self.handle.clone(),
             exit_tx: self.exit_tx.clone(),
             global_log_config: ctx.global_log_config.as_ref(),
@@ -271,7 +271,7 @@ impl TestDaemonHarness {
             &ctx.service_config,
             &ctx.working_dir,
             &ctx.env,
-            Some(&ctx.logs),
+            Some(&ctx.log_config),
             ctx.global_log_config.as_ref(),
         );
 
@@ -319,9 +319,9 @@ impl TestDaemonHarness {
             .unwrap_or(false)
     }
 
-    /// Get the logs buffer
-    pub async fn logs(&self) -> Option<SharedLogBuffer> {
-        self.handle.get_logs_buffer().await
+    /// Get the logs helper for test operations
+    pub async fn logs(&self) -> Option<TestLogHelper> {
+        self.handle.get_log_config().await.map(TestLogHelper::new)
     }
 
     /// Spawn a file change handler that restarts services on file changes
@@ -343,7 +343,7 @@ impl TestDaemonHarness {
                     &ctx.service_config,
                     &ctx.working_dir,
                     &ctx.env,
-                    Some(&ctx.logs),
+                    Some(&ctx.log_config),
                     ctx.global_log_config.as_ref(),
                 );
 
@@ -368,8 +368,12 @@ impl TestDaemonHarness {
                     let should_clear = retention == LogRetention::Clear;
 
                     if should_clear {
-                        ctx.logs.clear_service(&event.service_name);
-                        ctx.logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                        let reader = LogReader::new(
+                            ctx.log_config.logs_dir.clone(),
+                            ctx.log_config.max_rotated_files,
+                        );
+                        reader.clear_service(&event.service_name);
+                        reader.clear_service_prefix(&format!("[{}.", event.service_name));
                     }
                 }
 
@@ -386,7 +390,7 @@ impl TestDaemonHarness {
                     service_name: &event.service_name,
                     service_config: &ctx.service_config,
                     config_dir: &ctx.config_dir,
-                    logs: ctx.logs.clone(),
+                    log_config: ctx.log_config.clone(),
                     handle: handle.clone(),
                     exit_tx: exit_tx.clone(),
                     global_log_config: ctx.global_log_config.as_ref(),
@@ -430,7 +434,7 @@ impl TestDaemonHarness {
                     &ctx.service_config,
                     &ctx.working_dir,
                     &ctx.env,
-                    Some(&ctx.logs),
+                    Some(&ctx.log_config),
                     ctx.global_log_config.as_ref(),
                 );
 
@@ -455,8 +459,12 @@ impl TestDaemonHarness {
                     let should_clear = retention == LogRetention::Clear;
 
                     if should_clear {
-                        ctx.logs.clear_service(&event.service_name);
-                        ctx.logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                        let reader = LogReader::new(
+                            ctx.log_config.logs_dir.clone(),
+                            ctx.log_config.max_rotated_files,
+                        );
+                        reader.clear_service(&event.service_name);
+                        reader.clear_service_prefix(&format!("[{}.", event.service_name));
                     }
                 }
 
@@ -489,8 +497,12 @@ impl TestDaemonHarness {
                         let should_clear = retention == LogRetention::Clear;
 
                         if should_clear {
-                            ctx.logs.clear_service(&event.service_name);
-                            ctx.logs.clear_service_prefix(&format!("[{}.", event.service_name));
+                            let reader = LogReader::new(
+                                ctx.log_config.logs_dir.clone(),
+                                ctx.log_config.max_rotated_files,
+                            );
+                            reader.clear_service(&event.service_name);
+                            reader.clear_service_prefix(&format!("[{}.", event.service_name));
                         }
                     }
 
@@ -499,7 +511,7 @@ impl TestDaemonHarness {
                         service_name: &event.service_name,
                         service_config: &ctx.service_config,
                         config_dir: &ctx.config_dir,
-                        logs: ctx.logs.clone(),
+                        log_config: ctx.log_config.clone(),
                         handle: handle.clone(),
                         exit_tx: exit_tx.clone(),
                         global_log_config: ctx.global_log_config.as_ref(),
@@ -533,6 +545,89 @@ impl TestDaemonHarness {
     pub async fn reload_config(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.handle.reload_config().await?;
         Ok(())
+    }
+}
+
+/// Test helper for log operations that provides the same interface as the old SharedLogBuffer.
+/// This allows tests to push log entries directly for testing purposes.
+pub struct TestLogHelper {
+    config: LogWriterConfig,
+    sequence: std::sync::atomic::AtomicU64,
+}
+
+impl TestLogHelper {
+    pub fn new(config: LogWriterConfig) -> Self {
+        Self {
+            config,
+            sequence: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Push a log entry to disk (creates a BufferedLogWriter, writes, and flushes)
+    pub fn push(&self, service: &str, line: String, stream: LogStream) {
+        let mut writer = BufferedLogWriter::from_config(&self.config, service, stream);
+        writer.write(&line);
+        // writer.flush() is called by drop
+        self.sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Get the last N log entries, optionally filtered by service
+    pub fn tail(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
+        let reader = LogReader::new(
+            self.config.logs_dir.clone(),
+            self.config.max_rotated_files,
+        );
+        reader.tail(count, service)
+    }
+
+    /// Clear all logs
+    pub fn clear(&self) {
+        let reader = LogReader::new(
+            self.config.logs_dir.clone(),
+            self.config.max_rotated_files,
+        );
+        reader.clear();
+        self.sequence.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Clear logs for a specific service
+    pub fn clear_service(&self, service: &str) {
+        let reader = LogReader::new(
+            self.config.logs_dir.clone(),
+            self.config.max_rotated_files,
+        );
+        reader.clear_service(service);
+    }
+
+    /// Clear logs for services matching a prefix
+    pub fn clear_service_prefix(&self, prefix: &str) {
+        let reader = LogReader::new(
+            self.config.logs_dir.clone(),
+            self.config.max_rotated_files,
+        );
+        reader.clear_service_prefix(prefix);
+    }
+
+    /// Get current sequence number
+    pub fn current_sequence(&self) -> u64 {
+        self.sequence.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Get entries since a sequence number
+    pub fn entries_since(&self, since: u64, service: Option<&str>) -> Vec<LogLine> {
+        let reader = LogReader::new(
+            self.config.logs_dir.clone(),
+            self.config.max_rotated_files,
+        );
+        // Get all entries and filter by index
+        // Note: this is less efficient than the old approach but maintains API compatibility
+        let all = reader.tail(10000, service);
+        let current = self.current_sequence();
+        if since >= current {
+            return Vec::new();
+        }
+        let skip = (since as usize).saturating_sub(all.len().saturating_sub(current as usize));
+        all.into_iter().skip(skip).collect()
     }
 }
 

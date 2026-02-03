@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0  # Disable buffering for immediate writes
+
 services:
   log-timestamp-service:
     command: ["sh", "-c", "echo TIMESTAMP_LOG_MESSAGE; sleep 300"]

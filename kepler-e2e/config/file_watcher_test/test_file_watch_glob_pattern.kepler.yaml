@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   glob-watch-service:
     command: ["sh", "-c", "echo GLOB_WATCH_START; sleep 300"]

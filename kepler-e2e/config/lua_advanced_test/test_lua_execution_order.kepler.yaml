@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 lua: |
   global.order = {}
   table.insert(global.order, "lua_block")

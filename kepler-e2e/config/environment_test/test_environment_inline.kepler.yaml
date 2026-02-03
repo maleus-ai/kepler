@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   env-inline-service:
     command: ["sh", "-c", "echo MY_VAR=$MY_VAR; sleep 300"]

@@ -139,8 +139,8 @@ impl ServiceOrchestrator {
             None => get_start_order(&config.services)?,
         };
 
-        let logs = handle
-            .get_logs_buffer()
+        let log_config = handle
+            .get_log_config()
             .await
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
@@ -156,7 +156,7 @@ impl ServiceOrchestrator {
                 GlobalHookType::OnInit,
                 &config_dir,
                 &env,
-                Some(&logs),
+                Some(&log_config),
                 global_log_config.as_ref(),
             )
             .await?;
@@ -171,7 +171,7 @@ impl ServiceOrchestrator {
             GlobalHookType::OnStart,
             &config_dir,
             &env,
-            Some(&logs),
+            Some(&log_config),
             global_log_config.as_ref(),
         )
         .await?;
@@ -349,7 +349,7 @@ impl ServiceOrchestrator {
             None => get_stop_order(&config.services)?,
         };
 
-        let logs = handle.get_logs_buffer().await;
+        let log_config = handle.get_log_config().await;
         let global_log_config = config.global_logs().cloned();
         let global_hooks = config.global_hooks().cloned();
 
@@ -385,14 +385,14 @@ impl ServiceOrchestrator {
 
         // Run global on_stop hook if stopping all and services were stopped
         if service_filter.is_none() && !stopped.is_empty() {
-            if let Some(ref logs) = logs {
+            if let Some(ref log_cfg) = log_config {
                 let env = std::env::vars().collect();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::OnStop,
                     &config_dir,
                     &env,
-                    Some(logs),
+                    Some(log_cfg),
                     global_log_config.as_ref(),
                 )
                 .await
@@ -405,14 +405,14 @@ impl ServiceOrchestrator {
         // Run on_cleanup if requested
         if service_filter.is_none() && clean {
             info!("Running cleanup hooks");
-            if let Some(ref logs) = logs {
+            if let Some(ref log_cfg) = log_config {
                 let env = std::env::vars().collect();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::OnCleanup,
                     &config_dir,
                     &env,
-                    Some(logs),
+                    Some(log_cfg),
                     global_log_config.as_ref(),
                 )
                 .await
@@ -422,8 +422,11 @@ impl ServiceOrchestrator {
             }
         }
 
-        // Apply log retention
-        if let Some(ref logs_buffer) = logs {
+        // Apply log retention using LogReader
+        if let Some(ref log_cfg) = log_config {
+            use crate::logs::LogReader;
+            let reader = LogReader::new(log_cfg.logs_dir.clone(), log_cfg.max_rotated_files);
+
             for service_name in &stopped {
                 // When clean is true, always clear logs (no retention policy check)
                 let should_clear = if clean {
@@ -442,8 +445,8 @@ impl ServiceOrchestrator {
                 };
 
                 if should_clear {
-                    logs_buffer.clear_service(service_name);
-                    logs_buffer.clear_service_prefix(&format!("[{}.", service_name));
+                    reader.clear_service(service_name);
+                    reader.clear_service_prefix(&format!("[{}.", service_name));
                 }
             }
 
@@ -457,7 +460,7 @@ impl ServiceOrchestrator {
                         .unwrap_or(LogRetention::Clear)
                         == LogRetention::Clear;
                 if should_clear_global {
-                    logs_buffer.clear_service_prefix(GLOBAL_HOOK_PREFIX);
+                    reader.clear_service_prefix(GLOBAL_HOOK_PREFIX);
                 }
             }
         }
@@ -748,7 +751,7 @@ impl ServiceOrchestrator {
             &ctx.service_config,
             &ctx.working_dir,
             &ctx.env,
-            Some(&ctx.logs),
+            Some(&ctx.log_config),
             ctx.global_log_config.as_ref(),
         );
 
@@ -817,7 +820,7 @@ impl ServiceOrchestrator {
             service_name,
             service_config: &ctx.service_config,
             config_dir: &ctx.config_dir,
-            logs: ctx.logs.clone(),
+            log_config: ctx.log_config.clone(),
             handle: handle.clone(),
             exit_tx: self.exit_tx.clone(),
             global_log_config: ctx.global_log_config.as_ref(),

@@ -217,16 +217,19 @@ async fn test_log_buffer_operations() {
     // Clear any existing logs first (logs persist on disk across test runs)
     logs.clear();
 
-    // Push some logs
+    // Push some logs with small delays to ensure distinct timestamps
+    // (new architecture writes stdout/stderr to separate files, merged by timestamp)
     logs.push("buffer_ops_test", "line 1".to_string(), LogStream::Stdout);
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     logs.push("buffer_ops_test", "line 2".to_string(), LogStream::Stderr);
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     logs.push("buffer_ops_test", "line 3".to_string(), LogStream::Stdout);
 
     // Test tail
     let entries = logs.tail(10, Some("buffer_ops_test"));
     assert_eq!(entries.len(), 3);
 
-    // Test tail with limit
+    // Test tail with limit (returns last N entries sorted by timestamp)
     let entries = logs.tail(2, Some("buffer_ops_test"));
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].line, "line 2");
@@ -260,7 +263,10 @@ async fn test_log_stream_types() {
     // Clear any existing logs first
     logs.clear();
 
+    // Add delay between writes to ensure distinct timestamps
+    // (new architecture writes stdout/stderr to separate files, merged by timestamp)
     logs.push("stream_types_test", "stdout line".to_string(), LogStream::Stdout);
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     logs.push("stream_types_test", "stderr line".to_string(), LogStream::Stderr);
 
     let entries = logs.tail(10, Some("stream_types_test"));

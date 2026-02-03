@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   quick-exit:
     command: ["sh", "-c", "echo Done && exit 0"]

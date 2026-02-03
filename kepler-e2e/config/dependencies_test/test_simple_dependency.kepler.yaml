@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   service-a:
     command: ["sh", "-c", "echo SERVICE_A_STARTED; sleep 300"]

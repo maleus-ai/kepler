@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   unmatched-watch-service:
     command: ["sh", "-c", "echo UNMATCHED_WATCH_START; sleep 300"]

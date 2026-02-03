@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 lua: |
   global.config = { base_port = 8000, services = {} }
   function next_port()

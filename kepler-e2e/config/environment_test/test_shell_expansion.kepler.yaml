@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   shell-expansion-service:
     command: ["sh", "-c", "echo EXPANDED_VAR=$EXPANDED_VAR; sleep 300"]

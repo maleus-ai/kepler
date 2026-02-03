@@ -71,6 +71,9 @@ async fn test_sys_env_clear_excludes_cli_env() -> E2eResult<()> {
 
     // Create a config that uses sys_env: clear
     let config_content = r#"
+kepler:
+  logs:
+    buffer_size: 0
 services:
   clear-checker:
     command: ["sh", "-c", "echo CLEAR_TEST_VAR=${CLEAR_TEST_VAR:-EMPTY} && sleep 30"]
@@ -120,6 +123,9 @@ async fn test_restart_uses_new_cli_env() -> E2eResult<()> {
     // Rename the variable in the config for this test
     let config_content = format!(
         r#"
+kepler:
+  logs:
+    buffer_size: 0
 services:
   env-checker:
     command: ["sh", "-c", "echo {}=${} && sleep 30"]

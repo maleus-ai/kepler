@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   cycle-a:
     command: ["sh", "-c", "echo A; sleep 300"]

@@ -1,0 +1,25 @@
+# Test config for multi-service log rotation and reconciliation
+# Uses very small rotation size to force multiple rotations quickly
+
+kepler:
+  logs:
+    buffer_size: 0     # Disable buffering for immediate writes
+    rotation:
+      max_size: "1K"   # Very small (1KB) to force many rotations
+      max_files: 3     # Keep only 3 rotated files to test wrap-around
+
+services:
+  log-rotation-a:
+    command: ["bash", "-c", "i=1; while [ $i -le 200 ]; do echo \"SRVA_$i padding_to_fill_the_file_quickly_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; i=$((i+1)); done; echo SRVA_DONE; sleep 300"]
+    logs:
+      store: true
+
+  log-rotation-b:
+    command: ["bash", "-c", "i=1; while [ $i -le 200 ]; do echo \"SRVB_$i padding_to_fill_the_file_quickly_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; i=$((i+1)); done; echo SRVB_DONE; sleep 300"]
+    logs:
+      store: true
+
+  log-rotation-c:
+    command: ["bash", "-c", "i=1; while [ $i -le 200 ]; do echo \"SRVC_$i padding_to_fill_the_file_quickly_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\" >&2; i=$((i+1)); done; echo SRVC_DONE >&2; sleep 300"]
+    logs:
+      store: true

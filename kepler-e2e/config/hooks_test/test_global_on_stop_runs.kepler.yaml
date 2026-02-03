@@ -1,4 +1,6 @@
 kepler:
+  logs:
+    buffer_size: 0
   hooks:
     on_stop:
       run: |

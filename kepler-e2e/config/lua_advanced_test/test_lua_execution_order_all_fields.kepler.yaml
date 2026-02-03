@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 lua: |
   global.exec_order = {}
   function track(name)

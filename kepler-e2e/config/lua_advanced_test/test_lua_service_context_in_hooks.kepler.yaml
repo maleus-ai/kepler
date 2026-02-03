@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   hook-context-service:
     command: ["sh", "-c", "echo HOOK_CONTEXT_RUNNING && sleep 30"]

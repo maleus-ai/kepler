@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 # Template config - marker is replaced at runtime with CYCLE_N_MARKER
 services:
   cyclic-logger:

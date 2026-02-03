@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0  # Disable buffering for immediate writes
+
 services:
   filter-service-a:
     command: ["sh", "-c", "echo FILTER_A_MESSAGE; sleep 300"]

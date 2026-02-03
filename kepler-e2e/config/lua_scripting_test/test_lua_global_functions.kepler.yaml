@@ -1,3 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
 lua: |
   function make_echo_command(message)
     return {"sh", "-c", "echo " .. message .. "; sleep 300"}
