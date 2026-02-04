@@ -8,6 +8,8 @@ This document describes Kepler's internal implementation, security measures, and
 - [File Storage and Directory Structure](#file-storage-and-directory-structure)
 - [Socket Security](#socket-security)
 - [Configuration Lifecycle](#configuration-lifecycle)
+- [Event-Driven Architecture](#event-driven-architecture)
+- [Dependency Management](#dependency-management)
 - [Environment Variable Handling](#environment-variable-handling)
 - [Lua Scripting Security](#lua-scripting-security)
 - [Process Security](#process-security)
@@ -162,6 +164,170 @@ Once baked, the snapshot is immutable. Services always run using the baked snaps
 |------|-------------|
 | `kepler-daemon/src/config_actor.rs` | Config initialization and snapshot management |
 | `kepler-daemon/src/persistence.rs` | Snapshot persistence to disk |
+
+---
+
+## Event-Driven Architecture
+
+Kepler uses an event-driven architecture for service lifecycle management. Each service emits events at various lifecycle stages, enabling features like restart propagation and health monitoring.
+
+### Service Events
+
+Services emit events at the following lifecycle points:
+
+| Event | Description |
+|-------|-------------|
+| `Init` | Before `on_init` hook runs (first start only) |
+| `Start` | Before `on_start` hook runs |
+| `Restart` | Before service restarts (with reason) |
+| `Exit` | When process exits (with exit code) |
+| `Stop` | Before `on_stop` hook runs |
+| `Cleanup` | Before `on_cleanup` hook runs |
+| `Healthcheck` | After each health check (with status) |
+| `Healthy` | When service transitions to healthy |
+| `Unhealthy` | When service transitions to unhealthy |
+
+### Restart Reasons
+
+When a service restarts, the event includes the reason:
+
+| Reason | Description |
+|--------|-------------|
+| `Watch` | File watcher triggered restart |
+| `Failure` | Process exited with error (includes exit code) |
+| `Manual` | User requested restart via CLI |
+| `DependencyRestart` | Dependency restarted (includes dependency name) |
+
+### Per-Service Event Channels
+
+Each service has a dedicated SPSC (Single Producer, Single Consumer) event channel:
+
+```
+┌─────────────┐                            ┌──────────────────────┐
+│  Service A  │ ──► [SPSC A (cap: 100)] ──►│                      │
+└─────────────┘                            │                      │
+                                           │    Orchestrator      │
+┌─────────────┐                            │                      │
+│  Service B  │ ──► [SPSC B (cap: 100)] ──►│   - Event handling   │
+└─────────────┘                            │   - Restart prop.    │
+                                           │                      │
+┌─────────────┐                            │                      │
+│  Service C  │ ──► [SPSC C (cap: 100)] ──►│                      │
+└─────────────┘                            └──────────────────────┘
+```
+
+**Benefits:**
+- **Isolation**: One misbehaving service can't flood others
+- **Backpressure**: Per-service buffer quotas prevent noisy neighbor issues
+- **Fairness**: Each service has guaranteed capacity for events
+
+### Relevant Files
+
+| File | Description |
+|------|-------------|
+| `kepler-daemon/src/events.rs` | ServiceEvent types, channel creation |
+| `kepler-daemon/src/config_actor.rs` | Event channel management per service |
+| `kepler-daemon/src/orchestrator.rs` | ServiceEventHandler, event processing |
+
+---
+
+## Dependency Management
+
+Kepler supports Docker Compose-compatible dependency configuration with conditions, timeouts, and restart propagation.
+
+### Dependency Conditions
+
+Services can specify conditions that must be met before starting:
+
+| Condition | Description |
+|-----------|-------------|
+| `service_started` | Dependency status is Running, Healthy, or Unhealthy (default) |
+| `service_healthy` | Dependency status is Healthy (requires healthcheck) |
+| `service_completed_successfully` | Dependency exited with code 0 (for init containers) |
+
+### Dependency Waiting
+
+When a service starts, it waits for all dependencies to satisfy their conditions:
+
+```mermaid
+flowchart TD
+    A[Start Service] --> B[Get Dependencies]
+    B --> C{More deps?}
+    C -->|Yes| D[Check condition]
+    D --> E{Satisfied?}
+    E -->|No| F{Timeout?}
+    F -->|No| G[Wait 100ms]
+    G --> D
+    F -->|Yes| H[Error: Timeout]
+    E -->|Yes| C
+    C -->|No| I[Start process]
+```
+
+### Restart Propagation
+
+When `restart: true` is set in a dependency configuration, the dependent service restarts when its dependency restarts:
+
+```mermaid
+flowchart TD
+    A[Dependency Restarts] --> B[Emit Restart Event]
+    B --> C[Orchestrator receives event]
+    C --> D{Service has restart: true?}
+    D -->|No| E[No action]
+    D -->|Yes| F[Stop dependent service]
+    F --> G[Wait for dependency condition]
+    G --> H[Restart dependent service]
+```
+
+**Example:**
+```yaml
+services:
+  database:
+    command: ["postgres"]
+    healthcheck:
+      test: ["pg_isready"]
+
+  backend:
+    command: ["./server"]
+    depends_on:
+      database:
+        condition: service_healthy
+        restart: true  # Backend restarts when database restarts
+```
+
+When the database restarts:
+1. Backend is stopped
+2. System waits for database to become healthy
+3. Backend is restarted
+
+### Configuration Format
+
+Kepler supports both simple and extended dependency formats:
+
+**Simple format (backward compatible):**
+```yaml
+depends_on:
+  - service-a
+  - service-b
+```
+
+**Extended format (Docker Compose compatible):**
+```yaml
+depends_on:
+  service-a:
+    condition: service_healthy
+    timeout: 30s
+    restart: true
+  service-b:
+    condition: service_started
+```
+
+### Relevant Files
+
+| File | Description |
+|------|-------------|
+| `kepler-daemon/src/config.rs` | DependencyCondition, DependencyConfig, DependsOn types |
+| `kepler-daemon/src/deps.rs` | Dependency graph, start/stop ordering, condition checking |
+| `kepler-daemon/src/orchestrator.rs` | Dependency waiting, restart propagation |
 
 ---
 
@@ -439,11 +605,15 @@ CLI                              Daemon
 | Directory structure | `kepler-daemon/src/lib.rs` | State directory paths |
 | Secure file writing | `kepler-daemon/src/persistence.rs` | File permissions |
 | Socket security | `kepler-protocol/src/server.rs` | UID verification |
-| Config loading | `kepler-daemon/src/config_actor.rs` | Lifecycle management |
-| Env expansion | `kepler-daemon/src/config.rs` | Shell-style expansion |
+| Config loading | `kepler-daemon/src/config_actor.rs` | Lifecycle management, event channels |
+| Env expansion | `kepler-daemon/src/config.rs` | Shell-style expansion, dependency types |
 | Env building | `kepler-daemon/src/env.rs` | Priority merging |
 | Lua evaluation | `kepler-daemon/src/lua_eval.rs` | Sandbox implementation |
 | Process spawning | `kepler-daemon/src/process.rs` | Security controls |
+| Event system | `kepler-daemon/src/events.rs` | ServiceEvent types, event channels |
+| Dependency graph | `kepler-daemon/src/deps.rs` | Start/stop ordering, condition checking |
+| Service orchestration | `kepler-daemon/src/orchestrator.rs` | Event handling, restart propagation |
+| Health checking | `kepler-daemon/src/health.rs` | Health check loop, event emission |
 | Log writing | `kepler-daemon/src/logs/writer.rs` | Buffered log writer with truncation |
 | Log reading | `kepler-daemon/src/logs/reader.rs` | Log file reader with merged iterators |
 | Log cursors | `kepler-daemon/src/cursor.rs` | Server-side cursor management for streaming |

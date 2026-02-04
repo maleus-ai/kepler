@@ -9,11 +9,15 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{resolve_log_retention, KeplerConfig, LogRetention};
+use std::sync::Arc;
+use std::time::Instant;
+
+use crate::config::{resolve_log_retention, DependencyCondition, KeplerConfig, LogRetention, ServiceConfig};
 use kepler_protocol::protocol::PrunedConfigInfo;
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
-use crate::deps::{get_service_with_deps, get_start_levels, get_start_order, get_stop_order};
+use crate::deps::{check_dependency_satisfied, get_service_with_deps, get_start_levels, get_start_order, get_stop_order};
+use crate::events::{RestartReason, ServiceEvent};
 use crate::health::spawn_health_checker;
 use crate::hooks::{
     run_global_hook, run_service_hook, GlobalHookType, ServiceHookParams, ServiceHookType,
@@ -62,6 +66,13 @@ pub enum OrchestratorError {
     #[error("IO error: {0}")]
     Io(String),
 
+    #[error("Dependency timeout: {service} timed out waiting for {dependency} to satisfy condition {condition:?}")]
+    DependencyTimeout {
+        service: String,
+        dependency: String,
+        condition: DependencyCondition,
+    },
+
     #[error("Daemon error: {0}")]
     DaemonError(#[from] crate::errors::DaemonError),
 }
@@ -74,6 +85,7 @@ pub enum OrchestratorError {
 /// - Applying log retention policies
 /// - Updating state
 /// - Spawning auxiliary tasks (health checks, file watchers)
+#[derive(Clone)]
 pub struct ServiceOrchestrator {
     registry: SharedConfigRegistry,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
@@ -251,6 +263,20 @@ impl ServiceOrchestrator {
             if let Err(e) = handle.take_snapshot_if_needed().await {
                 warn!("Failed to take config snapshot: {}", e);
             }
+
+            // Check if any service has restart propagation enabled
+            let needs_event_handler = config.services.values().any(|svc| {
+                !svc.depends_on.dependencies_with_restart().is_empty()
+            });
+
+            // Spawn event handler for restart propagation if needed and not already running
+            if needs_event_handler && !handle.has_event_handler().await {
+                let self_arc = Arc::new(self.clone());
+                let config_path_owned = config_path.to_path_buf();
+                let handle_clone = handle.clone();
+                self_arc.spawn_event_handler(config_path_owned, handle_clone).await;
+                handle.set_event_handler_spawned().await;
+            }
         }
 
         if started.is_empty() {
@@ -272,6 +298,10 @@ impl ServiceOrchestrator {
             .await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
+        // Wait for dependencies to satisfy their conditions
+        self.wait_for_dependencies(handle, service_name, &ctx.service_config)
+            .await?;
+
         // Update status to starting
         let _ = handle
             .set_service_status(service_name, ServiceStatus::Starting)
@@ -281,11 +311,17 @@ impl ServiceOrchestrator {
         let service_initialized = handle.is_service_initialized(service_name).await;
 
         if !service_initialized {
+            // Emit Init event
+            handle.emit_event(service_name, ServiceEvent::Init).await;
+
             self.run_service_hook(&ctx, service_name, ServiceHookType::OnInit)
                 .await?;
 
             handle.mark_service_initialized(service_name).await?;
         }
+
+        // Emit Start event
+        handle.emit_event(service_name, ServiceEvent::Start).await;
 
         // Run on_start hook
         self.run_service_hook(&ctx, service_name, ServiceHookType::OnStart)
@@ -300,6 +336,51 @@ impl ServiceOrchestrator {
 
         // Spawn auxiliary tasks
         self.spawn_auxiliary_tasks(handle, service_name, &ctx).await;
+
+        Ok(())
+    }
+
+    /// Wait for all dependencies to satisfy their conditions
+    async fn wait_for_dependencies(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        service_config: &ServiceConfig,
+    ) -> Result<(), OrchestratorError> {
+        for (dep_name, dep_config) in service_config.depends_on.iter() {
+            let start = Instant::now();
+
+            debug!(
+                "Service {} waiting for dependency {} (condition: {:?})",
+                service_name, dep_name, dep_config.condition
+            );
+
+            loop {
+                if check_dependency_satisfied(&dep_name, &dep_config.condition, handle).await {
+                    debug!(
+                        "Dependency {} satisfied for service {} (took {:?})",
+                        dep_name,
+                        service_name,
+                        start.elapsed()
+                    );
+                    break;
+                }
+
+                // Check timeout
+                if let Some(timeout) = dep_config.timeout {
+                    if start.elapsed() > timeout {
+                        return Err(OrchestratorError::DependencyTimeout {
+                            service: service_name.to_string(),
+                            dependency: dep_name.clone(),
+                            condition: dep_config.condition.clone(),
+                        });
+                    }
+                }
+
+                // Wait before checking again
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        }
 
         Ok(())
     }
@@ -364,6 +445,9 @@ impl ServiceOrchestrator {
                 continue;
             }
 
+            // Emit Stop event
+            handle.emit_event(service_name, ServiceEvent::Stop).await;
+
             // Get service context
             if let Some(ctx) = handle.get_service_context(service_name).await {
                 // Run on_stop hook
@@ -405,6 +489,12 @@ impl ServiceOrchestrator {
         // Run on_cleanup if requested
         if service_filter.is_none() && clean {
             info!("Running cleanup hooks");
+
+            // Emit Cleanup event for all services
+            for service_name in &services_to_stop {
+                handle.emit_event(service_name, ServiceEvent::Cleanup).await;
+            }
+
             if let Some(ref log_cfg) = log_config {
                 let env = std::env::vars().collect();
                 if let Err(e) = run_global_hook(
@@ -549,15 +639,36 @@ impl ServiceOrchestrator {
         config_path: &Path,
         service_name: &str,
     ) -> Result<(), OrchestratorError> {
+        self.restart_single_service_with_reason(config_path, service_name, RestartReason::Watch)
+            .await
+    }
+
+    /// Restart a single service with a specific reason
+    pub async fn restart_single_service_with_reason(
+        &self,
+        config_path: &Path,
+        service_name: &str,
+        reason: RestartReason,
+    ) -> Result<(), OrchestratorError> {
         info!(
-            "Restarting service {} in {:?}",
-            service_name, config_path
+            "Restarting service {} in {:?} (reason: {:?})",
+            service_name, config_path, reason
         );
 
         let handle = self
             .registry
             .get(&config_path.to_path_buf())
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
+
+        // Emit Restart event
+        handle
+            .emit_event(
+                service_name,
+                ServiceEvent::Restart {
+                    reason: reason.clone(),
+                },
+            )
+            .await;
 
         // Get service context
         let ctx = handle
@@ -591,8 +702,22 @@ impl ServiceOrchestrator {
             .await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
+        // Emit Start event (restart includes a start)
+        handle.emit_event(service_name, ServiceEvent::Start).await;
+
+        // Run on_start hook (runs on every start, including restarts)
+        self.run_service_hook(&ctx, service_name, ServiceHookType::OnStart)
+            .await?;
+
+        // Apply on_start log retention
+        self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Start)
+            .await;
+
         // Spawn the service
         self.spawn_service(&handle, service_name, &ctx).await?;
+
+        // Spawn auxiliary tasks (health checker, file watcher)
+        self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
 
         // Update state
         let _ = handle
@@ -629,6 +754,11 @@ impl ServiceOrchestrator {
             None => return Ok(()), // Service no longer exists
         };
 
+        // Emit Exit event
+        handle
+            .emit_event(service_name, ServiceEvent::Exit { code: exit_code })
+            .await;
+
         // Record process exit in state
         let _ = handle.record_process_exit(service_name, exit_code).await;
 
@@ -648,6 +778,16 @@ impl ServiceOrchestrator {
         let should_restart = ctx.service_config.restart.should_restart_on_exit(exit_code);
 
         if should_restart {
+            // Emit Restart event with Failure reason
+            handle
+                .emit_event(
+                    service_name,
+                    ServiceEvent::Restart {
+                        reason: RestartReason::Failure { exit_code },
+                    },
+                )
+                .await;
+
             // Increment restart count and set status to starting
             let _ = handle.increment_restart_count(service_name).await;
             let _ = handle
@@ -1041,4 +1181,228 @@ fn dir_size(path: &Path) -> u64 {
         }
     }
     size
+}
+
+/// Tagged message containing service name and event message
+#[derive(Debug, Clone)]
+pub struct TaggedEventMessage {
+    pub service_name: String,
+    pub message: crate::events::ServiceEventMessage,
+}
+
+/// Handler for service events that manages restart propagation
+///
+/// The ServiceEventHandler uses a channel to receive events from all services.
+/// When a service emits a Restart event, it propagates the restart to dependent
+/// services that have `on_dependency_restart` enabled.
+pub struct ServiceEventHandler {
+    /// Receiver for tagged events from all services
+    event_rx: mpsc::Receiver<TaggedEventMessage>,
+    /// Reference to the orchestrator for restart operations
+    orchestrator: Arc<ServiceOrchestrator>,
+    /// Config path for this handler
+    config_path: PathBuf,
+    /// Config actor handle
+    handle: ConfigActorHandle,
+}
+
+impl ServiceEventHandler {
+    /// Create a new event handler for a config
+    pub fn new(
+        event_rx: mpsc::Receiver<TaggedEventMessage>,
+        orchestrator: Arc<ServiceOrchestrator>,
+        config_path: PathBuf,
+        handle: ConfigActorHandle,
+    ) -> Self {
+        Self {
+            event_rx,
+            orchestrator,
+            config_path,
+            handle,
+        }
+    }
+
+    /// Run the event handler loop
+    ///
+    /// This loop processes events from all services and propagates restarts
+    /// to dependent services when appropriate.
+    pub async fn run(mut self) {
+        info!("ServiceEventHandler started for {:?}", self.config_path);
+
+        while let Some(tagged_msg) = self.event_rx.recv().await {
+            let service_name = &tagged_msg.service_name;
+            let event = &tagged_msg.message.event;
+
+            debug!(
+                "Event received for {}: {:?}",
+                service_name, event
+            );
+
+            // Handle restart propagation
+            if let ServiceEvent::Restart { .. } = event {
+                if let Err(e) = self.propagate_restart(service_name).await {
+                    error!(
+                        "Failed to propagate restart for {}: {}",
+                        service_name, e
+                    );
+                }
+            }
+        }
+
+        info!("ServiceEventHandler stopped for {:?}", self.config_path);
+    }
+
+    /// Propagate restart to dependent services
+    ///
+    /// When a service restarts, this method:
+    /// 1. Finds services that depend on the restarted service with `restart: true`
+    /// 2. For each matching service: stops it, waits for the dependency condition, restarts it
+    ///
+    /// This follows Docker Compose behavior where `restart: true` in depends_on causes
+    /// the dependent service to restart when its dependency restarts.
+    async fn propagate_restart(&self, restarted_service: &str) -> Result<(), OrchestratorError> {
+        let config = match self.handle.get_config().await {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        info!(
+            "Checking restart propagation for dependents of {}",
+            restarted_service
+        );
+
+        for (service_name, service_config) in &config.services {
+            // Skip the service that triggered the restart
+            if service_name == restarted_service {
+                continue;
+            }
+
+            // Check if this service depends on the restarted service with restart: true
+            // This is the Docker Compose compatible check
+            if !service_config
+                .depends_on
+                .should_restart_on_dependency(restarted_service)
+            {
+                continue;
+            }
+
+            // Check if the service is running
+            if !self.handle.is_service_running(service_name).await {
+                continue;
+            }
+
+            info!(
+                "Propagating restart from {} to {}",
+                restarted_service, service_name
+            );
+
+            // Stop the dependent service
+            if let Err(e) = stop_service(service_name, self.handle.clone()).await {
+                warn!("Failed to stop {} for restart propagation: {}", service_name, e);
+                continue;
+            }
+
+            // Wait for the dependency's condition to be met
+            let dep_config = service_config
+                .depends_on
+                .get(restarted_service)
+                .unwrap_or_default();
+
+            let start = Instant::now();
+            loop {
+                if check_dependency_satisfied(restarted_service, &dep_config.condition, &self.handle)
+                    .await
+                {
+                    break;
+                }
+
+                // Check timeout if specified
+                if let Some(timeout) = dep_config.timeout {
+                    if start.elapsed() > timeout {
+                        warn!(
+                            "Timeout waiting for {} to satisfy condition for {} restart propagation",
+                            restarted_service, service_name
+                        );
+                        break;
+                    }
+                }
+
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+
+            // Restart the dependent service
+            if let Err(e) = self
+                .orchestrator
+                .restart_single_service_with_reason(
+                    &self.config_path,
+                    service_name,
+                    RestartReason::DependencyRestart {
+                        dependency: restarted_service.to_string(),
+                    },
+                )
+                .await
+            {
+                error!(
+                    "Failed to restart {} after {} restart: {}",
+                    service_name, restarted_service, e
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Spawn forwarders that receive events from service channels and forward them to the aggregator
+async fn spawn_event_forwarders(
+    handle: &ConfigActorHandle,
+    aggregate_tx: mpsc::Sender<TaggedEventMessage>,
+) {
+    let receivers = handle.get_all_event_receivers().await;
+
+    for (service_name, mut rx) in receivers {
+        let tx = aggregate_tx.clone();
+        let name = service_name.clone();
+
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                let tagged = TaggedEventMessage {
+                    service_name: name.clone(),
+                    message: msg,
+                };
+                if tx.send(tagged).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+}
+
+impl ServiceOrchestrator {
+    /// Spawn an event handler for a config
+    ///
+    /// This creates a ServiceEventHandler that processes events from all services
+    /// in the config and handles restart propagation.
+    pub async fn spawn_event_handler(
+        self: &Arc<Self>,
+        config_path: PathBuf,
+        handle: ConfigActorHandle,
+    ) -> tokio::task::JoinHandle<()> {
+        // Create an aggregate channel for all service events
+        let (aggregate_tx, aggregate_rx) = mpsc::channel(1000);
+
+        // Spawn forwarders for each service
+        spawn_event_forwarders(&handle, aggregate_tx).await;
+
+        let event_handler = ServiceEventHandler::new(
+            aggregate_rx,
+            Arc::clone(self),
+            config_path,
+            handle,
+        );
+
+        tokio::spawn(async move {
+            event_handler.run().await;
+        })
+    }
 }

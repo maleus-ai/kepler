@@ -470,26 +470,15 @@ impl E2eHarness {
         Ok(dir_path)
     }
 
-    /// Get logs with timestamps
+    /// Get logs with timestamps (same as get_logs since timestamps are configured in service logs config)
     pub async fn get_logs_with_timestamps(
         &self,
         config_path: &Path,
         service: Option<&str>,
         lines: usize,
     ) -> E2eResult<CommandOutput> {
-        let config_str = config_path.to_str().ok_or_else(|| {
-            E2eError::CommandFailed("Invalid config path".to_string())
-        })?;
-
-        let lines_str = lines.to_string();
-        let mut args = vec!["-f", config_str, "logs", "-n", &lines_str, "--timestamps"];
-        let service_owned;
-        if let Some(s) = service {
-            service_owned = s.to_string();
-            args.push(&service_owned);
-        }
-
-        self.run_cli(&args).await
+        // Note: timestamps come from the logs config (timestamp: true), not a CLI flag
+        self.get_logs(config_path, service, lines).await
     }
 
     /// Extract PID from ps output for a service

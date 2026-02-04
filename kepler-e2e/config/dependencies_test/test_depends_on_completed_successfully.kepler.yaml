@@ -1,0 +1,21 @@
+# Test depends_on with service_completed_successfully condition
+# App should wait for init container to exit with code 0 before starting
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  init-container:
+    command: ["sh", "-c", "echo INIT_STARTED; sleep 0.5; echo INIT_COMPLETED; exit 0"]
+    restart: no
+    logs:
+      timestamp: true
+
+  app:
+    command: ["sh", "-c", "echo APP_STARTED; sleep 300"]
+    depends_on:
+      init-container:
+        condition: service_completed_successfully
+    logs:
+      timestamp: true

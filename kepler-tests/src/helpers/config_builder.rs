@@ -1,7 +1,7 @@
 //! Programmatic config creation with builder pattern
 
 use kepler_daemon::config::{
-    GlobalHooks, HealthCheck, HookCommand, KeplerConfig, KeplerGlobalConfig, LogConfig,
+    DependsOn, GlobalHooks, HealthCheck, HookCommand, KeplerConfig, KeplerGlobalConfig, LogConfig,
     ResourceLimits, RestartConfig, RestartPolicy, ServiceConfig, ServiceHooks, SysEnvPolicy,
 };
 use std::collections::HashMap;
@@ -256,7 +256,7 @@ impl TestServiceBuilder {
             env_file: self.env_file,
             sys_env: self.sys_env,
             restart: self.restart,
-            depends_on: self.depends_on,
+            depends_on: DependsOn::from(self.depends_on),
             healthcheck: self.healthcheck,
             hooks: self.hooks,
             logs: self.logs,

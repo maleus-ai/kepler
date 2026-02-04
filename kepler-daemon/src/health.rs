@@ -6,6 +6,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::HealthCheck;
 use crate::config_actor::ConfigActorHandle;
+use crate::events::{HealthStatus, ServiceEvent};
 use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use crate::state::ServiceStatus;
 
@@ -54,6 +55,23 @@ async fn health_check_loop(
 
         match update_result {
             Ok(update) => {
+                // Emit Healthcheck event
+                let health_status = if passed {
+                    HealthStatus::Success
+                } else {
+                    HealthStatus::Failure {
+                        consecutive_failures: update.failures,
+                    }
+                };
+                handle
+                    .emit_event(
+                        &service_name,
+                        ServiceEvent::Healthcheck {
+                            status: health_status,
+                        },
+                    )
+                    .await;
+
                 if passed {
                     debug!("Health check passed for {}", service_name);
                 } else {
@@ -72,8 +90,21 @@ async fn health_check_loop(
                     }
                 }
 
-                // Run hooks if status changed
+                // Emit health state transition events and run hooks if status changed
                 if update.previous_status != update.new_status {
+                    // Emit Healthy or Unhealthy event based on new status
+                    match update.new_status {
+                        ServiceStatus::Healthy => {
+                            handle.emit_event(&service_name, ServiceEvent::Healthy).await;
+                        }
+                        ServiceStatus::Unhealthy => {
+                            handle
+                                .emit_event(&service_name, ServiceEvent::Unhealthy)
+                                .await;
+                        }
+                        _ => {}
+                    }
+
                     run_status_change_hook(
                         &service_name,
                         update.previous_status,

@@ -640,3 +640,187 @@ services:
     assert_eq!(logs.max_size, Some("100M".to_string()));
     assert_eq!(logs.buffer_size, Some(0));
 }
+
+/// Test: !lua tag works for depends_on simple list
+#[test]
+fn test_lua_depends_on_simple_list() {
+    use kepler_daemon::config::DependencyCondition;
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  database:
+    command: ["echo", "db"]
+  cache:
+    command: ["echo", "cache"]
+  backend:
+    command: ["echo", "backend"]
+    depends_on: !lua |
+      return {"database", "cache"}
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let service = config.services.get("backend").unwrap();
+
+    let deps = service.depends_on.names();
+    assert!(deps.contains(&"database".to_string()));
+    assert!(deps.contains(&"cache".to_string()));
+
+    // Should default to service_started condition
+    let db_config = service.depends_on.get("database").unwrap();
+    assert_eq!(db_config.condition, DependencyCondition::ServiceStarted);
+}
+
+/// Test: !lua tag works for depends_on extended form with conditions
+#[test]
+fn test_lua_depends_on_extended_form() {
+    use kepler_daemon::config::DependencyCondition;
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  database:
+    command: ["echo", "db"]
+  backend:
+    command: ["echo", "backend"]
+    depends_on: !lua |
+      return {
+        database = {
+          condition = "service_healthy",
+          timeout = "30s",
+          restart = true
+        }
+      }
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let service = config.services.get("backend").unwrap();
+
+    let db_config = service.depends_on.get("database").unwrap();
+    assert_eq!(db_config.condition, DependencyCondition::ServiceHealthy);
+    assert_eq!(db_config.timeout, Some(std::time::Duration::from_secs(30)));
+    assert!(db_config.restart);
+}
+
+/// Test: !lua tag works for depends_on with service_completed_successfully condition
+#[test]
+fn test_lua_depends_on_completed_successfully() {
+    use kepler_daemon::config::DependencyCondition;
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  init:
+    command: ["echo", "init"]
+  app:
+    command: ["echo", "app"]
+    depends_on: !lua |
+      return {
+        init = {
+          condition = "service_completed_successfully"
+        }
+      }
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let service = config.services.get("app").unwrap();
+
+    let init_config = service.depends_on.get("init").unwrap();
+    assert_eq!(init_config.condition, DependencyCondition::ServiceCompletedSuccessfully);
+}
+
+/// Test: !lua tag works for individual fields within depends_on
+#[test]
+fn test_lua_depends_on_individual_fields() {
+    use kepler_daemon::config::DependencyCondition;
+    let temp_dir = TempDir::new().unwrap();
+
+    // Set env var to control the condition
+    unsafe {
+        std::env::set_var("KEPLER_DEP_CONDITION", "service_healthy");
+        std::env::set_var("KEPLER_DEP_TIMEOUT", "60s");
+    }
+
+    let yaml = r#"
+services:
+  database:
+    command: ["echo", "db"]
+  backend:
+    command: ["echo", "backend"]
+    depends_on:
+      database:
+        condition: !lua |
+          return ctx.env.KEPLER_DEP_CONDITION or "service_started"
+        timeout: !lua |
+          return ctx.env.KEPLER_DEP_TIMEOUT or "30s"
+        restart: !lua |
+          return true
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+
+    // Cleanup
+    unsafe {
+        std::env::remove_var("KEPLER_DEP_CONDITION");
+        std::env::remove_var("KEPLER_DEP_TIMEOUT");
+    }
+
+    let service = config.services.get("backend").unwrap();
+    let db_config = service.depends_on.get("database").unwrap();
+
+    assert_eq!(db_config.condition, DependencyCondition::ServiceHealthy);
+    assert_eq!(db_config.timeout, Some(std::time::Duration::from_secs(60)));
+    assert!(db_config.restart);
+}
+
+/// Test: !lua tag works for conditional depends_on based on environment
+#[test]
+fn test_lua_depends_on_conditional() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Set env var to enable cache dependency
+    unsafe {
+        std::env::set_var("KEPLER_USE_CACHE", "true");
+    }
+
+    let yaml = r#"
+services:
+  database:
+    command: ["echo", "db"]
+  cache:
+    command: ["echo", "cache"]
+  backend:
+    command: ["echo", "backend"]
+    depends_on: !lua |
+      local deps = {
+        database = {
+          condition = "service_healthy"
+        }
+      }
+      if ctx.env.KEPLER_USE_CACHE == "true" then
+        deps.cache = {
+          condition = "service_started",
+          restart = true
+        }
+      end
+      return deps
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+
+    // Cleanup
+    unsafe {
+        std::env::remove_var("KEPLER_USE_CACHE");
+    }
+
+    let service = config.services.get("backend").unwrap();
+    let deps = service.depends_on.names();
+
+    assert!(deps.contains(&"database".to_string()));
+    assert!(deps.contains(&"cache".to_string()));
+
+    // Cache should have restart: true
+    assert!(service.depends_on.should_restart_on_dependency("cache"));
+    // Database should not have restart (defaults to false)
+    assert!(!service.depends_on.should_restart_on_dependency("database"));
+}

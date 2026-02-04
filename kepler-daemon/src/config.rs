@@ -216,8 +216,11 @@ pub struct ServiceConfig {
     pub sys_env: SysEnvPolicy,
     #[serde(default)]
     pub restart: RestartConfig,
+    /// Dependencies with optional conditions and timeouts
+    /// Simple form: `depends_on: [service-a, service-b]`
+    /// Extended form: `depends_on: [service-a, { service-b: { condition: service_healthy, timeout: 5m } }]`
     #[serde(default)]
-    pub depends_on: Vec<String>,
+    pub depends_on: DependsOn,
     #[serde(default)]
     pub healthcheck: Option<HealthCheck>,
     #[serde(default)]
@@ -312,6 +315,190 @@ impl RestartConfig {
             );
         }
         Ok(())
+    }
+}
+
+/// Condition that must be satisfied before a dependent service can start
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyCondition {
+    /// Service has started (status = Running, Healthy, or Unhealthy)
+    #[default]
+    ServiceStarted,
+    /// Service is healthy (status = Healthy, requires healthcheck)
+    ServiceHealthy,
+    /// Service completed successfully (exited with code 0)
+    ServiceCompletedSuccessfully,
+}
+
+/// Configuration for a single dependency (Docker Compose compatible)
+///
+/// Example:
+/// ```yaml
+/// depends_on:
+///   db:
+///     condition: service_healthy
+///     restart: true
+///   redis:
+///     condition: service_started
+/// ```
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+pub struct DependencyConfig {
+    /// Condition that must be met before dependent can start
+    #[serde(default)]
+    pub condition: DependencyCondition,
+    /// Optional timeout for waiting on the condition
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_duration",
+        serialize_with = "serialize_optional_duration"
+    )]
+    pub timeout: Option<Duration>,
+    /// Whether to restart this service when the dependency restarts
+    /// When true, if the dependency is restarted, this service will also be restarted
+    #[serde(default)]
+    pub restart: bool,
+}
+
+fn deserialize_optional_duration<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Duration>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    match opt {
+        Some(s) => parse_duration(&s)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
+fn serialize_optional_duration<S>(
+    duration: &Option<Duration>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match duration {
+        Some(d) => serializer.serialize_str(&format_duration(d)),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// A dependency entry - either simple (just a name) or extended (with config)
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum DependencyEntry {
+    /// Simple form: just the service name
+    Simple(String),
+    /// Extended form: service name with configuration (in list form)
+    Extended(HashMap<String, DependencyConfig>),
+}
+
+/// Raw depends_on format - either a list or a map (Docker Compose compatible)
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum DependsOnFormat {
+    /// List format: depends_on: [service-a, { service-b: { condition: ... } }]
+    List(Vec<DependencyEntry>),
+    /// Map format (Docker Compose style): depends_on: { db: { condition: ..., restart: true } }
+    Map(HashMap<String, DependencyConfig>),
+}
+
+/// Collection of dependencies with both simple and extended forms
+/// Supports both list format and Docker Compose map format
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct DependsOn(pub Vec<DependencyEntry>);
+
+impl<'de> Deserialize<'de> for DependsOn {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let format = DependsOnFormat::deserialize(deserializer)?;
+        Ok(match format {
+            DependsOnFormat::List(entries) => DependsOn(entries),
+            DependsOnFormat::Map(map) => {
+                // Convert map to list of extended entries
+                DependsOn(vec![DependencyEntry::Extended(map)])
+            }
+        })
+    }
+}
+
+impl DependsOn {
+    /// Get all dependency names (for backward compatibility)
+    pub fn names(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .flat_map(|entry| match entry {
+                DependencyEntry::Simple(name) => vec![name.clone()],
+                DependencyEntry::Extended(map) => map.keys().cloned().collect(),
+            })
+            .collect()
+    }
+
+    /// Get configuration for a specific dependency
+    pub fn get(&self, name: &str) -> Option<DependencyConfig> {
+        for entry in &self.0 {
+            match entry {
+                DependencyEntry::Simple(n) if n == name => {
+                    return Some(DependencyConfig::default())
+                }
+                DependencyEntry::Extended(map) => {
+                    if let Some(config) = map.get(name) {
+                        return Some(config.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Check if the collection is empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Iterate over (name, config) pairs
+    pub fn iter(&self) -> impl Iterator<Item = (String, DependencyConfig)> + '_ {
+        self.0.iter().flat_map(|entry| match entry {
+            DependencyEntry::Simple(name) => {
+                vec![(name.clone(), DependencyConfig::default())].into_iter()
+            }
+            DependencyEntry::Extended(map) => map
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        })
+    }
+
+    /// Check if this service should restart when a specific dependency restarts
+    /// This is determined by the `restart: true` setting in the dependency config
+    pub fn should_restart_on_dependency(&self, dependency_name: &str) -> bool {
+        self.get(dependency_name)
+            .map(|config| config.restart)
+            .unwrap_or(false)
+    }
+
+    /// Get all dependencies that have restart enabled
+    pub fn dependencies_with_restart(&self) -> Vec<String> {
+        self.iter()
+            .filter(|(_, config)| config.restart)
+            .map(|(name, _)| name)
+            .collect()
+    }
+}
+
+impl From<Vec<String>> for DependsOn {
+    fn from(names: Vec<String>) -> Self {
+        DependsOn(names.into_iter().map(DependencyEntry::Simple).collect())
     }
 }
 
@@ -1421,9 +1608,12 @@ impl KeplerConfig {
             }
         }
 
-        // Expand depends_on
-        for dep in &mut service.depends_on {
-            *dep = Self::expand_value(dep, &expanded_context, sys_env);
+        // Expand depends_on entries (only simple string entries need expansion)
+        for entry in &mut service.depends_on.0 {
+            if let DependencyEntry::Simple(name) = entry {
+                *name = Self::expand_value(name, &expanded_context, sys_env);
+            }
+            // Extended entries have map keys which shouldn't be expanded
         }
 
         // NOTE: We intentionally do NOT expand healthcheck.test here.
@@ -1495,8 +1685,8 @@ impl KeplerConfig {
             }
 
             // Check dependencies exist
-            for dep in &service.depends_on {
-                if !self.services.contains_key(dep) {
+            for dep in service.depends_on.names() {
+                if !self.services.contains_key(&dep) {
                     errors.push(format!(
                         "Service '{}': depends on '{}' which is not defined",
                         name, dep
@@ -1630,5 +1820,260 @@ services:
         assert!(config.global_sys_env().is_none());
         assert!(config.global_logs().is_none());
         assert!(config.global_hooks().is_none());
+    }
+
+    #[test]
+    fn test_depends_on_simple_form() {
+        let yaml = r#"
+services:
+  db:
+    command: ["./db"]
+  app:
+    command: ["./app"]
+    depends_on:
+      - db
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let app = config.services.get("app").unwrap();
+        let dep_names = app.depends_on.names();
+        assert_eq!(dep_names, vec!["db"]);
+
+        // Default condition for simple form
+        let dep_config = app.depends_on.get("db").unwrap();
+        assert_eq!(dep_config.condition, DependencyCondition::ServiceStarted);
+        assert!(dep_config.timeout.is_none());
+    }
+
+    #[test]
+    fn test_depends_on_extended_form() {
+        let yaml = r#"
+services:
+  db:
+    command: ["./db"]
+  app:
+    command: ["./app"]
+    depends_on:
+      - db:
+          condition: service_healthy
+          timeout: 5m
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let app = config.services.get("app").unwrap();
+        let dep_names = app.depends_on.names();
+        assert_eq!(dep_names, vec!["db"]);
+
+        let dep_config = app.depends_on.get("db").unwrap();
+        assert_eq!(dep_config.condition, DependencyCondition::ServiceHealthy);
+        assert_eq!(dep_config.timeout, Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn test_depends_on_mixed_form() {
+        let yaml = r#"
+services:
+  db:
+    command: ["./db"]
+  cache:
+    command: ["./cache"]
+  app:
+    command: ["./app"]
+    depends_on:
+      - db
+      - cache:
+          condition: service_healthy
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let app = config.services.get("app").unwrap();
+        let dep_names = app.depends_on.names();
+        assert!(dep_names.contains(&"db".to_string()));
+        assert!(dep_names.contains(&"cache".to_string()));
+
+        // db uses default condition
+        let db_config = app.depends_on.get("db").unwrap();
+        assert_eq!(db_config.condition, DependencyCondition::ServiceStarted);
+
+        // cache uses explicit condition
+        let cache_config = app.depends_on.get("cache").unwrap();
+        assert_eq!(cache_config.condition, DependencyCondition::ServiceHealthy);
+    }
+
+    #[test]
+    fn test_depends_on_restart_true() {
+        // Docker Compose style: restart: true in depends_on
+        let yaml = r#"
+services:
+  db:
+    command: ["./db"]
+  app:
+    command: ["./app"]
+    depends_on:
+      db:
+        condition: service_healthy
+        restart: true
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let app = config.services.get("app").unwrap();
+        assert!(app.depends_on.should_restart_on_dependency("db"));
+        assert!(!app.depends_on.should_restart_on_dependency("other"));
+
+        let dep_config = app.depends_on.get("db").unwrap();
+        assert!(dep_config.restart);
+        assert_eq!(dep_config.condition, DependencyCondition::ServiceHealthy);
+    }
+
+    #[test]
+    fn test_depends_on_restart_false() {
+        // restart: false or not specified = no restart propagation
+        let yaml = r#"
+services:
+  db:
+    command: ["./db"]
+  app:
+    command: ["./app"]
+    depends_on:
+      db:
+        condition: service_started
+        restart: false
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let app = config.services.get("app").unwrap();
+        assert!(!app.depends_on.should_restart_on_dependency("db"));
+
+        let dep_config = app.depends_on.get("db").unwrap();
+        assert!(!dep_config.restart);
+    }
+
+    #[test]
+    fn test_depends_on_restart_default() {
+        // When restart is not specified, it defaults to false
+        let yaml = r#"
+services:
+  db:
+    command: ["./db"]
+  app:
+    command: ["./app"]
+    depends_on:
+      db:
+        condition: service_healthy
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let app = config.services.get("app").unwrap();
+        assert!(!app.depends_on.should_restart_on_dependency("db"));
+    }
+
+    #[test]
+    fn test_depends_on_restart_per_dependency() {
+        // Docker Compose style: restart can be different per dependency
+        let yaml = r#"
+services:
+  db:
+    command: ["./db"]
+  cache:
+    command: ["./cache"]
+  app:
+    command: ["./app"]
+    depends_on:
+      db:
+        condition: service_healthy
+        restart: true
+      cache:
+        condition: service_started
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let app = config.services.get("app").unwrap();
+        // db has restart: true
+        assert!(app.depends_on.should_restart_on_dependency("db"));
+        // cache doesn't have restart specified (defaults to false)
+        assert!(!app.depends_on.should_restart_on_dependency("cache"));
+
+        // Get all dependencies with restart enabled
+        let restart_deps = app.depends_on.dependencies_with_restart();
+        assert_eq!(restart_deps, vec!["db"]);
+    }
+
+    #[test]
+    fn test_depends_on_simple_no_restart() {
+        // Simple form doesn't support restart (backward compatible)
+        let yaml = r#"
+services:
+  db:
+    command: ["./db"]
+  app:
+    command: ["./app"]
+    depends_on:
+      - db
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let app = config.services.get("app").unwrap();
+        // Simple form = no restart
+        assert!(!app.depends_on.should_restart_on_dependency("db"));
+    }
+
+    #[test]
+    fn test_dependency_condition_service_completed_successfully() {
+        let yaml = r#"
+services:
+  init:
+    command: ["./init"]
+  app:
+    command: ["./app"]
+    depends_on:
+      - init:
+          condition: service_completed_successfully
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let app = config.services.get("app").unwrap();
+        let dep_config = app.depends_on.get("init").unwrap();
+        assert_eq!(
+            dep_config.condition,
+            DependencyCondition::ServiceCompletedSuccessfully
+        );
+    }
+
+    #[test]
+    fn test_depends_on_iter() {
+        let yaml = r#"
+services:
+  db:
+    command: ["./db"]
+  cache:
+    command: ["./cache"]
+  app:
+    command: ["./app"]
+    depends_on:
+      - db
+      - cache:
+          condition: service_healthy
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let app = config.services.get("app").unwrap();
+        let deps: Vec<_> = app.depends_on.iter().collect();
+        assert_eq!(deps.len(), 2);
+
+        // Find db and cache in the iteration
+        let db_entry = deps.iter().find(|(name, _)| name == "db");
+        let cache_entry = deps.iter().find(|(name, _)| name == "cache");
+
+        assert!(db_entry.is_some());
+        assert!(cache_entry.is_some());
+
+        assert_eq!(
+            db_entry.unwrap().1.condition,
+            DependencyCondition::ServiceStarted
+        );
+        assert_eq!(
+            cache_entry.unwrap().1.condition,
+            DependencyCondition::ServiceHealthy
+        );
     }
 }

@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::config::ServiceConfig;
+use crate::config::{DependencyCondition, ServiceConfig};
+use crate::config_actor::ConfigActorHandle;
 use crate::errors::{DaemonError, Result};
+use crate::state::ServiceStatus;
 
 /// Get the order in which services should be started (respecting dependencies)
 /// Returns services in topological order (dependencies first)
@@ -30,11 +32,11 @@ pub fn get_start_levels(services: &HashMap<String, ServiceConfig>) -> Result<Vec
 
     // Validate all dependencies exist
     for (name, config) in services {
-        for dep in &config.depends_on {
-            if !service_names.contains(dep) {
+        for dep in config.depends_on.names() {
+            if !service_names.contains(&dep) {
                 return Err(DaemonError::MissingDependency {
                     service: name.clone(),
-                    dependency: dep.clone(),
+                    dependency: dep,
                 });
             }
         }
@@ -68,12 +70,13 @@ pub fn get_start_levels(services: &HashMap<String, ServiceConfig>) -> Result<Vec
             DaemonError::ServiceNotFound(name.to_string())
         })?;
 
-        let level = if config.depends_on.is_empty() {
+        let dep_names = config.depends_on.names();
+        let level = if dep_names.is_empty() {
             0
         } else {
             let mut max_dep_level = 0;
-            for dep in &config.depends_on {
-                let dep_level = compute_level(dep, services, levels, computed, stack)?;
+            for dep in dep_names {
+                let dep_level = compute_level(&dep, services, levels, computed, stack)?;
                 max_dep_level = max_dep_level.max(dep_level);
             }
             max_dep_level + 1
@@ -114,11 +117,11 @@ fn topological_sort(services: &HashMap<String, ServiceConfig>) -> Result<Vec<Str
 
     // Validate all dependencies exist
     for (name, config) in services {
-        for dep in &config.depends_on {
-            if !service_names.contains(dep) {
+        for dep in config.depends_on.names() {
+            if !service_names.contains(&dep) {
                 return Err(DaemonError::MissingDependency {
                     service: name.clone(),
-                    dependency: dep.clone(),
+                    dependency: dep,
                 });
             }
         }
@@ -135,11 +138,11 @@ fn topological_sort(services: &HashMap<String, ServiceConfig>) -> Result<Vec<Str
     }
 
     for (name, config) in services {
-        for dep in &config.depends_on {
+        for dep in config.depends_on.names() {
             // name depends on dep, so increment in_degree of name
             *in_degree.get_mut(name).unwrap() += 1;
             // dep has name as a dependent
-            dependents.get_mut(dep).unwrap().push(name.clone());
+            dependents.get_mut(&dep).unwrap().push(name.clone());
         }
     }
 
@@ -222,24 +225,74 @@ fn collect_deps(
     needed.insert(service.to_string());
 
     if let Some(config) = services.get(service) {
-        for dep in &config.depends_on {
-            if !services.contains_key(dep) {
+        for dep in config.depends_on.names() {
+            if !services.contains_key(&dep) {
                 return Err(DaemonError::MissingDependency {
                     service: service.to_string(),
-                    dependency: dep.clone(),
+                    dependency: dep,
                 });
             }
-            collect_deps(dep, services, needed)?;
+            collect_deps(&dep, services, needed)?;
         }
     }
 
     Ok(())
 }
 
+/// Check if a dependency condition is satisfied based on current service status
+pub async fn check_dependency_satisfied(
+    dep_name: &str,
+    condition: &DependencyCondition,
+    handle: &ConfigActorHandle,
+) -> bool {
+    let state = match handle.get_service_state(dep_name).await {
+        Some(s) => s,
+        None => return false,
+    };
+
+    match condition {
+        DependencyCondition::ServiceStarted => {
+            // Service is considered "started" if it's running (in any running state)
+            matches!(
+                state.status,
+                ServiceStatus::Running | ServiceStatus::Healthy | ServiceStatus::Unhealthy
+            )
+        }
+        DependencyCondition::ServiceHealthy => {
+            // Service must be in the Healthy state
+            state.status == ServiceStatus::Healthy
+        }
+        DependencyCondition::ServiceCompletedSuccessfully => {
+            // Service must have stopped with exit code 0
+            state.status == ServiceStatus::Stopped && state.exit_code == Some(0)
+        }
+    }
+}
+
+/// Detect dependency cycles in the service configuration
+pub fn detect_cycles(services: &HashMap<String, ServiceConfig>) -> Result<()> {
+    // Validate all dependencies exist first
+    let service_names: HashSet<_> = services.keys().cloned().collect();
+    for (name, config) in services {
+        for dep in config.depends_on.names() {
+            if !service_names.contains(&dep) {
+                return Err(DaemonError::MissingDependency {
+                    service: name.clone(),
+                    dependency: dep,
+                });
+            }
+        }
+    }
+
+    // Try to compute start order - will fail if there's a cycle
+    topological_sort(services)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::RestartConfig;
+    use crate::config::{DependsOn, RestartConfig};
 
     fn make_service(deps: Vec<&str>) -> ServiceConfig {
         ServiceConfig {
@@ -249,7 +302,7 @@ mod tests {
             env_file: None,
             sys_env: Default::default(),
             restart: RestartConfig::default(),
-            depends_on: deps.into_iter().map(String::from).collect(),
+            depends_on: DependsOn::from(deps.into_iter().map(String::from).collect::<Vec<_>>()),
             healthcheck: None,
             hooks: None,
             logs: None,

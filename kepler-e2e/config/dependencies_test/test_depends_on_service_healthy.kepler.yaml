@@ -1,0 +1,26 @@
+# Test depends_on with service_healthy condition
+# Backend should wait for database healthcheck to pass before starting
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  database:
+    command: ["sh", "-c", "echo DATABASE_STARTED; sleep 300"]
+    healthcheck:
+      test: ["true"]
+      interval: 500ms
+      timeout: 1s
+      retries: 1
+      start_period: 0s
+    logs:
+      timestamp: true
+
+  backend:
+    command: ["sh", "-c", "echo BACKEND_STARTED; sleep 300"]
+    depends_on:
+      database:
+        condition: service_healthy
+    logs:
+      timestamp: true

@@ -17,6 +17,10 @@ use crate::config::{
 };
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
+use crate::events::{
+    service_event_channel, ServiceEvent, ServiceEventMessage, ServiceEventReceiver,
+    ServiceEventSender,
+};
 use crate::logs::{DEFAULT_BUFFER_SIZE, LogReader, LogWriterConfig};
 use crate::persistence::{ConfigPersistence, ExpandedConfigSnapshot};
 use crate::state::{
@@ -215,6 +219,32 @@ pub enum ConfigCommand {
     IsRestoredFromSnapshot {
         reply: oneshot::Sender<bool>,
     },
+
+    // === Event Channel Commands ===
+    /// Create an event channel for a service, returns receiver
+    CreateEventChannel {
+        service_name: String,
+        reply: oneshot::Sender<ServiceEventReceiver>,
+    },
+    /// Remove event channel for a service
+    RemoveEventChannel {
+        service_name: String,
+    },
+    /// Emit an event for a service
+    EmitEvent {
+        service_name: String,
+        event: ServiceEvent,
+    },
+    /// Get all event receivers (for orchestrator to poll)
+    GetAllEventReceivers {
+        reply: oneshot::Sender<Vec<(String, ServiceEventReceiver)>>,
+    },
+    /// Check if event handler has been spawned
+    HasEventHandler {
+        reply: oneshot::Sender<bool>,
+    },
+    /// Mark event handler as spawned
+    SetEventHandlerSpawned,
 }
 
 /// Per-config actor state
@@ -233,12 +263,17 @@ pub struct ConfigActor {
     watchers: HashMap<String, JoinHandle<()>>,
     health_checks: HashMap<String, JoinHandle<()>>,
 
+    // Event channels per service (service_name -> sender)
+    event_senders: HashMap<String, ServiceEventSender>,
+
     // Persistence
     persistence: ConfigPersistence,
     /// Whether the config snapshot has been taken (happens on first service start)
     snapshot_taken: bool,
     /// Whether this config was restored from a persisted snapshot
     restored_from_snapshot: bool,
+    /// Whether an event handler has been spawned for this config
+    event_handler_spawned: bool,
 
     rx: mpsc::Receiver<ConfigCommand>,
 }
@@ -452,9 +487,11 @@ impl ConfigActor {
             processes: HashMap::new(),
             watchers: HashMap::new(),
             health_checks: HashMap::new(),
+            event_senders: HashMap::new(),
             persistence,
             snapshot_taken,
             restored_from_snapshot,
+            event_handler_spawned: false,
             rx,
         };
 
@@ -746,6 +783,47 @@ impl ConfigActor {
             }
             ConfigCommand::IsRestoredFromSnapshot { reply } => {
                 let _ = reply.send(self.restored_from_snapshot);
+            }
+
+            // === Event Channel Commands ===
+            ConfigCommand::CreateEventChannel {
+                service_name,
+                reply,
+            } => {
+                let (tx, rx) = service_event_channel();
+                self.event_senders.insert(service_name, tx);
+                let _ = reply.send(rx);
+            }
+            ConfigCommand::RemoveEventChannel { service_name } => {
+                self.event_senders.remove(&service_name);
+            }
+            ConfigCommand::EmitEvent {
+                service_name,
+                event,
+            } => {
+                if let Some(sender) = self.event_senders.get(&service_name) {
+                    let msg = ServiceEventMessage::new(event);
+                    // Use try_send to avoid blocking if channel is full
+                    let _ = sender.try_send(msg);
+                }
+            }
+            ConfigCommand::GetAllEventReceivers { reply } => {
+                // Create new channels for all services and return the receivers
+                let mut receivers = Vec::new();
+                for service_name in self.services.keys() {
+                    if !self.event_senders.contains_key(service_name) {
+                        let (tx, rx) = service_event_channel();
+                        self.event_senders.insert(service_name.clone(), tx);
+                        receivers.push((service_name.clone(), rx));
+                    }
+                }
+                let _ = reply.send(receivers);
+            }
+            ConfigCommand::HasEventHandler { reply } => {
+                let _ = reply.send(self.event_handler_spawned);
+            }
+            ConfigCommand::SetEventHandlerSpawned => {
+                self.event_handler_spawned = true;
             }
         }
         false
@@ -1563,6 +1641,70 @@ impl ConfigActorHandle {
             .send(ConfigCommand::IsRestoredFromSnapshot { reply: reply_tx })
             .await;
         reply_rx.await.unwrap_or(false)
+    }
+
+    // === Event Channel Methods ===
+
+    /// Create an event channel for a service, returns receiver for orchestrator
+    pub async fn create_event_channel(&self, service_name: &str) -> Option<ServiceEventReceiver> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ConfigCommand::CreateEventChannel {
+                service_name: service_name.to_string(),
+                reply: reply_tx,
+            })
+            .await;
+        reply_rx.await.ok()
+    }
+
+    /// Remove event channel when service is removed
+    pub async fn remove_event_channel(&self, service_name: &str) {
+        let _ = self
+            .tx
+            .send(ConfigCommand::RemoveEventChannel {
+                service_name: service_name.to_string(),
+            })
+            .await;
+    }
+
+    /// Emit an event for a service
+    pub async fn emit_event(&self, service_name: &str, event: ServiceEvent) {
+        let _ = self
+            .tx
+            .send(ConfigCommand::EmitEvent {
+                service_name: service_name.to_string(),
+                event,
+            })
+            .await;
+    }
+
+    /// Get all event receivers for the orchestrator to poll
+    pub async fn get_all_event_receivers(&self) -> Vec<(String, ServiceEventReceiver)> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ConfigCommand::GetAllEventReceivers { reply: reply_tx })
+            .await;
+        reply_rx.await.unwrap_or_default()
+    }
+
+    /// Check if an event handler has been spawned for this config
+    pub async fn has_event_handler(&self) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ConfigCommand::HasEventHandler { reply: reply_tx })
+            .await;
+        reply_rx.await.unwrap_or(false)
+    }
+
+    /// Mark event handler as spawned for this config
+    pub async fn set_event_handler_spawned(&self) {
+        let _ = self
+            .tx
+            .send(ConfigCommand::SetEventHandlerSpawned)
+            .await;
     }
 
     // === Lifecycle ===

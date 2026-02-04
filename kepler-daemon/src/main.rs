@@ -281,12 +281,28 @@ async fn handle_request(
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
-            match orchestrator
-                .restart_services(&config_path, service.as_deref(), sys_env)
-                .await
-            {
-                Ok(msg) => Response::ok_with_message(msg),
-                Err(e) => Response::error(e.to_string()),
+
+            // For single-service restarts, use restart_single_service_with_reason
+            // to keep the config actor alive (preserving the event handler for restart propagation)
+            // and to emit proper Restart events.
+            // For full restarts (no service filter), use restart_services which re-creates everything.
+            if let Some(service_name) = &service {
+                use kepler_daemon::events::RestartReason;
+                match orchestrator
+                    .restart_single_service_with_reason(&config_path, service_name, RestartReason::Manual)
+                    .await
+                {
+                    Ok(()) => Response::ok_with_message(format!("Restarted service: {}", service_name)),
+                    Err(e) => Response::error(e.to_string()),
+                }
+            } else {
+                match orchestrator
+                    .restart_services(&config_path, None, sys_env)
+                    .await
+                {
+                    Ok(msg) => Response::ok_with_message(msg),
+                    Err(e) => Response::error(e.to_string()),
+                }
             }
         }
 

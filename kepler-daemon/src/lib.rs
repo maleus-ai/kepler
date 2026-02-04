@@ -9,6 +9,7 @@ pub mod cursor;
 pub mod deps;
 pub mod env;
 pub mod errors;
+pub mod events;
 pub mod health;
 pub mod hooks;
 pub mod logs;

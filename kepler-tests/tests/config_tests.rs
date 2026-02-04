@@ -427,8 +427,8 @@ services:
     assert!(config.services.contains_key("backend"));
     assert!(config.services.contains_key("database"));
 
-    assert_eq!(config.services["frontend"].depends_on, vec!["backend"]);
-    assert_eq!(config.services["backend"].depends_on, vec!["database"]);
+    assert_eq!(config.services["frontend"].depends_on.names(), vec!["backend"]);
+    assert_eq!(config.services["backend"].depends_on.names(), vec!["database"]);
     assert!(config.services["database"].depends_on.is_empty());
 }
 

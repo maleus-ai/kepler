@@ -149,8 +149,9 @@ async fn test_full_lifecycle() -> E2eResult<()> {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Wait for service to be running again after restart
+    // The service may have already transitioned to healthy, so check for either status
     harness
-        .wait_for_service_status(&config_path, "full-lifecycle-service", "running", Duration::from_secs(15))
+        .wait_for_service_status_any(&config_path, "full-lifecycle-service", &["running", "healthy"], Duration::from_secs(15))
         .await?;
 
     // Check logs for restart

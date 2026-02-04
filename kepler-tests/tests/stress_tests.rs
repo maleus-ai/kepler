@@ -218,7 +218,7 @@ fn test_clear_during_heavy_writes() {
 #[test]
 fn test_dependency_levels() {
     use kepler_daemon::deps::get_start_levels;
-    use kepler_daemon::config::ServiceConfig;
+    use kepler_daemon::config::{DependsOn, ServiceConfig};
     use std::collections::HashMap;
 
     fn make_service(deps: Vec<&str>) -> ServiceConfig {
@@ -229,7 +229,7 @@ fn test_dependency_levels() {
             env_file: None,
             sys_env: Default::default(),
             restart: Default::default(),
-            depends_on: deps.into_iter().map(String::from).collect(),
+            depends_on: DependsOn::from(deps.into_iter().map(String::from).collect::<Vec<_>>()),
             healthcheck: None,
             hooks: None,
             logs: None,

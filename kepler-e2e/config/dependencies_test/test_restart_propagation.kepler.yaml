@@ -1,0 +1,23 @@
+# Test restart propagation via depends_on restart: true
+# When database restarts, backend should also restart
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  database:
+    command: ["sh", "-c", "echo DATABASE_STARTED_$(date +%s%N); sleep 300"]
+    healthcheck:
+      test: ["true"]
+      interval: 500ms
+      timeout: 1s
+      retries: 1
+      start_period: 0s
+
+  backend:
+    command: ["sh", "-c", "echo BACKEND_STARTED_$(date +%s%N); sleep 300"]
+    depends_on:
+      database:
+        condition: service_healthy
+        restart: true

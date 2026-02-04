@@ -22,6 +22,7 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
     - [Full Example](#full-example)
     - [Global Hooks](#global-hooks)
     - [Service Options](#service-options)
+    - [Dependency Configuration](#dependency-configuration)
     - [Restart Configuration](#restart-configuration)
     - [Log Configuration](#log-configuration)
       - [Global Log Settings](#global-log-settings)
@@ -42,6 +43,7 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 - **Global Daemon Architecture**: Single daemon instance manages multiple config files
 - **On-Demand Config Loading**: Configs are loaded when first referenced
 - **Service Management**: Start, stop, restart services with dependency ordering
+- **Docker Compose-Compatible Dependencies**: Dependency conditions (`service_started`, `service_healthy`, `service_completed_successfully`), timeouts, and restart propagation
 - **Health Checks**: Docker-compatible health check configuration
 - **File Watching**: Automatic service restart on file changes
 - **Lifecycle Hooks**: Run commands at various lifecycle stages (init, start, stop, restart, cleanup)
@@ -235,7 +237,9 @@ services:
     user: node
     group: developers
     depends_on:
-      - database
+      database:
+        condition: service_healthy  # Wait for DB to be healthy
+        restart: true               # Restart backend if DB restarts
     environment:
       - DATABASE_URL=postgres://localhost:5432/app
     env_file: .env
@@ -265,7 +269,9 @@ services:
     command: ["npm", "run", "dev"]
     user: "1000:1000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+        timeout: 60s              # Wait up to 60s for backend health
     environment:
       - VITE_API_URL=${BACKEND_URL}
     restart: always
@@ -290,7 +296,7 @@ services:
 |--------|------|---------|-------------|
 | `command` | `string[]` | required | Command to run |
 | `working_dir` | `string` | config dir | Working directory |
-| `depends_on` | `string[]` | `[]` | Services that must be healthy first |
+| `depends_on` | `string[]\|object` | `[]` | Service dependencies (see below) |
 | `environment` | `string[]` | `[]` | Environment variables (`KEY=value`) |
 | `env_file` | `string` | - | Path to `.env` file |
 | `sys_env` | `string` | `clear` | System env policy: `clear` or `inherit` |
@@ -305,6 +311,51 @@ services:
 - `"username"` - resolve by name
 - `"1000"` - numeric uid
 - `"1000:1000"` - explicit uid:gid
+
+### Dependency Configuration
+
+Kepler supports Docker Compose-compatible dependency configuration with conditions and restart propagation.
+
+**Simple form (backward compatible):**
+```yaml
+depends_on:
+  - database
+  - cache
+```
+
+**Extended form with conditions:**
+```yaml
+depends_on:
+  database:
+    condition: service_healthy    # Wait for database health checks to pass
+    timeout: 30s                  # Optional timeout for condition
+    restart: true                 # Restart this service when database restarts
+  cache:
+    condition: service_started    # Just wait for cache to be running
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `condition` | `string` | `service_started` | When to consider dependency ready |
+| `timeout` | `duration` | none | Max time to wait for condition |
+| `restart` | `bool` | `false` | Restart this service when dependency restarts |
+
+**Dependency conditions:**
+
+| Condition | Description |
+|-----------|-------------|
+| `service_started` | Dependency is running (default) |
+| `service_healthy` | Dependency passed health checks |
+| `service_completed_successfully` | Dependency exited with code 0 (for init containers) |
+
+**Restart propagation:**
+
+When `restart: true` is set for a dependency:
+1. This service is stopped when the dependency restarts
+2. Waits for the dependency's condition to be met again
+3. This service is then restarted
+
+This is useful for services that need to reconnect or reinitialize when their dependencies restart.
 
 ### Restart Configuration
 
