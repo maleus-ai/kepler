@@ -228,7 +228,7 @@ fn test_global_hooks_parsing() {
     let yaml = r#"
 kepler:
   hooks:
-    pre_init:
+    on_init:
       run: echo global init
     pre_start:
       run: echo global start
@@ -245,7 +245,7 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.global_hooks().unwrap();
-    assert!(hooks.pre_init.is_some());
+    assert!(hooks.on_init.is_some());
     assert!(hooks.pre_start.is_some());
     assert!(hooks.pre_stop.is_some());
     assert!(hooks.pre_cleanup.is_some());
@@ -525,7 +525,7 @@ services:
   test:
     command: ["sleep", "3600"]
     hooks:
-      pre_init:
+      on_init:
         run: echo init
       pre_start:
         run: echo start
@@ -545,7 +545,7 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
-    assert!(hooks.pre_init.is_some());
+    assert!(hooks.on_init.is_some());
     assert!(hooks.pre_start.is_some());
     assert!(hooks.pre_stop.is_some());
     assert!(hooks.pre_restart.is_some());

@@ -21,7 +21,7 @@ async fn test_full_lifecycle_with_healthcheck_hooks() {
     let health_marker_path = marker.marker_path("health_status");
 
     let hooks = ServiceHooks {
-        pre_init: Some(marker.create_timestamped_marker_hook("on_init")),
+        on_init: Some(marker.create_timestamped_marker_hook("on_init")),
         pre_start: Some(marker.create_timestamped_marker_hook("on_start")),
         pre_stop: Some(marker.create_timestamped_marker_hook("on_stop")),
         post_healthcheck_success: Some(marker.create_timestamped_marker_hook("on_healthy")),
@@ -305,7 +305,7 @@ async fn test_service_stop_restart_cycle() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        pre_init: Some(marker.create_timestamped_marker_hook("init")),
+        on_init: Some(marker.create_timestamped_marker_hook("init")),
         pre_start: Some(marker.create_timestamped_marker_hook("start")),
         pre_stop: Some(marker.create_timestamped_marker_hook("stop")),
         ..Default::default()

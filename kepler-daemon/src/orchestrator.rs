@@ -30,7 +30,7 @@ use crate::watcher::{spawn_file_watcher, FileChangeEvent};
 /// Lifecycle events that trigger different hook/retention combinations
 #[derive(Debug, Clone, Copy)]
 pub enum LifecycleEvent {
-    /// First start - pre_init/post_init hooks
+    /// First start - on_init hook
     Init,
     /// Normal start - pre_start/post_start hooks, on_start retention
     Start,
@@ -160,12 +160,12 @@ impl ServiceOrchestrator {
         let global_log_config = config.global_logs().cloned();
         let initialized = handle.is_config_initialized().await;
 
-        // Run global pre_init hook if first time
+        // Run global on_init hook if first time
         if !initialized {
             let env = sys_env.clone().unwrap_or_else(|| std::env::vars().collect());
             run_global_hook(
                 &global_hooks,
-                GlobalHookType::PreInit,
+                GlobalHookType::OnInit,
                 &config_dir,
                 &env,
                 Some(&log_config),
@@ -291,21 +291,8 @@ impl ServiceOrchestrator {
                 warn!("Global post_start hook failed: {}", e);
             }
 
-            // Run global post_init hook if first time (after all services started)
+            // Mark config initialized after first start
             if !initialized {
-                if let Err(e) = run_global_hook(
-                    &global_hooks,
-                    GlobalHookType::PostInit,
-                    &config_dir,
-                    &env,
-                    Some(&log_config),
-                    global_log_config.as_ref(),
-                )
-                .await
-                {
-                    warn!("Global post_init hook failed: {}", e);
-                }
-
                 handle.mark_config_initialized().await?;
             }
         }
@@ -338,14 +325,14 @@ impl ServiceOrchestrator {
             .set_service_status(service_name, ServiceStatus::Starting)
             .await;
 
-        // Run pre_init hook if first time for this service
+        // Run on_init hook if first time for this service
         let service_initialized = handle.is_service_initialized(service_name).await;
 
         if !service_initialized {
             // Emit Init event
             handle.emit_event(service_name, ServiceEvent::Init).await;
 
-            self.run_service_hook(&ctx, service_name, ServiceHookType::PreInit)
+            self.run_service_hook(&ctx, service_name, ServiceHookType::OnInit)
                 .await?;
         }
 
@@ -368,12 +355,8 @@ impl ServiceOrchestrator {
             warn!("Hook post_start failed for {}: {}", service_name, e);
         }
 
-        // Run post_init hook if first time (after process spawned)
+        // Mark service initialized after first start
         if !service_initialized {
-            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostInit).await {
-                warn!("Hook post_init failed for {}: {}", service_name, e);
-            }
-
             handle.mark_service_initialized(service_name).await?;
         }
 

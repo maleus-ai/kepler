@@ -211,7 +211,7 @@ async fn test_all_service_hook_types() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        pre_init: Some(marker.create_timestamped_marker_hook("on_init")),
+        on_init: Some(marker.create_timestamped_marker_hook("on_init")),
         pre_start: Some(marker.create_timestamped_marker_hook("on_start")),
         pre_stop: Some(marker.create_timestamped_marker_hook("on_stop")),
         post_exit: Some(marker.create_timestamped_marker_hook("on_exit")),
@@ -264,7 +264,7 @@ async fn test_on_init_fires_once() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        pre_init: Some(marker.create_timestamped_marker_hook("on_init")),
+        on_init: Some(marker.create_timestamped_marker_hook("on_init")),
         pre_start: Some(marker.create_timestamped_marker_hook("on_start")),
         ..Default::default()
     };
@@ -370,7 +370,7 @@ async fn test_hook_execution_order() {
     let order_file = temp_dir.path().join("order.txt");
 
     let hooks = ServiceHooks {
-        pre_init: Some(HookCommand::Script {
+        on_init: Some(HookCommand::Script {
             run: format!("echo 'init' >> {}", order_file.display()),
             user: None,
             group: None,

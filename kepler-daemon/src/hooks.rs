@@ -58,8 +58,7 @@ impl<'a> ServiceHookParams<'a> {
 /// Types of global hooks
 #[derive(Debug, Clone, Copy)]
 pub enum GlobalHookType {
-    PreInit,
-    PostInit,
+    OnInit,
     PreStart,
     PostStart,
     PreStop,
@@ -72,8 +71,7 @@ pub enum GlobalHookType {
 impl GlobalHookType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            GlobalHookType::PreInit => "pre_init",
-            GlobalHookType::PostInit => "post_init",
+            GlobalHookType::OnInit => "on_init",
             GlobalHookType::PreStart => "pre_start",
             GlobalHookType::PostStart => "post_start",
             GlobalHookType::PreStop => "pre_stop",
@@ -94,8 +92,7 @@ impl std::fmt::Display for GlobalHookType {
 /// Types of service hooks
 #[derive(Debug, Clone, Copy)]
 pub enum ServiceHookType {
-    PreInit,
-    PostInit,
+    OnInit,
     PreStart,
     PostStart,
     PreStop,
@@ -110,8 +107,7 @@ pub enum ServiceHookType {
 impl ServiceHookType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ServiceHookType::PreInit => "pre_init",
-            ServiceHookType::PostInit => "post_init",
+            ServiceHookType::OnInit => "on_init",
             ServiceHookType::PreStart => "pre_start",
             ServiceHookType::PostStart => "post_start",
             ServiceHookType::PreStop => "pre_stop",
@@ -236,8 +232,7 @@ pub async fn run_global_hook(
     };
 
     let hook = match hook_type {
-        GlobalHookType::PreInit => &hooks.pre_init,
-        GlobalHookType::PostInit => &hooks.post_init,
+        GlobalHookType::OnInit => &hooks.on_init,
         GlobalHookType::PreStart => &hooks.pre_start,
         GlobalHookType::PostStart => &hooks.post_start,
         GlobalHookType::PreStop => &hooks.pre_stop,
@@ -287,8 +282,7 @@ pub async fn run_service_hook(
     };
 
     let hook = match hook_type {
-        ServiceHookType::PreInit => &hooks.pre_init,
-        ServiceHookType::PostInit => &hooks.post_init,
+        ServiceHookType::OnInit => &hooks.on_init,
         ServiceHookType::PreStart => &hooks.pre_start,
         ServiceHookType::PostStart => &hooks.post_start,
         ServiceHookType::PreStop => &hooks.pre_stop,

@@ -211,7 +211,7 @@ kepler:
     max_size: "50MB"     # Truncate logs when they exceed this size
 
   hooks:
-    pre_init:
+    on_init:
       run: echo "First run initialization"
     pre_start:
       run: echo "Kepler starting"
@@ -254,7 +254,7 @@ services:
       timeout: 5s
       retries: 3
     hooks:
-      pre_init:
+      on_init:
         run: npm install
       pre_start:
         command: ["echo", "Backend starting"]
@@ -285,8 +285,7 @@ services:
 
 | Hook | Description |
 |------|-------------|
-| `pre_init` | Runs once when config is first used (before first start) |
-| `post_init` | Runs once after all services start for the first time |
+| `on_init` | Runs once when config is first used (before first start) |
 | `pre_start` | Runs before services start |
 | `post_start` | Runs after all services have started |
 | `pre_stop` | Runs before services stop |
@@ -455,8 +454,7 @@ services:
 
 | Hook | Description |
 |------|-------------|
-| `pre_init` | Runs once when service first starts (before spawn) |
-| `post_init` | Runs once after service first spawns |
+| `on_init` | Runs once when service first starts (before spawn) |
 | `pre_start` | Runs before service spawns |
 | `post_start` | Runs after service spawns |
 | `pre_stop` | Runs before service stops |

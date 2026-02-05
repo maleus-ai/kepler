@@ -68,8 +68,7 @@ pub struct KeplerConfig {
 /// Global hooks that run at daemon lifecycle events
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct GlobalHooks {
-    pub pre_init: Option<HookCommand>,
-    pub post_init: Option<HookCommand>,
+    pub on_init: Option<HookCommand>,
     pub pre_start: Option<HookCommand>,
     pub post_start: Option<HookCommand>,
     pub pre_stop: Option<HookCommand>,
@@ -540,8 +539,7 @@ fn default_start_period() -> Duration {
 /// Service-specific hooks
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct ServiceHooks {
-    pub pre_init: Option<HookCommand>,
-    pub post_init: Option<HookCommand>,
+    pub on_init: Option<HookCommand>,
     pub pre_start: Option<HookCommand>,
     pub post_start: Option<HookCommand>,
     pub pre_stop: Option<HookCommand>,
@@ -1490,10 +1488,7 @@ impl KeplerConfig {
 
     /// Expand environment variables in global hooks
     fn expand_global_hooks(hooks: &mut GlobalHooks, context: &HashMap<String, String>, sys_env: &HashMap<String, String>) {
-        if let Some(ref mut hook) = hooks.pre_init {
-            Self::expand_hook_command(hook, context, sys_env);
-        }
-        if let Some(ref mut hook) = hooks.post_init {
+        if let Some(ref mut hook) = hooks.on_init {
             Self::expand_hook_command(hook, context, sys_env);
         }
         if let Some(ref mut hook) = hooks.pre_start {
@@ -1666,10 +1661,7 @@ impl KeplerConfig {
 
     /// Expand environment variables in service hooks
     fn expand_service_hooks(hooks: &mut ServiceHooks, context: &HashMap<String, String>, sys_env: &HashMap<String, String>) {
-        if let Some(ref mut hook) = hooks.pre_init {
-            Self::expand_hook_command(hook, context, sys_env);
-        }
-        if let Some(ref mut hook) = hooks.post_init {
+        if let Some(ref mut hook) = hooks.on_init {
             Self::expand_hook_command(hook, context, sys_env);
         }
         if let Some(ref mut hook) = hooks.pre_start {
@@ -1812,7 +1804,7 @@ kepler:
   logs:
     timestamp: true
   hooks:
-    pre_init:
+    on_init:
       run: echo "init"
 
 services:
@@ -1834,7 +1826,7 @@ services:
 
         // Check hooks
         assert!(kepler.hooks.is_some());
-        assert!(kepler.hooks.as_ref().unwrap().pre_init.is_some());
+        assert!(kepler.hooks.as_ref().unwrap().on_init.is_some());
 
         // Check accessor methods
         assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));

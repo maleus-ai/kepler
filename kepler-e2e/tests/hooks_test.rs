@@ -7,7 +7,7 @@ use std::time::Duration;
 
 const TEST_MODULE: &str = "hooks_test";
 
-/// Test that global pre_init runs once at first start
+/// Test that global on_init runs once at first start
 #[tokio::test]
 async fn test_global_on_init_runs_once() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -34,11 +34,11 @@ async fn test_global_on_init_runs_once() -> E2eResult<()> {
     // Check marker file was written
     tokio::time::sleep(Duration::from_millis(500)).await;
     let marker_content = std::fs::read_to_string(&marker_file)?;
-    let init_count_1 = marker_content.matches("PRE_INIT_RAN").count();
+    let init_count_1 = marker_content.matches("ON_INIT_RAN").count();
 
     assert!(
         init_count_1 >= 1,
-        "pre_init should have run. Content: {}",
+        "on_init should have run. Content: {}",
         marker_content
     );
 
@@ -55,13 +55,13 @@ async fn test_global_on_init_runs_once() -> E2eResult<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // pre_init should NOT run again (only runs once)
+    // on_init should NOT run again (only runs once)
     let marker_content_2 = std::fs::read_to_string(&marker_file)?;
-    let init_count_2 = marker_content_2.matches("PRE_INIT_RAN").count();
+    let init_count_2 = marker_content_2.matches("ON_INIT_RAN").count();
 
     assert_eq!(
         init_count_1, init_count_2,
-        "pre_init should only run once. First: {}, Second: {}",
+        "on_init should only run once. First: {}, Second: {}",
         init_count_1, init_count_2
     );
 

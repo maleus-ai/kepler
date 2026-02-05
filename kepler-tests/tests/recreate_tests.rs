@@ -373,17 +373,17 @@ async fn test_recreate_rebakes_config() {
     }
 }
 
-/// recreate runs pre_init hook (because state is cleared)
+/// recreate runs on_init hook (because state is cleared)
 #[tokio::test]
 async fn test_recreate_runs_init_hooks() {
     let temp_dir = TempDir::new().unwrap();
     let marker = MarkerFileHelper::new(temp_dir.path());
-    let pre_init_path = marker.marker_path("pre_init");
+    let on_init_path = marker.marker_path("on_init");
     let started_path = marker.marker_path("started");
 
     let hooks = ServiceHooks {
-        pre_init: Some(HookCommand::Script {
-            run: format!("echo 'PRE_INIT' >> {}", pre_init_path.display()),
+        on_init: Some(HookCommand::Script {
+            run: format!("echo 'PRE_INIT' >> {}", on_init_path.display()),
             user: None,
             group: None,
             working_dir: None,
@@ -426,11 +426,11 @@ async fn test_recreate_runs_init_hooks() {
         .wait_for_marker("started", Duration::from_secs(2))
         .await;
 
-    // Count initial pre_init calls
-    let init_count_1 = marker.count_marker_lines("pre_init");
-    assert_eq!(init_count_1, 1, "pre_init should fire once on first start");
+    // Count initial on_init calls
+    let init_count_1 = marker.count_marker_lines("on_init");
+    assert_eq!(init_count_1, 1, "on_init should fire once on first start");
 
-    // Recreate the service (should clear state and run pre_init again)
+    // Recreate the service (should clear state and run on_init again)
     orchestrator
         .recreate_services(&config_path, Some(sys_env))
         .await
@@ -439,11 +439,11 @@ async fn test_recreate_runs_init_hooks() {
     // Wait for service to recreate
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Count pre_init calls after recreate
-    let init_count_2 = marker.count_marker_lines("pre_init");
+    // Count on_init calls after recreate
+    let init_count_2 = marker.count_marker_lines("on_init");
     assert_eq!(
         init_count_2, 2,
-        "pre_init should fire again after recreate (state cleared)"
+        "on_init should fire again after recreate (state cleared)"
     );
 
     // Cleanup
@@ -950,7 +950,7 @@ async fn test_recreate_respects_dependency_order() {
     orchestrator.stop_services(&config_path, None, false).await.unwrap();
 }
 
-/// recreate calls all lifecycle hooks: pre_stop, post_stop during stop; pre_init, pre_start, post_start during start
+/// recreate calls all lifecycle hooks: pre_stop, post_stop during stop; on_init, pre_start, post_start during start
 #[tokio::test]
 async fn test_recreate_calls_all_lifecycle_hooks() {
     let temp_dir = TempDir::new().unwrap();
@@ -958,7 +958,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     let hooks_path = marker.marker_path("hooks");
 
     let hooks = ServiceHooks {
-        pre_init: Some(HookCommand::Script {
+        on_init: Some(HookCommand::Script {
             run: format!("echo 'PRE_INIT' >> {}", hooks_path.display()),
             user: None,
             group: None,
@@ -1079,10 +1079,10 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
 
     // Verify order: stop hooks before start hooks
     let pre_stop_pos = lines.iter().position(|l| *l == "PRE_STOP");
-    let pre_init_pos = lines.iter().position(|l| *l == "PRE_INIT");
+    let on_init_pos = lines.iter().position(|l| *l == "PRE_INIT");
 
     assert!(
-        pre_stop_pos.unwrap() < pre_init_pos.unwrap(),
+        pre_stop_pos.unwrap() < on_init_pos.unwrap(),
         "PRE_STOP should come BEFORE PRE_INIT. Lines: {:?}",
         lines
     );

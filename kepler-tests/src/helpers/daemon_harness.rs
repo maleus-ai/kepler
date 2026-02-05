@@ -167,7 +167,7 @@ impl TestDaemonHarness {
         if should_run_init {
             run_service_hook(
                 &ctx.service_config.hooks,
-                ServiceHookType::PreInit,
+                ServiceHookType::OnInit,
                 service_name,
                 &hook_params,
             )
