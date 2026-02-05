@@ -6,6 +6,6 @@ services:
   svc-stop-hook-service:
     command: ["sh", "-c", "echo Starting; sleep 300"]
     hooks:
-      on_stop:
+      pre_stop:
         run: |
-          echo "SERVICE_ON_STOP_RAN" >> __MARKER_FILE__
+          echo "SERVICE_PRE_STOP_RAN" >> __MARKER_FILE__

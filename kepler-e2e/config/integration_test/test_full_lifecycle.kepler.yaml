@@ -17,12 +17,12 @@ services:
       retries: 2
       start_period: 0s
     hooks:
-      on_start:
+      pre_start:
         run: |
-          echo "ON_START_HOOK" >> __MARKER_FILE__
-      on_stop:
+          echo "PRE_START_HOOK" >> __MARKER_FILE__
+      pre_stop:
         run: |
-          echo "ON_STOP_HOOK" >> __MARKER_FILE__
-      on_healthcheck_success:
+          echo "PRE_STOP_HOOK" >> __MARKER_FILE__
+      post_healthcheck_success:
         run: |
           echo "HEALTHCHECK_SUCCESS" >> __MARKER_FILE__

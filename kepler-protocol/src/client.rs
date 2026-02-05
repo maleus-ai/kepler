@@ -129,12 +129,12 @@ impl Client {
     pub async fn restart(
         &mut self,
         config_path: PathBuf,
-        service: Option<String>,
+        services: Vec<String>,
         sys_env: Option<HashMap<String, String>>,
     ) -> Result<Response> {
         self.send_request(&Request::Restart {
             config_path,
-            service,
+            services,
             sys_env,
         })
         .await

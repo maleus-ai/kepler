@@ -539,8 +539,8 @@ async fn test_lua_complex_integration() -> E2eResult<()> {
     // Check marker file for hook execution
     let marker_content = std::fs::read_to_string(&marker_file)?;
     assert!(
-        marker_content.contains("Hook on_start for api"),
-        "API on_start hook should have run with correct context. Marker: {}",
+        marker_content.contains("Hook pre_start for api"),
+        "API pre_start hook should have run with correct context. Marker: {}",
         marker_content
     );
 

@@ -68,10 +68,15 @@ pub struct KeplerConfig {
 /// Global hooks that run at daemon lifecycle events
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct GlobalHooks {
-    pub on_init: Option<HookCommand>,
-    pub on_start: Option<HookCommand>,
-    pub on_stop: Option<HookCommand>,
-    pub on_cleanup: Option<HookCommand>,
+    pub pre_init: Option<HookCommand>,
+    pub post_init: Option<HookCommand>,
+    pub pre_start: Option<HookCommand>,
+    pub post_start: Option<HookCommand>,
+    pub pre_stop: Option<HookCommand>,
+    pub post_stop: Option<HookCommand>,
+    pub pre_restart: Option<HookCommand>,
+    pub post_restart: Option<HookCommand>,
+    pub pre_cleanup: Option<HookCommand>,
 }
 
 /// Hook command - either a script or a command array
@@ -535,13 +540,17 @@ fn default_start_period() -> Duration {
 /// Service-specific hooks
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct ServiceHooks {
-    pub on_init: Option<HookCommand>,
-    pub on_start: Option<HookCommand>,
-    pub on_stop: Option<HookCommand>,
-    pub on_restart: Option<HookCommand>,
-    pub on_exit: Option<HookCommand>,
-    pub on_healthcheck_success: Option<HookCommand>,
-    pub on_healthcheck_fail: Option<HookCommand>,
+    pub pre_init: Option<HookCommand>,
+    pub post_init: Option<HookCommand>,
+    pub pre_start: Option<HookCommand>,
+    pub post_start: Option<HookCommand>,
+    pub pre_stop: Option<HookCommand>,
+    pub post_stop: Option<HookCommand>,
+    pub pre_restart: Option<HookCommand>,
+    pub post_restart: Option<HookCommand>,
+    pub post_exit: Option<HookCommand>,
+    pub post_healthcheck_success: Option<HookCommand>,
+    pub post_healthcheck_fail: Option<HookCommand>,
 }
 
 /// Log retention policy on service stop
@@ -1481,16 +1490,31 @@ impl KeplerConfig {
 
     /// Expand environment variables in global hooks
     fn expand_global_hooks(hooks: &mut GlobalHooks, context: &HashMap<String, String>, sys_env: &HashMap<String, String>) {
-        if let Some(ref mut hook) = hooks.on_init {
+        if let Some(ref mut hook) = hooks.pre_init {
             Self::expand_hook_command(hook, context, sys_env);
         }
-        if let Some(ref mut hook) = hooks.on_start {
+        if let Some(ref mut hook) = hooks.post_init {
             Self::expand_hook_command(hook, context, sys_env);
         }
-        if let Some(ref mut hook) = hooks.on_stop {
+        if let Some(ref mut hook) = hooks.pre_start {
             Self::expand_hook_command(hook, context, sys_env);
         }
-        if let Some(ref mut hook) = hooks.on_cleanup {
+        if let Some(ref mut hook) = hooks.post_start {
+            Self::expand_hook_command(hook, context, sys_env);
+        }
+        if let Some(ref mut hook) = hooks.pre_stop {
+            Self::expand_hook_command(hook, context, sys_env);
+        }
+        if let Some(ref mut hook) = hooks.post_stop {
+            Self::expand_hook_command(hook, context, sys_env);
+        }
+        if let Some(ref mut hook) = hooks.pre_restart {
+            Self::expand_hook_command(hook, context, sys_env);
+        }
+        if let Some(ref mut hook) = hooks.post_restart {
+            Self::expand_hook_command(hook, context, sys_env);
+        }
+        if let Some(ref mut hook) = hooks.pre_cleanup {
             Self::expand_hook_command(hook, context, sys_env);
         }
     }
@@ -1642,25 +1666,37 @@ impl KeplerConfig {
 
     /// Expand environment variables in service hooks
     fn expand_service_hooks(hooks: &mut ServiceHooks, context: &HashMap<String, String>, sys_env: &HashMap<String, String>) {
-        if let Some(ref mut hook) = hooks.on_init {
+        if let Some(ref mut hook) = hooks.pre_init {
             Self::expand_hook_command(hook, context, sys_env);
         }
-        if let Some(ref mut hook) = hooks.on_start {
+        if let Some(ref mut hook) = hooks.post_init {
             Self::expand_hook_command(hook, context, sys_env);
         }
-        if let Some(ref mut hook) = hooks.on_stop {
+        if let Some(ref mut hook) = hooks.pre_start {
             Self::expand_hook_command(hook, context, sys_env);
         }
-        if let Some(ref mut hook) = hooks.on_restart {
+        if let Some(ref mut hook) = hooks.post_start {
             Self::expand_hook_command(hook, context, sys_env);
         }
-        if let Some(ref mut hook) = hooks.on_exit {
+        if let Some(ref mut hook) = hooks.pre_stop {
             Self::expand_hook_command(hook, context, sys_env);
         }
-        if let Some(ref mut hook) = hooks.on_healthcheck_success {
+        if let Some(ref mut hook) = hooks.post_stop {
             Self::expand_hook_command(hook, context, sys_env);
         }
-        if let Some(ref mut hook) = hooks.on_healthcheck_fail {
+        if let Some(ref mut hook) = hooks.pre_restart {
+            Self::expand_hook_command(hook, context, sys_env);
+        }
+        if let Some(ref mut hook) = hooks.post_restart {
+            Self::expand_hook_command(hook, context, sys_env);
+        }
+        if let Some(ref mut hook) = hooks.post_exit {
+            Self::expand_hook_command(hook, context, sys_env);
+        }
+        if let Some(ref mut hook) = hooks.post_healthcheck_success {
+            Self::expand_hook_command(hook, context, sys_env);
+        }
+        if let Some(ref mut hook) = hooks.post_healthcheck_fail {
             Self::expand_hook_command(hook, context, sys_env);
         }
     }
@@ -1776,7 +1812,7 @@ kepler:
   logs:
     timestamp: true
   hooks:
-    on_init:
+    pre_init:
       run: echo "init"
 
 services:
@@ -1798,7 +1834,7 @@ services:
 
         // Check hooks
         assert!(kepler.hooks.is_some());
-        assert!(kepler.hooks.as_ref().unwrap().on_init.is_some());
+        assert!(kepler.hooks.as_ref().unwrap().pre_init.is_some());
 
         // Check accessor methods
         assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 const TEST_MODULE: &str = "hooks_test";
 
-/// Test that global on_init runs once at first start
+/// Test that global pre_init runs once at first start
 #[tokio::test]
 async fn test_global_on_init_runs_once() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -34,11 +34,11 @@ async fn test_global_on_init_runs_once() -> E2eResult<()> {
     // Check marker file was written
     tokio::time::sleep(Duration::from_millis(500)).await;
     let marker_content = std::fs::read_to_string(&marker_file)?;
-    let init_count_1 = marker_content.matches("ON_INIT_RAN").count();
+    let init_count_1 = marker_content.matches("PRE_INIT_RAN").count();
 
     assert!(
         init_count_1 >= 1,
-        "on_init should have run. Content: {}",
+        "pre_init should have run. Content: {}",
         marker_content
     );
 
@@ -55,13 +55,13 @@ async fn test_global_on_init_runs_once() -> E2eResult<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // on_init should NOT run again (only runs once)
+    // pre_init should NOT run again (only runs once)
     let marker_content_2 = std::fs::read_to_string(&marker_file)?;
-    let init_count_2 = marker_content_2.matches("ON_INIT_RAN").count();
+    let init_count_2 = marker_content_2.matches("PRE_INIT_RAN").count();
 
     assert_eq!(
         init_count_1, init_count_2,
-        "on_init should only run once. First: {}, Second: {}",
+        "pre_init should only run once. First: {}, Second: {}",
         init_count_1, init_count_2
     );
 
@@ -70,7 +70,7 @@ async fn test_global_on_init_runs_once() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that global on_start runs when services start
+/// Test that global pre_start runs when services start
 #[tokio::test]
 async fn test_global_on_start_runs() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -96,8 +96,8 @@ async fn test_global_on_start_runs() -> E2eResult<()> {
 
     let marker_content = std::fs::read_to_string(&marker_file)?;
     assert!(
-        marker_content.contains("ON_START_RAN"),
-        "Global on_start hook should have run. Content: {}",
+        marker_content.contains("PRE_START_RAN"),
+        "Global pre_start hook should have run. Content: {}",
         marker_content
     );
 
@@ -106,7 +106,7 @@ async fn test_global_on_start_runs() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that global on_stop runs when services stop
+/// Test that global pre_stop runs when services stop
 #[tokio::test]
 async fn test_global_on_stop_runs() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -134,8 +134,8 @@ async fn test_global_on_stop_runs() -> E2eResult<()> {
 
     let marker_content = std::fs::read_to_string(&marker_file)?;
     assert!(
-        marker_content.contains("ON_STOP_RAN"),
-        "Global on_stop hook should have run. Content: {}",
+        marker_content.contains("PRE_STOP_RAN"),
+        "Global pre_stop hook should have run. Content: {}",
         marker_content
     );
 
@@ -144,7 +144,7 @@ async fn test_global_on_stop_runs() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that global on_cleanup runs with --clean flag
+/// Test that global pre_cleanup runs with --clean flag
 #[tokio::test]
 async fn test_global_on_cleanup_runs() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -172,8 +172,8 @@ async fn test_global_on_cleanup_runs() -> E2eResult<()> {
 
     let marker_content = std::fs::read_to_string(&marker_file)?;
     assert!(
-        marker_content.contains("ON_CLEANUP_RAN"),
-        "Global on_cleanup hook should have run with --clean. Content: {}",
+        marker_content.contains("PRE_CLEANUP_RAN"),
+        "Global pre_cleanup hook should have run with --clean. Content: {}",
         marker_content
     );
 
@@ -182,7 +182,7 @@ async fn test_global_on_cleanup_runs() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that service on_start hook runs on each service start
+/// Test that service pre_start hook runs on each service start
 #[tokio::test]
 async fn test_service_on_start_runs() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -207,9 +207,9 @@ async fn test_service_on_start_runs() -> E2eResult<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     let marker_content = std::fs::read_to_string(&marker_file)?;
-    let count_1 = marker_content.matches("SERVICE_ON_START_RAN").count();
+    let count_1 = marker_content.matches("SERVICE_PRE_START_RAN").count();
 
-    assert!(count_1 >= 1, "Service on_start should have run. Content: {}", marker_content);
+    assert!(count_1 >= 1, "Service pre_start should have run. Content: {}", marker_content);
 
     // Restart the service
     harness.restart_service(&config_path, "svc-start-hook-service").await?;
@@ -221,11 +221,11 @@ async fn test_service_on_start_runs() -> E2eResult<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     let marker_content = std::fs::read_to_string(&marker_file)?;
-    let count_2 = marker_content.matches("SERVICE_ON_START_RAN").count();
+    let count_2 = marker_content.matches("SERVICE_PRE_START_RAN").count();
 
     assert!(
         count_2 > count_1,
-        "Service on_start should run on each start. Count: {} -> {}",
+        "Service pre_start should run on each start. Count: {} -> {}",
         count_1, count_2
     );
 
@@ -234,7 +234,7 @@ async fn test_service_on_start_runs() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that service on_stop hook runs when service stops
+/// Test that service pre_stop hook runs when service stops
 #[tokio::test]
 async fn test_service_on_stop_runs() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -262,8 +262,8 @@ async fn test_service_on_stop_runs() -> E2eResult<()> {
 
     let marker_content = std::fs::read_to_string(&marker_file)?;
     assert!(
-        marker_content.contains("SERVICE_ON_STOP_RAN"),
-        "Service on_stop hook should have run. Content: {}",
+        marker_content.contains("SERVICE_PRE_STOP_RAN"),
+        "Service pre_stop hook should have run. Content: {}",
         marker_content
     );
 
@@ -272,7 +272,7 @@ async fn test_service_on_stop_runs() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that service on_exit hook runs when process exits
+/// Test that service post_exit hook runs when process exits
 #[tokio::test]
 async fn test_service_on_exit_runs() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -295,8 +295,8 @@ async fn test_service_on_exit_runs() -> E2eResult<()> {
 
     let marker_content = std::fs::read_to_string(&marker_file)?;
     assert!(
-        marker_content.contains("SERVICE_ON_EXIT_RAN"),
-        "Service on_exit hook should have run when process exited. Content: {}",
+        marker_content.contains("SERVICE_POST_EXIT_RAN"),
+        "Service post_exit hook should have run when process exited. Content: {}",
         marker_content
     );
 

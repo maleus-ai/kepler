@@ -12,9 +12,9 @@ services:
       retries: 2
       start_period: 0s
     hooks:
-      on_healthcheck_success:
+      post_healthcheck_success:
         run: |
           echo "HEALTHCHECK_SUCCESS_HOOK" >> __MARKER_FILE__
-      on_healthcheck_fail:
+      post_healthcheck_fail:
         run: |
           echo "HEALTHCHECK_FAIL_HOOK" >> __MARKER_FILE__

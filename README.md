@@ -186,7 +186,7 @@ Commands that operate on services (require config):
 |---------|-------------|
 | `kepler start [service]` | Start all or specific service |
 | `kepler stop [service]` | Stop all or specific service |
-| `kepler restart [service]` | Restart all or specific service |
+| `kepler restart [services...]` | Restart all running or specific services |
 | `kepler status` | Show status of all loaded configs |
 | `kepler logs [--follow] [service]` | View logs (`--follow` to follow) |
 
@@ -210,15 +210,15 @@ kepler:
     buffer_size: 16384   # 16KB buffer for better write throughput
     max_size: "50MB"     # Truncate logs when they exceed this size
 
-hooks:
-  on_init:
-    run: echo "First run initialization"
-  on_start:
-    run: echo "Kepler started"
-  on_stop:
-    command: ["echo", "Kepler stopped"]
-  on_cleanup:
-    run: docker-compose down -v
+  hooks:
+    pre_init:
+      run: echo "First run initialization"
+    pre_start:
+      run: echo "Kepler starting"
+    pre_stop:
+      command: ["echo", "Kepler stopping"]
+    pre_cleanup:
+      run: docker-compose down -v
 
 services:
   database:
@@ -254,13 +254,13 @@ services:
       timeout: 5s
       retries: 3
     hooks:
-      on_init:
+      pre_init:
         run: npm install
-      on_start:
-        command: ["echo", "Backend started"]
-      on_restart:
+      pre_start:
+        command: ["echo", "Backend starting"]
+      pre_restart:
         run: echo "Backend restarting..."
-      on_stop:
+      pre_stop:
         run: ./cleanup.sh
         user: daemon
 
@@ -285,10 +285,15 @@ services:
 
 | Hook | Description |
 |------|-------------|
-| `on_init` | Runs once when config is first used |
-| `on_start` | Runs when kepler starts |
-| `on_stop` | Runs when kepler stops |
-| `on_cleanup` | Runs when `--clean` flag is used |
+| `pre_init` | Runs once when config is first used (before first start) |
+| `post_init` | Runs once after all services start for the first time |
+| `pre_start` | Runs before services start |
+| `post_start` | Runs after all services have started |
+| `pre_stop` | Runs before services stop |
+| `post_stop` | Runs after all services have stopped |
+| `pre_restart` | Runs before full restart (all services) |
+| `post_restart` | Runs after full restart (all services) |
+| `pre_cleanup` | Runs when `--clean` flag is used |
 
 ### Service Options
 
@@ -450,22 +455,26 @@ services:
 
 | Hook | Description |
 |------|-------------|
-| `on_init` | Runs once when service first starts |
-| `on_start` | Runs before service starts |
-| `on_stop` | Runs before service stops |
-| `on_restart` | Runs before service restarts |
-| `on_exit` | Runs when service process exits |
-| `on_healthcheck_success` | Runs when service becomes healthy |
-| `on_healthcheck_fail` | Runs when service becomes unhealthy |
+| `pre_init` | Runs once when service first starts (before spawn) |
+| `post_init` | Runs once after service first spawns |
+| `pre_start` | Runs before service spawns |
+| `post_start` | Runs after service spawns |
+| `pre_stop` | Runs before service stops |
+| `post_stop` | Runs after service stops |
+| `pre_restart` | Runs before service restarts (before stop) |
+| `post_restart` | Runs after service restarts (after spawn) |
+| `post_exit` | Runs when service process exits |
+| `post_healthcheck_success` | Runs when service becomes healthy |
+| `post_healthcheck_fail` | Runs when service becomes unhealthy |
 
 **Hook format:**
 ```yaml
 hooks:
-  on_start:
+  pre_start:
     run: echo "starting"           # Shell script
-  on_stop:
+  pre_stop:
     command: ["echo", "stopping"]  # Command array
-  on_restart:
+  pre_restart:
     run: ./notify.sh
     user: admin                    # Run as specific user
     working_dir: ./scripts         # Override working dir

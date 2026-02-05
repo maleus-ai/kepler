@@ -90,9 +90,9 @@ services:
   test:
     command: ["sleep", "3600"]
     hooks:
-      on_healthcheck_success:
+      post_healthcheck_success:
         run: echo healthy
-      on_healthcheck_fail:
+      post_healthcheck_fail:
         run: echo unhealthy
 "#;
 
@@ -101,15 +101,15 @@ services:
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
 
-    assert!(hooks.on_healthcheck_success.is_some());
-    assert!(hooks.on_healthcheck_fail.is_some());
+    assert!(hooks.post_healthcheck_success.is_some());
+    assert!(hooks.post_healthcheck_fail.is_some());
 
-    match hooks.on_healthcheck_success.as_ref().unwrap() {
+    match hooks.post_healthcheck_success.as_ref().unwrap() {
         HookCommand::Script { run, .. } => assert_eq!(run, "echo healthy"),
         _ => panic!("Expected Script hook"),
     }
 
-    match hooks.on_healthcheck_fail.as_ref().unwrap() {
+    match hooks.post_healthcheck_fail.as_ref().unwrap() {
         HookCommand::Script { run, .. } => assert_eq!(run, "echo unhealthy"),
         _ => panic!("Expected Script hook"),
     }
@@ -176,7 +176,7 @@ services:
   test:
     command: ["sleep", "3600"]
     hooks:
-      on_start:
+      pre_start:
         run: echo hello && echo world
 "#;
 
@@ -184,7 +184,7 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
-    match hooks.on_start.as_ref().unwrap() {
+    match hooks.pre_start.as_ref().unwrap() {
         HookCommand::Script { run, .. } => {
             assert_eq!(run, "echo hello && echo world");
         }
@@ -203,7 +203,7 @@ services:
   test:
     command: ["sleep", "3600"]
     hooks:
-      on_start:
+      pre_start:
         command: ["echo", "hello", "world"]
 "#;
 
@@ -211,7 +211,7 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
-    match hooks.on_start.as_ref().unwrap() {
+    match hooks.pre_start.as_ref().unwrap() {
         HookCommand::Command { command, .. } => {
             assert_eq!(command, &vec!["echo", "hello", "world"]);
         }
@@ -228,13 +228,13 @@ fn test_global_hooks_parsing() {
     let yaml = r#"
 kepler:
   hooks:
-    on_init:
+    pre_init:
       run: echo global init
-    on_start:
+    pre_start:
       run: echo global start
-    on_stop:
+    pre_stop:
       run: echo global stop
-    on_cleanup:
+    pre_cleanup:
       run: echo global cleanup
 services:
   test:
@@ -245,10 +245,10 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.global_hooks().unwrap();
-    assert!(hooks.on_init.is_some());
-    assert!(hooks.on_start.is_some());
-    assert!(hooks.on_stop.is_some());
-    assert!(hooks.on_cleanup.is_some());
+    assert!(hooks.pre_init.is_some());
+    assert!(hooks.pre_start.is_some());
+    assert!(hooks.pre_stop.is_some());
+    assert!(hooks.pre_cleanup.is_some());
 }
 
 /// Restart policy parsing (simple form)
@@ -525,19 +525,19 @@ services:
   test:
     command: ["sleep", "3600"]
     hooks:
-      on_init:
+      pre_init:
         run: echo init
-      on_start:
+      pre_start:
         run: echo start
-      on_stop:
+      pre_stop:
         run: echo stop
-      on_restart:
+      pre_restart:
         run: echo restart
-      on_exit:
+      post_exit:
         run: echo exit
-      on_healthcheck_success:
+      post_healthcheck_success:
         run: echo healthy
-      on_healthcheck_fail:
+      post_healthcheck_fail:
         run: echo unhealthy
 "#;
 
@@ -545,13 +545,13 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
-    assert!(hooks.on_init.is_some());
-    assert!(hooks.on_start.is_some());
-    assert!(hooks.on_stop.is_some());
-    assert!(hooks.on_restart.is_some());
-    assert!(hooks.on_exit.is_some());
-    assert!(hooks.on_healthcheck_success.is_some());
-    assert!(hooks.on_healthcheck_fail.is_some());
+    assert!(hooks.pre_init.is_some());
+    assert!(hooks.pre_start.is_some());
+    assert!(hooks.pre_stop.is_some());
+    assert!(hooks.pre_restart.is_some());
+    assert!(hooks.post_exit.is_some());
+    assert!(hooks.post_healthcheck_success.is_some());
+    assert!(hooks.post_healthcheck_fail.is_some());
 }
 
 /// User/group configuration parsing
@@ -615,12 +615,12 @@ services:
     command: ["sleep", "3600"]
     user: appuser
     hooks:
-      on_start:
+      pre_start:
         run: echo starting
-      on_stop:
+      pre_stop:
         run: echo stopping
         user: daemon
-      on_restart:
+      pre_restart:
         command: ["echo", "restarting"]
         user: root
 "#;
@@ -631,19 +631,19 @@ services:
     let hooks = config.services["test"].hooks.as_ref().unwrap();
 
     // on_start has no user override (inherits from service)
-    match hooks.on_start.as_ref().unwrap() {
+    match hooks.pre_start.as_ref().unwrap() {
         HookCommand::Script { user, .. } => assert!(user.is_none()),
         _ => panic!("Expected Script hook"),
     }
 
     // on_stop has user: daemon
-    match hooks.on_stop.as_ref().unwrap() {
+    match hooks.pre_stop.as_ref().unwrap() {
         HookCommand::Script { user, .. } => assert_eq!(user.as_deref(), Some("daemon")),
         _ => panic!("Expected Script hook"),
     }
 
     // on_restart has user: root
-    match hooks.on_restart.as_ref().unwrap() {
+    match hooks.pre_restart.as_ref().unwrap() {
         HookCommand::Command { user, .. } => assert_eq!(user.as_deref(), Some("root")),
         _ => panic!("Expected Command hook"),
     }
@@ -660,13 +660,13 @@ services:
   test:
     command: ["sleep", "3600"]
     hooks:
-      on_start:
+      pre_start:
         run: echo "starting"
         environment:
           - HOOK_VAR=hook_value
           - DEBUG=true
         env_file: .env.hooks
-      on_stop:
+      pre_stop:
         command: ["echo", "stopping"]
         environment:
           - CLEANUP=deep
@@ -678,7 +678,7 @@ services:
     let hooks = config.services["test"].hooks.as_ref().unwrap();
 
     // on_start has environment and env_file
-    match hooks.on_start.as_ref().unwrap() {
+    match hooks.pre_start.as_ref().unwrap() {
         HookCommand::Script { environment, env_file, .. } => {
             assert_eq!(environment.len(), 2);
             assert_eq!(environment[0], "HOOK_VAR=hook_value");
@@ -689,7 +689,7 @@ services:
     }
 
     // on_stop has environment but no env_file
-    match hooks.on_stop.as_ref().unwrap() {
+    match hooks.pre_stop.as_ref().unwrap() {
         HookCommand::Command { environment, env_file, .. } => {
             assert_eq!(environment.len(), 1);
             assert_eq!(environment[0], "CLEANUP=deep");

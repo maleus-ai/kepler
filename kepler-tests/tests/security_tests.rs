@@ -212,7 +212,7 @@ async fn test_hook_inherits_service_user() {
 
     // Hook writes its UID to a marker file
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!("id -u > {}", uid_marker_path.display()),
             user: None, // Should inherit from service
             group: None,
@@ -294,7 +294,7 @@ async fn test_hook_user_override() {
 
     // Hook overrides the user with a different UID
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!("id -u > {}", uid_marker_path.display()),
             user: Some(hook_user.to_string()), // Override service user with different UID
             group: None,

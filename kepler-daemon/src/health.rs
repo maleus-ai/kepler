@@ -139,13 +139,13 @@ async fn run_status_change_hook(
             if previous_status == ServiceStatus::Running
                 || previous_status == ServiceStatus::Unhealthy =>
         {
-            Some(ServiceHookType::OnHealthcheckSuccess)
+            Some(ServiceHookType::PostHealthcheckSuccess)
         }
         ServiceStatus::Unhealthy
             if previous_status == ServiceStatus::Running
                 || previous_status == ServiceStatus::Healthy =>
         {
-            Some(ServiceHookType::OnHealthcheckFail)
+            Some(ServiceHookType::PostHealthcheckFail)
         }
         _ => None,
     };

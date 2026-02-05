@@ -103,9 +103,9 @@ async fn run() -> Result<()> {
             handle_response(response);
         }
 
-        Commands::Restart { service } => {
+        Commands::Restart { services } => {
             let sys_env: HashMap<String, String> = std::env::vars().collect();
-            let response = client.restart(canonical_path, service, Some(sys_env)).await?;
+            let response = client.restart(canonical_path, services, Some(sys_env)).await?;
             handle_response(response);
         }
 
@@ -757,7 +757,7 @@ const SERVICE_COLORS: &[Color] = &[
 ];
 
 fn get_base_service_name(service: &str) -> &str {
-    // Extract base service name from hook patterns like "[backend.on_start]"
+    // Extract base service name from hook patterns like "[backend.pre_start]"
     if service.starts_with('[') && service.ends_with(']') {
         let inner = &service[1..service.len() - 1];
         if let Some(dot_pos) = inner.find('.') {

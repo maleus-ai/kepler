@@ -14,7 +14,7 @@ async fn test_script_format_hook() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!("touch {}", marker.marker_path("script").display()),
             user: None,
             group: None,
@@ -58,7 +58,7 @@ async fn test_command_format_hook() {
     let marker_path = marker.marker_path("command");
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Command {
+        pre_start: Some(HookCommand::Command {
             command: vec![
                 "touch".to_string(),
                 marker_path.to_string_lossy().to_string(),
@@ -105,7 +105,7 @@ async fn test_hook_environment_variables() {
     let marker_path = marker.marker_path("env");
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!("echo \"TEST_VAR=$TEST_VAR\" >> {}", marker_path.display()),
             user: None,
             group: None,
@@ -159,7 +159,7 @@ async fn test_hook_working_directory() {
     let marker_path = marker.marker_path("pwd");
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!("pwd >> {}", marker_path.display()),
             user: None,
             group: None,
@@ -211,10 +211,10 @@ async fn test_all_service_hook_types() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        on_init: Some(marker.create_timestamped_marker_hook("on_init")),
-        on_start: Some(marker.create_timestamped_marker_hook("on_start")),
-        on_stop: Some(marker.create_timestamped_marker_hook("on_stop")),
-        on_exit: Some(marker.create_timestamped_marker_hook("on_exit")),
+        pre_init: Some(marker.create_timestamped_marker_hook("on_init")),
+        pre_start: Some(marker.create_timestamped_marker_hook("on_start")),
+        pre_stop: Some(marker.create_timestamped_marker_hook("on_stop")),
+        post_exit: Some(marker.create_timestamped_marker_hook("on_exit")),
         ..Default::default()
     };
 
@@ -264,8 +264,8 @@ async fn test_on_init_fires_once() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        on_init: Some(marker.create_timestamped_marker_hook("on_init")),
-        on_start: Some(marker.create_timestamped_marker_hook("on_start")),
+        pre_init: Some(marker.create_timestamped_marker_hook("on_init")),
+        pre_start: Some(marker.create_timestamped_marker_hook("on_start")),
         ..Default::default()
     };
 
@@ -330,7 +330,7 @@ async fn test_hook_failure_doesnt_block_service() {
     let temp_dir = TempDir::new().unwrap();
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: "exit 1".to_string(), // Always fails
             user: None,
             group: None,
@@ -370,7 +370,7 @@ async fn test_hook_execution_order() {
     let order_file = temp_dir.path().join("order.txt");
 
     let hooks = ServiceHooks {
-        on_init: Some(HookCommand::Script {
+        pre_init: Some(HookCommand::Script {
             run: format!("echo 'init' >> {}", order_file.display()),
             user: None,
             group: None,
@@ -378,7 +378,7 @@ async fn test_hook_execution_order() {
             environment: Vec::new(),
             env_file: None,
         }),
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!("echo 'start' >> {}", order_file.display()),
             user: None,
             group: None,
@@ -425,7 +425,7 @@ async fn test_hook_own_environment_variables() {
     let marker_path = marker.marker_path("hook_env");
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!("echo \"HOOK_VAR=$HOOK_VAR\" >> {}", marker_path.display()),
             user: None,
             group: None,
@@ -479,7 +479,7 @@ async fn test_hook_env_file() {
     std::fs::write(&env_file_path, "HOOK_FILE_VAR=from_env_file\n").unwrap();
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!("echo \"HOOK_FILE_VAR=$HOOK_FILE_VAR\" >> {}", marker_path.display()),
             user: None,
             group: None,
@@ -533,7 +533,7 @@ async fn test_hook_env_overrides_service_env() {
     let marker_path = marker.marker_path("override_test");
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!("echo SHARED_VAR=$(printenv SHARED_VAR) >> {}", marker_path.display()),
             user: None,
             group: None,
@@ -584,7 +584,7 @@ async fn test_hook_env_expansion_with_service_env() {
     let marker_path = marker.marker_path("expansion_test");
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!("echo \"COMBINED=$COMBINED\" >> {}", marker_path.display()),
             user: None,
             group: None,
@@ -647,7 +647,7 @@ async fn test_hook_env_priority() {
     std::fs::write(&hook_env_file, "VAR2=hook_file\nVAR3=hook_file\n").unwrap();
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!(
                 "echo VAR1=$(printenv VAR1) >> {} && echo VAR2=$(printenv VAR2) >> {} && echo VAR3=$(printenv VAR3) >> {}",
                 marker_path.display(),
@@ -724,7 +724,7 @@ async fn test_log_output_disabled() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!(
                 "echo 'HOOK_SECRET_OUTPUT' && touch {}",
                 marker.marker_path("hook_done").display()
@@ -788,7 +788,7 @@ async fn test_log_output_enabled() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        on_start: Some(HookCommand::Script {
+        pre_start: Some(HookCommand::Script {
             run: format!(
                 "echo 'HOOK_VISIBLE_OUTPUT' && touch {}",
                 marker.marker_path("hook_done").display()

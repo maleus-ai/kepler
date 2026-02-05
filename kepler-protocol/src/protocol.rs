@@ -53,8 +53,9 @@ pub enum Request {
     Restart {
         /// Path to the config file
         config_path: PathBuf,
-        /// Service name (None = all services)
-        service: Option<String>,
+        /// Services to restart (empty = all running services)
+        #[serde(default)]
+        services: Vec<String>,
         /// System environment variables captured from CLI (for re-baking config snapshot)
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,

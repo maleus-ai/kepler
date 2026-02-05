@@ -167,7 +167,7 @@ impl TestDaemonHarness {
         if should_run_init {
             run_service_hook(
                 &ctx.service_config.hooks,
-                ServiceHookType::OnInit,
+                ServiceHookType::PreInit,
                 service_name,
                 &hook_params,
             )
@@ -182,7 +182,7 @@ impl TestDaemonHarness {
         // Run on_start hook
         run_service_hook(
             &ctx.service_config.hooks,
-            ServiceHookType::OnStart,
+            ServiceHookType::PreStart,
             service_name,
             &hook_params,
         )
@@ -277,7 +277,7 @@ impl TestDaemonHarness {
 
         run_service_hook(
             &ctx.service_config.hooks,
-            ServiceHookType::OnStop,
+            ServiceHookType::PreStop,
             service_name,
             &hook_params,
         )
@@ -349,7 +349,7 @@ impl TestDaemonHarness {
 
                 let _ = run_service_hook(
                     &ctx.service_config.hooks,
-                    ServiceHookType::OnRestart,
+                    ServiceHookType::PreRestart,
                     &event.service_name,
                     &hook_params,
                 )
@@ -440,7 +440,7 @@ impl TestDaemonHarness {
 
                 let _ = run_service_hook(
                     &ctx.service_config.hooks,
-                    ServiceHookType::OnExit,
+                    ServiceHookType::PostExit,
                     &event.service_name,
                     &hook_params,
                 )
@@ -478,7 +478,7 @@ impl TestDaemonHarness {
                     // Run on_restart hook
                     let _ = run_service_hook(
                         &ctx.service_config.hooks,
-                        ServiceHookType::OnRestart,
+                        ServiceHookType::PreRestart,
                         &event.service_name,
                         &hook_params,
                     )

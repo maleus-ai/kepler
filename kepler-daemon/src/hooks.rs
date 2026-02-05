@@ -58,19 +58,29 @@ impl<'a> ServiceHookParams<'a> {
 /// Types of global hooks
 #[derive(Debug, Clone, Copy)]
 pub enum GlobalHookType {
-    OnInit,
-    OnStart,
-    OnStop,
-    OnCleanup,
+    PreInit,
+    PostInit,
+    PreStart,
+    PostStart,
+    PreStop,
+    PostStop,
+    PreRestart,
+    PostRestart,
+    PreCleanup,
 }
 
 impl GlobalHookType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            GlobalHookType::OnInit => "on_init",
-            GlobalHookType::OnStart => "on_start",
-            GlobalHookType::OnStop => "on_stop",
-            GlobalHookType::OnCleanup => "on_cleanup",
+            GlobalHookType::PreInit => "pre_init",
+            GlobalHookType::PostInit => "post_init",
+            GlobalHookType::PreStart => "pre_start",
+            GlobalHookType::PostStart => "post_start",
+            GlobalHookType::PreStop => "pre_stop",
+            GlobalHookType::PostStop => "post_stop",
+            GlobalHookType::PreRestart => "pre_restart",
+            GlobalHookType::PostRestart => "post_restart",
+            GlobalHookType::PreCleanup => "pre_cleanup",
         }
     }
 }
@@ -84,25 +94,33 @@ impl std::fmt::Display for GlobalHookType {
 /// Types of service hooks
 #[derive(Debug, Clone, Copy)]
 pub enum ServiceHookType {
-    OnInit,
-    OnStart,
-    OnStop,
-    OnRestart,
-    OnExit,
-    OnHealthcheckSuccess,
-    OnHealthcheckFail,
+    PreInit,
+    PostInit,
+    PreStart,
+    PostStart,
+    PreStop,
+    PostStop,
+    PreRestart,
+    PostRestart,
+    PostExit,
+    PostHealthcheckSuccess,
+    PostHealthcheckFail,
 }
 
 impl ServiceHookType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ServiceHookType::OnInit => "on_init",
-            ServiceHookType::OnStart => "on_start",
-            ServiceHookType::OnStop => "on_stop",
-            ServiceHookType::OnRestart => "on_restart",
-            ServiceHookType::OnExit => "on_exit",
-            ServiceHookType::OnHealthcheckSuccess => "on_healthcheck_success",
-            ServiceHookType::OnHealthcheckFail => "on_healthcheck_fail",
+            ServiceHookType::PreInit => "pre_init",
+            ServiceHookType::PostInit => "post_init",
+            ServiceHookType::PreStart => "pre_start",
+            ServiceHookType::PostStart => "post_start",
+            ServiceHookType::PreStop => "pre_stop",
+            ServiceHookType::PostStop => "post_stop",
+            ServiceHookType::PreRestart => "pre_restart",
+            ServiceHookType::PostRestart => "post_restart",
+            ServiceHookType::PostExit => "post_exit",
+            ServiceHookType::PostHealthcheckSuccess => "post_healthcheck_success",
+            ServiceHookType::PostHealthcheckFail => "post_healthcheck_fail",
         }
     }
 }
@@ -218,10 +236,15 @@ pub async fn run_global_hook(
     };
 
     let hook = match hook_type {
-        GlobalHookType::OnInit => &hooks.on_init,
-        GlobalHookType::OnStart => &hooks.on_start,
-        GlobalHookType::OnStop => &hooks.on_stop,
-        GlobalHookType::OnCleanup => &hooks.on_cleanup,
+        GlobalHookType::PreInit => &hooks.pre_init,
+        GlobalHookType::PostInit => &hooks.post_init,
+        GlobalHookType::PreStart => &hooks.pre_start,
+        GlobalHookType::PostStart => &hooks.post_start,
+        GlobalHookType::PreStop => &hooks.pre_stop,
+        GlobalHookType::PostStop => &hooks.post_stop,
+        GlobalHookType::PreRestart => &hooks.pre_restart,
+        GlobalHookType::PostRestart => &hooks.post_restart,
+        GlobalHookType::PreCleanup => &hooks.pre_cleanup,
     };
 
     if let Some(hook) = hook {
@@ -264,13 +287,17 @@ pub async fn run_service_hook(
     };
 
     let hook = match hook_type {
-        ServiceHookType::OnInit => &hooks.on_init,
-        ServiceHookType::OnStart => &hooks.on_start,
-        ServiceHookType::OnStop => &hooks.on_stop,
-        ServiceHookType::OnRestart => &hooks.on_restart,
-        ServiceHookType::OnExit => &hooks.on_exit,
-        ServiceHookType::OnHealthcheckSuccess => &hooks.on_healthcheck_success,
-        ServiceHookType::OnHealthcheckFail => &hooks.on_healthcheck_fail,
+        ServiceHookType::PreInit => &hooks.pre_init,
+        ServiceHookType::PostInit => &hooks.post_init,
+        ServiceHookType::PreStart => &hooks.pre_start,
+        ServiceHookType::PostStart => &hooks.post_start,
+        ServiceHookType::PreStop => &hooks.pre_stop,
+        ServiceHookType::PostStop => &hooks.post_stop,
+        ServiceHookType::PreRestart => &hooks.pre_restart,
+        ServiceHookType::PostRestart => &hooks.post_restart,
+        ServiceHookType::PostExit => &hooks.post_exit,
+        ServiceHookType::PostHealthcheckSuccess => &hooks.post_healthcheck_success,
+        ServiceHookType::PostHealthcheckFail => &hooks.post_healthcheck_fail,
     };
 
     if let Some(hook) = hook {

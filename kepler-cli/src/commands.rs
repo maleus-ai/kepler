@@ -23,8 +23,9 @@ pub enum Commands {
     },
     /// Restart services (requires daemon to be running)
     Restart {
-        /// Specific service to restart (restarts all if not specified)
-        service: Option<String>,
+        /// Services to restart (restarts all running services if none specified)
+        #[arg(value_name = "SERVICE")]
+        services: Vec<String>,
     },
     /// View service logs
     Logs {

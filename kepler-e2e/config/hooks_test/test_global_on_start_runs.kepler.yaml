@@ -2,9 +2,9 @@ kepler:
   logs:
     buffer_size: 0
   hooks:
-    on_start:
+    pre_start:
       run: |
-        echo "ON_START_RAN" >> __MARKER_FILE__
+        echo "PRE_START_RAN" >> __MARKER_FILE__
 
 services:
   start-hook-service:

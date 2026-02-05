@@ -7,6 +7,6 @@ services:
     command: ["sh", "-c", "echo Starting; sleep 1; exit 0"]
     restart: no
     hooks:
-      on_exit:
+      post_exit:
         run: |
-          echo "SERVICE_ON_EXIT_RAN" >> __MARKER_FILE__
+          echo "SERVICE_POST_EXIT_RAN" >> __MARKER_FILE__

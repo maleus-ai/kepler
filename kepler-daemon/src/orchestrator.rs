@@ -30,15 +30,15 @@ use crate::watcher::{spawn_file_watcher, FileChangeEvent};
 /// Lifecycle events that trigger different hook/retention combinations
 #[derive(Debug, Clone, Copy)]
 pub enum LifecycleEvent {
-    /// First start - on_init hook
+    /// First start - pre_init/post_init hooks
     Init,
-    /// Normal start - on_start hook, on_start retention
+    /// Normal start - pre_start/post_start hooks, on_start retention
     Start,
-    /// Normal stop - on_stop hook, on_stop retention
+    /// Normal stop - pre_stop/post_stop hooks, on_stop retention
     Stop,
-    /// Restart - on_restart hook, on_restart retention
+    /// Restart - pre_restart/post_restart hooks, on_restart retention
     Restart,
-    /// Process exit - on_exit hook, on_exit retention + auto-restart logic
+    /// Process exit - post_exit hook, on_exit retention + auto-restart logic
     Exit,
 }
 
@@ -160,27 +160,25 @@ impl ServiceOrchestrator {
         let global_log_config = config.global_logs().cloned();
         let initialized = handle.is_config_initialized().await;
 
-        // Run global on_init hook if first time
+        // Run global pre_init hook if first time
         if !initialized {
             let env = sys_env.clone().unwrap_or_else(|| std::env::vars().collect());
             run_global_hook(
                 &global_hooks,
-                GlobalHookType::OnInit,
+                GlobalHookType::PreInit,
                 &config_dir,
                 &env,
                 Some(&log_config),
                 global_log_config.as_ref(),
             )
             .await?;
-
-            handle.mark_config_initialized().await?;
         }
 
-        // Run global on_start hook
+        // Run global pre_start hook
         let env = sys_env.clone().unwrap_or_else(|| std::env::vars().collect());
         run_global_hook(
             &global_hooks,
-            GlobalHookType::OnStart,
+            GlobalHookType::PreStart,
             &config_dir,
             &env,
             Some(&log_config),
@@ -277,6 +275,39 @@ impl ServiceOrchestrator {
                 self_arc.spawn_event_handler(config_path_owned, handle_clone).await;
                 handle.set_event_handler_spawned().await;
             }
+
+            // Run global post_start hook (after all services started)
+            let env = sys_env.clone().unwrap_or_else(|| std::env::vars().collect());
+            if let Err(e) = run_global_hook(
+                &global_hooks,
+                GlobalHookType::PostStart,
+                &config_dir,
+                &env,
+                Some(&log_config),
+                global_log_config.as_ref(),
+            )
+            .await
+            {
+                warn!("Global post_start hook failed: {}", e);
+            }
+
+            // Run global post_init hook if first time (after all services started)
+            if !initialized {
+                if let Err(e) = run_global_hook(
+                    &global_hooks,
+                    GlobalHookType::PostInit,
+                    &config_dir,
+                    &env,
+                    Some(&log_config),
+                    global_log_config.as_ref(),
+                )
+                .await
+                {
+                    warn!("Global post_init hook failed: {}", e);
+                }
+
+                handle.mark_config_initialized().await?;
+            }
         }
 
         if started.is_empty() {
@@ -307,24 +338,22 @@ impl ServiceOrchestrator {
             .set_service_status(service_name, ServiceStatus::Starting)
             .await;
 
-        // Run on_init hook if first time for this service
+        // Run pre_init hook if first time for this service
         let service_initialized = handle.is_service_initialized(service_name).await;
 
         if !service_initialized {
             // Emit Init event
             handle.emit_event(service_name, ServiceEvent::Init).await;
 
-            self.run_service_hook(&ctx, service_name, ServiceHookType::OnInit)
+            self.run_service_hook(&ctx, service_name, ServiceHookType::PreInit)
                 .await?;
-
-            handle.mark_service_initialized(service_name).await?;
         }
 
         // Emit Start event
         handle.emit_event(service_name, ServiceEvent::Start).await;
 
-        // Run on_start hook
-        self.run_service_hook(&ctx, service_name, ServiceHookType::OnStart)
+        // Run pre_start hook
+        self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart)
             .await?;
 
         // Apply on_start log retention
@@ -333,6 +362,20 @@ impl ServiceOrchestrator {
 
         // Spawn process
         self.spawn_service(handle, service_name, &ctx).await?;
+
+        // Run post_start hook (after process spawned)
+        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart).await {
+            warn!("Hook post_start failed for {}: {}", service_name, e);
+        }
+
+        // Run post_init hook if first time (after process spawned)
+        if !service_initialized {
+            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostInit).await {
+                warn!("Hook post_init failed for {}: {}", service_name, e);
+            }
+
+            handle.mark_service_initialized(service_name).await?;
+        }
 
         // Spawn auxiliary tasks
         self.spawn_auxiliary_tasks(handle, service_name, &ctx).await;
@@ -390,7 +433,7 @@ impl ServiceOrchestrator {
     /// If `service_filter` is provided, only stops that service.
     /// Otherwise stops all services in reverse dependency order.
     ///
-    /// If `clean` is true, also runs on_cleanup hooks and retention.
+    /// If `clean` is true, also runs pre_cleanup hooks and retention.
     pub async fn stop_services(
         &self,
         config_path: &Path,
@@ -434,6 +477,25 @@ impl ServiceOrchestrator {
         let global_log_config = config.global_logs().cloned();
         let global_hooks = config.global_hooks().cloned();
 
+        // Run global pre_stop hook if stopping all services
+        if service_filter.is_none() {
+            if let Some(ref log_cfg) = log_config {
+                let env = std::env::vars().collect();
+                if let Err(e) = run_global_hook(
+                    &global_hooks,
+                    GlobalHookType::PreStop,
+                    &config_dir,
+                    &env,
+                    Some(log_cfg),
+                    global_log_config.as_ref(),
+                )
+                .await
+                {
+                    warn!("Global pre_stop hook failed: {}", e);
+                }
+            }
+        }
+
         let mut stopped = Vec::new();
 
         // Stop services in reverse dependency order
@@ -449,13 +511,15 @@ impl ServiceOrchestrator {
             handle.emit_event(service_name, ServiceEvent::Stop).await;
 
             // Get service context
-            if let Some(ctx) = handle.get_service_context(service_name).await {
-                // Run on_stop hook
+            let ctx = handle.get_service_context(service_name).await;
+
+            if let Some(ref ctx) = ctx {
+                // Run pre_stop hook
                 if let Err(e) = self
-                    .run_service_hook(&ctx, service_name, ServiceHookType::OnStop)
+                    .run_service_hook(ctx, service_name, ServiceHookType::PreStop)
                     .await
                 {
-                    warn!("Hook on_stop failed for {}: {}", service_name, e);
+                    warn!("Hook pre_stop failed for {}: {}", service_name, e);
                 }
             }
 
@@ -464,16 +528,26 @@ impl ServiceOrchestrator {
                 .await
                 .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
 
+            // Run post_stop hook (after process stopped)
+            if let Some(ref ctx) = ctx {
+                if let Err(e) = self
+                    .run_service_hook(ctx, service_name, ServiceHookType::PostStop)
+                    .await
+                {
+                    warn!("Hook post_stop failed for {}: {}", service_name, e);
+                }
+            }
+
             stopped.push(service_name.clone());
         }
 
-        // Run global on_stop hook if stopping all and services were stopped
+        // Run global post_stop hook if stopping all and services were stopped
         if service_filter.is_none() && !stopped.is_empty() {
             if let Some(ref log_cfg) = log_config {
                 let env = std::env::vars().collect();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
-                    GlobalHookType::OnStop,
+                    GlobalHookType::PostStop,
                     &config_dir,
                     &env,
                     Some(log_cfg),
@@ -481,12 +555,12 @@ impl ServiceOrchestrator {
                 )
                 .await
                 {
-                    warn!("Hook on_stop failed: {}", e);
+                    warn!("Global post_stop hook failed: {}", e);
                 }
             }
         }
 
-        // Run on_cleanup if requested
+        // Run pre_cleanup if requested
         if service_filter.is_none() && clean {
             info!("Running cleanup hooks");
 
@@ -499,7 +573,7 @@ impl ServiceOrchestrator {
                 let env = std::env::vars().collect();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
-                    GlobalHookType::OnCleanup,
+                    GlobalHookType::PreCleanup,
                     &config_dir,
                     &env,
                     Some(log_cfg),
@@ -507,7 +581,7 @@ impl ServiceOrchestrator {
                 )
                 .await
                 {
-                    error!("Cleanup hook failed: {}", e);
+                    error!("pre_cleanup hook failed: {}", e);
                 }
             }
         }
@@ -594,26 +668,77 @@ impl ServiceOrchestrator {
 
     /// Restart services for a config
     ///
-    /// If `service_filter` is provided, only restarts that service.
-    /// Otherwise restarts all services with fresh config (re-expands environment variables).
+    /// If `services` is empty, restarts all RUNNING services with fresh config.
+    /// Otherwise restarts only the specified RUNNING services.
     ///
     /// This method now incorporates the old "recreate" behavior:
-    /// 1. Stop services
-    /// 2. Clear config snapshot to force re-expansion
-    /// 3. Unload config actor
-    /// 4. Start services with fresh sys_env
+    /// 1. Run global pre_restart hook (for full restart only)
+    /// 2. Stop services
+    /// 3. Clear config snapshot to force re-expansion
+    /// 4. Unload config actor
+    /// 5. Start services with fresh sys_env
+    /// 6. Run global post_restart hook (for full restart only)
     pub async fn restart_services(
         &self,
         config_path: &Path,
-        service_filter: Option<&str>,
+        services: &[String],
         sys_env: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
         info!("Restarting services for {:?}", config_path);
 
+        let is_full_restart = services.is_empty();
+        let config_dir = config_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+        // Get handle for hooks and to check running services
+        let handle = self.registry.get(&config_path.to_path_buf());
+        let (global_hooks, global_log_config, log_config) = if let Some(ref h) = handle {
+            let config = h.get_config().await;
+            let log_cfg = h.get_log_config().await;
+            (
+                config.as_ref().and_then(|c| c.global_hooks().cloned()),
+                config.as_ref().and_then(|c| c.global_logs().cloned()),
+                log_cfg,
+            )
+        } else {
+            (None, None, None)
+        };
+
+        // Run global pre_restart hook for full restart
+        if is_full_restart {
+            if let Some(ref log_cfg) = log_config {
+                let env = sys_env.clone().unwrap_or_else(|| std::env::vars().collect());
+                if let Err(e) = run_global_hook(
+                    &global_hooks,
+                    GlobalHookType::PreRestart,
+                    &config_dir,
+                    &env,
+                    Some(log_cfg),
+                    global_log_config.as_ref(),
+                )
+                .await
+                {
+                    warn!("Global pre_restart hook failed: {}", e);
+                }
+            }
+        }
+
         // Stop services first
-        let stop_result = self.stop_services(config_path, service_filter, false).await;
-        if let Err(e) = &stop_result {
-            warn!("Error stopping services during restart: {}", e);
+        if is_full_restart {
+            let stop_result = self.stop_services(config_path, None, false).await;
+            if let Err(e) = &stop_result {
+                warn!("Error stopping services during restart: {}", e);
+            }
+        } else {
+            // Stop only specified running services
+            for service_name in services {
+                let stop_result = self.stop_services(config_path, Some(service_name), false).await;
+                if let Err(e) = &stop_result {
+                    warn!("Error stopping service {} during restart: {}", service_name, e);
+                }
+            }
         }
 
         // Clear snapshot to force re-expansion with new env
@@ -629,7 +754,46 @@ impl ServiceOrchestrator {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         // Start services with fresh config and sys_env
-        self.start_services(config_path, service_filter, sys_env).await
+        let start_result = if is_full_restart {
+            self.start_services(config_path, None, sys_env.clone()).await
+        } else {
+            // Start only specified services
+            let mut started = Vec::new();
+            for service_name in services {
+                match self.start_services(config_path, Some(service_name), sys_env.clone()).await {
+                    Ok(msg) => started.push(msg),
+                    Err(e) => warn!("Error starting service {} during restart: {}", service_name, e),
+                }
+            }
+            Ok(format!("Restarted services: {}", services.join(", ")))
+        };
+
+        // Run global post_restart hook for full restart
+        if is_full_restart {
+            // Re-get handle after reload
+            if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
+                if let Some(log_cfg) = handle.get_log_config().await {
+                    let config = handle.get_config().await;
+                    let global_hooks = config.as_ref().and_then(|c| c.global_hooks().cloned());
+                    let global_log_config = config.as_ref().and_then(|c| c.global_logs().cloned());
+                    let env = sys_env.unwrap_or_else(|| std::env::vars().collect());
+                    if let Err(e) = run_global_hook(
+                        &global_hooks,
+                        GlobalHookType::PostRestart,
+                        &config_dir,
+                        &env,
+                        Some(&log_cfg),
+                        global_log_config.as_ref(),
+                    )
+                    .await
+                    {
+                        warn!("Global post_restart hook failed: {}", e);
+                    }
+                }
+            }
+        }
+
+        start_result
     }
 
 
@@ -676,12 +840,20 @@ impl ServiceOrchestrator {
             .await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
-        // Run on_restart hook
+        // Run pre_restart hook
         if let Err(e) = self
-            .run_service_hook(&ctx, service_name, ServiceHookType::OnRestart)
+            .run_service_hook(&ctx, service_name, ServiceHookType::PreRestart)
             .await
         {
-            warn!("Hook on_restart failed for {}: {}", service_name, e);
+            warn!("Hook pre_restart failed for {}: {}", service_name, e);
+        }
+
+        // Run pre_stop hook
+        if let Err(e) = self
+            .run_service_hook(&ctx, service_name, ServiceHookType::PreStop)
+            .await
+        {
+            warn!("Hook pre_stop failed for {}: {}", service_name, e);
         }
 
         // Apply on_restart log retention
@@ -692,6 +864,14 @@ impl ServiceOrchestrator {
         stop_service(service_name, handle.clone())
             .await
             .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
+
+        // Run post_stop hook (after process stopped)
+        if let Err(e) = self
+            .run_service_hook(&ctx, service_name, ServiceHookType::PostStop)
+            .await
+        {
+            warn!("Hook post_stop failed for {}: {}", service_name, e);
+        }
 
         // Small delay between stop and start
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -705,8 +885,8 @@ impl ServiceOrchestrator {
         // Emit Start event (restart includes a start)
         handle.emit_event(service_name, ServiceEvent::Start).await;
 
-        // Run on_start hook (runs on every start, including restarts)
-        self.run_service_hook(&ctx, service_name, ServiceHookType::OnStart)
+        // Run pre_start hook (runs on every start, including restarts)
+        self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart)
             .await?;
 
         // Apply on_start log retention
@@ -715,6 +895,16 @@ impl ServiceOrchestrator {
 
         // Spawn the service
         self.spawn_service(&handle, service_name, &ctx).await?;
+
+        // Run post_start hook (after process spawned)
+        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart).await {
+            warn!("Hook post_start failed for {}: {}", service_name, e);
+        }
+
+        // Run post_restart hook (after restart complete)
+        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart).await {
+            warn!("Hook post_restart failed for {}: {}", service_name, e);
+        }
 
         // Spawn auxiliary tasks (health checker, file watcher)
         self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
@@ -733,10 +923,10 @@ impl ServiceOrchestrator {
     ///
     /// This method:
     /// - Records the exit in state
-    /// - Runs on_exit hook
+    /// - Runs post_exit hook
     /// - Applies on_exit log retention
     /// - Determines if restart is needed based on policy
-    /// - If restarting: runs on_restart hook, applies retention, spawns new process
+    /// - If restarting: runs pre_restart/pre_start/post_start/post_restart hooks
     pub async fn handle_exit(
         &self,
         config_path: &Path,
@@ -762,12 +952,12 @@ impl ServiceOrchestrator {
         // Record process exit in state
         let _ = handle.record_process_exit(service_name, exit_code).await;
 
-        // Run on_exit hook
+        // Run post_exit hook
         if let Err(e) = self
-            .run_service_hook(&ctx, service_name, ServiceHookType::OnExit)
+            .run_service_hook(&ctx, service_name, ServiceHookType::PostExit)
             .await
         {
-            warn!("Hook on_exit failed for {}: {}", service_name, e);
+            warn!("Hook post_exit failed for {}: {}", service_name, e);
         }
 
         // Apply on_exit log retention
@@ -803,12 +993,20 @@ impl ServiceOrchestrator {
                 ctx.service_config.restart.policy()
             );
 
-            // Run on_restart hook
+            // Run pre_restart hook
             if let Err(e) = self
-                .run_service_hook(&ctx, service_name, ServiceHookType::OnRestart)
+                .run_service_hook(&ctx, service_name, ServiceHookType::PreRestart)
                 .await
             {
-                warn!("Hook on_restart failed for {}: {}", service_name, e);
+                warn!("Hook pre_restart failed for {}: {}", service_name, e);
+            }
+
+            // Run pre_start hook
+            if let Err(e) = self
+                .run_service_hook(&ctx, service_name, ServiceHookType::PreStart)
+                .await
+            {
+                warn!("Hook pre_start failed for {}: {}", service_name, e);
             }
 
             // Apply on_restart log retention
@@ -824,6 +1022,16 @@ impl ServiceOrchestrator {
             // Spawn new process
             match self.spawn_service(&handle, service_name, &ctx).await {
                 Ok(()) => {
+                    // Run post_start hook (after process spawned)
+                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart).await {
+                        warn!("Hook post_start failed for {}: {}", service_name, e);
+                    }
+
+                    // Run post_restart hook (after restart complete)
+                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart).await {
+                        warn!("Hook post_restart failed for {}: {}", service_name, e);
+                    }
+
                     let _ = handle
                         .set_service_status(service_name, ServiceStatus::Running)
                         .await;
@@ -1143,7 +1351,7 @@ impl ServiceOrchestrator {
         Ok(results)
     }
 
-    /// Run cleanup hook before pruning
+    /// Run pre_cleanup hook before pruning
     async fn run_cleanup_hook_for_prune(&self, config_file: &Path) {
         // Use daemon's current environment for cleanup hooks during prune
         let daemon_env: HashMap<String, String> = std::env::vars().collect();
@@ -1153,7 +1361,7 @@ impl ServiceOrchestrator {
 
             if let Err(e) = run_global_hook(
                 &config.global_hooks().cloned(),
-                GlobalHookType::OnCleanup,
+                GlobalHookType::PreCleanup,
                 config_dir,
                 &env,
                 None, // No log buffer for prune
@@ -1161,7 +1369,7 @@ impl ServiceOrchestrator {
             )
             .await
             {
-                warn!("Cleanup hook failed: {}", e);
+                warn!("pre_cleanup hook failed: {}", e);
             }
         }
     }

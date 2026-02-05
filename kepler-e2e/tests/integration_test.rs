@@ -124,13 +124,13 @@ async fn test_full_lifecycle() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "full-lifecycle-service", "healthy", Duration::from_secs(15))
         .await?;
 
-    // Verify on_start hook ran (poll for content)
+    // Verify pre_start hook ran (poll for content)
     let marker_content = harness
-        .wait_for_file_content(&marker_file, "ON_START_HOOK", Duration::from_secs(10))
+        .wait_for_file_content(&marker_file, "PRE_START_HOOK", Duration::from_secs(10))
         .await?;
     assert!(
-        marker_content.contains("ON_START_HOOK"),
-        "on_start hook should have run. Content: {}",
+        marker_content.contains("PRE_START_HOOK"),
+        "pre_start hook should have run. Content: {}",
         marker_content
     );
 
@@ -166,13 +166,13 @@ async fn test_full_lifecycle() -> E2eResult<()> {
     // Stop and verify on_stop hook
     harness.stop_services(&config_path).await?;
 
-    // Wait for on_stop hook to complete (poll for content)
+    // Wait for pre_stop hook to complete (poll for content)
     let marker_content = harness
-        .wait_for_file_content(&marker_file, "ON_STOP_HOOK", Duration::from_secs(10))
+        .wait_for_file_content(&marker_file, "PRE_STOP_HOOK", Duration::from_secs(10))
         .await?;
     assert!(
-        marker_content.contains("ON_STOP_HOOK"),
-        "on_stop hook should have run. Content: {}",
+        marker_content.contains("PRE_STOP_HOOK"),
+        "pre_stop hook should have run. Content: {}",
         marker_content
     );
 

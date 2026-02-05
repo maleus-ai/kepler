@@ -6,6 +6,6 @@ services:
   svc-start-hook-service:
     command: ["sh", "-c", "echo Starting; sleep 300"]
     hooks:
-      on_start:
+      pre_start:
         run: |
-          echo "SERVICE_ON_START_RAN" >> __MARKER_FILE__
+          echo "SERVICE_PRE_START_RAN" >> __MARKER_FILE__

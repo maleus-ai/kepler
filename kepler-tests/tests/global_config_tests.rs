@@ -129,13 +129,13 @@ kepler:
   logs:
     timestamp: true
     retention:
-      on_stop: retain
-      on_start: retain
+      pre_stop: retain
+      pre_start: retain
     max_size: 10M
   hooks:
-    on_init:
+    pre_init:
       run: echo "Kepler starting"
-    on_stop:
+    pre_stop:
       run: echo "Kepler stopping"
 
 services:
@@ -167,8 +167,8 @@ services:
     // Verify hooks
     assert!(kepler.hooks.is_some(), "kepler.hooks should exist");
     let hooks = kepler.hooks.as_ref().unwrap();
-    assert!(hooks.on_init.is_some(), "on_init hook should exist");
-    assert!(hooks.on_stop.is_some(), "on_stop hook should exist");
+    assert!(hooks.pre_init.is_some(), "on_init hook should exist");
+    assert!(hooks.pre_stop.is_some(), "on_stop hook should exist");
 
     // Verify accessor methods work
     assert!(config.global_hooks().is_some());

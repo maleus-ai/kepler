@@ -2,9 +2,9 @@ kepler:
   logs:
     buffer_size: 0
   hooks:
-    on_cleanup:
+    pre_cleanup:
       run: |
-        echo "ON_CLEANUP_RAN" >> __MARKER_FILE__
+        echo "PRE_CLEANUP_RAN" >> __MARKER_FILE__
 
 services:
   cleanup-hook-service:

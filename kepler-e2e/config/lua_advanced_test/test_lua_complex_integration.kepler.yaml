@@ -30,7 +30,7 @@ services:
         return {"sh", "-c", "curl -f http://localhost:" .. ctx.env.PORT .. "/health || exit 1"}
       interval: 10s
     hooks:
-      on_start:
+      pre_start:
         environment: !lua |
           return {"HOOK=" .. (ctx.hook_name or "none"), "SVC=" .. (ctx.service_name or "none")}
         run: "echo Hook $HOOK for $SVC >> __MARKER_FILE__"
@@ -62,7 +62,7 @@ services:
       }
     command: ["sh", "-c", "echo Worker $SERVICE on port $PORT registered=$REGISTERED_SERVICES && sleep 300"]
     hooks:
-      on_start:
+      pre_start:
         environment: !lua |
           return {"WORKER_HOOK=" .. (ctx.hook_name or "none")}
         run: "echo Worker hook $WORKER_HOOK >> __MARKER_FILE__"

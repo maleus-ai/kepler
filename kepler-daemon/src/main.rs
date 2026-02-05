@@ -274,7 +274,7 @@ async fn handle_request(
 
         Request::Restart {
             config_path,
-            service,
+            services,
             sys_env,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
@@ -282,22 +282,39 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
 
-            // For single-service restarts, use restart_single_service_with_reason
+            // For specific services, use restart_single_service_with_reason
             // to keep the config actor alive (preserving the event handler for restart propagation)
             // and to emit proper Restart events.
-            // For full restarts (no service filter), use restart_services which re-creates everything.
-            if let Some(service_name) = &service {
+            // For full restarts (empty services), use restart_services which re-creates everything.
+            if !services.is_empty() {
                 use kepler_daemon::events::RestartReason;
-                match orchestrator
-                    .restart_single_service_with_reason(&config_path, service_name, RestartReason::Manual)
-                    .await
-                {
-                    Ok(()) => Response::ok_with_message(format!("Restarted service: {}", service_name)),
-                    Err(e) => Response::error(e.to_string()),
+                let mut restarted = Vec::new();
+                let mut errors = Vec::new();
+
+                for service_name in &services {
+                    match orchestrator
+                        .restart_single_service_with_reason(&config_path, service_name, RestartReason::Manual)
+                        .await
+                    {
+                        Ok(()) => restarted.push(service_name.clone()),
+                        Err(e) => errors.push(format!("{}: {}", service_name, e)),
+                    }
+                }
+
+                if errors.is_empty() {
+                    Response::ok_with_message(format!("Restarted services: {}", restarted.join(", ")))
+                } else if restarted.is_empty() {
+                    Response::error(format!("Failed to restart: {}", errors.join(", ")))
+                } else {
+                    Response::ok_with_message(format!(
+                        "Restarted: {}. Errors: {}",
+                        restarted.join(", "),
+                        errors.join(", ")
+                    ))
                 }
             } else {
                 match orchestrator
-                    .restart_services(&config_path, None, sys_env)
+                    .restart_services(&config_path, &[], sys_env)
                     .await
                 {
                     Ok(msg) => Response::ok_with_message(msg),

@@ -21,11 +21,11 @@ async fn test_full_lifecycle_with_healthcheck_hooks() {
     let health_marker_path = marker.marker_path("health_status");
 
     let hooks = ServiceHooks {
-        on_init: Some(marker.create_timestamped_marker_hook("on_init")),
-        on_start: Some(marker.create_timestamped_marker_hook("on_start")),
-        on_stop: Some(marker.create_timestamped_marker_hook("on_stop")),
-        on_healthcheck_success: Some(marker.create_timestamped_marker_hook("on_healthy")),
-        on_healthcheck_fail: Some(marker.create_timestamped_marker_hook("on_unhealthy")),
+        pre_init: Some(marker.create_timestamped_marker_hook("on_init")),
+        pre_start: Some(marker.create_timestamped_marker_hook("on_start")),
+        pre_stop: Some(marker.create_timestamped_marker_hook("on_stop")),
+        post_healthcheck_success: Some(marker.create_timestamped_marker_hook("on_healthy")),
+        post_healthcheck_fail: Some(marker.create_timestamped_marker_hook("on_unhealthy")),
         ..Default::default()
     };
 
@@ -118,7 +118,7 @@ async fn test_service_dependencies_order() {
 
     // Create services with dependencies: frontend -> backend -> database
     let frontend_hooks = ServiceHooks {
-        on_start: Some(kepler_daemon::config::HookCommand::Script {
+        pre_start: Some(kepler_daemon::config::HookCommand::Script {
             run: format!("echo 'frontend' >> {}", order_file.display()),
             user: None,
             group: None,
@@ -130,7 +130,7 @@ async fn test_service_dependencies_order() {
     };
 
     let backend_hooks = ServiceHooks {
-        on_start: Some(kepler_daemon::config::HookCommand::Script {
+        pre_start: Some(kepler_daemon::config::HookCommand::Script {
             run: format!("echo 'backend' >> {}", order_file.display()),
             user: None,
             group: None,
@@ -142,7 +142,7 @@ async fn test_service_dependencies_order() {
     };
 
     let database_hooks = ServiceHooks {
-        on_start: Some(kepler_daemon::config::HookCommand::Script {
+        pre_start: Some(kepler_daemon::config::HookCommand::Script {
             run: format!("echo 'database' >> {}", order_file.display()),
             user: None,
             group: None,
@@ -213,8 +213,8 @@ async fn test_multiple_health_transitions() {
     let health_marker_path = marker.marker_path("health_status");
 
     let hooks = ServiceHooks {
-        on_healthcheck_success: Some(marker.create_timestamped_marker_hook("healthy")),
-        on_healthcheck_fail: Some(marker.create_timestamped_marker_hook("unhealthy")),
+        post_healthcheck_success: Some(marker.create_timestamped_marker_hook("healthy")),
+        post_healthcheck_fail: Some(marker.create_timestamped_marker_hook("unhealthy")),
         ..Default::default()
     };
 
@@ -305,9 +305,9 @@ async fn test_service_stop_restart_cycle() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        on_init: Some(marker.create_timestamped_marker_hook("init")),
-        on_start: Some(marker.create_timestamped_marker_hook("start")),
-        on_stop: Some(marker.create_timestamped_marker_hook("stop")),
+        pre_init: Some(marker.create_timestamped_marker_hook("init")),
+        pre_start: Some(marker.create_timestamped_marker_hook("start")),
+        pre_stop: Some(marker.create_timestamped_marker_hook("stop")),
         ..Default::default()
     };
 
