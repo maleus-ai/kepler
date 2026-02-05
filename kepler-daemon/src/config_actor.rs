@@ -115,6 +115,9 @@ pub enum ConfigCommand {
         service_name: String,
         reply: oneshot::Sender<bool>,
     },
+    GetRunningServices {
+        reply: oneshot::Sender<Vec<String>>,
+    },
     IsConfigInitialized {
         reply: oneshot::Sender<bool>,
     },
@@ -607,6 +610,15 @@ impl ConfigActor {
                     .map(|s| s.status.is_running())
                     .unwrap_or(false);
                 let _ = reply.send(result);
+            }
+            ConfigCommand::GetRunningServices { reply } => {
+                let running: Vec<String> = self
+                    .services
+                    .iter()
+                    .filter(|(_, s)| s.status.is_running())
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                let _ = reply.send(running);
             }
             ConfigCommand::IsConfigInitialized { reply } => {
                 let _ = reply.send(self.initialized);
@@ -1342,6 +1354,16 @@ impl ConfigActorHandle {
             })
             .await;
         reply_rx.await.unwrap_or(false)
+    }
+
+    /// Get list of running services
+    pub async fn get_running_services(&self) -> Vec<String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ConfigCommand::GetRunningServices { reply: reply_tx })
+            .await;
+        reply_rx.await.unwrap_or_default()
     }
 
     /// Check if config is initialized

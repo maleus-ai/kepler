@@ -109,6 +109,12 @@ async fn run() -> Result<()> {
             handle_response(response);
         }
 
+        Commands::Recreate => {
+            let sys_env: HashMap<String, String> = std::env::vars().collect();
+            let response = client.recreate(canonical_path, Some(sys_env)).await?;
+            handle_response(response);
+        }
+
         Commands::Logs {
             service,
             follow,

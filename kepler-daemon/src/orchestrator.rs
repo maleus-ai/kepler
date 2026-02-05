@@ -668,23 +668,30 @@ impl ServiceOrchestrator {
 
     /// Restart services for a config
     ///
-    /// If `services` is empty, restarts all RUNNING services with fresh config.
+    /// If `services` is empty, restarts all RUNNING services.
     /// Otherwise restarts only the specified RUNNING services.
     ///
-    /// This method now incorporates the old "recreate" behavior:
-    /// 1. Run global pre_restart hook (for full restart only)
-    /// 2. Stop services
-    /// 3. Clear config snapshot to force re-expansion
-    /// 4. Unload config actor
-    /// 5. Start services with fresh sys_env
-    /// 6. Run global post_restart hook (for full restart only)
+    /// This method PRESERVES the baked config and state:
+    /// - Config actor stays loaded
+    /// - Environment variables are NOT re-expanded
+    /// - Service-level pre_restart/post_restart hooks are called
+    ///
+    /// For a fresh restart with re-baked config, use `recreate_services()` instead.
+    ///
+    /// Execution order:
+    /// 1. Global pre_restart (full restart only)
+    /// 2. STOP PHASE - reverse dependency order (dependents first):
+    ///    For each running service: pre_restart, pre_stop, apply retention, stop, post_stop
+    /// 3. START PHASE - forward dependency order (dependencies first):
+    ///    For each service: pre_start, apply retention, spawn, post_start, post_restart
+    /// 4. Global post_restart (full restart only)
     pub async fn restart_services(
         &self,
         config_path: &Path,
         services: &[String],
-        sys_env: Option<HashMap<String, String>>,
+        _sys_env: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
-        info!("Restarting services for {:?}", config_path);
+        info!("Restarting services for {:?} (preserving state)", config_path);
 
         let is_full_restart = services.is_empty();
         let config_dir = config_path
@@ -692,24 +699,61 @@ impl ServiceOrchestrator {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-        // Get handle for hooks and to check running services
-        let handle = self.registry.get(&config_path.to_path_buf());
-        let (global_hooks, global_log_config, log_config) = if let Some(ref h) = handle {
-            let config = h.get_config().await;
-            let log_cfg = h.get_log_config().await;
-            (
-                config.as_ref().and_then(|c| c.global_hooks().cloned()),
-                config.as_ref().and_then(|c| c.global_logs().cloned()),
-                log_cfg,
-            )
+        // Get handle - must already be loaded
+        let handle = self.registry.get(&config_path.to_path_buf())
+            .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
+
+        let config = handle
+            .get_config()
+            .await
+            .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
+
+        let log_config = handle.get_log_config().await;
+        let global_hooks = config.global_hooks().cloned();
+        let global_log_config = config.global_logs().cloned();
+
+        // Get list of running services to restart
+        let services_to_restart: Vec<String> = if is_full_restart {
+            handle.get_running_services().await
         } else {
-            (None, None, None)
+            let mut running = Vec::new();
+            for s in services {
+                if handle.is_service_running(s).await {
+                    running.push(s.clone());
+                }
+            }
+            running
+        };
+
+        if services_to_restart.is_empty() {
+            return Ok("No running services to restart".to_string());
+        }
+
+        // Sort services by dependency graph
+        // Stop order: reverse topological sort (dependents first, then dependencies)
+        // Start order: forward topological sort (dependencies first, then dependents)
+        let stop_order = {
+            let filtered: HashMap<_, _> = config.services
+                .iter()
+                .filter(|(k, _)| services_to_restart.contains(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            get_stop_order(&filtered).unwrap_or_else(|_| services_to_restart.clone())
+        };
+
+        let start_order = {
+            let filtered: HashMap<_, _> = config.services
+                .iter()
+                .filter(|(k, _)| services_to_restart.contains(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            get_start_order(&filtered).unwrap_or_else(|_| services_to_restart.clone())
         };
 
         // Run global pre_restart hook for full restart
         if is_full_restart {
             if let Some(ref log_cfg) = log_config {
-                let env = sys_env.clone().unwrap_or_else(|| std::env::vars().collect());
+                let env: HashMap<String, String> = std::env::vars().collect();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PreRestart,
@@ -725,20 +769,155 @@ impl ServiceOrchestrator {
             }
         }
 
-        // Stop services first
-        if is_full_restart {
-            let stop_result = self.stop_services(config_path, None, false).await;
-            if let Err(e) = &stop_result {
-                warn!("Error stopping services during restart: {}", e);
+        // Phase 1: Run pre_restart hooks and stop (reverse dependency order)
+        for service_name in &stop_order {
+            // Get service context
+            let ctx = match handle.get_service_context(service_name).await {
+                Some(ctx) => ctx,
+                None => {
+                    warn!("Service context not found for {}", service_name);
+                    continue;
+                }
+            };
+
+            // Emit Restart event
+            handle
+                .emit_event(
+                    service_name,
+                    ServiceEvent::Restart {
+                        reason: RestartReason::Manual,
+                    },
+                )
+                .await;
+
+            // Run pre_restart hook
+            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreRestart).await {
+                warn!("Hook pre_restart failed for {}: {}", service_name, e);
             }
-        } else {
-            // Stop only specified running services
-            for service_name in services {
-                let stop_result = self.stop_services(config_path, Some(service_name), false).await;
-                if let Err(e) = &stop_result {
-                    warn!("Error stopping service {} during restart: {}", service_name, e);
+
+            // Run pre_stop hook
+            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStop).await {
+                warn!("Hook pre_stop failed for {}: {}", service_name, e);
+            }
+
+            // Apply on_restart log retention
+            self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart).await;
+
+            // Stop process
+            if let Err(e) = stop_service(service_name, handle.clone()).await {
+                warn!("Failed to stop service {}: {}", service_name, e);
+            }
+
+            // Run post_stop hook
+            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStop).await {
+                warn!("Hook post_stop failed for {}: {}", service_name, e);
+            }
+        }
+
+        // Small delay between stop and start phases
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        let mut restarted = Vec::new();
+
+        // Phase 2: Start services (forward dependency order)
+        for service_name in &start_order {
+            // Refresh context after stop (state may have changed)
+            let ctx = match handle.get_service_context(service_name).await {
+                Some(ctx) => ctx,
+                None => {
+                    warn!("Service context not found for {}", service_name);
+                    continue;
+                }
+            };
+
+            // Emit Start event (restart includes a start)
+            handle.emit_event(service_name, ServiceEvent::Start).await;
+
+            // Run pre_start hook
+            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart).await {
+                warn!("Hook pre_start failed for {}: {}", service_name, e);
+                continue;
+            }
+
+            // Apply on_start log retention
+            self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Start).await;
+
+            // Spawn process
+            match self.spawn_service(&handle, service_name, &ctx).await {
+                Ok(()) => {
+                    restarted.push(service_name.clone());
+
+                    // Run post_start hook
+                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart).await {
+                        warn!("Hook post_start failed for {}: {}", service_name, e);
+                    }
+
+                    // Run post_restart hook
+                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart).await {
+                        warn!("Hook post_restart failed for {}: {}", service_name, e);
+                    }
+
+                    // Spawn auxiliary tasks
+                    self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
+
+                    // Increment restart count
+                    let _ = handle.increment_restart_count(service_name).await;
+                }
+                Err(e) => {
+                    error!("Failed to spawn service {}: {}", service_name, e);
+                    let _ = handle.set_service_status(service_name, ServiceStatus::Failed).await;
                 }
             }
+        }
+
+        // Run global post_restart hook for full restart
+        if is_full_restart {
+            if let Some(ref log_cfg) = log_config {
+                let env: HashMap<String, String> = std::env::vars().collect();
+                if let Err(e) = run_global_hook(
+                    &global_hooks,
+                    GlobalHookType::PostRestart,
+                    &config_dir,
+                    &env,
+                    Some(log_cfg),
+                    global_log_config.as_ref(),
+                )
+                .await
+                {
+                    warn!("Global post_restart hook failed: {}", e);
+                }
+            }
+        }
+
+        if restarted.is_empty() {
+            Ok("No services were restarted".to_string())
+        } else {
+            Ok(format!("Restarted services: {}", restarted.join(", ")))
+        }
+    }
+
+    /// Recreate services for a config (re-bake config, clear state, start fresh)
+    ///
+    /// This method CLEARS state and re-expands the config:
+    /// - Stops all services
+    /// - Clears the config snapshot (forcing re-expansion)
+    /// - Unloads the config actor
+    /// - Starts services fresh with new sys_env
+    ///
+    /// Use this when the config file has changed or you want to pick up
+    /// new environment variables. For a simple restart that preserves state,
+    /// use `restart_services()` instead.
+    pub async fn recreate_services(
+        &self,
+        config_path: &Path,
+        sys_env: Option<HashMap<String, String>>,
+    ) -> Result<String, OrchestratorError> {
+        info!("Recreating services for {:?} (clearing state)", config_path);
+
+        // Stop all services first
+        let stop_result = self.stop_services(config_path, None, false).await;
+        if let Err(e) = &stop_result {
+            warn!("Error stopping services during recreate: {}", e);
         }
 
         // Clear snapshot to force re-expansion with new env
@@ -751,49 +930,11 @@ impl ServiceOrchestrator {
         // Unload the config actor completely
         self.registry.unload(&config_path.to_path_buf()).await;
 
+        // Small delay to ensure cleanup
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         // Start services with fresh config and sys_env
-        let start_result = if is_full_restart {
-            self.start_services(config_path, None, sys_env.clone()).await
-        } else {
-            // Start only specified services
-            let mut started = Vec::new();
-            for service_name in services {
-                match self.start_services(config_path, Some(service_name), sys_env.clone()).await {
-                    Ok(msg) => started.push(msg),
-                    Err(e) => warn!("Error starting service {} during restart: {}", service_name, e),
-                }
-            }
-            Ok(format!("Restarted services: {}", services.join(", ")))
-        };
-
-        // Run global post_restart hook for full restart
-        if is_full_restart {
-            // Re-get handle after reload
-            if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
-                if let Some(log_cfg) = handle.get_log_config().await {
-                    let config = handle.get_config().await;
-                    let global_hooks = config.as_ref().and_then(|c| c.global_hooks().cloned());
-                    let global_log_config = config.as_ref().and_then(|c| c.global_logs().cloned());
-                    let env = sys_env.unwrap_or_else(|| std::env::vars().collect());
-                    if let Err(e) = run_global_hook(
-                        &global_hooks,
-                        GlobalHookType::PostRestart,
-                        &config_dir,
-                        &env,
-                        Some(&log_cfg),
-                        global_log_config.as_ref(),
-                    )
-                    .await
-                    {
-                        warn!("Global post_restart hook failed: {}", e);
-                    }
-                }
-            }
-        }
-
-        start_result
+        self.start_services(config_path, None, sys_env).await
     }
 
 

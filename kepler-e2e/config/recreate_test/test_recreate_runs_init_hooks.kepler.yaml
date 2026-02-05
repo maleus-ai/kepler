@@ -1,0 +1,7 @@
+# Test that recreate runs pre_init hooks (because state is cleared)
+services:
+  init-service:
+    command: ["sh", "-c", "echo STARTED >> MARKER_FILE && sleep 3600"]
+    hooks:
+      pre_init:
+        run: "echo PRE_INIT >> MARKER_FILE"

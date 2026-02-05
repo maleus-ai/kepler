@@ -1,0 +1,9 @@
+# Test that restart calls pre_restart and post_restart hooks
+services:
+  hook-service:
+    command: ["sh", "-c", "echo STARTED >> MARKER_FILE && sleep 3600"]
+    hooks:
+      pre_restart:
+        run: "echo PRE_RESTART >> MARKER_FILE"
+      post_restart:
+        run: "echo POST_RESTART >> MARKER_FILE"

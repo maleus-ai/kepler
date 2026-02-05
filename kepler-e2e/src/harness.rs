@@ -416,6 +416,26 @@ impl E2eHarness {
         self.run_cli(&["-f", config_str, "restart", service]).await
     }
 
+    /// Recreate all services (re-bake config, clear state, start fresh)
+    pub async fn recreate_services(&self, config_path: &Path) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "recreate"]).await
+    }
+
+    /// Recreate services with custom environment variables
+    pub async fn recreate_services_with_env(
+        &self,
+        config_path: &Path,
+        env: &[(&str, &str)],
+    ) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli_with_env(&["-f", config_str, "recreate"], env).await
+    }
+
     /// Start a specific service
     pub async fn start_service(&self, config_path: &Path, service: &str) -> E2eResult<CommandOutput> {
         let config_str = config_path.to_str().ok_or_else(|| {

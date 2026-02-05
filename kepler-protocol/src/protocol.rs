@@ -49,13 +49,21 @@ pub enum Request {
         /// Whether to cleanup everything after stopping processes
         clean: bool,
     },
-    /// Restart service(s)
+    /// Restart service(s) - preserves baked config, runs restart hooks
     Restart {
         /// Path to the config file
         config_path: PathBuf,
         /// Services to restart (empty = all running services)
         #[serde(default)]
         services: Vec<String>,
+        /// System environment variables (unused, kept for API compatibility)
+        #[serde(default)]
+        sys_env: Option<HashMap<String, String>>,
+    },
+    /// Recreate services - re-bake config, clear state, start fresh
+    Recreate {
+        /// Path to the config file
+        config_path: PathBuf,
         /// System environment variables captured from CLI (for re-baking config snapshot)
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,

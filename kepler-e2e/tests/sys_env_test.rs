@@ -107,9 +107,12 @@ services:
     Ok(())
 }
 
-/// Test that restart also uses the new CLI environment (re-bakes config)
+/// Test that restart preserves the baked config (does NOT use new CLI environment)
+///
+/// Note: Prior to the restart/recreate split, restart would re-bake config.
+/// Now restart preserves baked config; use recreate to re-bake.
 #[tokio::test]
-async fn test_restart_uses_new_cli_env() -> E2eResult<()> {
+async fn test_restart_preserves_baked_cli_env() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
 
     const TEST_VAR: &str = "RESTART_TEST_VAR";
@@ -161,7 +164,7 @@ services:
         logs.stdout
     );
 
-    // Restart with updated value
+    // Restart with updated value - should still use INITIAL value (baked config preserved)
     let restart_output = harness
         .run_cli_with_env(
             &["-f", config_path.to_str().unwrap(), "restart"],
@@ -177,12 +180,111 @@ services:
     // Wait a moment for logs to be written
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Verify updated value appears in logs after restart
+    // Verify logs still show INITIAL value (restart preserves baked config)
     let logs = harness.get_logs(&config_path, None, 100).await?;
+
+    // Count occurrences - should have at least 2 initial values and no updated values
+    let initial_count = logs.stdout.matches(&format!("{}={}", TEST_VAR, INITIAL_VALUE)).count();
+    let updated_count = logs.stdout.matches(&format!("{}={}", TEST_VAR, UPDATED_VALUE)).count();
+
+    assert!(
+        initial_count >= 2,
+        "Restart should preserve baked config (initial value). Expected at least 2 occurrences of '{}={}', got {}. stdout: {}",
+        TEST_VAR,
+        INITIAL_VALUE,
+        initial_count,
+        logs.stdout
+    );
+    assert_eq!(
+        updated_count, 0,
+        "Restart should NOT use new CLI env (baked config preserved). Found {} occurrences of '{}={}'. stdout: {}",
+        updated_count,
+        TEST_VAR,
+        UPDATED_VALUE,
+        logs.stdout
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Test that recreate uses the new CLI environment (re-bakes config)
+#[tokio::test]
+async fn test_recreate_uses_new_cli_env() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    const TEST_VAR: &str = "RECREATE_TEST_VAR";
+    const INITIAL_VALUE: &str = "initial_value";
+    const UPDATED_VALUE: &str = "updated_value";
+
+    harness.start_daemon().await?;
+
+    // Create a config that uses the test variable
+    let config_content = format!(
+        r#"
+kepler:
+  logs:
+    buffer_size: 0
+services:
+  env-checker:
+    command: ["sh", "-c", "echo {}=${} && sleep 30"]
+    sys_env: inherit
+    restart: no
+"#,
+        TEST_VAR, TEST_VAR
+    );
+    let config_path = harness.create_test_config(&config_content)?;
+
+    // Start with initial value
+    let output = harness
+        .start_services_with_env(&config_path, &[(TEST_VAR, INITIAL_VALUE)])
+        .await?;
+    output.assert_success();
+
+    harness
+        .wait_for_service_status(&config_path, "env-checker", "running", Duration::from_secs(10))
+        .await?;
+
+    // Verify initial value
+    let logs = harness
+        .wait_for_log_content(
+            &config_path,
+            &format!("{}={}", TEST_VAR, INITIAL_VALUE),
+            Duration::from_secs(5),
+        )
+        .await?;
+
+    assert!(
+        logs.stdout_contains(&format!("{}={}", TEST_VAR, INITIAL_VALUE)),
+        "Initial start should have initial value. stdout: {}",
+        logs.stdout
+    );
+
+    // Recreate with updated value - should use UPDATED value (config re-baked)
+    let recreate_output = harness
+        .run_cli_with_env(
+            &["-f", config_path.to_str().unwrap(), "recreate"],
+            &[(TEST_VAR, UPDATED_VALUE)],
+        )
+        .await?;
+    recreate_output.assert_success();
+
+    harness
+        .wait_for_service_status(&config_path, "env-checker", "running", Duration::from_secs(10))
+        .await?;
+
+    // Wait for logs to contain the updated value
+    let logs = harness
+        .wait_for_log_content(
+            &config_path,
+            &format!("{}={}", TEST_VAR, UPDATED_VALUE),
+            Duration::from_secs(5),
+        )
+        .await?;
 
     assert!(
         logs.stdout_contains(&format!("{}={}", TEST_VAR, UPDATED_VALUE)),
-        "Restart should use new CLI env. Expected '{}={}' in stdout: {}",
+        "Recreate should use new CLI env (config re-baked). Expected '{}={}' in stdout: {}",
         TEST_VAR,
         UPDATED_VALUE,
         logs.stdout

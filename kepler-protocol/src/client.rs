@@ -125,7 +125,7 @@ impl Client {
         .await
     }
 
-    /// Restart services for a config
+    /// Restart services for a config (preserves baked config, runs restart hooks)
     pub async fn restart(
         &mut self,
         config_path: PathBuf,
@@ -135,6 +135,19 @@ impl Client {
         self.send_request(&Request::Restart {
             config_path,
             services,
+            sys_env,
+        })
+        .await
+    }
+
+    /// Recreate services for a config (re-bake config, clear state, start fresh)
+    pub async fn recreate(
+        &mut self,
+        config_path: PathBuf,
+        sys_env: Option<HashMap<String, String>>,
+    ) -> Result<Response> {
+        self.send_request(&Request::Recreate {
+            config_path,
             sys_env,
         })
         .await

@@ -1,0 +1,24 @@
+# Test that stop respects reverse dependency order
+kepler:
+  logs:
+    buffer_size: 0
+services:
+  db:
+    command: ["sleep", "3600"]
+    hooks:
+      pre_stop:
+        run: "echo 'STOP_DB' >> MARKER_FILE"
+  api:
+    command: ["sleep", "3600"]
+    depends_on:
+      - db
+    hooks:
+      pre_stop:
+        run: "echo 'STOP_API' >> MARKER_FILE"
+  web:
+    command: ["sleep", "3600"]
+    depends_on:
+      - api
+    hooks:
+      pre_stop:
+        run: "echo 'STOP_WEB' >> MARKER_FILE"

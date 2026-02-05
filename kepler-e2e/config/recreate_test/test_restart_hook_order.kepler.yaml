@@ -1,0 +1,20 @@
+# Test that restart calls all hooks in correct order
+kepler:
+  logs:
+    buffer_size: 0
+services:
+  test-svc:
+    command: ["sleep", "3600"]
+    hooks:
+      pre_restart:
+        run: "echo 'PRE_RESTART' >> MARKER_FILE"
+      pre_stop:
+        run: "echo 'PRE_STOP' >> MARKER_FILE"
+      post_stop:
+        run: "echo 'POST_STOP' >> MARKER_FILE"
+      pre_start:
+        run: "echo 'PRE_START' >> MARKER_FILE"
+      post_start:
+        run: "echo 'POST_START' >> MARKER_FILE"
+      post_restart:
+        run: "echo 'POST_RESTART' >> MARKER_FILE"

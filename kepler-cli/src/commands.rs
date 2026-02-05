@@ -21,12 +21,14 @@ pub enum Commands {
         #[arg(long)]
         clean: bool,
     },
-    /// Restart services (requires daemon to be running)
+    /// Restart services (preserves config, runs restart hooks)
     Restart {
         /// Services to restart (restarts all running services if none specified)
         #[arg(value_name = "SERVICE")]
         services: Vec<String>,
     },
+    /// Recreate services (re-bake config, clear state, start fresh)
+    Recreate,
     /// View service logs
     Logs {
         /// Specific service to view logs for (shows all if not specified)

@@ -1,0 +1,21 @@
+# Test that recreate respects dependency order
+kepler:
+  logs:
+    buffer_size: 0
+services:
+  backend:
+    command: ["sleep", "3600"]
+    hooks:
+      pre_stop:
+        run: "echo 'STOP_BACKEND' >> MARKER_FILE"
+      pre_start:
+        run: "echo 'START_BACKEND' >> MARKER_FILE"
+  frontend:
+    command: ["sleep", "3600"]
+    depends_on:
+      - backend
+    hooks:
+      pre_stop:
+        run: "echo 'STOP_FRONTEND' >> MARKER_FILE"
+      pre_start:
+        run: "echo 'START_FRONTEND' >> MARKER_FILE"
