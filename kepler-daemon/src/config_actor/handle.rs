@@ -506,35 +506,47 @@ impl ConfigActorHandle {
 
     /// Clear logs for a service
     pub async fn clear_service_logs(&self, service_name: &str) {
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::ClearServiceLogs {
                 service_name: service_name.to_string(),
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send ClearServiceLogs");
+        }
     }
 
     /// Clear logs by prefix
     pub async fn clear_service_logs_prefix(&self, prefix: &str) {
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::ClearServiceLogsPrefix {
                 prefix: prefix.to_string(),
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send ClearServiceLogsPrefix");
+        }
     }
 
     // === Process Handle Methods ===
 
     /// Store a process handle
     pub async fn store_process_handle(&self, service_name: &str, handle: ProcessHandle) {
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::StoreProcessHandle {
                 service_name: service_name.to_string(),
                 handle,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send StoreProcessHandle");
+        }
     }
 
     /// Remove and return a process handle
@@ -563,25 +575,33 @@ impl ConfigActorHandle {
         handle_type: TaskHandleType,
         handle: JoinHandle<()>,
     ) {
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::StoreTaskHandle {
                 service_name: service_name.to_string(),
                 handle_type,
                 handle,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send StoreTaskHandle");
+        }
     }
 
     /// Cancel a task handle
     pub async fn cancel_task_handle(&self, service_name: &str, handle_type: TaskHandleType) {
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::CancelTaskHandle {
                 service_name: service_name.to_string(),
                 handle_type,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send CancelTaskHandle");
+        }
     }
 
     // === Persistence Methods ===
@@ -646,23 +666,31 @@ impl ConfigActorHandle {
 
     /// Remove event channel when service is removed
     pub async fn remove_event_channel(&self, service_name: &str) {
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::RemoveEventChannel {
                 service_name: service_name.to_string(),
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send RemoveEventChannel");
+        }
     }
 
     /// Emit an event for a service
     pub async fn emit_event(&self, service_name: &str, event: ServiceEvent) {
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::EmitEvent {
                 service_name: service_name.to_string(),
                 event,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send EmitEvent");
+        }
     }
 
     /// Get all event receivers for the orchestrator to poll
@@ -695,7 +723,9 @@ impl ConfigActorHandle {
 
     /// Mark event handler as spawned for this config
     pub async fn set_event_handler_spawned(&self) {
-        let _ = self.tx.send(ConfigCommand::SetEventHandlerSpawned).await;
+        if self.tx.send(ConfigCommand::SetEventHandlerSpawned).await.is_err() {
+            warn!("Config actor closed, cannot send SetEventHandlerSpawned");
+        }
     }
 
     // === Lifecycle ===

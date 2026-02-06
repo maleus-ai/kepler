@@ -239,8 +239,8 @@ impl FileWatcherActor {
                                 ).await;
 
                                 if send_result.is_err() {
-                                    warn!(
-                                        "Failed to send restart event for service {} - channel timeout",
+                                    error!(
+                                        "Failed to send restart event for service {} - channel timeout, event dropped",
                                         self.service_name
                                     );
                                 }

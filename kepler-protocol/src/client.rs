@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
 };
 
@@ -37,7 +37,7 @@ impl Client {
                 // Try to send a ping
                 let mut client = Self { stream };
                 matches!(
-                    client.send_request(&Request::Ping).await,
+                    client.send_request(Request::Ping).await,
                     Ok(Response::Ok { .. })
                 )
             }
@@ -46,27 +46,28 @@ impl Client {
     }
 
     /// Send a request and receive a response
-    async fn send_request(&mut self, request: &Request) -> Result<Response> {
-        let bytes = encode_request(request)?;
+    async fn send_request(&mut self, request: Request) -> Result<Response> {
+        let request_type = request.variant_name();
+        let bytes = encode_request(&request)?;
         self.stream
             .write_all(&bytes)
             .await
             .map_err(|e| ClientError::Send {
-                request: request.clone(),
+                request_type,
                 source: e,
             })?;
 
         let line = {
-            let mut reader = BufReader::new(&mut self.stream);
+            let mut reader = BufReader::new((&mut self.stream).take(MAX_MESSAGE_SIZE as u64 + 1));
             let mut line: Vec<u8> = Vec::new();
 
-            // Read response with size limit
+            // Read response with size limit (reader is capped at MAX_MESSAGE_SIZE+1)
             loop {
                 let bytes_read = reader
                     .read_until(FRAME_DELIMITER, &mut line)
                     .await
                     .map_err(|e| ClientError::Receive {
-                        request: request.clone(),
+                        request_type,
                         source: e,
                     })?;
 
@@ -102,7 +103,7 @@ impl Client {
         service: Option<String>,
         sys_env: Option<HashMap<String, String>>,
     ) -> Result<Response> {
-        self.send_request(&Request::Start {
+        self.send_request(Request::Start {
             config_path,
             service,
             sys_env,
@@ -117,7 +118,7 @@ impl Client {
         service: Option<String>,
         clean: bool,
     ) -> Result<Response> {
-        self.send_request(&Request::Stop {
+        self.send_request(Request::Stop {
             config_path,
             service,
             clean,
@@ -132,7 +133,7 @@ impl Client {
         services: Vec<String>,
         sys_env: Option<HashMap<String, String>>,
     ) -> Result<Response> {
-        self.send_request(&Request::Restart {
+        self.send_request(Request::Restart {
             config_path,
             services,
             sys_env,
@@ -146,7 +147,7 @@ impl Client {
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
     ) -> Result<Response> {
-        self.send_request(&Request::Recreate {
+        self.send_request(Request::Recreate {
             config_path,
             sys_env,
         })
@@ -155,17 +156,17 @@ impl Client {
 
     /// Get status (for a specific config or all configs)
     pub async fn status(&mut self, config_path: Option<PathBuf>) -> Result<Response> {
-        self.send_request(&Request::Status { config_path }).await
+        self.send_request(Request::Status { config_path }).await
     }
 
     /// List all loaded configs
     pub async fn list_configs(&mut self) -> Result<Response> {
-        self.send_request(&Request::ListConfigs).await
+        self.send_request(Request::ListConfigs).await
     }
 
     /// Unload a config
     pub async fn unload_config(&mut self, config_path: PathBuf) -> Result<Response> {
-        self.send_request(&Request::UnloadConfig { config_path })
+        self.send_request(Request::UnloadConfig { config_path })
             .await
     }
 
@@ -178,7 +179,7 @@ impl Client {
         lines: usize,
         mode: LogMode,
     ) -> Result<Response> {
-        self.send_request(&Request::Logs {
+        self.send_request(Request::Logs {
             config_path,
             service,
             follow,
@@ -197,7 +198,7 @@ impl Client {
         offset: usize,
         limit: usize,
     ) -> Result<Response> {
-        self.send_request(&Request::LogsChunk {
+        self.send_request(Request::LogsChunk {
             config_path,
             service,
             offset,
@@ -208,12 +209,12 @@ impl Client {
 
     /// Shutdown the daemon
     pub async fn shutdown(&mut self) -> Result<Response> {
-        self.send_request(&Request::Shutdown).await
+        self.send_request(Request::Shutdown).await
     }
 
     /// Prune all stopped/orphaned config state directories
     pub async fn prune(&mut self, force: bool, dry_run: bool) -> Result<Response> {
-        self.send_request(&Request::Prune { force, dry_run }).await
+        self.send_request(Request::Prune { force, dry_run }).await
     }
 
     /// Cursor-based log streaming (for 'all' and 'follow' modes)
@@ -225,15 +226,15 @@ impl Client {
     /// Returns entries, cursor_id for next request, and has_more flag.
     pub async fn logs_cursor(
         &mut self,
-        config_path: PathBuf,
-        service: Option<String>,
-        cursor_id: Option<String>,
+        config_path: &Path,
+        service: Option<&str>,
+        cursor_id: Option<&str>,
         from_start: bool,
     ) -> Result<Response> {
-        self.send_request(&Request::LogsCursor {
-            config_path,
-            service,
-            cursor_id,
+        self.send_request(Request::LogsCursor {
+            config_path: config_path.to_path_buf(),
+            service: service.map(String::from),
+            cursor_id: cursor_id.map(String::from),
             from_start,
         })
         .await

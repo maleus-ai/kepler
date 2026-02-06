@@ -137,13 +137,11 @@ async fn run() -> Result<()> {
         }
 
         Commands::Daemon { .. } => {
-            // Already handled above
-            unreachable!()
+            unreachable!("Daemon commands are handled by early return above")
         }
 
         Commands::Prune { .. } => {
-            // Already handled above
-            unreachable!()
+            unreachable!("Prune commands are handled by early return above")
         }
 
     }
@@ -659,9 +657,9 @@ async fn handle_logs(
     loop {
         let response = match client
             .logs_cursor(
-                config_path.clone(),
-                service.clone(),
-                cursor_id.clone(),
+                &config_path,
+                service.as_deref(),
+                cursor_id.as_deref(),
                 from_start,
             )
             .await
@@ -708,8 +706,8 @@ async fn handle_logs(
                 }
             }
             Response::Error { message } => {
-                // Check if cursor expired
-                if message.contains("Cursor expired") || message.contains("cursor") {
+                // Check if cursor expired (exact prefix match)
+                if message.starts_with("Cursor expired or invalid") {
                     // Reset cursor and retry
                     cursor_id = None;
                     continue;

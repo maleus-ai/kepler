@@ -140,9 +140,16 @@ fn topological_sort(services: &HashMap<String, ServiceConfig>) -> Result<Vec<Str
     for (name, config) in services {
         for dep in config.depends_on.names() {
             // name depends on dep, so increment in_degree of name
-            *in_degree.get_mut(name).unwrap() += 1;
+            *in_degree.get_mut(name).ok_or_else(|| {
+                DaemonError::Internal(format!("unknown service '{}' in dependency graph", name))
+            })? += 1;
             // dep has name as a dependent
-            dependents.get_mut(&dep).unwrap().push(name.clone());
+            dependents.get_mut(&dep).ok_or_else(|| {
+                DaemonError::MissingDependency {
+                    service: name.clone(),
+                    dependency: dep.clone(),
+                }
+            })?.push(name.clone());
         }
     }
 
@@ -164,7 +171,9 @@ fn topological_sort(services: &HashMap<String, ServiceConfig>) -> Result<Vec<Str
         // For each dependent of this node, decrease in_degree
         let deps = dependents.get(&node).cloned().unwrap_or_default();
         for dep in deps {
-            let deg = in_degree.get_mut(&dep).unwrap();
+            let deg = in_degree.get_mut(&dep).ok_or_else(|| {
+                DaemonError::Internal(format!("unknown dependency '{}' in service '{}'", dep, node))
+            })?;
             *deg -= 1;
             if *deg == 0 {
                 // Insert in sorted position for deterministic order

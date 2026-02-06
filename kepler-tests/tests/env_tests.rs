@@ -41,12 +41,13 @@ async fn test_service_environment_array() {
 
     harness.start_service("test").await.unwrap();
 
-    let content = marker
-        .wait_for_marker_content("env_array", Duration::from_secs(2))
+    // Wait for both echo lines to be written before reading
+    let got_lines = marker
+        .wait_for_marker_lines("env_array", 2, Duration::from_secs(2))
         .await;
 
-    assert!(content.is_some(), "Service should have written env vars");
-    let content = content.unwrap();
+    assert!(got_lines, "Service should have written 2 env var lines");
+    let content = marker.read_marker("env_array").unwrap();
     assert!(
         content.contains("MY_VAR=hello"),
         "MY_VAR should be 'hello'. Got: {}",

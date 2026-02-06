@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::protocol::{Request, MAX_MESSAGE_SIZE};
+use crate::protocol::MAX_MESSAGE_SIZE;
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -24,16 +24,16 @@ pub enum ClientError {
     #[error("failed to create socket: {0}")]
     Connect(#[source] std::io::Error),
 
-    #[error("failed to send request: {request:?} {source}")]
+    #[error("failed to send request ({request_type}): {source}")]
     Send {
-        request: Request,
+        request_type: &'static str,
         #[source]
         source: std::io::Error,
     },
 
-    #[error("failed to receive response: {request:?} {source}")]
+    #[error("failed to receive response ({request_type}): {source}")]
     Receive {
-        request: Request,
+        request_type: &'static str,
         #[source]
         source: std::io::Error,
     },

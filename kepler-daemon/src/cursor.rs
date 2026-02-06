@@ -258,7 +258,15 @@ impl CursorManager {
                     let service_arc: Arc<str> = Arc::from(service.as_str());
                     let mut line_buf = String::with_capacity(256);
 
-                    while buf_reader.read_line(&mut line_buf).unwrap_or(0) > 0 {
+                    loop {
+                        match buf_reader.read_line(&mut line_buf) {
+                            Ok(0) => break,
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!("I/O error reading log file {:?}: {}", path, e);
+                                break;
+                            }
+                        }
                         if let Some(log_line) =
                             LogReader::parse_log_line_arc(&line_buf, &service_arc, *stream)
                         {

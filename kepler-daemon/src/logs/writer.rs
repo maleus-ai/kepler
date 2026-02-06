@@ -150,7 +150,7 @@ impl BufferedLogWriter {
             }
 
         if self.file.is_none() {
-            self.file = Some(self.open_log_file());
+            self.file = self.open_log_file();
         }
 
         if let Some(ref mut file) = self.file {
@@ -174,7 +174,7 @@ impl BufferedLogWriter {
 
         // Get or create the file handle
         if self.file.is_none() {
-            self.file = Some(self.open_log_file());
+            self.file = self.open_log_file();
         }
 
         if let Some(ref mut file) = self.file {
@@ -188,35 +188,44 @@ impl BufferedLogWriter {
     }
 
     /// Open the log file with appropriate flags
-    fn open_log_file(&self) -> File {
+    fn open_log_file(&self) -> Option<File> {
         // Validate existing path is not a symlink
         #[cfg(unix)]
         if let Err(e) = validate_not_symlink(&self.log_file) {
             tracing::warn!("Refusing to open log file: {}", e);
-            return File::open("/dev/null").expect("Failed to open /dev/null");
+            return File::open("/dev/null").ok();
         }
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            OpenOptions::new()
+            match OpenOptions::new()
                 .create(true)
                 .append(true)
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(&self.log_file)
-                .unwrap_or_else(|e| {
+            {
+                Ok(f) => Some(f),
+                Err(e) => {
                     tracing::warn!("Failed to open log file {:?}: {}", self.log_file, e);
-                    File::open("/dev/null").expect("Failed to open /dev/null")
-                })
+                    File::open("/dev/null").ok()
+                }
+            }
         }
         #[cfg(not(unix))]
         {
-            OpenOptions::new()
+            match OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&self.log_file)
-                .expect("Failed to open log file")
+            {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    tracing::warn!("Failed to open log file {:?}: {}", self.log_file, e);
+                    None
+                }
+            }
         }
     }
 

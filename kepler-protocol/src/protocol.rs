@@ -133,6 +133,27 @@ pub enum Request {
     },
 }
 
+impl Request {
+    /// Return the variant name as a static string (for lightweight error reporting)
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Request::Start { .. } => "Start",
+            Request::Stop { .. } => "Stop",
+            Request::Restart { .. } => "Restart",
+            Request::Recreate { .. } => "Recreate",
+            Request::Status { .. } => "Status",
+            Request::Logs { .. } => "Logs",
+            Request::LogsChunk { .. } => "LogsChunk",
+            Request::Shutdown => "Shutdown",
+            Request::Ping => "Ping",
+            Request::ListConfigs => "ListConfigs",
+            Request::UnloadConfig { .. } => "UnloadConfig",
+            Request::Prune { .. } => "Prune",
+            Request::LogsCursor { .. } => "LogsCursor",
+        }
+    }
+}
+
 /// Response sent from daemon to CLI
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]

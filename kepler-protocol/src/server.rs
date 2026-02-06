@@ -1,7 +1,10 @@
+#[cfg(not(unix))]
+compile_error!("kepler-protocol server requires a unix target for socket security (peer credentials, file permissions)");
+
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     sync::mpsc,
 };
@@ -141,10 +144,10 @@ where
     }
 
     let line = {
-        let mut reader = BufReader::new(&mut stream);
+        let mut reader = BufReader::new((&mut stream).take(MAX_MESSAGE_SIZE as u64 + 1));
         let mut line = Vec::new();
 
-        // Read request with size limit
+        // Read request with size limit (reader is capped at MAX_MESSAGE_SIZE+1)
         loop {
             let byte_read = reader
                 .read_until(FRAME_DELIMITER, &mut line)
