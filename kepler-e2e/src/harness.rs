@@ -403,7 +403,7 @@ impl E2eHarness {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        self.run_cli(&["-f", config_str, "restart"]).await
+        self.run_cli(&["-f", config_str, "restart", "-d"]).await
     }
 
     /// Restart a specific service
@@ -411,7 +411,7 @@ impl E2eHarness {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        self.run_cli(&["-f", config_str, "restart", service]).await
+        self.run_cli(&["-f", config_str, "restart", "-d", service]).await
     }
 
     /// Recreate all services (re-bake config, clear state, start fresh)
@@ -419,7 +419,7 @@ impl E2eHarness {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        self.run_cli(&["-f", config_str, "recreate"]).await
+        self.run_cli(&["-f", config_str, "recreate", "-d"]).await
     }
 
     /// Recreate services with custom environment variables
@@ -431,7 +431,7 @@ impl E2eHarness {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        self.run_cli_with_env(&["-f", config_str, "recreate"], env).await
+        self.run_cli_with_env(&["-f", config_str, "recreate", "-d"], env).await
     }
 
     /// Start a specific service (detached mode for tests)

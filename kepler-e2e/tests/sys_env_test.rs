@@ -167,7 +167,7 @@ services:
     // Restart with updated value - should still use INITIAL value (baked config preserved)
     let restart_output = harness
         .run_cli_with_env(
-            &["-f", config_path.to_str().unwrap(), "restart"],
+            &["-f", config_path.to_str().unwrap(), "restart", "-d"],
             &[(TEST_VAR, UPDATED_VALUE)],
         )
         .await?;
@@ -263,7 +263,7 @@ services:
     // Recreate with updated value - should use UPDATED value (config re-baked)
     let recreate_output = harness
         .run_cli_with_env(
-            &["-f", config_path.to_str().unwrap(), "recreate"],
+            &["-f", config_path.to_str().unwrap(), "recreate", "-d"],
             &[(TEST_VAR, UPDATED_VALUE)],
         )
         .await?;
