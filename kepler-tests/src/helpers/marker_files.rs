@@ -50,58 +50,6 @@ impl MarkerFileHelper {
         }
     }
 
-    /// Create a hook command that writes a specific value to a marker file
-    pub fn create_value_marker_hook(&self, name: &str, value: &str) -> HookCommand {
-        let marker_path = self.marker_path(name);
-        HookCommand::Script {
-            run: format!("echo '{}' >> {}", value, marker_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }
-    }
-
-    /// Create a hook that writes environment variable values to a marker file
-    pub fn create_env_capture_hook(&self, name: &str, env_vars: &[&str]) -> HookCommand {
-        let marker_path = self.marker_path(name);
-        let capture_commands: Vec<String> = env_vars
-            .iter()
-            .map(|var| format!("echo \"{}=${{{}}}\" >> {}", var, var, marker_path.display()))
-            .collect();
-        HookCommand::Script {
-            run: capture_commands.join(" && "),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }
-    }
-
-    /// Create a hook with environment variables that writes them to a marker file
-    pub fn create_env_capture_hook_with_env(
-        &self,
-        name: &str,
-        env_vars: &[&str],
-        environment: Vec<String>,
-    ) -> HookCommand {
-        let marker_path = self.marker_path(name);
-        let capture_commands: Vec<String> = env_vars
-            .iter()
-            .map(|var| format!("echo \"{}=${{{}}}\" >> {}", var, var, marker_path.display()))
-            .collect();
-        HookCommand::Script {
-            run: capture_commands.join(" && "),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment,
-            env_file: None,
-        }
-    }
-
     /// Check if a marker file exists
     pub fn marker_exists(&self, name: &str) -> bool {
         self.marker_path(name).exists()
@@ -196,26 +144,6 @@ impl MarkerFileHelper {
         }
     }
 
-    /// Get the order in which markers were created based on timestamps
-    pub fn get_marker_order(&self, names: &[&str]) -> Vec<String> {
-        let mut markers: Vec<(String, std::time::SystemTime)> = names
-            .iter()
-            .filter_map(|name| {
-                let path = self.marker_path(name);
-                if path.exists() {
-                    std::fs::metadata(&path)
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .map(|time| (name.to_string(), time))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        markers.sort_by_key(|(_, time)| *time);
-        markers.into_iter().map(|(name, _)| name).collect()
-    }
 }
 
 #[cfg(test)]

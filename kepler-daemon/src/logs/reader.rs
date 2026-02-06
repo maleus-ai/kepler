@@ -232,13 +232,14 @@ impl LogReader {
         let filename = path.file_name()?.to_str()?;
 
         // Parse: service.stdout.log or service.stderr.log
-        if let Some(service) = filename.strip_suffix(".stdout.log") {
-            Some((service.to_string(), LogStream::Stdout))
-        } else if let Some(service) = filename.strip_suffix(".stderr.log") {
-            Some((service.to_string(), LogStream::Stderr))
-        } else {
-            None
-        }
+        filename
+            .strip_suffix(".stdout.log")
+            .map(|service| (service.to_string(), LogStream::Stdout))
+            .or_else(|| {
+                filename
+                    .strip_suffix(".stderr.log")
+                    .map(|service| (service.to_string(), LogStream::Stderr))
+            })
     }
 
     /// Read all entries from a log file
@@ -319,46 +320,6 @@ impl LogReader {
         }
 
         entries
-    }
-
-    /// Parse a log line from the new file format
-    /// New format: "TIMESTAMP\tMESSAGE"
-    #[allow(dead_code)]
-    pub fn parse_log_line(line: &str, service: &str, stream: LogStream) -> Option<LogLine> {
-        let mut parts = line.splitn(2, '\t');
-
-        let timestamp_str = parts.next()?;
-        let content = parts.next().unwrap_or("");
-
-        let timestamp = timestamp_str.parse::<i64>().ok()?;
-
-        Some(LogLine {
-            service: Arc::from(service),
-            line: content.to_string(),
-            timestamp: Utc.timestamp_millis_opt(timestamp).single()?,
-            stream,
-        })
-    }
-
-    /// Parse a log line with pre-allocated service string (avoids repeated service allocation)
-    /// New format: "TIMESTAMP\tMESSAGE"
-    /// Note: line may contain trailing newline from read_line()
-    #[allow(dead_code)]
-    pub fn parse_log_line_reuse(line: &str, service: &String, stream: LogStream) -> Option<LogLine> {
-        let line = line.trim_end_matches('\n').trim_end_matches('\r');
-        let mut parts = line.splitn(2, '\t');
-
-        let timestamp_str = parts.next()?;
-        let content = parts.next().unwrap_or("");
-
-        let timestamp = timestamp_str.parse::<i64>().ok()?;
-
-        Some(LogLine {
-            service: Arc::from(service.as_str()),
-            line: content.to_string(),
-            timestamp: Utc.timestamp_millis_opt(timestamp).single()?,
-            stream,
-        })
     }
 
     /// Parse a log line with Arc<str> service (cheap clone - just reference count increment)

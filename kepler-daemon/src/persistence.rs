@@ -268,21 +268,6 @@ impl ConfigPersistence {
         Ok(())
     }
 
-    /// Get the path to a copied env_file in the state directory.
-    ///
-    /// Returns the path where the env_file was copied for a given service.
-    pub fn get_env_file_path(&self, service_name: &str, original_env_file: &Path) -> PathBuf {
-        let dest_name = format!(
-            "{}_{}",
-            service_name,
-            original_env_file
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-        );
-        self.env_files_dir().join(dest_name)
-    }
-
     // =========================================================================
     // Snapshot management
     // =========================================================================

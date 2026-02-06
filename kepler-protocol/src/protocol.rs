@@ -163,15 +163,6 @@ pub enum Response {
 }
 
 impl Response {
-    /// Create a success response with no data
-    #[allow(dead_code)]
-    pub fn ok() -> Self {
-        Response::Ok {
-            message: None,
-            data: None,
-        }
-    }
-
     /// Create a success response with a message
     pub fn ok_with_message(msg: impl Into<String>) -> Self {
         Response::Ok {

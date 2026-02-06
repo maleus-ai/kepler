@@ -291,9 +291,4 @@ impl CursorManager {
             .retain(|_id, state| now.duration_since(state.last_polled) < self.ttl);
     }
 
-    /// Get the number of active cursors (for debugging/monitoring)
-    #[allow(dead_code)]
-    pub fn cursor_count(&self) -> usize {
-        self.cursors.len()
-    }
 }

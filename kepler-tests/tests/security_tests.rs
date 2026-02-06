@@ -105,14 +105,6 @@ fn lookup_uid_by_name(username: &str) -> Option<u32> {
     User::from_name(username).ok()?.map(|u| u.uid.as_raw())
 }
 
-/// Look up a group by name and return their GID
-#[cfg(unix)]
-#[allow(dead_code)] // May be used in future tests
-fn lookup_gid_by_name(groupname: &str) -> Option<u32> {
-    use nix::unistd::Group;
-    Group::from_name(groupname).ok()?.map(|g| g.gid.as_raw())
-}
-
 // ============================================================================
 // User/Group Privilege Dropping Tests
 // ============================================================================

@@ -211,12 +211,6 @@ impl Client {
         self.send_request(&Request::Shutdown).await
     }
 
-    /// Ping the daemon
-    #[allow(dead_code)]
-    pub async fn ping(&mut self) -> Result<Response> {
-        self.send_request(&Request::Ping).await
-    }
-
     /// Prune all stopped/orphaned config state directories
     pub async fn prune(&mut self, force: bool, dry_run: bool) -> Result<Response> {
         self.send_request(&Request::Prune { force, dry_run }).await
