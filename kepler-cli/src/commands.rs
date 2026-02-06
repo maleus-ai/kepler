@@ -51,17 +51,13 @@ pub enum Commands {
         #[arg(long)]
         follow: bool,
 
-        /// Number of lines to show
-        #[arg(short = 'n', long, default_value = "100")]
-        lines: usize,
-
-        /// Show first N lines (oldest first)
+        /// Show first N lines, oldest first (default: 100)
         #[arg(long, conflicts_with = "tail")]
-        head: bool,
+        head: Option<usize>,
 
-        /// Show last N lines (newest last) - this is the default
+        /// Show last N lines, newest last (default: 100)
         #[arg(long)]
-        tail: bool,
+        tail: Option<usize>,
     },
     /// List all services and their states
     PS {

@@ -611,7 +611,7 @@ impl E2eHarness {
         })?;
 
         let lines_str = lines.to_string();
-        let mut args = vec!["-f", config_str, "logs", "-n", &lines_str];
+        let mut args = vec!["-f", config_str, "logs", "--tail", &lines_str];
         let service_owned;
         if let Some(s) = service {
             service_owned = s.to_string();

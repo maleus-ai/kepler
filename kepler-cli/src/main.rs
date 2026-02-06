@@ -154,16 +154,15 @@ async fn run() -> Result<()> {
         Commands::Logs {
             service,
             follow,
-            lines,
             head,
             tail,
         } => {
-            let mode = if head {
-                LogMode::Head
-            } else if tail {
-                LogMode::Tail
+            let (mode, lines) = if let Some(n) = head {
+                (LogMode::Head, n)
+            } else if let Some(n) = tail {
+                (LogMode::Tail, n)
             } else {
-                LogMode::All // Default: read all logs chronologically
+                (LogMode::All, 100)
             };
             handle_logs(&mut client, canonical_path, service, follow, lines, mode).await?;
         }

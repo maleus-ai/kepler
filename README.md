@@ -193,7 +193,7 @@ Commands that operate on services (require config):
 | `kepler restart [-d] [services...]` | Restart services, follow logs (Ctrl+C stops). `-d` to detach |
 | `kepler recreate [-d]` | Re-bake config, clear state, start fresh, follow logs (Ctrl+C stops). `-d` to detach |
 | `kepler ps [--all]` | List services and states (`--all` for all loaded configs) |
-| `kepler logs [--follow] [--head\|--tail] [-n N] [service]` | View logs |
+| `kepler logs [--follow] [--head N\|--tail N] [service]` | View logs |
 | `kepler prune [--force] [--dry-run]` | Prune stopped/orphaned config state directories |
 
 ### Options
