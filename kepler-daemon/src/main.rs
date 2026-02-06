@@ -354,6 +354,7 @@ async fn handle_request(
             lines,
             max_bytes,
             mode,
+            no_hooks,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -362,7 +363,7 @@ async fn handle_request(
 
             match registry.get(&config_path) {
                 Some(handle) => {
-                    let entries = handle.get_logs_with_mode(service, lines, max_bytes, mode).await;
+                    let entries = handle.get_logs_with_mode(service, lines, max_bytes, mode, no_hooks).await;
                     Response::ok_with_data(ResponseData::Logs(entries))
                 }
                 None => Response::ok_with_data(ResponseData::Logs(Vec::new())),
@@ -395,6 +396,7 @@ async fn handle_request(
             service,
             offset,
             limit,
+            no_hooks,
         } => {
             use kepler_protocol::protocol::LogChunkData;
 
@@ -405,7 +407,7 @@ async fn handle_request(
 
             // Use true pagination - reads efficiently from disk with offset/limit
             let (entries, has_more) = match registry.get(&config_path) {
-                Some(handle) => handle.get_logs_paginated(service, offset, limit).await,
+                Some(handle) => handle.get_logs_paginated(service, offset, limit, no_hooks).await,
                 None => (Vec::new(), false),
             };
 
@@ -431,6 +433,7 @@ async fn handle_request(
             service,
             cursor_id,
             from_start,
+            no_hooks,
         } => {
             use kepler_protocol::protocol::LogCursorData;
 
@@ -456,6 +459,7 @@ async fn handle_request(
                     logs_dir,
                     service,
                     from_start,
+                    no_hooks,
                 ),
             };
 

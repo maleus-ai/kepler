@@ -30,11 +30,11 @@ impl LogReader {
 
     /// Get the last N entries, optionally filtered by service.
     /// Uses efficient reverse reading - only reads as much as needed from the end of files.
-    pub fn tail(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
+    pub fn tail(&self, count: usize, service: Option<&str>, no_hooks: bool) -> Vec<LogLine> {
         let count = count.min(DEFAULT_MAX_LINES);
 
         // Collect files grouped by service for reverse iterator
-        let files_by_service = self.collect_files_by_service(service);
+        let files_by_service = self.collect_files_by_service(service, no_hooks);
 
         if files_by_service.is_empty() {
             return Vec::new();
@@ -57,10 +57,11 @@ impl LogReader {
         count: usize,
         service: Option<&str>,
         max_bytes: Option<usize>,
+        no_hooks: bool,
     ) -> Vec<LogLine> {
         // If no byte limit specified, use efficient reverse reading
         if max_bytes.is_none() {
-            return self.tail(count, service);
+            return self.tail(count, service, no_hooks);
         }
 
         // With byte limit, use the bounded read approach
@@ -68,7 +69,7 @@ impl LogReader {
         let max_bytes = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
 
         // Collect all relevant log files
-        let files = self.collect_log_files(service);
+        let files = self.collect_log_files(service, no_hooks);
 
         if files.is_empty() {
             return Vec::new();
@@ -99,8 +100,9 @@ impl LogReader {
         service: Option<&str>,
         offset: usize,
         limit: usize,
+        no_hooks: bool,
     ) -> (Vec<LogLine>, bool) {
-        let mut entries: Vec<LogLine> = self.iter(service).skip(offset).take(limit + 1).collect();
+        let mut entries: Vec<LogLine> = self.iter(service, no_hooks).skip(offset).take(limit + 1).collect();
         let has_more = entries.len() > limit;
         entries.truncate(limit);
         (entries, has_more)
@@ -108,7 +110,7 @@ impl LogReader {
 
     /// Collect all log files, optionally filtered by service
     /// Returns (path, service_name, stream)
-    pub(crate) fn collect_log_files(&self, service: Option<&str>) -> Vec<(PathBuf, String, LogStream)> {
+    pub(crate) fn collect_log_files(&self, service: Option<&str>, no_hooks: bool) -> Vec<(PathBuf, String, LogStream)> {
         let mut files = Vec::new();
 
         if let Some(svc) = service {
@@ -120,6 +122,10 @@ impl LogReader {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if let Some((svc, stream)) = self.parse_log_filename(&path) {
+                        // Hook log files have a dot in the service name (e.g. "backend.pre_start")
+                        if no_hooks && svc.contains('.') {
+                            continue;
+                        }
                         files.push((path, svc, stream));
                     }
                 }
@@ -146,14 +152,14 @@ impl LogReader {
     /// Collect files grouped by service/stream for the reverse iterator.
     /// Returns: Vec<(files_for_this_stream, service_name, stream)>
     /// With truncation instead of rotation, each group has only one file.
-    pub(crate) fn collect_files_by_service(&self, service: Option<&str>) -> Vec<(Vec<PathBuf>, String, LogStream)> {
+    pub(crate) fn collect_files_by_service(&self, service: Option<&str>, no_hooks: bool) -> Vec<(Vec<PathBuf>, String, LogStream)> {
         let mut result: Vec<(Vec<PathBuf>, String, LogStream)> = Vec::new();
 
         let services: Vec<String> = if let Some(svc) = service {
             vec![svc.to_string()]
         } else {
             // Discover all services from log files
-            self.discover_services()
+            self.discover_services(no_hooks)
         };
 
         for svc in services {
@@ -172,13 +178,17 @@ impl LogReader {
     }
 
     /// Discover all services that have log files
-    fn discover_services(&self) -> Vec<String> {
+    fn discover_services(&self, no_hooks: bool) -> Vec<String> {
         let mut services = std::collections::HashSet::new();
 
         if let Ok(entries) = fs::read_dir(&self.logs_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if let Some((svc, _)) = self.parse_log_filename(&path) {
+                    // Hook log files have a dot in the service name (e.g. "backend.pre_start")
+                    if no_hooks && svc.contains('.') {
+                        continue;
+                    }
                     services.insert(svc);
                 }
             }
@@ -353,14 +363,14 @@ impl LogReader {
 
     /// Create a merged iterator for streaming logs in chronological order (oldest first)
     /// This is memory-efficient as it only keeps one entry per file in memory at a time.
-    pub fn iter(&self, service: Option<&str>) -> MergedLogIterator {
-        let files = self.collect_log_files(service);
+    pub fn iter(&self, service: Option<&str>, no_hooks: bool) -> MergedLogIterator {
+        let files = self.collect_log_files(service, no_hooks);
         MergedLogIterator::new(files)
     }
 
     /// Get the first N entries in chronological order using the efficient iterator
     /// Unlike tail(), this doesn't need to read all entries - it stops after N.
-    pub fn head(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
-        self.iter(service).take(count).collect()
+    pub fn head(&self, count: usize, service: Option<&str>, no_hooks: bool) -> Vec<LogLine> {
+        self.iter(service, no_hooks).take(count).collect()
     }
 }

@@ -180,6 +180,7 @@ impl Client {
         follow: bool,
         lines: usize,
         mode: LogMode,
+        no_hooks: bool,
     ) -> Result<Response> {
         self.send_request(Request::Logs {
             config_path,
@@ -188,6 +189,7 @@ impl Client {
             lines,
             max_bytes: None, // Use default bounded reading
             mode,
+            no_hooks,
         })
         .await
     }
@@ -199,12 +201,14 @@ impl Client {
         service: Option<String>,
         offset: usize,
         limit: usize,
+        no_hooks: bool,
     ) -> Result<Response> {
         self.send_request(Request::LogsChunk {
             config_path,
             service,
             offset,
             limit,
+            no_hooks,
         })
         .await
     }
@@ -232,12 +236,14 @@ impl Client {
         service: Option<&str>,
         cursor_id: Option<&str>,
         from_start: bool,
+        no_hooks: bool,
     ) -> Result<Response> {
         self.send_request(Request::LogsCursor {
             config_path: config_path.to_path_buf(),
             service: service.map(String::from),
             cursor_id: cursor_id.map(String::from),
             from_start,
+            no_hooks,
         })
         .await
     }

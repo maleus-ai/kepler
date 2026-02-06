@@ -40,7 +40,7 @@ fn test_read_single_file() {
     ]);
 
     let reader = LogReader::new(logs_dir);
-    let logs = reader.tail(100, Some("my-service"));
+    let logs = reader.tail(100, Some("my-service"), false);
 
     assert_eq!(logs.len(), 3, "Should have 3 log entries");
     assert_eq!(logs[0].line, "First message");
@@ -66,15 +66,15 @@ fn test_read_multiple_services() {
     let reader = LogReader::new(logs_dir.clone());
 
     // Read all services
-    let all_logs = reader.tail(100, None);
+    let all_logs = reader.tail(100, None, false);
     assert_eq!(all_logs.len(), 3, "Should have logs from all services");
 
     // Verify we can filter by service
-    let logs_a = reader.tail(100, Some("service-a"));
+    let logs_a = reader.tail(100, Some("service-a"), false);
     assert_eq!(logs_a.len(), 1);
     assert_eq!(logs_a[0].line, "Message from A");
 
-    let logs_b = reader.tail(100, Some("service-b"));
+    let logs_b = reader.tail(100, Some("service-b"), false);
     assert_eq!(logs_b.len(), 1);
     assert_eq!(logs_b[0].line, "Message from B");
 }
@@ -113,7 +113,7 @@ fn test_merge_stdout_stderr_chronologically() {
     drop(stderr_writer);
 
     let reader = LogReader::new(logs_dir);
-    let logs = reader.tail(100, Some("my-service"));
+    let logs = reader.tail(100, Some("my-service"), false);
 
     assert_eq!(logs.len(), 4, "Should have 4 entries");
 
@@ -152,19 +152,19 @@ fn test_tail_returns_last_n_lines() {
     let reader = LogReader::new(logs_dir);
 
     // Request last 10
-    let last_10 = reader.tail(10, Some("my-service"));
+    let last_10 = reader.tail(10, Some("my-service"), false);
     assert_eq!(last_10.len(), 10, "Should return exactly 10 lines");
     assert_eq!(last_10[0].line, "Line 90");
     assert_eq!(last_10[9].line, "Line 99");
 
     // Request last 5
-    let last_5 = reader.tail(5, Some("my-service"));
+    let last_5 = reader.tail(5, Some("my-service"), false);
     assert_eq!(last_5.len(), 5);
     assert_eq!(last_5[0].line, "Line 95");
     assert_eq!(last_5[4].line, "Line 99");
 
     // Request more than available
-    let all = reader.tail(200, Some("my-service"));
+    let all = reader.tail(200, Some("my-service"), false);
     assert_eq!(all.len(), 100);
 }
 
@@ -181,28 +181,28 @@ fn test_pagination_offset_limit() {
     let reader = LogReader::new(logs_dir);
 
     // First page
-    let (page1, has_more) = reader.get_paginated(Some("my-service"), 0, 10);
+    let (page1, has_more) = reader.get_paginated(Some("my-service"), 0, 10, false);
     assert!(has_more, "Should have more entries after first page");
     assert_eq!(page1.len(), 10);
     assert_eq!(page1[0].line, "Line 0");
     assert_eq!(page1[9].line, "Line 9");
 
     // Second page
-    let (page2, has_more) = reader.get_paginated(Some("my-service"), 10, 10);
+    let (page2, has_more) = reader.get_paginated(Some("my-service"), 10, 10, false);
     assert!(has_more);
     assert_eq!(page2.len(), 10);
     assert_eq!(page2[0].line, "Line 10");
     assert_eq!(page2[9].line, "Line 19");
 
     // Last partial page
-    let (last_page, has_more) = reader.get_paginated(Some("my-service"), 45, 10);
+    let (last_page, has_more) = reader.get_paginated(Some("my-service"), 45, 10, false);
     assert!(!has_more, "Should not have more entries on last page");
     assert_eq!(last_page.len(), 5);
     assert_eq!(last_page[0].line, "Line 45");
     assert_eq!(last_page[4].line, "Line 49");
 
     // Beyond end
-    let (beyond, has_more) = reader.get_paginated(Some("my-service"), 100, 10);
+    let (beyond, has_more) = reader.get_paginated(Some("my-service"), 100, 10, false);
     assert!(!has_more);
     assert_eq!(beyond.len(), 0);
 }
@@ -239,7 +239,7 @@ fn test_truncated_file_continues_working() {
 
     // Read back all logs
     let reader = LogReader::new(logs_dir);
-    let logs = reader.tail(1000, Some("my-service"));
+    let logs = reader.tail(1000, Some("my-service"), false);
 
     // Some logs will be lost due to truncation, but remaining should be valid
     // and timestamps should be in chronological order
@@ -267,24 +267,24 @@ fn test_filter_by_service() {
     let reader = LogReader::new(logs_dir);
 
     // Filter by specific service
-    let web_logs = reader.tail(100, Some("web"));
+    let web_logs = reader.tail(100, Some("web"), false);
     assert_eq!(web_logs.len(), 2);
     for log in &web_logs {
         assert_eq!(&*log.service, "web");
     }
 
-    let api_logs = reader.tail(100, Some("api"));
+    let api_logs = reader.tail(100, Some("api"), false);
     assert_eq!(api_logs.len(), 1);
     assert_eq!(&*api_logs[0].service, "api");
 
-    let worker_logs = reader.tail(100, Some("worker"));
+    let worker_logs = reader.tail(100, Some("worker"), false);
     assert_eq!(worker_logs.len(), 3);
     for log in &worker_logs {
         assert_eq!(&*log.service, "worker");
     }
 
     // Non-existent service
-    let none_logs = reader.tail(100, Some("nonexistent"));
+    let none_logs = reader.tail(100, Some("nonexistent"), false);
     assert_eq!(none_logs.len(), 0);
 }
 
@@ -300,14 +300,14 @@ fn test_clear_all_logs() {
     let reader = LogReader::new(logs_dir.clone());
 
     // Verify logs exist
-    let logs = reader.tail(100, None);
+    let logs = reader.tail(100, None, false);
     assert_eq!(logs.len(), 3);
 
     // Clear all
     reader.clear();
 
     // Verify empty
-    let logs = reader.tail(100, None);
+    let logs = reader.tail(100, None, false);
     assert_eq!(logs.len(), 0);
 
     // Verify files are deleted
@@ -330,11 +330,11 @@ fn test_clear_service_logs() {
     reader.clear_service("service-a");
 
     // service-a should be gone
-    let logs_a = reader.tail(100, Some("service-a"));
+    let logs_a = reader.tail(100, Some("service-a"), false);
     assert_eq!(logs_a.len(), 0);
 
     // service-b should still exist
-    let logs_b = reader.tail(100, Some("service-b"));
+    let logs_b = reader.tail(100, Some("service-b"), false);
     assert_eq!(logs_b.len(), 1);
     assert_eq!(logs_b[0].line, "msg b");
 }
@@ -354,13 +354,13 @@ fn test_clear_service_prefix() {
     reader.clear_service_prefix("api-");
 
     // api-* services should be gone
-    let api_users = reader.tail(100, Some("api-users"));
-    let api_orders = reader.tail(100, Some("api-orders"));
+    let api_users = reader.tail(100, Some("api-users"), false);
+    let api_orders = reader.tail(100, Some("api-orders"), false);
     assert_eq!(api_users.len(), 0);
     assert_eq!(api_orders.len(), 0);
 
     // worker should still exist
-    let worker = reader.tail(100, Some("worker"));
+    let worker = reader.tail(100, Some("worker"), false);
     assert_eq!(worker.len(), 1);
 }
 
@@ -371,10 +371,10 @@ fn test_empty_logs_directory() {
 
     let reader = LogReader::new(logs_dir);
 
-    let logs = reader.tail(100, None);
+    let logs = reader.tail(100, None, false);
     assert_eq!(logs.len(), 0);
 
-    let (paginated, has_more) = reader.get_paginated(None, 0, 10);
+    let (paginated, has_more) = reader.get_paginated(None, 0, 10, false);
     assert_eq!(paginated.len(), 0);
     assert!(!has_more);
 }
@@ -388,7 +388,7 @@ fn test_nonexistent_service() {
 
     let reader = LogReader::new(logs_dir);
 
-    let logs = reader.tail(100, Some("nonexistent"));
+    let logs = reader.tail(100, Some("nonexistent"), false);
     assert_eq!(logs.len(), 0);
 }
 
@@ -403,7 +403,7 @@ fn test_service_name_with_special_chars() {
     let reader = LogReader::new(logs_dir.clone());
 
     // Should be able to read back using the same service name
-    let logs = reader.tail(100, Some("my/special:service"));
+    let logs = reader.tail(100, Some("my/special:service"), false);
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].line, "special msg");
 }
@@ -416,7 +416,7 @@ fn test_log_line_metadata() {
     write_log_entries(&logs_dir, "test-svc", LogStream::Stdout, &["test message"]);
 
     let reader = LogReader::new(logs_dir);
-    let logs = reader.tail(1, Some("test-svc"));
+    let logs = reader.tail(1, Some("test-svc"), false);
 
     assert_eq!(logs.len(), 1);
     let log = &logs[0];
@@ -445,7 +445,7 @@ fn test_bounded_reading() {
     let reader = LogReader::new(logs_dir);
 
     // Bounded read should limit bytes read
-    let logs = reader.tail_bounded(1000, Some("large-service"), Some(10 * 1024)); // 10KB limit
+    let logs = reader.tail_bounded(1000, Some("large-service"), Some(10 * 1024), false); // 10KB limit
 
     // Should return some logs, but not all (due to byte limit)
     assert!(!logs.is_empty(), "Should return some logs");
@@ -471,7 +471,7 @@ fn test_multiple_rotated_files() {
     fs::write(&rotated1, "500\tLegacy rotated file\n").unwrap();
 
     let reader = LogReader::new(logs_dir);
-    let logs = reader.tail(100, Some("manual-service"));
+    let logs = reader.tail(100, Some("manual-service"), false);
 
     assert_eq!(logs.len(), 4, "Should read all 4 entries from main file");
 
@@ -494,7 +494,7 @@ fn test_reader_from_config() {
     write_log_entries(&config.logs_dir, "test-svc", LogStream::Stdout, &["test"]);
 
     let reader = LogReader::new(config.logs_dir.clone());
-    let logs = reader.tail(10, Some("test-svc"));
+    let logs = reader.tail(10, Some("test-svc"), false);
 
     assert_eq!(logs.len(), 1);
 }
@@ -520,7 +520,7 @@ fn test_truncation_ignores_legacy_rotation_files() {
     fs::write(&rotated2, "2000\tLegacy rotated 2\n").unwrap();
 
     let reader = LogReader::new(logs_dir);
-    let logs = reader.tail(100, Some("truncation-test"));
+    let logs = reader.tail(100, Some("truncation-test"), false);
 
     // Only main file is read (4 entries)
     assert_eq!(logs.len(), 4, "Should read only main file entries");
@@ -563,7 +563,7 @@ fn test_multi_service_chronological_merge() {
     let reader = LogReader::new(logs_dir);
 
     // Read all services - should be chronologically merged
-    let all_logs = reader.tail(100, None);
+    let all_logs = reader.tail(100, None, false);
 
     assert_eq!(all_logs.len(), 7, "Should have 7 total entries");
 
@@ -597,7 +597,7 @@ fn test_multi_service_chronological_merge() {
     }
 
     // Verify filtering still works correctly
-    let svc_a_only = reader.tail(100, Some("service-a"));
+    let svc_a_only = reader.tail(100, Some("service-a"), false);
     assert_eq!(svc_a_only.len(), 3);
     assert_eq!(svc_a_only[0].timestamp.timestamp_millis(), 1000);
     assert_eq!(svc_a_only[1].timestamp.timestamp_millis(), 3000);
@@ -629,7 +629,7 @@ fn test_truncation_maintains_integrity() {
 
     // Read back
     let reader = LogReader::new(logs_dir.clone());
-    let logs = reader.tail(1000, Some("heavy-truncation"));
+    let logs = reader.tail(1000, Some("heavy-truncation"), false);
 
     // With truncation, we'll have fewer logs since old ones are discarded
     // File will contain only the most recent messages that fit

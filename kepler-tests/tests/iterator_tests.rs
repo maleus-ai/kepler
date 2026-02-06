@@ -40,7 +40,7 @@ fn test_iterator_single_file() {
     drop(writer);
 
     let reader = LogReader::new(logs_dir);
-    let mut iter = reader.iter(Some("test-service"));
+    let mut iter = reader.iter(Some("test-service"), false);
 
     // First item should be oldest (Message 0)
     let first = iter.next().expect("Should have first item");
@@ -76,7 +76,7 @@ fn test_iterator_multiple_files_merged() {
     ).unwrap();
 
     let reader = LogReader::new(logs_dir);
-    let logs: Vec<_> = reader.iter(None).collect();
+    let logs: Vec<_> = reader.iter(None, false).collect();
 
     assert_eq!(logs.len(), 6);
 
@@ -108,7 +108,7 @@ fn test_iterator_stdout_stderr_merged() {
     ).unwrap();
 
     let reader = LogReader::new(logs_dir);
-    let logs: Vec<_> = reader.iter(Some("my-svc")).collect();
+    let logs: Vec<_> = reader.iter(Some("my-svc"), false).collect();
 
     assert_eq!(logs.len(), 4);
 
@@ -130,7 +130,7 @@ fn test_iterator_empty_files() {
     fs::create_dir_all(&logs_dir).unwrap();
 
     let reader = LogReader::new(logs_dir);
-    let logs: Vec<_> = reader.iter(None).collect();
+    let logs: Vec<_> = reader.iter(None, false).collect();
 
     assert_eq!(logs.len(), 0);
 }
@@ -158,7 +158,7 @@ fn test_iterator_single_file_only() {
     ).unwrap();
 
     let reader = LogReader::new(logs_dir);
-    let logs: Vec<_> = reader.iter(Some("single-svc")).collect();
+    let logs: Vec<_> = reader.iter(Some("single-svc"), false).collect();
 
     // Only reads from main file (truncation model ignores rotation files)
     assert_eq!(logs.len(), 2);
@@ -187,7 +187,7 @@ fn test_iterator_take_limits_iteration() {
     let reader = LogReader::new(logs_dir);
 
     // Use take() to limit iteration
-    let first_5: Vec<_> = reader.iter(Some("test-service")).take(5).collect();
+    let first_5: Vec<_> = reader.iter(Some("test-service"), false).take(5).collect();
 
     assert_eq!(first_5.len(), 5);
     assert_eq!(first_5[0].line, "Message 000");
@@ -215,13 +215,13 @@ fn test_head_method() {
 
     let reader = LogReader::new(logs_dir);
 
-    let first_10 = reader.head(10, Some("test-service"));
+    let first_10 = reader.head(10, Some("test-service"), false);
     assert_eq!(first_10.len(), 10);
     assert_eq!(first_10[0].line, "Line 00");
     assert_eq!(first_10[9].line, "Line 09");
 
     // Request more than available
-    let all = reader.head(100, Some("test-service"));
+    let all = reader.head(100, Some("test-service"), false);
     assert_eq!(all.len(), 50);
 }
 
@@ -251,7 +251,7 @@ fn test_head_across_services() {
     let reader = LogReader::new(logs_dir);
 
     // Get first 5 across all services
-    let first_5 = reader.head(5, None);
+    let first_5 = reader.head(5, None, false);
     assert_eq!(first_5.len(), 5);
 
     assert_eq!(first_5[0].line, "web-1");    // ts=100
@@ -279,7 +279,7 @@ fn test_iterator_preserves_metadata() {
     ).unwrap();
 
     let reader = LogReader::new(logs_dir);
-    let logs: Vec<_> = reader.iter(Some("my-service")).collect();
+    let logs: Vec<_> = reader.iter(Some("my-service"), false).collect();
 
     assert_eq!(logs.len(), 2);
 
@@ -319,7 +319,7 @@ fn test_iterator_handles_malformed_lines() {
     ).unwrap();
 
     let reader = LogReader::new(logs_dir);
-    let logs: Vec<_> = reader.iter(Some("test")).collect();
+    let logs: Vec<_> = reader.iter(Some("test"), false).collect();
 
     assert_eq!(logs.len(), 3);
     assert_eq!(logs[0].line, "Good line 1");
@@ -344,7 +344,7 @@ fn test_iterator_stops_on_malformed_line() {
     ).unwrap();
 
     let reader = LogReader::new(logs_dir);
-    let logs: Vec<_> = reader.iter(Some("test")).collect();
+    let logs: Vec<_> = reader.iter(Some("test"), false).collect();
 
     // Only gets the first line before the malformed one
     assert_eq!(logs.len(), 1);
@@ -378,7 +378,7 @@ fn test_iterator_ignores_legacy_rotation_files() {
     ).unwrap();
 
     let reader = LogReader::new(logs_dir);
-    let logs: Vec<_> = reader.iter(Some("wrap")).collect();
+    let logs: Vec<_> = reader.iter(Some("wrap"), false).collect();
 
     // Only reads from main file (truncation model ignores rotation files)
     assert_eq!(logs.len(), 1);

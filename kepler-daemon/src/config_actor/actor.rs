@@ -319,18 +319,20 @@ impl ConfigActor {
             ConfigCommand::GetLogs {
                 service,
                 lines,
+                no_hooks,
                 reply,
             } => {
-                let result = self.get_logs(service.as_deref(), lines);
+                let result = self.get_logs(service.as_deref(), lines, no_hooks);
                 let _ = reply.send(result);
             }
             ConfigCommand::GetLogsBounded {
                 service,
                 lines,
                 max_bytes,
+                no_hooks,
                 reply,
             } => {
-                let result = self.get_logs_bounded(service.as_deref(), lines, max_bytes);
+                let result = self.get_logs_bounded(service.as_deref(), lines, max_bytes, no_hooks);
                 let _ = reply.send(result);
             }
             ConfigCommand::GetLogsWithMode {
@@ -338,18 +340,20 @@ impl ConfigActor {
                 lines,
                 max_bytes,
                 mode,
+                no_hooks,
                 reply,
             } => {
-                let result = self.get_logs_with_mode(service.as_deref(), lines, max_bytes, mode);
+                let result = self.get_logs_with_mode(service.as_deref(), lines, max_bytes, mode, no_hooks);
                 let _ = reply.send(result);
             }
             ConfigCommand::GetLogsPaginated {
                 service,
                 offset,
                 limit,
+                no_hooks,
                 reply,
             } => {
-                let result = self.get_logs_paginated(service.as_deref(), offset, limit);
+                let result = self.get_logs_paginated(service.as_deref(), offset, limit, no_hooks);
                 let _ = reply.send(result);
             }
             ConfigCommand::GetServiceConfig {
@@ -718,10 +722,10 @@ impl ConfigActor {
         }
     }
 
-    fn get_logs(&self, service: Option<&str>, lines: usize) -> Vec<LogEntry> {
+    fn get_logs(&self, service: Option<&str>, lines: usize, no_hooks: bool) -> Vec<LogEntry> {
         let reader = LogReader::new(self.log_config.logs_dir.clone());
         reader
-            .tail(lines, service)
+            .tail(lines, service, no_hooks)
             .into_iter()
             .map(|l| l.into())
             .collect()
@@ -732,10 +736,11 @@ impl ConfigActor {
         service: Option<&str>,
         lines: usize,
         max_bytes: Option<usize>,
+        no_hooks: bool,
     ) -> Vec<LogEntry> {
         let reader = LogReader::new(self.log_config.logs_dir.clone());
         reader
-            .tail_bounded(lines, service, max_bytes)
+            .tail_bounded(lines, service, max_bytes, no_hooks)
             .into_iter()
             .map(|l| l.into())
             .collect()
@@ -747,20 +752,21 @@ impl ConfigActor {
         lines: usize,
         max_bytes: Option<usize>,
         mode: LogMode,
+        no_hooks: bool,
     ) -> Vec<LogEntry> {
         let reader = LogReader::new(self.log_config.logs_dir.clone());
         match mode {
             LogMode::Head => reader
-                .head(lines, service)
+                .head(lines, service, no_hooks)
                 .into_iter()
                 .map(|l| l.into())
                 .collect(),
             LogMode::Tail => reader
-                .tail_bounded(lines, service, max_bytes)
+                .tail_bounded(lines, service, max_bytes, no_hooks)
                 .into_iter()
                 .map(|l| l.into())
                 .collect(),
-            LogMode::All => reader.iter(service).take(lines).map(|l| l.into()).collect(),
+            LogMode::All => reader.iter(service, no_hooks).take(lines).map(|l| l.into()).collect(),
         }
     }
 
@@ -769,9 +775,10 @@ impl ConfigActor {
         service: Option<&str>,
         offset: usize,
         limit: usize,
+        no_hooks: bool,
     ) -> (Vec<LogEntry>, bool) {
         let reader = LogReader::new(self.log_config.logs_dir.clone());
-        let (logs, has_more) = reader.get_paginated(service, offset, limit);
+        let (logs, has_more) = reader.get_paginated(service, offset, limit, no_hooks);
         (logs.into_iter().map(|l| l.into()).collect(), has_more)
     }
 

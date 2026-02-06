@@ -604,7 +604,7 @@ impl TestLogHelper {
         let reader = LogReader::new(
             self.config.logs_dir.clone(),
         );
-        reader.tail(count, service)
+        reader.tail(count, service, false)
     }
 
     /// Clear all logs
@@ -644,7 +644,7 @@ impl TestLogHelper {
         );
         // Get all entries and filter by index
         // Note: this is less efficient than the old approach but maintains API compatibility
-        let all = reader.tail(10000, service);
+        let all = reader.tail(10000, service, false);
         let current = self.current_sequence();
         if since >= current {
             return Vec::new();

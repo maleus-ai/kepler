@@ -92,6 +92,9 @@ pub enum Request {
         /// Log reading mode (head or tail)
         #[serde(default)]
         mode: LogMode,
+        /// Whether to exclude hook log entries
+        #[serde(default)]
+        no_hooks: bool,
     },
     /// Get logs with pagination (for large log responses)
     LogsChunk {
@@ -103,6 +106,9 @@ pub enum Request {
         offset: usize,
         /// Maximum number of entries to return
         limit: usize,
+        /// Whether to exclude hook log entries
+        #[serde(default)]
+        no_hooks: bool,
     },
     /// Shutdown the daemon
     Shutdown,
@@ -133,6 +139,9 @@ pub enum Request {
         /// If true, start cursor at beginning of files (for 'all' mode)
         /// If false, start cursor at end of files (for 'follow' mode)
         from_start: bool,
+        /// Whether to exclude hook log entries
+        #[serde(default)]
+        no_hooks: bool,
     },
 }
 

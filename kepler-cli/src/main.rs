@@ -100,7 +100,7 @@ async fn run() -> Result<()> {
 
             if !detach {
                 // Follow logs until Ctrl+C, then stop services
-                follow_logs_until_ctrl_c(&mut client, &canonical_path, service.as_deref()).await?;
+                follow_logs_until_ctrl_c(&mut client, &canonical_path, service.as_deref(), false).await?;
 
                 // Ctrl+C received — stop services via fresh connection
                 eprintln!("\nGracefully stopping...");
@@ -123,7 +123,7 @@ async fn run() -> Result<()> {
             handle_response(response);
 
             if !detach {
-                follow_logs_until_ctrl_c(&mut client, &canonical_path, None).await?;
+                follow_logs_until_ctrl_c(&mut client, &canonical_path, None, false).await?;
 
                 eprintln!("\nGracefully stopping...");
                 let daemon_socket = Daemon::get_socket_path()
@@ -140,7 +140,7 @@ async fn run() -> Result<()> {
             handle_response(response);
 
             if !detach {
-                follow_logs_until_ctrl_c(&mut client, &canonical_path, None).await?;
+                follow_logs_until_ctrl_c(&mut client, &canonical_path, None, false).await?;
 
                 eprintln!("\nGracefully stopping...");
                 let daemon_socket = Daemon::get_socket_path()
@@ -156,6 +156,7 @@ async fn run() -> Result<()> {
             follow,
             head,
             tail,
+            no_hook,
         } => {
             let (mode, lines) = if let Some(n) = head {
                 (LogMode::Head, n)
@@ -164,7 +165,7 @@ async fn run() -> Result<()> {
             } else {
                 (LogMode::All, 100)
             };
-            handle_logs(&mut client, canonical_path, service, follow, lines, mode).await?;
+            handle_logs(&mut client, canonical_path, service, follow, lines, mode, no_hook).await?;
         }
 
         Commands::PS { .. } => {
@@ -652,6 +653,7 @@ async fn follow_logs_until_ctrl_c(
     client: &mut Client,
     config_path: &Path,
     service: Option<&str>,
+    no_hooks: bool,
 ) -> Result<()> {
     let mut color_map: HashMap<String, Color> = HashMap::new();
     let mut cursor_id: Option<String> = None;
@@ -661,7 +663,7 @@ async fn follow_logs_until_ctrl_c(
     loop {
         // Always complete the RPC before checking Ctrl+C (keeps socket clean)
         let response = match client
-            .logs_cursor(config_path, service, cursor_id.as_deref(), true)
+            .logs_cursor(config_path, service, cursor_id.as_deref(), true, no_hooks)
             .await
         {
             Ok(resp) => resp,
@@ -722,13 +724,14 @@ async fn handle_logs(
     follow: bool,
     lines: usize,
     mode: LogMode,
+    no_hooks: bool,
 ) -> Result<()> {
     let mut color_map: HashMap<String, Color> = HashMap::new();
 
     // For head/tail modes, use one-shot request
     if mode == LogMode::Head || mode == LogMode::Tail {
         let response = client
-            .logs(config_path.clone(), service.clone(), false, lines, mode)
+            .logs(config_path.clone(), service.clone(), false, lines, mode, no_hooks)
             .await?;
 
         let entries = match response {
@@ -770,6 +773,7 @@ async fn handle_logs(
                 service.as_deref(),
                 cursor_id.as_deref(),
                 from_start,
+                no_hooks,
             )
             .await
         {

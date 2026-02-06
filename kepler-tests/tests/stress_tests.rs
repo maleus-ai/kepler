@@ -36,11 +36,11 @@ fn test_large_log_file_bounded_read() {
 
     // Read with bounded tail should not OOM
     let reader = LogReader::new(logs_dir.clone());
-    let entries = reader.tail(1000, Some("test-service"));
+    let entries = reader.tail(1000, Some("test-service"), false);
     assert_eq!(entries.len(), 1000);
 
     // Reading with bounds should respect the limit
-    let entries = reader.tail_bounded(100, Some("test-service"), Some(1024 * 1024));
+    let entries = reader.tail_bounded(100, Some("test-service"), Some(1024 * 1024), false);
     assert!(entries.len() <= 100);
 }
 
@@ -175,8 +175,8 @@ fn test_bounded_read_respects_limits() {
         100_000, // Way more than DEFAULT_MAX_LINES
         Some("test-service"),
         Some(DEFAULT_MAX_BYTES),
+        false,
     );
-
     // Should be capped at the internal limit (10,000 lines)
     assert!(
         entries.len() <= 10_000,
@@ -210,7 +210,7 @@ fn test_clear_during_heavy_writes() {
     }
 
     // Should have 0 entries after final clear
-    let entries = reader.tail(1000, None);
+    let entries = reader.tail(1000, None, false);
     assert_eq!(entries.len(), 0, "Buffer should be empty after clear");
 }
 
@@ -310,7 +310,7 @@ fn test_truncated_logs_maintain_ordering() {
 
     // Read back remaining logs
     let reader = LogReader::new(logs_dir);
-    let all_entries = reader.tail(1000, Some("test-service"));
+    let all_entries = reader.tail(1000, Some("test-service"), false);
 
     // Should have some entries (older ones truncated)
     assert!(
@@ -361,23 +361,23 @@ fn test_log_pagination_offset_limit() {
     let reader = LogReader::new(logs_dir);
 
     // Test first page
-    let (page1, has_more) = reader.get_paginated(Some("pagination-test"), 0, 10);
+    let (page1, has_more) = reader.get_paginated(Some("pagination-test"), 0, 10, false);
     assert!(has_more, "Should have more entries after first page");
     assert_eq!(page1.len(), 10, "First page should have 10 entries");
     assert!(page1[0].line.contains("000"), "First entry should be line 000");
 
     // Test second page
-    let (page2, _) = reader.get_paginated(Some("pagination-test"), 10, 10);
+    let (page2, _) = reader.get_paginated(Some("pagination-test"), 10, 10, false);
     assert_eq!(page2.len(), 10, "Second page should have 10 entries");
     assert!(page2[0].line.contains("010"), "Second page should start at line 010");
 
     // Test last page (partial)
-    let (last_page, has_more) = reader.get_paginated(Some("pagination-test"), 95, 10);
+    let (last_page, has_more) = reader.get_paginated(Some("pagination-test"), 95, 10, false);
     assert!(!has_more, "Should not have more entries on last page");
     assert_eq!(last_page.len(), 5, "Last page should have only 5 entries");
 
     // Test offset beyond total
-    let (empty, has_more) = reader.get_paginated(Some("pagination-test"), 200, 10);
+    let (empty, has_more) = reader.get_paginated(Some("pagination-test"), 200, 10, false);
     assert!(!has_more);
     assert_eq!(empty.len(), 0, "Should return empty for offset beyond total");
 }
@@ -500,7 +500,7 @@ fn test_clear_service_prefix_removes_logs() {
     );
 
     // Verify we can still read logs from other-service
-    let other_entries = reader.tail(100, Some("other-service"));
+    let other_entries = reader.tail(100, Some("other-service"), false);
     assert!(
         !other_entries.is_empty(),
         "other-service should still have logs"
@@ -567,7 +567,7 @@ fn test_clear_all_removes_all_logs() {
     );
 
     // Verify tail returns empty
-    let all_entries = reader.tail(1000, None);
+    let all_entries = reader.tail(1000, None, false);
     assert!(
         all_entries.is_empty(),
         "Buffer should be empty after clear()"
@@ -739,7 +739,7 @@ fn test_buffer_with_truncation() {
 
     // Verify we can read entries back
     let reader = LogReader::new(logs_dir);
-    let entries = reader.tail(100, Some("truncate-buffer"));
+    let entries = reader.tail(100, Some("truncate-buffer"), false);
     assert!(
         !entries.is_empty(),
         "Should have entries after truncation, got {}",
@@ -797,7 +797,7 @@ fn test_concurrent_writers_no_contention() {
     let reader = LogReader::new((*logs_dir).clone());
     for thread_id in 0..num_threads {
         let service_name = format!("service-{}", thread_id);
-        let entries = reader.tail(lines_per_thread * 2, Some(&service_name));
+        let entries = reader.tail(lines_per_thread * 2, Some(&service_name), false);
         assert_eq!(
             entries.len(),
             lines_per_thread,

@@ -28,12 +28,14 @@ pub enum ConfigCommand {
     GetLogs {
         service: Option<String>,
         lines: usize,
+        no_hooks: bool,
         reply: oneshot::Sender<Vec<LogEntry>>,
     },
     GetLogsBounded {
         service: Option<String>,
         lines: usize,
         max_bytes: Option<usize>,
+        no_hooks: bool,
         reply: oneshot::Sender<Vec<LogEntry>>,
     },
     GetLogsWithMode {
@@ -41,12 +43,14 @@ pub enum ConfigCommand {
         lines: usize,
         max_bytes: Option<usize>,
         mode: LogMode,
+        no_hooks: bool,
         reply: oneshot::Sender<Vec<LogEntry>>,
     },
     GetLogsPaginated {
         service: Option<String>,
         offset: usize,
         limit: usize,
+        no_hooks: bool,
         reply: oneshot::Sender<(Vec<LogEntry>, bool)>,
     },
     GetServiceConfig {

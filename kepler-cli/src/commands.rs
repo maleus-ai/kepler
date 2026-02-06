@@ -58,6 +58,10 @@ pub enum Commands {
         /// Show last N lines, newest last (default: 100)
         #[arg(long)]
         tail: Option<usize>,
+
+        /// Exclude hook logs (pre_start, post_stop, etc.)
+        #[arg(long)]
+        no_hook: bool,
     },
     /// List all services and their states
     PS {

@@ -93,13 +93,14 @@ impl ConfigActorHandle {
     }
 
     /// Get logs
-    pub async fn get_logs(&self, service: Option<String>, lines: usize) -> Vec<LogEntry> {
+    pub async fn get_logs(&self, service: Option<String>, lines: usize, no_hooks: bool) -> Vec<LogEntry> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .tx
             .send(ConfigCommand::GetLogs {
                 service,
                 lines,
+                no_hooks,
                 reply: reply_tx,
             })
             .await
@@ -116,6 +117,7 @@ impl ConfigActorHandle {
         service: Option<String>,
         lines: usize,
         max_bytes: Option<usize>,
+        no_hooks: bool,
     ) -> Vec<LogEntry> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
@@ -124,6 +126,7 @@ impl ConfigActorHandle {
                 service,
                 lines,
                 max_bytes,
+                no_hooks,
                 reply: reply_tx,
             })
             .await
@@ -141,6 +144,7 @@ impl ConfigActorHandle {
         lines: usize,
         max_bytes: Option<usize>,
         mode: LogMode,
+        no_hooks: bool,
     ) -> Vec<LogEntry> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
@@ -150,6 +154,7 @@ impl ConfigActorHandle {
                 lines,
                 max_bytes,
                 mode,
+                no_hooks,
                 reply: reply_tx,
             })
             .await
@@ -166,6 +171,7 @@ impl ConfigActorHandle {
         service: Option<String>,
         offset: usize,
         limit: usize,
+        no_hooks: bool,
     ) -> (Vec<LogEntry>, bool) {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
@@ -174,6 +180,7 @@ impl ConfigActorHandle {
                 service,
                 offset,
                 limit,
+                no_hooks,
                 reply: reply_tx,
             })
             .await

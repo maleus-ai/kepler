@@ -53,6 +53,8 @@ pub struct CursorState {
     positions: HashMap<PathBuf, FilePosition>,
     /// Service filter (None = all services)
     service_filter: Option<String>,
+    /// Whether to exclude hook log files
+    no_hooks: bool,
     /// Last time this cursor was polled (for TTL)
     last_polled: Instant,
     /// Config this cursor belongs to (for validation)
@@ -140,12 +142,13 @@ impl CursorManager {
         logs_dir: PathBuf,
         service: Option<String>,
         from_start: bool,
+        no_hooks: bool,
     ) -> String {
         let cursor_id = generate_cursor_id();
 
         // Collect current log files
         let reader = LogReader::new(logs_dir.clone());
-        let files = reader.collect_log_files(service.as_deref());
+        let files = reader.collect_log_files(service.as_deref(), no_hooks);
 
         let mut positions = HashMap::new();
         for (path, _service, _stream) in files {
@@ -164,6 +167,7 @@ impl CursorManager {
         let state = CursorState {
             positions,
             service_filter: service,
+            no_hooks,
             last_polled: Instant::now(),
             config_path,
             logs_dir,
@@ -182,7 +186,7 @@ impl CursorManager {
         config_path: &Path,
     ) -> Result<(Vec<LogLine>, bool), CursorError> {
         // Phase 1: Lock, validate, clone state, drop lock
-        let (mut positions, service_filter, logs_dir) = {
+        let (mut positions, service_filter, no_hooks, logs_dir) = {
             let mut cursor = self
                 .cursors
                 .get_mut(cursor_id)
@@ -203,13 +207,14 @@ impl CursorManager {
             (
                 cursor.positions.clone(),
                 cursor.service_filter.clone(),
+                cursor.no_hooks,
                 cursor.logs_dir.clone(),
             )
         }; // RefMut dropped here
 
         // Phase 2: File I/O without any lock
         let reader = LogReader::new(logs_dir);
-        let current_files = reader.collect_log_files(service_filter.as_deref());
+        let current_files = reader.collect_log_files(service_filter.as_deref(), no_hooks);
 
         // Add any new files we haven't seen before
         for (path, _service, _stream) in &current_files {

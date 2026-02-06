@@ -309,7 +309,7 @@ fn test_tail_returns_newest_entries_first_internally() {
     let reader = LogReader::new(logs_dir);
 
     // Request last 5
-    let last_5 = reader.tail(5, Some("test-service"));
+    let last_5 = reader.tail(5, Some("test-service"), false);
     assert_eq!(last_5.len(), 5);
 
     // tail() returns in chronological order (oldest to newest)
@@ -342,7 +342,7 @@ fn test_tail_with_main_file_multiple_entries() {
     let reader = LogReader::new(logs_dir);
 
     // Request tail(4) - should get all 4 entries from main file
-    let logs = reader.tail(4, Some("multi-entry"));
+    let logs = reader.tail(4, Some("multi-entry"), false);
 
     assert_eq!(logs.len(), 4, "Should return 4 entries");
 
@@ -375,7 +375,7 @@ fn test_tail_across_multiple_services() {
     let reader = LogReader::new(logs_dir);
 
     // Request tail(4) across all services
-    let logs = reader.tail(4, None);
+    let logs = reader.tail(4, None, false);
 
     assert_eq!(logs.len(), 4);
 
@@ -407,7 +407,7 @@ fn test_tail_merges_stdout_stderr_correctly() {
     let reader = LogReader::new(logs_dir);
 
     // Get all 6 entries
-    let logs = reader.tail(10, Some("my-svc"));
+    let logs = reader.tail(10, Some("my-svc"), false);
 
     assert_eq!(logs.len(), 6);
 
@@ -446,7 +446,7 @@ fn test_tail_stops_early_when_count_reached() {
     let reader = LogReader::new(logs_dir);
 
     // Request only 5 - should stop early without reading all 1000
-    let logs = reader.tail(5, Some("test-service"));
+    let logs = reader.tail(5, Some("test-service"), false);
 
     assert_eq!(logs.len(), 5);
 
@@ -463,7 +463,7 @@ fn test_tail_empty_service() {
     fs::create_dir_all(&logs_dir).unwrap();
 
     let reader = LogReader::new(logs_dir);
-    let logs = reader.tail(10, Some("nonexistent"));
+    let logs = reader.tail(10, Some("nonexistent"), false);
 
     assert_eq!(logs.len(), 0);
 }
@@ -499,7 +499,7 @@ fn test_tail_with_truncation_and_many_entries() {
     assert!(!rotated1.exists(), "Rotated files should not exist with truncation model");
 
     // tail should return entries in chronological order
-    let logs = reader.tail(20, Some("truncating-service"));
+    let logs = reader.tail(20, Some("truncating-service"), false);
 
     // Verify timestamps are ordered
     for i in 1..logs.len() {
@@ -537,7 +537,7 @@ fn test_head_returns_oldest_first() {
     let reader = LogReader::new(logs_dir);
 
     // head() should return oldest first
-    let first_5 = reader.head(5, Some("test-service"));
+    let first_5 = reader.head(5, Some("test-service"), false);
     assert_eq!(first_5.len(), 5);
 
     assert_eq!(first_5[0].line, "Message 0");
@@ -566,7 +566,7 @@ fn test_head_merges_services_chronologically() {
     let reader = LogReader::new(logs_dir);
 
     // head(4) should return 4 oldest entries merged
-    let logs = reader.head(4, None);
+    let logs = reader.head(4, None, false);
 
     assert_eq!(logs.len(), 4);
     assert_eq!(logs[0].line, "A-1"); // ts=1000
@@ -596,7 +596,7 @@ fn test_head_stops_early() {
     let reader = LogReader::new(logs_dir);
 
     // Request only 5 - iterator should stop early
-    let logs = reader.head(5, Some("test-service"));
+    let logs = reader.head(5, Some("test-service"), false);
 
     assert_eq!(logs.len(), 5);
     assert_eq!(logs[0].line, "Message 0000");
