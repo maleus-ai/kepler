@@ -147,6 +147,21 @@ Use `recreate` when:
 - Environment variables have changed
 - env_files have been modified
 
+### CLI PS Command
+
+The `ps` command lists services and their states:
+
+- `kepler ps` - Show services for the current config
+- `kepler ps --all` - Show services across all loaded configs
+
+### CLI Prune Command
+
+The `prune` command removes state directories for stopped or orphaned configs:
+
+- `kepler prune` - Prune stopped/orphaned config state directories
+- `kepler prune --force` - Force prune even if services appear running
+- `kepler prune --dry-run` - Show what would be pruned without deleting
+
 ### Config Baking Process
 
 When no snapshot exists (or after `recreate`), the config goes through a baking process:
@@ -488,7 +503,7 @@ This ordering ensures that each stage has access to the variables it needs while
 
 ### Root Execution Prevention
 
-Running the daemon as root is blocked by default for security. The `--allow-root` flag can override this (not recommended).
+Running the daemon as root is blocked by default for security. The `--allow-root` flag can override this (not recommended). This flag is available both via the CLI (`kepler daemon start --allow-root`) and when running the daemon binary directly (`kepler-daemon --allow-root`).
 
 ### Privilege Dropping
 

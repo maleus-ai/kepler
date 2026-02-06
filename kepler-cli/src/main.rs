@@ -168,7 +168,7 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
         .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
 
     match command {
-        DaemonCommands::Start { detach } => {
+        DaemonCommands::Start { detach, allow_root } => {
             // Check if daemon is already running
             if Client::is_daemon_running(&daemon_socket).await {
                 println!("Daemon is already running");
@@ -191,9 +191,9 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
                 if !daemon_path.exists() {
                     // Try looking in same directory as kepler binary
                     let alt_path = which_daemon()?;
-                    start_daemon_detached(&alt_path)?;
+                    start_daemon_detached(&alt_path, *allow_root)?;
                 } else {
-                    start_daemon_detached(&daemon_path)?;
+                    start_daemon_detached(&daemon_path, *allow_root)?;
                 }
 
                 // Wait for daemon to start
@@ -211,7 +211,11 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
                 println!("Starting daemon in foreground...");
                 println!("Press Ctrl+C to stop");
 
-                let status = tokio::process::Command::new(&daemon_path)
+                let mut cmd = tokio::process::Command::new(&daemon_path);
+                if *allow_root {
+                    cmd.arg("--allow-root");
+                }
+                let status = cmd
                     .status()
                     .await
                     .map_err(|source| CliError::DaemonExec {
@@ -249,7 +253,7 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
             }
         }
 
-        DaemonCommands::Restart { detach } => {
+        DaemonCommands::Restart { detach, allow_root } => {
             // Stop daemon if running
             if Client::is_daemon_running(&daemon_socket).await {
                 let mut client = Client::connect(&daemon_socket).await?;
@@ -265,7 +269,7 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
             }
 
             // Start daemon
-            let start_cmd = DaemonCommands::Start { detach: *detach };
+            let start_cmd = DaemonCommands::Start { detach: *detach, allow_root: *allow_root };
             return Box::pin(handle_daemon_command(&start_cmd)).await;
         }
 
@@ -339,14 +343,17 @@ fn which_daemon() -> Result<PathBuf> {
     Err(CliError::DaemonNotFound)
 }
 
-fn start_daemon_detached(daemon_path: &PathBuf) -> Result<()> {
+fn start_daemon_detached(daemon_path: &PathBuf, allow_root: bool) -> Result<()> {
     use std::process::Command;
 
-    Command::new(daemon_path)
-        .stdin(Stdio::null())
+    let mut cmd = Command::new(daemon_path);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::null());
+    if allow_root {
+        cmd.arg("--allow-root");
+    }
+    cmd.spawn()
         .map_err(|source| CliError::DaemonSpawn {
             path: daemon_path.clone(),
             source,

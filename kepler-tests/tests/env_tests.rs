@@ -494,12 +494,12 @@ async fn test_env_merge_priority_chain() {
 
     harness.start_service("test").await.unwrap();
 
-    let content = marker
-        .wait_for_marker_content("priority", Duration::from_secs(2))
+    let got_lines = marker
+        .wait_for_marker_lines("priority", 4, Duration::from_secs(2))
         .await;
 
-    assert!(content.is_some(), "Service should have written priority test");
-    let content = content.unwrap();
+    assert!(got_lines, "Service should have written 4 priority test lines");
+    let content = marker.read_marker("priority").unwrap();
 
     // VAR_ONLY_FILE: only in env_file
     assert!(

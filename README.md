@@ -103,7 +103,7 @@ sudo useradd -r -s /bin/false kepler
 sudo -u kepler kepler daemon start -d
 ```
 
-**Avoid running as root** - the daemon will warn if started as root. Use the `user:` option in your config to run specific services with elevated privileges when needed.
+**Avoid running as root** - the daemon refuses to start as root by default. Use `kepler daemon start --allow-root` to override (not recommended). Instead, use the `user:` option in your config to run specific services with elevated privileges when needed.
 
 **Using systemd:**
 ```ini
@@ -157,8 +157,8 @@ kepler start             # Start services from kepler.yaml
 **3. Monitor and manage:**
 
 ```bash
-kepler status            # Show service status
-kepler logs -f           # Follow logs
+kepler ps                # Show service status
+kepler logs --follow     # Follow logs
 kepler stop              # Stop services
 kepler daemon stop       # Stop daemon
 ```
@@ -173,9 +173,9 @@ Commands that manage the global daemon (no config required):
 
 | Command | Description |
 |---------|-------------|
-| `kepler daemon start [-d]` | Start daemon (`-d` for background) |
+| `kepler daemon start [-d] [--allow-root]` | Start daemon (`-d` for background) |
 | `kepler daemon stop` | Stop daemon (stops all services first) |
-| `kepler daemon restart [-d]` | Restart daemon |
+| `kepler daemon restart [-d] [--allow-root]` | Restart daemon |
 | `kepler daemon status` | Show daemon info and loaded configs |
 
 ### Service Commands
@@ -187,14 +187,16 @@ Commands that operate on services (require config):
 | `kepler start [service]` | Start all or specific service |
 | `kepler stop [service]` | Stop all or specific service |
 | `kepler restart [services...]` | Restart all running or specific services |
-| `kepler status` | Show status of all loaded configs |
-| `kepler logs [--follow] [service]` | View logs (`--follow` to follow) |
+| `kepler recreate` | Re-bake config, clear state, and start fresh |
+| `kepler ps [--all]` | List services and states (`--all` for all loaded configs) |
+| `kepler logs [--follow] [--head\|--tail] [-n N] [service]` | View logs |
+| `kepler prune [--force] [--dry-run]` | Prune stopped/orphaned config state directories |
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| `-f, --file <FILE>` | Config file path (default: `kepler.yaml`) |
+| `-f, --file <FILE>` | Config file path (default: `kepler.yaml`, also accepts `kepler.yml`) |
 | `-v, --verbose` | Enable verbose output |
 | `--clean` | Run cleanup hooks after stopping |
 
@@ -206,6 +208,7 @@ Commands that operate on services (require config):
 
 ```yaml
 kepler:
+  sys_env: clear         # Global sys_env policy (clear or inherit), default: clear
   logs:
     buffer_size: 16384   # 16KB buffer for better write throughput
     max_size: "50MB"     # Truncate logs when they exceed this size
@@ -310,11 +313,20 @@ services:
 | `user` | `string` | - | User to run as (Unix) |
 | `group` | `string` | - | Group override (Unix) |
 | `logs` | `object` | - | Log configuration |
+| `limits` | `object` | - | Resource limits (see below) |
 
 **User format** (Unix only):
 - `"username"` - resolve by name
 - `"1000"` - numeric uid
 - `"1000:1000"` - explicit uid:gid
+
+**Resource limits** (Unix only):
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `limits.memory` | `string` | Memory limit (e.g., `"512M"`, `"1G"`, `"2048K"`) |
+| `limits.cpu_time` | `int` | CPU time limit in seconds |
+| `limits.max_fds` | `int` | Maximum number of open file descriptors |
 
 ### Dependency Configuration
 
@@ -577,7 +589,7 @@ kepler daemon start -d
 
 By default, Kepler clears the environment before starting services and only passes explicitly configured environment variables. This is a security feature that prevents unintended environment leakage.
 
-The `sys_env` option controls this behavior:
+The `sys_env` option controls this behavior (configurable globally under `kepler.sys_env` or per-service):
 - `clear` (default) - Start with empty environment, only explicit vars are passed
 - `inherit` - Inherit all system environment variables from the daemon
 
