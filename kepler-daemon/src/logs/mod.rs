@@ -31,8 +31,8 @@ pub const DEFAULT_MAX_LINES: usize = 10_000;
 /// Default max log file size before truncation (10MB)
 pub const DEFAULT_MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
 
-/// Default buffer size (8KB)
-pub const DEFAULT_BUFFER_SIZE: usize = 8 * 1024;
+/// Default buffer size (0 = synchronous writes)
+pub const DEFAULT_BUFFER_SIZE: usize = 0;
 
 /// Validate that a path is not a symlink (security measure to prevent symlink attacks)
 #[cfg(unix)]

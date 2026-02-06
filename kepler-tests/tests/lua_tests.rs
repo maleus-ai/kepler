@@ -587,7 +587,7 @@ kepler:
     max_size: !lua |
       return ctx.env.KEPLER_LOG_MAX_SIZE or "10M"
     buffer_size: !lua |
-      return tonumber(ctx.env.KEPLER_LOG_BUFFER) or 8192
+      return tonumber(ctx.env.KEPLER_LOG_BUFFER) or 0
 
 services:
   test:

@@ -318,7 +318,7 @@ When the database restarts:
 
 Kepler supports both simple and extended dependency formats:
 
-**Simple format (backward compatible):**
+**Simple format:**
 ```yaml
 depends_on:
   - service-a
@@ -566,12 +566,12 @@ Settings can be configured globally under `kepler.logs` or per-service under `se
 Log writes are buffered for performance:
 
 1. **Lock-free buffer**: Each writer uses a per-service buffer to batch writes
-2. **Configurable size**: `buffer_size` controls how many bytes are buffered before flushing (default: 8KB)
+2. **Configurable size**: `buffer_size` controls how many bytes are buffered before flushing (default: 0, synchronous writes)
 3. **Automatic flush**: Buffers are flushed on service stop or when full
 
 Trade-offs:
-- `buffer_size: 0` - Synchronous writes, safest for crash recovery
-- `buffer_size: 8192` (default) - 8KB buffer, good balance of performance and safety
+- `buffer_size: 0` (default) - Synchronous writes, safest for crash recovery
+- `buffer_size: 8192` - 8KB buffer, good balance of performance and safety
 - `buffer_size: 16384` - 16KB buffer, ~30% better throughput
 
 ### Cursor-Based Streaming

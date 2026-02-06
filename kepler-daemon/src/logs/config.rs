@@ -19,7 +19,7 @@ pub struct LogWriterConfig {
 }
 
 impl LogWriterConfig {
-    /// Create a new config with default settings (unbounded size, 8KB buffer).
+    /// Create a new config with default settings (unbounded size, synchronous writes).
     pub fn new(logs_dir: PathBuf) -> Self {
         Self {
             logs_dir,

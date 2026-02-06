@@ -338,7 +338,7 @@ services:
 
 Kepler supports Docker Compose-compatible dependency configuration with conditions and restart propagation.
 
-**Simple form (backward compatible):**
+**Simple form:**
 ```yaml
 depends_on:
   - database
@@ -368,7 +368,7 @@ depends_on:
 |-----------|-------------|
 | `service_started` | Dependency is running (default) |
 | `service_healthy` | Dependency passed health checks |
-| `service_completed_successfully` | Dependency exited with code 0 (for init containers) |
+| `service_completed_successfully` | Dependency exited with code 0 |
 
 **Restart propagation:**
 
@@ -420,21 +420,21 @@ kepler:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `max_size` | `string` | unbounded | Max log file size before truncation (`K`, `KB`, `M`, `MB`, `G`, `GB`) |
-| `buffer_size` | `int` | `8192` | Bytes to buffer before flushing to disk (0 = synchronous writes) |
+| `buffer_size` | `int` | `0` | Bytes to buffer before flushing to disk (0 = synchronous writes) |
 
 **Truncation behavior:**
 When `max_size` is specified and a log file exceeds this limit, it is truncated from the beginning, keeping only the most recent logs:
 - Single file per service/stream (`service.stdout.log`, `service.stderr.log`)
-- Oldest logs are discarded when the limit is reached
+- When the limit is reached, the file is truncated and writing starts fresh
 - Predictable disk usage per service
 
 If `max_size` is not specified, logs grow unbounded (no truncation).
 
 **Buffer size trade-offs:**
-- `0` - Write every log line directly to disk (synchronous). Safest, no data loss on crash.
-- `8192` (default) - 8KB buffer. Good balance of performance and safety.
-- `16384` - 16KB buffer. ~30% better throughput, slightly higher crash risk.
-- Higher values provide diminishing returns and risk more data loss on crash.
+- `0` (default) - Write every log line directly to disk (synchronous). Safest, no data loss on crash.
+- `8192` - 8KB buffer. Better performance, but buffered logs may be lost if the daemon crashes.
+- `16384` - 16KB buffer. ~30% better throughput, but more buffered logs may be lost on daemon crash.
+- Higher values provide diminishing returns and increase the amount of logs lost on daemon crash.
 
 #### Per-Service Log Settings
 
@@ -476,10 +476,10 @@ services:
 | `pre_start` | Runs before service spawns |
 | `post_start` | Runs after service spawns |
 | `pre_stop` | Runs before service stops |
-| `post_stop` | Runs after service stops |
+| `post_stop` | Runs after service is manually stopped (via CLI) |
 | `pre_restart` | Runs before service restarts (before stop) |
 | `post_restart` | Runs after service restarts (after spawn) |
-| `post_exit` | Runs when service process exits |
+| `post_exit` | Runs when the service process exits on its own (returns a status code) |
 | `post_healthcheck_success` | Runs when service becomes healthy |
 | `post_healthcheck_fail` | Runs when service becomes unhealthy |
 
@@ -543,7 +543,7 @@ services:
 
 Kepler supports Lua scripting (using sandboxed Luau) for dynamic config generation via `!lua` and `!lua_file` YAML tags.
 
-**Single evaluation:** Lua scripts are evaluated **once** when the config is first loaded. The returned values are then "baked" into the configuration and persisted. Scripts do not re-run on service restart or daemon restart. To re-evaluate, reload the config via CLI. See [ARCHITECTURE.md](ARCHITECTURE.md#lua-scripting-security) for details on the sandbox and security model.
+**Single evaluation:** Lua scripts are evaluated **once** when the config is first loaded. The returned values are then "baked" into the configuration and persisted. Scripts do not re-run on service restart or daemon restart. To re-evaluate, use `kepler recreate`. See [ARCHITECTURE.md](ARCHITECTURE.md#lua-scripting-security) for details on the sandbox and security model.
 
 ```yaml
 lua: |
@@ -597,12 +597,12 @@ By default, Kepler clears the environment before starting services and only pass
 
 The `sys_env` option controls this behavior (configurable globally under `kepler.sys_env` or per-service):
 - `clear` (default) - Start with empty environment, only explicit vars are passed
-- `inherit` - Inherit all system environment variables from the daemon
+- `inherit` - Inherit all system environment variables captured from the CLI at config load time
 
 Services receive their environment from these sources (in priority order):
 1. **`environment` array** - Explicit variables in the service config
 2. **`env_file`** - Variables loaded from the specified `.env` file
-3. **System environment** - If `sys_env: inherit`, all daemon env vars are included
+3. **System environment** - If `sys_env: inherit`, all env vars captured from the CLI environment at config first load time are included
 
 **Example - Controlled environment (default):**
 ```yaml
@@ -622,7 +622,7 @@ services:
 services:
   legacy-app:
     command: ["./legacy-app"]
-    sys_env: inherit  # Inherit all daemon environment variables
+    sys_env: inherit  # Inherit all environment variables from CLI at config load time
     environment:
       - EXTRA_VAR=value  # Additional vars on top of inherited
 ```

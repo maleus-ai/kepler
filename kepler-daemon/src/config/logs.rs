@@ -83,7 +83,7 @@ pub struct LogConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_size: Option<String>,
     /// Buffer size in bytes before flushing to disk.
-    /// Default: 8KB (8192 bytes) for better performance.
+    /// Default: 0 (synchronous writes, safest for crash recovery).
     /// 0 = write directly to disk (synchronous writes, safest for crash recovery).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer_size: Option<usize>,
