@@ -52,7 +52,8 @@ The daemon stores all state in `~/.kepler/` (or `$KEPLER_DAEMON_PATH` if set):
         ├── expanded_config.yaml  # Snapshot with resolved env vars
         ├── state.json          # Runtime service state
         ├── source_path.txt     # Original config location
-        └── env_files/          # Copied env files
+        ├── env_files/          # Copied env files
+        └── logs/               # Per-service log files
 ```
 
 ### Security
@@ -193,11 +194,11 @@ Services emit events at the following lifecycle points:
 | Event | Description |
 |-------|-------------|
 | `Init` | Before `on_init` hook runs (first start only) |
-| `Start` | Before `on_start` hook runs |
+| `Start` | Before `pre_start` hook runs |
 | `Restart` | Before service restarts (with reason) |
 | `Exit` | When process exits (with exit code) |
-| `Stop` | Before `on_stop` hook runs |
-| `Cleanup` | Before `on_cleanup` hook runs |
+| `Stop` | Before `pre_stop` hook runs |
+| `Cleanup` | Before `pre_cleanup` hook runs |
 | `Healthcheck` | After each health check (with status) |
 | `Healthy` | When service transitions to healthy |
 | `Unhealthy` | When service transitions to unhealthy |
@@ -258,7 +259,7 @@ Services can specify conditions that must be met before starting:
 |-----------|-------------|
 | `service_started` | Dependency status is Running, Healthy, or Unhealthy (default) |
 | `service_healthy` | Dependency status is Healthy (requires healthcheck) |
-| `service_completed_successfully` | Dependency exited with code 0 (for init containers) |
+| `service_completed_successfully` | Dependency exited with code 0 |
 
 ### Dependency Waiting
 

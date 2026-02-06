@@ -34,15 +34,15 @@ pub enum HealthStatus {
 pub enum ServiceEvent {
     /// Service initialization (on_init hook about to run)
     Init,
-    /// Service starting (on_start hook about to run)
+    /// Service starting (pre_start hook about to run)
     Start,
     /// Service restarting
     Restart { reason: RestartReason },
     /// Process exited
     Exit { code: Option<i32> },
-    /// Service stopping (on_stop hook about to run)
+    /// Service stopping (pre_stop hook about to run)
     Stop,
-    /// Service cleanup (on_cleanup hook about to run)
+    /// Service cleanup (pre_cleanup hook about to run)
     Cleanup,
     /// Health check result
     Healthcheck { status: HealthStatus },

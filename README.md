@@ -366,8 +366,8 @@ depends_on:
 
 | Condition | Description |
 |-----------|-------------|
-| `service_started` | Dependency is running (default) |
-| `service_healthy` | Dependency passed health checks |
+| `service_started` | Dependency status is Running, Healthy, or Unhealthy (default) |
+| `service_healthy` | Dependency status is Healthy (requires healthcheck) |
 | `service_completed_successfully` | Dependency exited with code 0 |
 
 **Restart propagation:**
@@ -517,7 +517,7 @@ Hooks inherit the service's environment and user by default.
 
 ## Variable Expansion
 
-Kepler supports shell-style variable expansion (`${VAR}`, `${VAR:-default}`, `~`) in config values.
+Kepler supports shell-style variable expansion (`${VAR}`, `${VAR:-default}`, `${VAR:+value}`, `~`) in config values.
 
 **Expanded at config load time:**
 - `working_dir`, `env_file`, `user`, `group`
@@ -657,7 +657,9 @@ Kepler uses a global daemon architecture with per-config isolation:
         ├── config.yaml       # Copied config (immutable)
         ├── expanded_config.yaml
         ├── state.json
-        └── logs/
+        ├── source_path.txt   # Original config location
+        ├── env_files/        # Copied env files
+        └── logs/             # Per-service log files
 ```
 
 **How it works:**
