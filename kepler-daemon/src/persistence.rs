@@ -310,25 +310,36 @@ impl ConfigPersistence {
     // Internal helpers
     // =========================================================================
 
-    /// Write a file with secure permissions (0o600 on Unix).
+    /// Write a file atomically with secure permissions (0o600 on Unix).
+    ///
+    /// Writes to a temporary file in the same directory, then atomically
+    /// renames it to the target path. This prevents corruption if the
+    /// process crashes mid-write.
     fn write_secure_file(&self, path: &Path, content: &[u8]) -> Result<()> {
+        let parent = path.parent().ok_or_else(|| {
+            DaemonError::Internal(format!("No parent directory for '{}'", path.display()))
+        })?;
+
+        let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
+            DaemonError::Internal(format!("Failed to create temp file in '{}': {}", parent.display(), e))
+        })?;
+
+        // Set secure permissions before writing content
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)
-                .map_err(|e| DaemonError::Internal(format!("Failed to open '{}': {}", path.display(), e)))?;
-            file.write_all(content).map_err(|e| DaemonError::Internal(format!("Failed to write '{}': {}", path.display(), e)))?;
+            use std::os::unix::fs::PermissionsExt;
+            tmp.as_file().set_permissions(std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+                DaemonError::Internal(format!("Failed to set permissions on temp file: {}", e))
+            })?;
         }
 
-        #[cfg(not(unix))]
-        {
-            std::fs::write(path, content).map_err(|e| DaemonError::Internal(format!("Failed to write '{}': {}", path.display(), e)))?;
-        }
+        tmp.write_all(content).map_err(|e| {
+            DaemonError::Internal(format!("Failed to write temp file: {}", e))
+        })?;
+
+        tmp.persist(path).map_err(|e| {
+            DaemonError::Internal(format!("Failed to persist '{}': {}", path.display(), e))
+        })?;
 
         Ok(())
     }

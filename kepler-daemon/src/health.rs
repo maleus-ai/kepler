@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
@@ -45,8 +47,20 @@ async fn health_check_loop(
             return;
         }
 
-        // Run health check
-        let passed = run_health_check(&config.test, config.timeout).await;
+        // Get service context for env and working_dir
+        let ctx = match handle.get_service_context(&service_name).await {
+            Some(ctx) => ctx,
+            None => {
+                debug!(
+                    "Health check for {} stopping - service context not available",
+                    service_name
+                );
+                return;
+            }
+        };
+
+        // Run health check with service environment
+        let passed = run_health_check(&config.test, config.timeout, &ctx.env, &ctx.working_dir).await;
 
         // Update state based on result
         let update_result = handle
@@ -189,8 +203,13 @@ async fn run_status_change_hook(
     }
 }
 
-/// Execute a single health check command
-async fn run_health_check(test: &[String], check_timeout: Duration) -> bool {
+/// Execute a single health check command with the service's environment
+async fn run_health_check(
+    test: &[String],
+    check_timeout: Duration,
+    env: &HashMap<String, String>,
+    working_dir: &Path,
+) -> bool {
     if test.is_empty() {
         return true;
     }
@@ -202,6 +221,9 @@ async fn run_health_check(test: &[String], check_timeout: Duration) -> bool {
     let result = timeout(check_timeout, async {
         let mut cmd = Command::new(program);
         cmd.args(args)
+            .env_clear()
+            .envs(env)
+            .current_dir(working_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

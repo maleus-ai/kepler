@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 use crate::config_actor::{ConfigActor, ConfigActorHandle};
 use crate::errors::Result;
@@ -16,8 +17,10 @@ use kepler_protocol::protocol::ConfigStatus;
 
 /// Registry for config actors - allows multiple CLI clients to share actors
 pub struct ConfigRegistry {
-    /// Map from config path (canonicalized) to actor handle
-    actors: DashMap<PathBuf, ConfigActorHandle>,
+    /// Map from config path (canonicalized) to actor handle.
+    /// Uses `OnceCell` to ensure exactly one actor is created per path,
+    /// even under concurrent `get_or_create` calls.
+    actors: DashMap<PathBuf, Arc<OnceCell<ConfigActorHandle>>>,
     /// Daemon start time for uptime calculation
     started_at: DateTime<Utc>,
 }
@@ -42,6 +45,9 @@ impl ConfigRegistry {
     ///
     /// The `sys_env` parameter provides the system environment variables captured
     /// from the CLI. If None, the daemon's current environment is used.
+    ///
+    /// Uses `OnceCell` to ensure exactly one actor is created per path,
+    /// even under concurrent calls for the same path.
     pub async fn get_or_create(
         &self,
         config_path: PathBuf,
@@ -56,49 +62,65 @@ impl ConfigRegistry {
             }
         })?;
 
-        // Return existing if loaded
-        if let Some(handle) = self.actors.get(&canonical_path) {
-            // Try to reload config to pick up any changes
+        // Atomically get or insert a OnceCell placeholder (cheap, no I/O under shard lock)
+        let cell = self.actors
+            .entry(canonical_path.clone())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone();
+
+        // If already initialized, reload config and return
+        if let Some(handle) = cell.get() {
             let _ = handle.reload_config().await;
             return Ok(handle.clone());
         }
 
-        // Create new actor
-        let (handle, actor) = ConfigActor::create(config_path, sys_env)?;
+        // Exactly one caller initializes; others await the result
+        let result = cell.get_or_try_init(|| async {
+            let (handle, actor) = ConfigActor::create(config_path, sys_env)?;
+            tokio::spawn(actor.run());
+            Ok(handle)
+        }).await;
 
-        // Spawn the actor
-        tokio::spawn(actor.run());
-
-        // Store the handle
-        self.actors.insert(canonical_path, handle.clone());
-
-        Ok(handle)
+        match result {
+            Ok(handle) => Ok(handle.clone()),
+            Err(e) => {
+                // Remove placeholder so future calls can retry
+                self.actors.remove(&canonical_path);
+                Err(e)
+            }
+        }
     }
 
-    /// Get existing actor (None if not loaded)
+    /// Get existing actor (None if not loaded or not yet initialized)
     pub fn get(&self, config_path: &PathBuf) -> Option<ConfigActorHandle> {
         // Try to canonicalize the path first
         let canonical_path = std::fs::canonicalize(config_path).ok()?;
-        self.actors.get(&canonical_path).map(|h| h.clone())
+        self.actors.get(&canonical_path).and_then(|cell| cell.get().cloned())
     }
 
     /// Unload a config - stops the actor
     pub async fn unload(&self, config_path: &PathBuf) {
         // Canonicalize the path
         if let Ok(canonical_path) = std::fs::canonicalize(config_path)
-            && let Some((_, handle)) = self.actors.remove(&canonical_path) {
+            && let Some((_, cell)) = self.actors.remove(&canonical_path)
+            && let Some(handle) = cell.get() {
                 handle.shutdown().await;
             }
     }
 
-    /// List all loaded config paths
+    /// List all loaded config paths (only those with initialized actors)
     pub fn list_paths(&self) -> Vec<PathBuf> {
-        self.actors.iter().map(|e| e.key().clone()).collect()
+        self.actors.iter()
+            .filter(|e| e.value().get().is_some())
+            .map(|e| e.key().clone())
+            .collect()
     }
 
-    /// Get all actor handles for cross-config operations
+    /// Get all actor handles for cross-config operations (only initialized)
     pub fn all_handles(&self) -> Vec<ConfigActorHandle> {
-        self.actors.iter().map(|e| e.value().clone()).collect()
+        self.actors.iter()
+            .filter_map(|e| e.value().get().cloned())
+            .collect()
     }
 
     /// Shutdown all actors and return the list of config paths
@@ -132,11 +154,11 @@ impl ConfigRegistry {
     /// Returns true if config is not loaded or all services are stopped
     pub async fn can_prune_config(&self, config_hash: &str) -> bool {
         for entry in self.actors.iter() {
-            let handle = entry.value();
-            if handle.config_hash() == config_hash {
-                // Config is loaded - check if all services stopped
-                return handle.all_services_stopped().await;
-            }
+            if let Some(handle) = entry.value().get()
+                && handle.config_hash() == config_hash {
+                    // Config is loaded - check if all services stopped
+                    return handle.all_services_stopped().await;
+                }
         }
         // Config not loaded - can prune
         true
