@@ -1,61 +1,70 @@
+# Example Kepler config — runs on any machine with sh, python3, and curl
+#
+# Try it:
+#   kepler daemon start -d
+#   kepler start                  # attached mode (Ctrl+C to stop)
+#   kepler start -d               # or detached mode
+#   kepler ps
+#   kepler logs --follow
+#   kepler stop
+#   kepler stop -s SIGKILL        # force kill
+
 kepler:
+  logs:
+    buffer_size: 0     # Flush logs immediately (good for demos)
+
   hooks:
     on_init:
-      run: |
-        echo "First run of kepler.yaml"
-    on_start:
-      run: |
-        echo "Kepler started"
-    on_stop:
-      run: |
-        echo "Kepler stopped"
-    on_cleanup:
-      command: ["echo", "Cleanup of resources"]
+      run: echo "Initializing services for the first time..."
+    pre_start:
+      run: echo "Starting all services"
+    pre_stop:
+      run: echo "Stopping all services"
+    pre_cleanup:
+      run: echo "Cleaning up resources"
 
 services:
-  backend:
-    working_dir: /repository/apps/backend
-    command: ["pnpm", "server:start"]
+  # A one-shot migration task that runs first then exits
+  migration:
+    command: ["sh", "-c", "echo 'Running migrations...'; sleep 2; echo 'Migrations complete!'"]
+
+  # A simple HTTP server using Python's built-in module
+  # Waits for migration to finish before starting
+  web:
+    command: ["python3", "-m", "http.server", "8089"]
+    depends_on:
+      migration:
+        condition: service_completed_successfully
     healthcheck:
-      test:
-        [
-          "sh",
-          "-c",
-          "curl -f http://localhost:4000/server/health-check || exit 1",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-    # Restart on crashes AND file changes
-    restart:
-      policy: always
-      watch:
-        - "**/*.ts"
+      test: ["sh", "-c", "curl -sf http://localhost:8089/ > /dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    restart: on-failure
+    environment:
+      - PYTHONUNBUFFERED=1
     hooks:
       on_init:
-        command: ["echo", "First run of the backend"]
-      on_restart:
-        command: ["echo", "Backend restarted"]
-      on_exit:
-        command: ["echo", "Backend exited"]
-      on_start:
-        command: ["echo", "Backend started"]
-  frontend:
-    working_dir: /repository/apps/frontend
-    command: ["pnpm", "server:start"]
-    environment:
-      # Inject the VITE_API_URL env variable copied from ${BACKEND_URL}
-      - VITE_API_URL=${BACKEND_URL}
-    # Restart on crashes AND file changes
-    restart:
-      policy: always
-      watch:
-        - "**/*.ts"
-  snivel:
+        run: echo "First-time setup for web server"
+      pre_start:
+        run: echo "Web server starting on port 8089"
+      post_healthcheck_success:
+        command: ["echo", "Web server is healthy"]
+
+  # A background worker that runs periodic tasks
+  # Waits for the web server to be healthy before starting
+  worker:
+    command: ["sh", "-c", "echo 'Worker started'; while true; do echo \"[$(date +%T)] Tick\"; sleep 5; done"]
+    depends_on:
+      web:
+        condition: service_healthy
+        restart: true              # Restart worker if web restarts
+    restart: always
     logs:
       timestamp: true
-    working_dir: /snivel
-    command: ["pnpm", "server:snivel"]
-    restart: always
-    env_file: ./.env
+    hooks:
+      pre_start:
+        run: echo "Worker waiting for web to be healthy..."
+      post_exit:
+        command: ["echo", "Worker exited"]

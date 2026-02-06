@@ -48,6 +48,9 @@ pub enum Request {
         service: Option<String>,
         /// Whether to cleanup everything after stopping processes
         clean: bool,
+        /// Signal to send (e.g., "SIGKILL", "TERM", "9"). Default: SIGTERM
+        #[serde(default)]
+        signal: Option<String>,
     },
     /// Restart service(s) - preserves baked config, runs restart hooks
     Restart {

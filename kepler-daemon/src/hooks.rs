@@ -208,11 +208,11 @@ pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>) -> Result<()
 }
 
 /// The prefix used for global hook logs
-pub const GLOBAL_HOOK_PREFIX: &str = "[global]";
+pub const GLOBAL_HOOK_PREFIX: &str = "global.";
 
-/// Format the service name for global hook logs (e.g., "[global.on_start]")
+/// Format the service name for global hook logs (e.g., "global.on_start")
 pub fn global_hook_service_name(hook_type: GlobalHookType) -> String {
-    format!("[global.{}]", hook_type.as_str())
+    format!("global.{}", hook_type.as_str())
 }
 
 /// Run a global hook if it exists
@@ -264,9 +264,9 @@ pub async fn run_global_hook(
     Ok(())
 }
 
-/// Format the log name for service hooks (e.g., "[backend.on_start]")
+/// Format the log name for service hooks (e.g., "backend.on_start")
 pub fn service_hook_log_name(service_name: &str, hook_type: ServiceHookType) -> String {
-    format!("[{}.{}]", service_name, hook_type.as_str())
+    format!("{}.{}", service_name, hook_type.as_str())
 }
 
 /// Run a service hook if it exists

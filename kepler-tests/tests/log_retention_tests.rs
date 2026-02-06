@@ -350,15 +350,15 @@ async fn test_clear_service_prefix() {
     logs.push("prefix_svc", "service log".to_string(), LogStream::Stdout);
 
     // Add hook logs (using the format from hooks.rs)
-    logs.push("[prefix_svc.pre_start]", "hook log 1".to_string(), LogStream::Stdout);
-    logs.push("[prefix_svc.pre_stop]", "hook log 2".to_string(), LogStream::Stdout);
+    logs.push("prefix_svc.pre_start", "hook log 1".to_string(), LogStream::Stdout);
+    logs.push("prefix_svc.pre_stop", "hook log 2".to_string(), LogStream::Stdout);
 
     // Verify all logs exist
     let all_entries = logs.tail(10, None);
     assert_eq!(all_entries.len(), 3, "Should have 3 log entries: 1 service + 2 hooks");
 
     // Clear hook logs using prefix
-    logs.clear_service_prefix("[prefix_svc.");
+    logs.clear_service_prefix("prefix_svc.");
 
     // Service logs should remain
     let service_entries = logs.tail(10, Some("prefix_svc"));
@@ -366,7 +366,7 @@ async fn test_clear_service_prefix() {
     assert_eq!(service_entries[0].line, "service log");
 
     // Hook logs should be cleared
-    let hook_entries = logs.tail(10, Some("[prefix_svc.pre_start]"));
+    let hook_entries = logs.tail(10, Some("prefix_svc.pre_start"));
     assert_eq!(hook_entries.len(), 0, "Hook logs should be cleared");
 
     harness.stop_service("prefix_svc").await.unwrap();

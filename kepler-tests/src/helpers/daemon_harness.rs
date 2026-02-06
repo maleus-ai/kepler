@@ -258,6 +258,37 @@ impl TestDaemonHarness {
         Ok(())
     }
 
+    /// Stop a specific service with a specific signal
+    pub async fn stop_service_with_signal(&self, service_name: &str, signal: i32) -> Result<(), Box<dyn std::error::Error>> {
+        // Get service context for hooks
+        let ctx = self.handle
+            .get_service_context(service_name)
+            .await
+            .ok_or("Service not found")?;
+
+        // Run on_stop hook
+        let hook_params = ServiceHookParams::from_service_context(
+            &ctx.service_config,
+            &ctx.working_dir,
+            &ctx.env,
+            Some(&ctx.log_config),
+            ctx.global_log_config.as_ref(),
+        );
+
+        run_service_hook(
+            &ctx.service_config.hooks,
+            ServiceHookType::PreStop,
+            service_name,
+            &hook_params,
+        )
+        .await?;
+
+        // Stop the service with the specified signal
+        stop_service(service_name, self.handle.clone(), Some(signal)).await?;
+
+        Ok(())
+    }
+
     /// Stop a specific service
     pub async fn stop_service(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Get service context for hooks
@@ -284,7 +315,7 @@ impl TestDaemonHarness {
         .await?;
 
         // Stop the service
-        stop_service(service_name, self.handle.clone()).await?;
+        stop_service(service_name, self.handle.clone(), None).await?;
 
         Ok(())
     }
@@ -372,12 +403,12 @@ impl TestDaemonHarness {
                             ctx.log_config.logs_dir.clone(),
                         );
                         reader.clear_service(&event.service_name);
-                        reader.clear_service_prefix(&format!("[{}.", event.service_name));
+                        reader.clear_service_prefix(&format!("{}.", event.service_name));
                     }
                 }
 
                 // Stop the service
-                if stop_service(&event.service_name, handle.clone()).await.is_err() {
+                if stop_service(&event.service_name, handle.clone(), None).await.is_err() {
                     continue;
                 }
 
@@ -462,7 +493,7 @@ impl TestDaemonHarness {
                             ctx.log_config.logs_dir.clone(),
                         );
                         reader.clear_service(&event.service_name);
-                        reader.clear_service_prefix(&format!("[{}.", event.service_name));
+                        reader.clear_service_prefix(&format!("{}.", event.service_name));
                     }
                 }
 
@@ -499,7 +530,7 @@ impl TestDaemonHarness {
                                 ctx.log_config.logs_dir.clone(),
                             );
                             reader.clear_service(&event.service_name);
-                            reader.clear_service_prefix(&format!("[{}.", event.service_name));
+                            reader.clear_service_prefix(&format!("{}.", event.service_name));
                         }
                     }
 

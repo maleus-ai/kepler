@@ -126,8 +126,8 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         .set_service_pid(service_name, pid, Some(Utc::now()))
         .await;
 
-    // Create shutdown channel for graceful stop
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    // Create shutdown channel for graceful stop (carries signal number)
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<i32>();
 
     // Spawn process monitor with the Child (signal-based monitoring)
     let config_path = handle.config_path().to_path_buf();
@@ -162,7 +162,7 @@ async fn monitor_process(
     config_path: PathBuf,
     service_name: String,
     mut child: Child,
-    shutdown_rx: oneshot::Receiver<()>,
+    shutdown_rx: oneshot::Receiver<i32>,
     _handle: ConfigActorHandle,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
 ) {
@@ -210,23 +210,29 @@ async fn monitor_process(
                 }
             }
         }
-        // Wait for shutdown signal
-        _ = shutdown_rx => {
-            debug!("Shutdown signal received for {}", service_name);
+        // Wait for shutdown signal (carries signal number)
+        signal_result = shutdown_rx => {
+            let signal_num = signal_result.unwrap_or(15); // Default SIGTERM
+            debug!("Shutdown signal received for {} (signal {})", service_name, signal_num);
 
-            // Send SIGTERM for graceful shutdown
             #[cfg(unix)]
             {
                 if let Some(pid) = child.id() {
-                    debug!("Sending SIGTERM to process {}", pid);
+                    debug!("Sending signal {} to process {}", signal_num, pid);
                     use nix::sys::signal::{kill, Signal};
                     use nix::unistd::Pid;
-                    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                    if let Ok(sig) = Signal::try_from(signal_num) {
+                        let _ = kill(Pid::from_raw(pid as i32), sig);
+                    } else {
+                        warn!("Invalid signal number {}, falling back to SIGTERM", signal_num);
+                        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                    }
                 }
             }
 
             #[cfg(not(unix))]
             {
+                let _ = signal_num; // suppress unused warning
                 let _ = child.start_kill();
             }
 
@@ -256,10 +262,75 @@ async fn monitor_process(
     }
 }
 
+/// Parse a signal name or number string into a signal number
+pub fn parse_signal_name(name: &str) -> Option<i32> {
+    match name.to_uppercase().trim_start_matches("SIG") {
+        "TERM" => Some(15),
+        "KILL" => Some(9),
+        "INT" => Some(2),
+        "HUP" => Some(1),
+        "QUIT" => Some(3),
+        "USR1" => Some(10),
+        "USR2" => Some(12),
+        _ => name.parse::<i32>().ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_signal_name_with_sig_prefix() {
+        assert_eq!(parse_signal_name("SIGTERM"), Some(15));
+        assert_eq!(parse_signal_name("SIGKILL"), Some(9));
+        assert_eq!(parse_signal_name("SIGINT"), Some(2));
+        assert_eq!(parse_signal_name("SIGHUP"), Some(1));
+        assert_eq!(parse_signal_name("SIGQUIT"), Some(3));
+        assert_eq!(parse_signal_name("SIGUSR1"), Some(10));
+        assert_eq!(parse_signal_name("SIGUSR2"), Some(12));
+    }
+
+    #[test]
+    fn test_parse_signal_name_without_prefix() {
+        assert_eq!(parse_signal_name("TERM"), Some(15));
+        assert_eq!(parse_signal_name("KILL"), Some(9));
+        assert_eq!(parse_signal_name("INT"), Some(2));
+        assert_eq!(parse_signal_name("HUP"), Some(1));
+        assert_eq!(parse_signal_name("QUIT"), Some(3));
+        assert_eq!(parse_signal_name("USR1"), Some(10));
+        assert_eq!(parse_signal_name("USR2"), Some(12));
+    }
+
+    #[test]
+    fn test_parse_signal_name_lowercase() {
+        assert_eq!(parse_signal_name("sigterm"), Some(15));
+        assert_eq!(parse_signal_name("kill"), Some(9));
+        assert_eq!(parse_signal_name("sigkill"), Some(9));
+        assert_eq!(parse_signal_name("term"), Some(15));
+    }
+
+    #[test]
+    fn test_parse_signal_name_numeric() {
+        assert_eq!(parse_signal_name("9"), Some(9));
+        assert_eq!(parse_signal_name("15"), Some(15));
+        assert_eq!(parse_signal_name("2"), Some(2));
+        assert_eq!(parse_signal_name("1"), Some(1));
+    }
+
+    #[test]
+    fn test_parse_signal_name_invalid() {
+        assert_eq!(parse_signal_name("INVALID"), None);
+        assert_eq!(parse_signal_name(""), None);
+        assert_eq!(parse_signal_name("abc"), None);
+    }
+}
+
 /// Stop a service process
 pub async fn stop_service(
     service_name: &str,
     handle: ConfigActorHandle,
+    signal: Option<i32>,
 ) -> Result<()> {
     info!("Stopping service {}", service_name);
 
@@ -272,9 +343,9 @@ pub async fn stop_service(
     let process_handle = handle.remove_process_handle(service_name).await;
 
     if let Some(process_handle) = process_handle {
-        // Send shutdown signal to monitor task
+        // Send shutdown signal to monitor task (with signal number)
         if let Some(shutdown_tx) = process_handle.shutdown_tx {
-            let _ = shutdown_tx.send(());
+            let _ = shutdown_tx.send(signal.unwrap_or(15));
         }
 
         // Cancel output tasks

@@ -43,6 +43,8 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 - **Global Daemon Architecture**: Single daemon instance manages multiple config files
 - **On-Demand Config Loading**: Configs are loaded when first referenced
 - **Service Management**: Start, stop, restart services with dependency ordering
+- **Attached Start Mode**: `kepler start` follows logs like `docker compose up`; Ctrl+C gracefully stops services
+- **Custom Stop Signals**: Send specific signals (SIGKILL, SIGINT, etc.) when stopping services
 - **Docker Compose-Compatible Dependencies**: Dependency conditions (`service_started`, `service_healthy`, `service_completed_successfully`), timeouts, and restart propagation
 - **Health Checks**: Docker-compatible health check configuration
 - **File Watching**: Automatic service restart on file changes
@@ -151,7 +153,8 @@ services:
 
 ```bash
 kepler daemon start -d   # Start daemon in background
-kepler start             # Start services from kepler.yaml
+kepler start             # Start services and follow logs (Ctrl+C to stop)
+kepler start -d          # Start services and return immediately (detached)
 ```
 
 **3. Monitor and manage:**
@@ -159,7 +162,8 @@ kepler start             # Start services from kepler.yaml
 ```bash
 kepler ps                # Show service status
 kepler logs --follow     # Follow logs
-kepler stop              # Stop services
+kepler stop              # Stop services (SIGTERM)
+kepler stop -s SIGKILL   # Stop services with a specific signal
 kepler daemon stop       # Stop daemon
 ```
 
@@ -184,10 +188,10 @@ Commands that operate on services (require config):
 
 | Command | Description |
 |---------|-------------|
-| `kepler start [service]` | Start all or specific service |
-| `kepler stop [service]` | Stop all or specific service |
-| `kepler restart [services...]` | Restart all running or specific services |
-| `kepler recreate` | Re-bake config, clear state, and start fresh |
+| `kepler start [-d] [service]` | Start services, follow logs (Ctrl+C stops). `-d` to detach |
+| `kepler stop [-s SIGNAL] [--clean] [service]` | Stop services. Optional `--signal` (default: SIGTERM) |
+| `kepler restart [-d] [services...]` | Restart services, follow logs (Ctrl+C stops). `-d` to detach |
+| `kepler recreate [-d]` | Re-bake config, clear state, start fresh, follow logs (Ctrl+C stops). `-d` to detach |
 | `kepler ps [--all]` | List services and states (`--all` for all loaded configs) |
 | `kepler logs [--follow] [--head\|--tail] [-n N] [service]` | View logs |
 | `kepler prune [--force] [--dry-run]` | Prune stopped/orphaned config state directories |
@@ -198,6 +202,8 @@ Commands that operate on services (require config):
 |--------|-------------|
 | `-f, --file <FILE>` | Config file path (default: `kepler.yaml`, also accepts `kepler.yml`) |
 | `-v, --verbose` | Enable verbose output |
+| `-d, --detach` | Start services and return immediately (don't follow logs) |
+| `-s, --signal <SIGNAL>` | Signal to send on stop (e.g., `SIGKILL`, `TERM`, `9`). Default: SIGTERM |
 | `--clean` | Run cleanup hooks after stopping |
 
 ---

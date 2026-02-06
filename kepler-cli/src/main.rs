@@ -3,8 +3,9 @@ mod config;
 mod errors;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use crate::{commands::Commands, commands::DaemonCommands, config::Config, errors::{CliError, Result}};
 use chrono::{DateTime, Local, Utc};
@@ -92,27 +93,62 @@ async fn run() -> Result<()> {
         .map_err(|_| CliError::ConfigNotFound(config_path.clone()))?;
 
     match cli.command {
-        Commands::Start { service } => {
+        Commands::Start { service, detach } => {
             let sys_env: HashMap<String, String> = std::env::vars().collect();
-            let response = client.start(canonical_path, service, Some(sys_env)).await?;
+            let response = client.start(canonical_path.clone(), service.clone(), Some(sys_env)).await?;
+            handle_response(response);
+
+            if !detach {
+                // Follow logs until Ctrl+C, then stop services
+                follow_logs_until_ctrl_c(&mut client, &canonical_path, service.as_deref()).await?;
+
+                // Ctrl+C received — stop services via fresh connection
+                eprintln!("\nGracefully stopping...");
+                let daemon_socket = Daemon::get_socket_path()
+                    .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
+                let mut stop_client = Client::connect(&daemon_socket).await?;
+                let response = stop_client.stop(canonical_path, service, false, None).await?;
+                handle_response(response);
+            }
+        }
+
+        Commands::Stop { service, clean, signal } => {
+            let response = client.stop(canonical_path, service, clean, signal).await?;
             handle_response(response);
         }
 
-        Commands::Stop { service, clean } => {
-            let response = client.stop(canonical_path, service, clean).await?;
+        Commands::Restart { services, detach } => {
+            let sys_env: HashMap<String, String> = std::env::vars().collect();
+            let response = client.restart(canonical_path.clone(), services, Some(sys_env)).await?;
             handle_response(response);
+
+            if !detach {
+                follow_logs_until_ctrl_c(&mut client, &canonical_path, None).await?;
+
+                eprintln!("\nGracefully stopping...");
+                let daemon_socket = Daemon::get_socket_path()
+                    .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
+                let mut stop_client = Client::connect(&daemon_socket).await?;
+                let response = stop_client.stop(canonical_path, None, false, None).await?;
+                handle_response(response);
+            }
         }
 
-        Commands::Restart { services } => {
+        Commands::Recreate { detach } => {
             let sys_env: HashMap<String, String> = std::env::vars().collect();
-            let response = client.restart(canonical_path, services, Some(sys_env)).await?;
+            let response = client.recreate(canonical_path.clone(), Some(sys_env)).await?;
             handle_response(response);
-        }
 
-        Commands::Recreate => {
-            let sys_env: HashMap<String, String> = std::env::vars().collect();
-            let response = client.recreate(canonical_path, Some(sys_env)).await?;
-            handle_response(response);
+            if !detach {
+                follow_logs_until_ctrl_c(&mut client, &canonical_path, None).await?;
+
+                eprintln!("\nGracefully stopping...");
+                let daemon_socket = Daemon::get_socket_path()
+                    .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
+                let mut stop_client = Client::connect(&daemon_socket).await?;
+                let response = stop_client.stop(canonical_path, None, false, None).await?;
+                handle_response(response);
+            }
         }
 
         Commands::Logs {
@@ -613,6 +649,73 @@ fn format_uptime(started_at_ts: i64) -> String {
     }
 }
 
+async fn follow_logs_until_ctrl_c(
+    client: &mut Client,
+    config_path: &Path,
+    service: Option<&str>,
+) -> Result<()> {
+    let mut color_map: HashMap<String, Color> = HashMap::new();
+    let mut cursor_id: Option<String> = None;
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
+    loop {
+        // Always complete the RPC before checking Ctrl+C (keeps socket clean)
+        let response = match client
+            .logs_cursor(config_path, service, cursor_id.as_deref(), true)
+            .await
+        {
+            Ok(resp) => resp,
+            Err(_) => {
+                // Reconnect on request error
+                let socket = Daemon::get_socket_path()
+                    .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
+                *client = match Client::connect(&socket).await {
+                    Ok(c) => c,
+                    Err(_) => {
+                        eprintln!("\nDaemon disconnected");
+                        break;
+                    }
+                };
+                continue;
+            }
+        };
+
+        match response {
+            Response::Ok {
+                data: Some(ResponseData::LogCursor(LogCursorData {
+                    entries,
+                    cursor_id: new_cursor_id,
+                    ..
+                })),
+                ..
+            } => {
+                cursor_id = Some(new_cursor_id);
+                for entry in &entries {
+                    print_log_entry(entry, &mut color_map);
+                }
+            }
+            Response::Error { message } => {
+                if message.starts_with("Cursor expired or invalid") {
+                    cursor_id = None;
+                    continue;
+                }
+                eprintln!("Error: {}", message);
+                break;
+            }
+            _ => {}
+        }
+
+        // Wait 500ms or break on Ctrl+C
+        tokio::select! {
+            _ = &mut ctrl_c => break,
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+        }
+    }
+
+    Ok(())
+}
+
 async fn handle_logs(
     client: &mut Client,
     config_path: PathBuf,
@@ -750,11 +853,15 @@ const SERVICE_COLORS: &[Color] = &[
 ];
 
 fn get_base_service_name(service: &str) -> &str {
-    // Extract base service name from hook patterns like "[backend.pre_start]"
-    if let Some(inner) = service.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
-        && let Some(dot_pos) = inner.find('.') {
-            return &inner[..dot_pos];
-        }
+    // Extract base service name from hook patterns like "backend.pre_start"
+    // Also handles "global.on_init" -> "global"
+    if let Some(dot_pos) = service.find('.') {
+        return &service[..dot_pos];
+    }
+    // Handle ":err" suffix from stderr tagging
+    if let Some(base) = service.strip_suffix(":err") {
+        return base;
+    }
     service
 }
 
@@ -789,21 +896,17 @@ fn print_log_entry(entry: &kepler_protocol::protocol::LogEntry, color_map: &mut 
         })
         .unwrap_or_default();
 
-    let stream_indicator = if entry.stream == "stderr" {
-        "!"
-    } else {
-        " "
-    };
-
     let color = get_service_color(&entry.service, color_map);
-    let colored_service = entry.service.color(color);
+    let stream_prefix = if entry.stream == "stderr" { "err" } else { "out" };
+    let service_label = format!("[{}: {}]", stream_prefix, entry.service);
+    let colored_service = service_label.color(color);
 
     if timestamp_str.is_empty() {
-        println!("{}{} | {}", stream_indicator, colored_service, entry.line);
+        println!("{} | {}", colored_service, entry.line);
     } else {
         println!(
-            "{} {}{} | {}",
-            timestamp_str, stream_indicator, colored_service, entry.line
+            "{} {} | {}",
+            timestamp_str, colored_service, entry.line
         );
     }
 }

@@ -341,7 +341,7 @@ impl E2eHarness {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        self.run_cli_with_env(&["-f", config_str, "start"], env).await
+        self.run_cli_with_env(&["-f", config_str, "start", "-d"], env).await
     }
 
     /// Run the kepler CLI with the given arguments and a custom timeout
@@ -374,12 +374,12 @@ impl E2eHarness {
         }
     }
 
-    /// Start services from a config file
+    /// Start services from a config file (detached mode for tests)
     pub async fn start_services(&self, config_path: &Path) -> E2eResult<CommandOutput> {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        self.run_cli(&["-f", config_str, "start"]).await
+        self.run_cli(&["-f", config_str, "start", "-d"]).await
     }
 
     /// Stop services from a config file
@@ -434,12 +434,28 @@ impl E2eHarness {
         self.run_cli_with_env(&["-f", config_str, "recreate"], env).await
     }
 
-    /// Start a specific service
+    /// Start a specific service (detached mode for tests)
     pub async fn start_service(&self, config_path: &Path, service: &str) -> E2eResult<CommandOutput> {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        self.run_cli(&["-f", config_str, "start", service]).await
+        self.run_cli(&["-f", config_str, "start", "-d", service]).await
+    }
+
+    /// Stop services with a specific signal
+    pub async fn stop_services_with_signal(&self, config_path: &Path, signal: &str) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "stop", &format!("--signal={}", signal)]).await
+    }
+
+    /// Stop a specific service with a specific signal
+    pub async fn stop_service_with_signal(&self, config_path: &Path, service: &str, signal: &str) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "stop", service, &format!("--signal={}", signal)]).await
     }
 
     /// Stop a specific service

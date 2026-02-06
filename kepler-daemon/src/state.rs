@@ -97,8 +97,8 @@ impl From<&ServiceState> for ServiceInfo {
 /// Process handle for a running service
 /// Note: Child is not stored here - it's owned by the monitor task
 pub struct ProcessHandle {
-    /// Channel to signal shutdown to the monitor task
-    pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Channel to signal shutdown to the monitor task (carries signal number, 15=SIGTERM)
+    pub shutdown_tx: Option<tokio::sync::oneshot::Sender<i32>>,
     pub stdout_task: Option<JoinHandle<()>>,
     pub stderr_task: Option<JoinHandle<()>>,
 }

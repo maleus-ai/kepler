@@ -1,0 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  test-service:
+    command: ["sh", "-c", "echo Running; sleep 300"]

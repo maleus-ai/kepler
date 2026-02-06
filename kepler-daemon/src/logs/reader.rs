@@ -323,7 +323,9 @@ impl LogReader {
         }
     }
 
-    /// Clear logs for services matching a prefix
+    /// Clear logs for services matching a prefix.
+    /// Skips files that are direct service logs (e.g., prefix "web." won't match
+    /// "web.stdout.log" but will match "web.on_init.stdout.log").
     pub fn clear_service_prefix(&self, prefix: &str) {
         let safe_prefix = prefix.replace(['/', '\\', ':', '[', ']'], "_");
 
@@ -333,6 +335,11 @@ impl LogReader {
                 let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
                 if filename.starts_with(&safe_prefix) {
+                    // Skip direct service log files (service.stdout.log, service.stderr.log)
+                    let rest = &filename[safe_prefix.len()..];
+                    if rest.starts_with("stdout.log") || rest.starts_with("stderr.log") {
+                        continue;
+                    }
                     let _ = fs::remove_file(&path);
                 }
             }

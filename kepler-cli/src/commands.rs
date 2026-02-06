@@ -12,6 +12,9 @@ pub enum Commands {
     Start {
         /// Specific service to start (starts all if not specified)
         service: Option<String>,
+        /// Detach and return immediately (don't follow logs)
+        #[arg(short, long)]
+        detach: bool,
     },
     /// Stop services (requires daemon to be running)
     Stop {
@@ -20,15 +23,25 @@ pub enum Commands {
         /// Run cleanup hooks after stopping
         #[arg(long)]
         clean: bool,
+        /// Signal to send (e.g., SIGKILL, TERM, 9). Default: SIGTERM
+        #[arg(short, long)]
+        signal: Option<String>,
     },
     /// Restart services (preserves config, runs restart hooks)
     Restart {
         /// Services to restart (restarts all running services if none specified)
         #[arg(value_name = "SERVICE")]
         services: Vec<String>,
+        /// Detach and return immediately (don't follow logs)
+        #[arg(short, long)]
+        detach: bool,
     },
     /// Recreate services (re-bake config, clear state, start fresh)
-    Recreate,
+    Recreate {
+        /// Detach and return immediately (don't follow logs)
+        #[arg(short, long)]
+        detach: bool,
+    },
     /// View service logs
     Logs {
         /// Specific service to view logs for (shows all if not specified)

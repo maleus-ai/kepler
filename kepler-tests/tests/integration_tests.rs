@@ -351,6 +351,35 @@ async fn test_service_stop_restart_cycle() {
     assert_eq!(marker.count_marker_lines("stop"), 3, "on_stop fires each stop");
 }
 
+/// Stopping a service with SIGKILL (signal 9)
+#[tokio::test]
+async fn test_stop_service_with_sigkill() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service("test", TestServiceBuilder::long_running().build())
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    // Start the service
+    harness.start_service("test").await.unwrap();
+    assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Running));
+
+    // Stop with SIGKILL (9)
+    harness.stop_service_with_signal("test", 9).await.unwrap();
+
+    // Verify service is stopped
+    let status = harness.get_status("test").await;
+    assert!(
+        status == Some(ServiceStatus::Stopped) || status == Some(ServiceStatus::Failed),
+        "Service should be stopped or failed after SIGKILL, got {:?}",
+        status
+    );
+}
+
 /// Multiple services can run concurrently
 #[tokio::test]
 async fn test_multiple_concurrent_services() {

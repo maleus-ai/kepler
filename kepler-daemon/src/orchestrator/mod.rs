@@ -380,11 +380,13 @@ impl ServiceOrchestrator {
     /// Otherwise stops all services in reverse dependency order.
     ///
     /// If `clean` is true, also runs pre_cleanup hooks and retention.
+    /// If `signal` is provided, sends that signal instead of SIGTERM.
     pub async fn stop_services(
         &self,
         config_path: &Path,
         service_filter: Option<&str>,
         clean: bool,
+        signal: Option<i32>,
     ) -> Result<String, OrchestratorError> {
         let config_dir = config_path
             .parent()
@@ -469,7 +471,7 @@ impl ServiceOrchestrator {
             }
 
             // Stop the service
-            stop_service(service_name, handle.clone())
+            stop_service(service_name, handle.clone(), signal)
                 .await
                 .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
 
@@ -534,7 +536,15 @@ impl ServiceOrchestrator {
             use crate::logs::LogReader;
             let reader = LogReader::new(log_cfg.logs_dir.clone());
 
-            for service_name in &stopped {
+            // When stopping all services, clear logs for ALL services (including
+            // already-exited ones like one-shot tasks), not just those we stopped now.
+            let services_to_clear = if service_filter.is_none() {
+                &services_to_stop
+            } else {
+                &stopped
+            };
+
+            for service_name in services_to_clear {
                 // When clean is true, always clear logs (no retention policy check)
                 let should_clear = if clean {
                     true
@@ -553,7 +563,7 @@ impl ServiceOrchestrator {
 
                 if should_clear {
                     reader.clear_service(service_name);
-                    reader.clear_service_prefix(&format!("[{}.", service_name));
+                    reader.clear_service_prefix(&format!("{}.", service_name));
                 }
             }
 
@@ -746,7 +756,7 @@ impl ServiceOrchestrator {
             self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart).await;
 
             // Stop process
-            if let Err(e) = stop_service(service_name, handle.clone()).await {
+            if let Err(e) = stop_service(service_name, handle.clone(), None).await {
                 warn!("Failed to stop service {}: {}", service_name, e);
             }
 
@@ -856,7 +866,7 @@ impl ServiceOrchestrator {
         info!("Recreating services for {:?} (clearing state)", config_path);
 
         // Stop all services first
-        let stop_result = self.stop_services(config_path, None, false).await;
+        let stop_result = self.stop_services(config_path, None, false, None).await;
         if let Err(e) = &stop_result {
             warn!("Error stopping services during recreate: {}", e);
         }
@@ -942,7 +952,7 @@ impl ServiceOrchestrator {
             .await;
 
         // Stop the service
-        stop_service(service_name, handle.clone())
+        stop_service(service_name, handle.clone(), None)
             .await
             .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
 
@@ -1228,7 +1238,7 @@ impl ServiceOrchestrator {
         if retention == LogRetention::Clear {
             handle.clear_service_logs(service_name).await;
             handle
-                .clear_service_logs_prefix(&format!("[{}.", service_name))
+                .clear_service_logs_prefix(&format!("{}.", service_name))
                 .await;
         }
     }

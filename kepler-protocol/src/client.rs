@@ -117,11 +117,13 @@ impl Client {
         config_path: PathBuf,
         service: Option<String>,
         clean: bool,
+        signal: Option<String>,
     ) -> Result<Response> {
         self.send_request(Request::Stop {
             config_path,
             service,
             clean,
+            signal,
         })
         .await
     }

@@ -4,7 +4,7 @@ use kepler_daemon::cursor::CursorManager;
 use kepler_daemon::errors::DaemonError;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::persistence::ConfigPersistence;
-use kepler_daemon::process::{kill_process_by_pid, validate_running_process, ProcessExitEvent};
+use kepler_daemon::process::{kill_process_by_pid, parse_signal_name, validate_running_process, ProcessExitEvent};
 use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_daemon::Daemon;
@@ -223,7 +223,7 @@ async fn handle_request(
             let config_paths = registry.list_paths();
 
             for config_path in config_paths {
-                if let Err(e) = orchestrator.stop_services(&config_path, None, false).await {
+                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
                     error!("Error stopping services during shutdown: {}", e);
                 }
             }
@@ -258,13 +258,25 @@ async fn handle_request(
             config_path,
             service,
             clean,
+            signal,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
+            // Parse signal name to number
+            let signal_num = match signal.as_deref().map(parse_signal_name) {
+                Some(Some(num)) => Some(num),
+                Some(None) => {
+                    return Response::error(format!(
+                        "Unknown signal: {}",
+                        signal.unwrap()
+                    ));
+                }
+                None => None,
+            };
             match orchestrator
-                .stop_services(&config_path, service.as_deref(), clean)
+                .stop_services(&config_path, service.as_deref(), clean, signal_num)
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -369,7 +381,7 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
             // Stop all services first
-            if let Err(e) = orchestrator.stop_services(&config_path, None, false).await {
+            if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
                 return Response::error(format!("Failed to stop services: {}", e));
             }
 
