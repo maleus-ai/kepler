@@ -166,7 +166,7 @@ impl ConfigActorHandle {
         service: Option<String>,
         offset: usize,
         limit: usize,
-    ) -> (Vec<LogEntry>, usize) {
+    ) -> (Vec<LogEntry>, bool) {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .tx
@@ -181,7 +181,7 @@ impl ConfigActorHandle {
         {
             warn!("Config actor closed, cannot send GetLogsPaginated");
         }
-        reply_rx.await.unwrap_or_else(|_| (Vec::new(), 0))
+        reply_rx.await.unwrap_or_else(|_| (Vec::new(), false))
     }
 
     /// Get a service configuration

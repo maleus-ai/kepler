@@ -29,7 +29,10 @@ pub fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
         _ => return Err(format!("Unknown duration unit: {}", unit)),
     };
 
-    Ok(Duration::from_millis(num * multiplier))
+    let millis = num
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("Duration value too large: {}", s))?;
+    Ok(Duration::from_millis(millis))
 }
 
 /// Format duration as string (e.g., "10s", "5m", "1h", "100ms")

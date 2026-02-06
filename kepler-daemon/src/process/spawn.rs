@@ -63,20 +63,11 @@ pub struct DetachedResult {
     pub stderr_task: Option<JoinHandle<()>>,
 }
 
-/// Spawn a command and wait for completion
+/// Build a `Command` from a `CommandSpec`, applying all common configuration:
+/// validation, working directory, environment, user/group dropping, and resource limits.
 ///
-/// This function handles all the common logic for spawning processes:
-/// - Command validation
-/// - Working directory setup
-/// - Environment configuration
-/// - User/group privilege dropping (Unix only)
-/// - Output capture (stdout/stderr)
-///
-/// The `mode` parameter determines behavior:
-/// - `Silent`: Wait for completion and return exit code
-/// - `WithLogging`: Wait with logging to tracing and BufferedLogWriter
-pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<BlockingResult> {
-    // Validate command
+/// Returns the configured `Command` and the program name (for error context).
+fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
     if spec.program_and_args.is_empty() {
         return Err(DaemonError::Config("Empty command".to_string()));
     }
@@ -120,6 +111,17 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
             cmd.pre_exec(move || apply_resource_limits(&limits));
         }
     }
+
+    Ok((cmd, program.clone()))
+}
+
+/// Spawn a command and wait for completion
+///
+/// The `mode` parameter determines behavior:
+/// - `Silent`: Wait for completion and return exit code
+/// - `WithLogging`: Wait with logging to tracing and BufferedLogWriter
+pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<BlockingResult> {
+    let (mut cmd, program) = build_command(&spec)?;
 
     let mut child = cmd.spawn().map_err(|e| DaemonError::ProcessSpawn {
         service: program.clone(),
@@ -260,50 +262,7 @@ pub async fn spawn_detached(
     store_stdout: bool,
     store_stderr: bool,
 ) -> Result<DetachedResult> {
-    // Validate command
-    if spec.program_and_args.is_empty() {
-        return Err(DaemonError::Config("Empty command".to_string()));
-    }
-
-    let program = &spec.program_and_args[0];
-    let args = &spec.program_and_args[1..];
-
-    debug!("Spawning command: {} {:?}", program, args);
-
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .current_dir(&spec.working_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    // Clear environment if requested (secure default)
-    if spec.clear_env {
-        cmd.env_clear();
-    }
-    cmd.envs(&spec.environment);
-
-    // Apply user/group if configured (Unix only)
-    #[cfg(unix)]
-    if let Some(ref user) = spec.user {
-        use crate::user::resolve_user;
-
-        let (uid, gid) = resolve_user(user, spec.group.as_deref())?;
-        cmd.uid(uid);
-        cmd.gid(gid);
-        debug!("Command will run as uid={}, gid={}", uid, gid);
-    }
-
-    // Apply resource limits via pre_exec (Unix only)
-    #[cfg(unix)]
-    if let Some(ref limits) = spec.limits {
-        let limits = limits.clone();
-        // SAFETY: pre_exec runs in a forked child process before exec.
-        // apply_resource_limits only calls setrlimit which is async-signal-safe.
-        unsafe {
-            cmd.pre_exec(move || apply_resource_limits(&limits));
-        }
-    }
+    let (mut cmd, program) = build_command(&spec)?;
 
     let mut child = cmd.spawn().map_err(|e| DaemonError::ProcessSpawn {
         service: program.clone(),

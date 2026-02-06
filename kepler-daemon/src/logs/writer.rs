@@ -117,9 +117,7 @@ impl BufferedLogWriter {
 
         if self.buffer_size == 0 {
             // No buffering - write directly to disk
-            // Copy bytes to avoid borrow conflict
-            let bytes = self.format_buffer.as_bytes().to_vec();
-            self.write_to_disk(&bytes);
+            self.write_format_buffer_to_disk();
         } else {
             // Buffer the entry
             self.buffer.extend_from_slice(self.format_buffer.as_bytes());
@@ -141,6 +139,30 @@ impl BufferedLogWriter {
         self.write_to_disk(&buffer);
         self.buffer = buffer;
         self.buffer.clear();
+    }
+
+    /// Write the format buffer directly to disk without allocation.
+    /// This avoids the borrow conflict of passing `self.format_buffer` to `write_to_disk`.
+    fn write_format_buffer_to_disk(&mut self) {
+        if let Some(max_size) = self.max_log_size {
+            if self.bytes_written >= max_size {
+                self.truncate_log_file();
+            }
+        }
+
+        if self.file.is_none() {
+            self.file = Some(self.open_log_file());
+        }
+
+        if let Some(ref mut file) = self.file {
+            let data = self.format_buffer.as_bytes();
+            if let Err(e) = file.write_all(data) {
+                tracing::warn!("Failed to write log entry: {}", e);
+                self.file = None;
+            } else {
+                self.bytes_written += data.len() as u64;
+            }
+        }
     }
 
     /// Write data directly to disk

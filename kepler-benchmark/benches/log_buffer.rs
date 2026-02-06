@@ -464,10 +464,10 @@ fn bench_log_reading(c: &mut Criterion) {
                 // Read 5 pages
                 for page in 0..5 {
                     let offset = page * page_size;
-                    let (entries, total) = black_box(
+                    let (entries, has_more) = black_box(
                         reader.get_paginated(Some("read-test"), offset, page_size)
                     );
-                    let _ = (entries, total);
+                    let _ = (entries, has_more);
                 }
             });
         });
@@ -532,10 +532,10 @@ fn bench_multi_service_reading(c: &mut Criterion) {
                 let mut offset = 0;
                 let page_size = 1000;
                 loop {
-                    let (entries, total) = reader.get_paginated(None, offset, page_size);
+                    let (entries, has_more) = reader.get_paginated(None, offset, page_size);
                     black_box(&entries);
                     offset += entries.len();
-                    if offset >= total {
+                    if !has_more {
                         break;
                     }
                 }
@@ -608,7 +608,7 @@ fn bench_truncated_log_reading(c: &mut Criterion) {
             let mut offset = 0;
             let page_size = 500;
             for _ in 0..10 {
-                let (entries, _total) = reader.get_paginated(None, offset, page_size);
+                let (entries, _has_more) = reader.get_paginated(None, offset, page_size);
                 black_box(&entries);
                 offset += page_size;
             }
@@ -1024,12 +1024,12 @@ fn bench_merge_strategies(c: &mut Criterion) {
             });
         });
 
-        // Strategy 2: get_paginated (read all, sort, slice)
-        // Reads everything, sorts in memory, returns slice
+        // Strategy 2: get_paginated (uses merged iterator with skip/take)
+        // Memory-efficient single-pass pagination
         group.bench_function(format!("paginated_{}", read_count), |b| {
             let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
-                let (entries, _total) = black_box(reader.get_paginated(None, 0, read_count));
+                let (entries, _has_more) = black_box(reader.get_paginated(None, 0, read_count));
                 entries
             });
         });
@@ -1058,7 +1058,7 @@ fn bench_merge_strategies(c: &mut Criterion) {
     group.bench_function("paginated_full", |b| {
         let reader = LogReader::new(logs_dir.clone());
         b.iter(|| {
-            let (entries, _total) = black_box(reader.get_paginated(None, 0, total_lines));
+            let (entries, _has_more) = black_box(reader.get_paginated(None, 0, total_lines));
             entries
         });
     });

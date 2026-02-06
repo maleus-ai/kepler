@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{resolve_log_buffer_size, resolve_log_max_size, KeplerConfig};
 use crate::env::build_service_env;
@@ -76,7 +76,7 @@ impl ConfigActor {
             if e.kind() == std::io::ErrorKind::NotFound {
                 DaemonError::ConfigNotFound(config_path.clone())
             } else {
-                DaemonError::Io(e)
+                DaemonError::Internal(format!("Failed to canonicalize '{}': {}", config_path.display(), e))
             }
         })?;
 
@@ -174,7 +174,7 @@ impl ConfigActor {
                 info!("Loading config fresh from source (no snapshot)");
 
                 // Read original file contents
-                let contents = std::fs::read(&canonical_path)?;
+                let contents = std::fs::read(&canonical_path).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", canonical_path.display(), e)))?;
 
                 // Copy config to secure location
                 let copied_config_path = state_dir.join("config.yaml");
@@ -589,8 +589,16 @@ impl ConfigActor {
             } => {
                 if let Some(sender) = self.event_senders.get(&service_name) {
                     let msg = ServiceEventMessage::new(event);
-                    // Use try_send to avoid blocking if channel is full
-                    let _ = sender.try_send(msg);
+                    if let Err(e) = sender.try_send(msg) {
+                        match e {
+                            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                                warn!("Event channel full for service '{}', dropping event", service_name);
+                            }
+                            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                                warn!("Event channel closed for service '{}'", service_name);
+                            }
+                        }
+                    }
                 }
             }
             ConfigCommand::GetAllEventReceivers { reply } => {
@@ -761,10 +769,10 @@ impl ConfigActor {
         service: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> (Vec<LogEntry>, usize) {
+    ) -> (Vec<LogEntry>, bool) {
         let reader = LogReader::new(self.log_config.logs_dir.clone());
-        let (logs, total) = reader.get_paginated(service, offset, limit);
-        (logs.into_iter().map(|l| l.into()).collect(), total)
+        let (logs, has_more) = reader.get_paginated(service, offset, limit);
+        (logs.into_iter().map(|l| l.into()).collect(), has_more)
     }
 
     fn reload_config(&mut self) -> Result<()> {

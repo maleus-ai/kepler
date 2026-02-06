@@ -15,7 +15,11 @@ pub use lifecycle::LifecycleEvent;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Delay between stop and start phases during restart.
+/// Allows OS resources (ports, file handles) to be fully released.
+const RESTART_DELAY: Duration = Duration::from_millis(500);
 
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -758,7 +762,7 @@ impl ServiceOrchestrator {
         }
 
         // Small delay between stop and start phases
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(RESTART_DELAY).await;
 
         let mut restarted = Vec::new();
 
@@ -874,7 +878,7 @@ impl ServiceOrchestrator {
         self.registry.unload(&config_path.to_path_buf()).await;
 
         // Small delay to ensure cleanup
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(RESTART_DELAY).await;
 
         // Start services with fresh config and sys_env
         self.start_services(config_path, None, sys_env).await
@@ -958,7 +962,7 @@ impl ServiceOrchestrator {
         }
 
         // Small delay between stop and start
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(RESTART_DELAY).await;
 
         // Refresh context after stop (state may have changed)
         let ctx = handle
@@ -992,11 +996,6 @@ impl ServiceOrchestrator {
 
         // Spawn auxiliary tasks (health checker, file watcher)
         self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
-
-        // Update state
-        let _ = handle
-            .set_service_status(service_name, ServiceStatus::Running)
-            .await;
 
         let _ = handle.increment_restart_count(service_name).await;
 

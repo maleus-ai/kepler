@@ -97,7 +97,7 @@ impl ConfigPersistence {
             return Ok(None);
         }
 
-        let content = std::fs::read_to_string(&path)?;
+        let content = std::fs::read_to_string(&path).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", path.display(), e)))?;
         let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(&content).map_err(|e| {
             DaemonError::Internal(format!("Failed to parse expanded config: {}", e))
         })?;
@@ -132,7 +132,7 @@ impl ConfigPersistence {
             return Ok(None);
         }
 
-        let content = std::fs::read_to_string(&path)?;
+        let content = std::fs::read_to_string(&path).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", path.display(), e)))?;
         match serde_json::from_str(&content) {
             Ok(state) => {
                 debug!("Loaded config state from {:?}", path);
@@ -168,7 +168,7 @@ impl ConfigPersistence {
             return Ok(None);
         }
 
-        let content = std::fs::read_to_string(&path)?;
+        let content = std::fs::read_to_string(&path).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", path.display(), e)))?;
         let source_path = PathBuf::from(content.trim());
         debug!("Loaded source path from {:?}: {:?}", path, source_path);
         Ok(Some(source_path))
@@ -205,11 +205,11 @@ impl ConfigPersistence {
                 .recursive(true)
                 .mode(0o700)
                 .create(&env_files_dir)
-                .map_err(DaemonError::Io)?;
+                .map_err(|e| DaemonError::Internal(format!("Failed to create directory '{}': {}", env_files_dir.display(), e)))?;
         }
         #[cfg(not(unix))]
         {
-            std::fs::create_dir_all(&env_files_dir).map_err(DaemonError::Io)?;
+            std::fs::create_dir_all(&env_files_dir).map_err(|e| DaemonError::Internal(format!("Failed to create directory '{}': {}", env_files_dir.display(), e)))?;
         }
 
         for (service_name, config) in services {
@@ -238,19 +238,19 @@ impl ConfigPersistence {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::OpenOptionsExt;
-                        let contents = std::fs::read(&source).map_err(DaemonError::Io)?;
+                        let contents = std::fs::read(&source).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", source.display(), e)))?;
                         let mut file = std::fs::OpenOptions::new()
                             .write(true)
                             .create(true)
                             .truncate(true)
                             .mode(0o600)
                             .open(&dest)
-                            .map_err(DaemonError::Io)?;
-                        file.write_all(&contents).map_err(DaemonError::Io)?;
+                            .map_err(|e| DaemonError::Internal(format!("Failed to open '{}': {}", dest.display(), e)))?;
+                        file.write_all(&contents).map_err(|e| DaemonError::Internal(format!("Failed to write '{}': {}", dest.display(), e)))?;
                     }
                     #[cfg(not(unix))]
                     {
-                        std::fs::copy(&source, &dest).map_err(DaemonError::Io)?;
+                        std::fs::copy(&source, &dest).map_err(|e| DaemonError::Internal(format!("Failed to copy '{}' to '{}': {}", source.display(), dest.display(), e)))?;
                     }
 
                     info!(
@@ -280,21 +280,21 @@ impl ConfigPersistence {
         // Remove expanded config
         let expanded_path = self.expanded_config_path();
         if expanded_path.exists() {
-            std::fs::remove_file(&expanded_path)?;
+            std::fs::remove_file(&expanded_path).map_err(|e| DaemonError::Internal(format!("Failed to remove '{}': {}", expanded_path.display(), e)))?;
             debug!("Removed expanded config: {:?}", expanded_path);
         }
 
         // Remove state (optional, could preserve some fields)
         let state_path = self.state_path();
         if state_path.exists() {
-            std::fs::remove_file(&state_path)?;
+            std::fs::remove_file(&state_path).map_err(|e| DaemonError::Internal(format!("Failed to remove '{}': {}", state_path.display(), e)))?;
             debug!("Removed state: {:?}", state_path);
         }
 
         // Remove env_files directory
         let env_files_dir = self.env_files_dir();
         if env_files_dir.exists() {
-            std::fs::remove_dir_all(&env_files_dir)?;
+            std::fs::remove_dir_all(&env_files_dir).map_err(|e| DaemonError::Internal(format!("Failed to remove directory '{}': {}", env_files_dir.display(), e)))?;
             debug!("Removed env_files directory: {:?}", env_files_dir);
         }
 
@@ -321,13 +321,13 @@ impl ConfigPersistence {
                 .truncate(true)
                 .mode(0o600)
                 .open(path)
-                .map_err(DaemonError::Io)?;
-            file.write_all(content).map_err(DaemonError::Io)?;
+                .map_err(|e| DaemonError::Internal(format!("Failed to open '{}': {}", path.display(), e)))?;
+            file.write_all(content).map_err(|e| DaemonError::Internal(format!("Failed to write '{}': {}", path.display(), e)))?;
         }
 
         #[cfg(not(unix))]
         {
-            std::fs::write(path, content)?;
+            std::fs::write(path, content).map_err(|e| DaemonError::Internal(format!("Failed to write '{}': {}", path.display(), e)))?;
         }
 
         Ok(())

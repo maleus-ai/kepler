@@ -361,8 +361,8 @@ fn test_log_pagination_offset_limit() {
     let reader = LogReader::new(logs_dir);
 
     // Test first page
-    let (page1, total) = reader.get_paginated(Some("pagination-test"), 0, 10);
-    assert_eq!(total, 100, "Total should be 100");
+    let (page1, has_more) = reader.get_paginated(Some("pagination-test"), 0, 10);
+    assert!(has_more, "Should have more entries after first page");
     assert_eq!(page1.len(), 10, "First page should have 10 entries");
     assert!(page1[0].line.contains("000"), "First entry should be line 000");
 
@@ -372,11 +372,13 @@ fn test_log_pagination_offset_limit() {
     assert!(page2[0].line.contains("010"), "Second page should start at line 010");
 
     // Test last page (partial)
-    let (last_page, _) = reader.get_paginated(Some("pagination-test"), 95, 10);
+    let (last_page, has_more) = reader.get_paginated(Some("pagination-test"), 95, 10);
+    assert!(!has_more, "Should not have more entries on last page");
     assert_eq!(last_page.len(), 5, "Last page should have only 5 entries");
 
     // Test offset beyond total
-    let (empty, _) = reader.get_paginated(Some("pagination-test"), 200, 10);
+    let (empty, has_more) = reader.get_paginated(Some("pagination-test"), 200, 10);
+    assert!(!has_more);
     assert_eq!(empty.len(), 0, "Should return empty for offset beyond total");
 }
 

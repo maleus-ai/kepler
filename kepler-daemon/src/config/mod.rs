@@ -213,7 +213,7 @@ impl KeplerConfig {
             if e.kind() == std::io::ErrorKind::NotFound {
                 DaemonError::ConfigNotFound(path.to_path_buf())
             } else {
-                DaemonError::Io(e)
+                DaemonError::Internal(format!("Failed to read config '{}': {}", path.display(), e))
             }
         })?;
 

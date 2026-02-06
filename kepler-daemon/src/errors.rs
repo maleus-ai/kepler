@@ -68,9 +68,6 @@ pub enum DaemonError {
     #[error("File watcher error: {0}")]
     Watcher(String),
 
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
     #[error("Internal error: {0}")]
     Internal(String),
 

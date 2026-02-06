@@ -47,7 +47,7 @@ pub enum ConfigCommand {
         service: Option<String>,
         offset: usize,
         limit: usize,
-        reply: oneshot::Sender<(Vec<LogEntry>, usize)>,
+        reply: oneshot::Sender<(Vec<LogEntry>, bool)>,
     },
     GetServiceConfig {
         service_name: String,

@@ -24,7 +24,7 @@ fn canonicalize_config_path(path: PathBuf) -> std::result::Result<PathBuf, Daemo
         if e.kind() == std::io::ErrorKind::NotFound {
             DaemonError::ConfigNotFound(path)
         } else {
-            DaemonError::Io(e)
+            DaemonError::Internal(format!("Failed to canonicalize '{}': {}", path.display(), e))
         }
     })
 }
@@ -392,19 +392,18 @@ async fn handle_request(
             };
 
             // Use true pagination - reads efficiently from disk with offset/limit
-            let (entries, total) = match registry.get(&config_path) {
+            let (entries, has_more) = match registry.get(&config_path) {
                 Some(handle) => handle.get_logs_paginated(service, offset, limit).await,
-                None => (Vec::new(), 0),
+                None => (Vec::new(), false),
             };
 
-            let has_more = offset + entries.len() < total;
             let next_offset = offset + entries.len();
 
             Response::ok_with_data(ResponseData::LogChunk(LogChunkData {
                 entries,
                 has_more,
                 next_offset,
-                total: Some(total),
+                total: None,
             }))
         }
 

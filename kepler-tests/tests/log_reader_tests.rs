@@ -181,29 +181,29 @@ fn test_pagination_offset_limit() {
     let reader = LogReader::new(logs_dir);
 
     // First page
-    let (page1, total) = reader.get_paginated(Some("my-service"), 0, 10);
-    assert_eq!(total, 50, "Total should be 50");
+    let (page1, has_more) = reader.get_paginated(Some("my-service"), 0, 10);
+    assert!(has_more, "Should have more entries after first page");
     assert_eq!(page1.len(), 10);
     assert_eq!(page1[0].line, "Line 0");
     assert_eq!(page1[9].line, "Line 9");
 
     // Second page
-    let (page2, total) = reader.get_paginated(Some("my-service"), 10, 10);
-    assert_eq!(total, 50);
+    let (page2, has_more) = reader.get_paginated(Some("my-service"), 10, 10);
+    assert!(has_more);
     assert_eq!(page2.len(), 10);
     assert_eq!(page2[0].line, "Line 10");
     assert_eq!(page2[9].line, "Line 19");
 
     // Last partial page
-    let (last_page, total) = reader.get_paginated(Some("my-service"), 45, 10);
-    assert_eq!(total, 50);
+    let (last_page, has_more) = reader.get_paginated(Some("my-service"), 45, 10);
+    assert!(!has_more, "Should not have more entries on last page");
     assert_eq!(last_page.len(), 5);
     assert_eq!(last_page[0].line, "Line 45");
     assert_eq!(last_page[4].line, "Line 49");
 
     // Beyond end
-    let (beyond, total) = reader.get_paginated(Some("my-service"), 100, 10);
-    assert_eq!(total, 50);
+    let (beyond, has_more) = reader.get_paginated(Some("my-service"), 100, 10);
+    assert!(!has_more);
     assert_eq!(beyond.len(), 0);
 }
 
@@ -374,9 +374,9 @@ fn test_empty_logs_directory() {
     let logs = reader.tail(100, None);
     assert_eq!(logs.len(), 0);
 
-    let (paginated, total) = reader.get_paginated(None, 0, 10);
+    let (paginated, has_more) = reader.get_paginated(None, 0, 10);
     assert_eq!(paginated.len(), 0);
-    assert_eq!(total, 0);
+    assert!(!has_more);
 }
 
 #[test]

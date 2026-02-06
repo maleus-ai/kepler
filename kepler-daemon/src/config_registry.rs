@@ -52,7 +52,7 @@ impl ConfigRegistry {
             if e.kind() == std::io::ErrorKind::NotFound {
                 crate::errors::DaemonError::ConfigNotFound(config_path.clone())
             } else {
-                crate::errors::DaemonError::Io(e)
+                crate::errors::DaemonError::Internal(format!("Failed to canonicalize '{}': {}", config_path.display(), e))
             }
         })?;
 

@@ -345,31 +345,15 @@ fn which_daemon() -> Result<PathBuf> {
 fn start_daemon_detached(daemon_path: &PathBuf) -> Result<()> {
     use std::process::Command;
 
-    #[cfg(unix)]
-    {
-        Command::new(daemon_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|source| CliError::DaemonSpawn {
-                path: daemon_path.clone(),
-                source,
-            })?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        Command::new(daemon_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|source| CliError::DaemonSpawn {
-                path: daemon_path.clone(),
-                source,
-            })?;
-    }
+    Command::new(daemon_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|source| CliError::DaemonSpawn {
+            path: daemon_path.clone(),
+            source,
+        })?;
 
     Ok(())
 }
@@ -675,30 +659,30 @@ async fn handle_logs(
     let mut cursor_id: Option<String> = None;
 
     loop {
-        // Re-connect for each request
-        let daemon_socket = match Daemon::get_socket_path() {
-            Ok(path) => path,
-            Err(_) => {
-                eprintln!("\nCannot determine daemon socket path");
-                break;
-            }
-        };
-        let mut client = match Client::connect(&daemon_socket).await {
-            Ok(c) => c,
-            Err(_) => {
-                eprintln!("\nDaemon disconnected");
-                break;
-            }
-        };
-
-        let response = client
+        let response = match client
             .logs_cursor(
                 config_path.clone(),
                 service.clone(),
                 cursor_id.clone(),
                 from_start,
             )
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(_) => {
+                // Reconnect on request error
+                let socket = Daemon::get_socket_path()
+                    .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
+                *client = match Client::connect(&socket).await {
+                    Ok(c) => c,
+                    Err(_) => {
+                        eprintln!("\nDaemon disconnected");
+                        break;
+                    }
+                };
+                continue;
+            }
+        };
 
         match response {
             Response::Ok {

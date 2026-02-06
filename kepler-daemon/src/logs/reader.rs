@@ -92,43 +92,18 @@ impl LogReader {
         entries.into_iter().skip(start).collect()
     }
 
-    /// Get logs with true pagination
+    /// Get logs with true pagination using the efficient merged iterator.
+    /// Returns `(entries, has_more)` where `has_more` indicates if more entries exist after this page.
     pub fn get_paginated(
         &self,
         service: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> (Vec<LogLine>, usize) {
-        let files = self.collect_log_files(service);
-
-        if files.is_empty() {
-            return (Vec::new(), 0);
-        }
-
-        // Read all entries and count
-        let mut all_entries: Vec<LogLine> = Vec::new();
-        for (path, svc, stream) in files {
-            let entries = self.read_log_file(&path, &svc, stream);
-            all_entries.extend(entries);
-        }
-
-        // Sort by timestamp
-        all_entries.sort_by_key(|e| e.timestamp);
-
-        let total = all_entries.len();
-
-        if offset >= total {
-            return (Vec::new(), total);
-        }
-
-        // Apply offset and limit
-        let entries: Vec<LogLine> = all_entries
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect();
-
-        (entries, total)
+    ) -> (Vec<LogLine>, bool) {
+        let mut entries: Vec<LogLine> = self.iter(service).skip(offset).take(limit + 1).collect();
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        (entries, has_more)
     }
 
     /// Collect all log files, optionally filtered by service
@@ -226,11 +201,6 @@ impl LogReader {
                     .strip_suffix(".stderr.log")
                     .map(|service| (service.to_string(), LogStream::Stderr))
             })
-    }
-
-    /// Read all entries from a log file
-    fn read_log_file(&self, path: &PathBuf, service: &str, stream: LogStream) -> Vec<LogLine> {
-        self.read_log_file_bounded(path, service, stream, None, None)
     }
 
     /// Read log entries from a file with optional bounds
