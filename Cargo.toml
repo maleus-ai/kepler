@@ -5,6 +5,5 @@ members = [
     "kepler-daemon",
     "kepler-tests",
     "kepler-e2e",
-    "kepler-benchmark",
 ]
 resolver = "2"
