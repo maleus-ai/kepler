@@ -167,11 +167,10 @@ fn process_service_lua(
         service_map.get(Value::String("environment".to_string()))
     {
         for entry in environment {
-            if let Value::String(s) = entry {
-                if let Some((key, value)) = s.split_once('=') {
+            if let Value::String(s) = entry
+                && let Some((key, value)) = s.split_once('=') {
                     full_env.insert(key.to_string(), value.to_string());
                 }
-            }
         }
     }
 

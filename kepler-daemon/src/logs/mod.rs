@@ -37,14 +37,13 @@ pub const DEFAULT_BUFFER_SIZE: usize = 8 * 1024;
 /// Validate that a path is not a symlink (security measure to prevent symlink attacks)
 #[cfg(unix)]
 pub(crate) fn validate_not_symlink(path: &std::path::Path) -> std::io::Result<()> {
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && meta.file_type().is_symlink() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Log path is a symlink: {:?}", path),
             ));
         }
-    }
     Ok(())
 }
 

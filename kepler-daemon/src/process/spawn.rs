@@ -17,11 +17,10 @@ pub(super) fn apply_resource_limits(limits: &ResourceLimits) -> std::io::Result<
     use crate::config::parse_memory_limit;
     use nix::sys::resource::{setrlimit, Resource};
 
-    if let Some(ref mem_str) = limits.memory {
-        if let Ok(bytes) = parse_memory_limit(mem_str) {
+    if let Some(ref mem_str) = limits.memory
+        && let Ok(bytes) = parse_memory_limit(mem_str) {
             setrlimit(Resource::RLIMIT_AS, bytes, bytes).map_err(std::io::Error::other)?;
         }
-    }
 
     if let Some(cpu_secs) = limits.cpu_time {
         setrlimit(Resource::RLIMIT_CPU, cpu_secs, cpu_secs).map_err(std::io::Error::other)?;

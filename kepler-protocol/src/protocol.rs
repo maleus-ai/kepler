@@ -180,7 +180,7 @@ impl Response {
 
 /// Data payload in response
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ResponseData {
     /// Service status information for a single config
     ServiceStatus(HashMap<String, ServiceInfo>),

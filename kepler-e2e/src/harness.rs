@@ -132,14 +132,13 @@ impl E2eHarness {
         if let Ok(entries) = std::fs::read_dir(&configs_dir) {
             for entry in entries.flatten() {
                 let source_path_file = entry.path().join("source_path.txt");
-                if source_path_file.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&source_path_file) {
+                if source_path_file.exists()
+                    && let Ok(content) = std::fs::read_to_string(&source_path_file) {
                         let stored_path = PathBuf::from(content.trim());
                         if stored_path == config_path {
                             return true;
                         }
                     }
-                }
             }
         }
         false
@@ -155,14 +154,13 @@ impl E2eHarness {
         if let Ok(entries) = std::fs::read_dir(&configs_dir) {
             for entry in entries.flatten() {
                 let source_path_file = entry.path().join("source_path.txt");
-                if source_path_file.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&source_path_file) {
+                if source_path_file.exists()
+                    && let Ok(content) = std::fs::read_to_string(&source_path_file) {
                         let stored_path = PathBuf::from(content.trim());
                         if stored_path == config_path {
                             return Some(entry.path());
                         }
                     }
-                }
             }
         }
         None
@@ -712,11 +710,10 @@ impl E2eHarness {
         let start = std::time::Instant::now();
 
         while start.elapsed() < timeout_duration {
-            if let Ok(content) = std::fs::read_to_string(file_path) {
-                if content.contains(expected_content) {
+            if let Ok(content) = std::fs::read_to_string(file_path)
+                && content.contains(expected_content) {
                     return Ok(content);
                 }
-            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 

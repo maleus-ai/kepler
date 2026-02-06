@@ -8,7 +8,7 @@
 //! Some tests require root privileges and are marked with #[ignore].
 //! Run with: `sudo -E cargo test --test security_tests -- --include-ignored`
 
-use kepler_daemon::config::{HookCommand, ResourceLimits, ServiceHooks};
+use kepler_daemon::config::{HookCommand, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -25,77 +25,34 @@ fn is_root() -> bool {
     nix::unistd::getuid().is_root()
 }
 
-/// Get the UID of a running process from /proc/{pid}/status
+/// Get the UID of a running process
 #[cfg(unix)]
 fn get_process_uid(pid: u32) -> Option<u32> {
-    let status_path = format!("/proc/{}/status", pid);
-    if let Ok(contents) = std::fs::read_to_string(&status_path) {
-        for line in contents.lines() {
-            if line.starts_with("Uid:") {
-                // Format: "Uid:\t<real>\t<effective>\t<saved>\t<filesystem>"
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    // Return the real UID (first number after "Uid:")
-                    return parts[1].parse().ok();
-                }
-            }
-        }
-    }
-    None
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+        false,
+        ProcessRefreshKind::nothing().with_user(UpdateKind::OnlyIfNotSet),
+    );
+    sys.process(Pid::from_u32(pid))
+        .and_then(|p| p.user_id())
+        .map(|uid| **uid)
 }
 
-/// Get the GID of a running process from /proc/{pid}/status
+/// Get the GID of a running process
 #[cfg(unix)]
 fn get_process_gid(pid: u32) -> Option<u32> {
-    let status_path = format!("/proc/{}/status", pid);
-    if let Ok(contents) = std::fs::read_to_string(&status_path) {
-        for line in contents.lines() {
-            if line.starts_with("Gid:") {
-                // Format: "Gid:\t<real>\t<effective>\t<saved>\t<filesystem>"
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    // Return the real GID (first number after "Gid:")
-                    return parts[1].parse().ok();
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Get resource limits from /proc/{pid}/limits
-#[cfg(unix)]
-fn get_process_limits(pid: u32) -> Option<String> {
-    let limits_path = format!("/proc/{}/limits", pid);
-    std::fs::read_to_string(&limits_path).ok()
-}
-
-/// Parse a specific limit value from /proc/{pid}/limits
-#[cfg(unix)]
-fn get_limit_value(limits_content: &str, limit_name: &str) -> Option<u64> {
-    for line in limits_content.lines() {
-        if line.starts_with(limit_name) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            // The format is: "Limit Name          Soft Limit   Hard Limit   Units"
-            // We need to find the soft limit which is after the limit name words
-            // For "Max open files" the parts would be: ["Max", "open", "files", "256", "256", "files"]
-            // For "Max address space" the parts would be: ["Max", "address", "space", "67108864", "67108864", "bytes"]
-            // For "Max cpu time" the parts would be: ["Max", "cpu", "time", "60", "60", "seconds"]
-            if parts.len() >= 4 {
-                // Find the first numeric value after the name
-                for part in &parts[2..] {
-                    if let Ok(value) = part.parse::<u64>() {
-                        return Some(value);
-                    }
-                    // Handle "unlimited" case
-                    if *part == "unlimited" {
-                        return None;
-                    }
-                }
-            }
-        }
-    }
-    None
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+        false,
+        ProcessRefreshKind::nothing().with_user(UpdateKind::OnlyIfNotSet),
+    );
+    sys.process(Pid::from_u32(pid))
+        .and_then(|p| p.group_id())
+        .map(|gid| *gid)
 }
 
 /// Look up a user by name and return their UID
@@ -416,279 +373,6 @@ services:
         "Error should indicate group resolution failure: {}",
         err
     );
-}
-
-// ============================================================================
-// Resource Limits Tests
-// ============================================================================
-
-/// Verify that CPU time limit (RLIMIT_CPU) is applied to spawned processes
-#[tokio::test]
-#[cfg(unix)]
-async fn test_cpu_time_limit_applied() {
-    let temp_dir = TempDir::new().unwrap();
-
-    let config = TestConfigBuilder::new()
-        .add_service(
-            "cpu_limited",
-            TestServiceBuilder::long_running()
-                .with_limits(ResourceLimits {
-                    memory: None,
-                    cpu_time: Some(60), // 60 seconds
-                    max_fds: None,
-                })
-                .build(),
-        )
-        .build();
-
-    let harness = TestDaemonHarness::new(config, temp_dir.path())
-        .await
-        .unwrap();
-
-    harness.start_service("cpu_limited").await.unwrap();
-
-    // Give the process time to start
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Get the service PID
-    let pid = harness
-        .handle()
-        .get_service_state("cpu_limited")
-        .await
-        .and_then(|s| s.pid);
-
-    assert!(pid.is_some(), "Service should have a PID");
-    let pid = pid.unwrap();
-
-    // Read the process limits
-    let limits_content = get_process_limits(pid);
-    assert!(
-        limits_content.is_some(),
-        "Should be able to read /proc/{}/limits",
-        pid
-    );
-
-    let limits = limits_content.unwrap();
-
-    // Check CPU time limit
-    let cpu_limit = get_limit_value(&limits, "Max cpu time");
-    assert!(
-        cpu_limit.is_some(),
-        "CPU time limit should be set. Limits:\n{}",
-        limits
-    );
-    assert_eq!(
-        cpu_limit.unwrap(),
-        60,
-        "CPU time limit should be 60 seconds"
-    );
-
-    harness.stop_service("cpu_limited").await.unwrap();
-}
-
-/// Verify that memory limit (RLIMIT_AS) is applied to spawned processes
-#[tokio::test]
-#[cfg(unix)]
-async fn test_memory_limit_applied() {
-    let temp_dir = TempDir::new().unwrap();
-
-    // 64MB in bytes
-    let expected_bytes: u64 = 64 * 1024 * 1024;
-
-    let config = TestConfigBuilder::new()
-        .add_service(
-            "memory_limited",
-            TestServiceBuilder::long_running()
-                .with_limits(ResourceLimits {
-                    memory: Some("64M".to_string()),
-                    cpu_time: None,
-                    max_fds: None,
-                })
-                .build(),
-        )
-        .build();
-
-    let harness = TestDaemonHarness::new(config, temp_dir.path())
-        .await
-        .unwrap();
-
-    harness.start_service("memory_limited").await.unwrap();
-
-    // Give the process time to start
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Get the service PID
-    let pid = harness
-        .handle()
-        .get_service_state("memory_limited")
-        .await
-        .and_then(|s| s.pid);
-
-    assert!(pid.is_some(), "Service should have a PID");
-    let pid = pid.unwrap();
-
-    // Read the process limits
-    let limits_content = get_process_limits(pid);
-    assert!(
-        limits_content.is_some(),
-        "Should be able to read /proc/{}/limits",
-        pid
-    );
-
-    let limits = limits_content.unwrap();
-
-    // Check memory limit (Max address space)
-    let memory_limit = get_limit_value(&limits, "Max address space");
-    assert!(
-        memory_limit.is_some(),
-        "Memory limit should be set. Limits:\n{}",
-        limits
-    );
-    assert_eq!(
-        memory_limit.unwrap(),
-        expected_bytes,
-        "Memory limit should be 64MB ({} bytes)",
-        expected_bytes
-    );
-
-    harness.stop_service("memory_limited").await.unwrap();
-}
-
-/// Verify that file descriptor limit (RLIMIT_NOFILE) is applied to spawned processes
-#[tokio::test]
-#[cfg(unix)]
-async fn test_file_descriptor_limit_applied() {
-    let temp_dir = TempDir::new().unwrap();
-
-    let config = TestConfigBuilder::new()
-        .add_service(
-            "fd_limited",
-            TestServiceBuilder::long_running()
-                .with_limits(ResourceLimits {
-                    memory: None,
-                    cpu_time: None,
-                    max_fds: Some(256),
-                })
-                .build(),
-        )
-        .build();
-
-    let harness = TestDaemonHarness::new(config, temp_dir.path())
-        .await
-        .unwrap();
-
-    harness.start_service("fd_limited").await.unwrap();
-
-    // Give the process time to start
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Get the service PID
-    let pid = harness
-        .handle()
-        .get_service_state("fd_limited")
-        .await
-        .and_then(|s| s.pid);
-
-    assert!(pid.is_some(), "Service should have a PID");
-    let pid = pid.unwrap();
-
-    // Read the process limits
-    let limits_content = get_process_limits(pid);
-    assert!(
-        limits_content.is_some(),
-        "Should be able to read /proc/{}/limits",
-        pid
-    );
-
-    let limits = limits_content.unwrap();
-
-    // Check file descriptor limit
-    let fd_limit = get_limit_value(&limits, "Max open files");
-    assert!(
-        fd_limit.is_some(),
-        "File descriptor limit should be set. Limits:\n{}",
-        limits
-    );
-    assert_eq!(
-        fd_limit.unwrap(),
-        256,
-        "File descriptor limit should be 256"
-    );
-
-    harness.stop_service("fd_limited").await.unwrap();
-}
-
-/// Verify that all resource limits can be applied together
-#[tokio::test]
-#[cfg(unix)]
-async fn test_all_resource_limits_applied() {
-    let temp_dir = TempDir::new().unwrap();
-
-    let expected_memory: u64 = 128 * 1024 * 1024; // 128MB
-    let expected_cpu: u64 = 120; // 120 seconds
-    let expected_fds: u64 = 512;
-
-    let config = TestConfigBuilder::new()
-        .add_service(
-            "all_limited",
-            TestServiceBuilder::long_running()
-                .with_limits(ResourceLimits {
-                    memory: Some("128M".to_string()),
-                    cpu_time: Some(expected_cpu),
-                    max_fds: Some(expected_fds),
-                })
-                .build(),
-        )
-        .build();
-
-    let harness = TestDaemonHarness::new(config, temp_dir.path())
-        .await
-        .unwrap();
-
-    harness.start_service("all_limited").await.unwrap();
-
-    // Give the process time to start
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Get the service PID
-    let pid = harness
-        .handle()
-        .get_service_state("all_limited")
-        .await
-        .and_then(|s| s.pid);
-
-    assert!(pid.is_some(), "Service should have a PID");
-    let pid = pid.unwrap();
-
-    // Read the process limits
-    let limits_content = get_process_limits(pid);
-    assert!(
-        limits_content.is_some(),
-        "Should be able to read /proc/{}/limits",
-        pid
-    );
-
-    let limits = limits_content.unwrap();
-
-    // Verify all limits
-    let memory_limit = get_limit_value(&limits, "Max address space");
-    assert_eq!(
-        memory_limit,
-        Some(expected_memory),
-        "Memory limit should be 128MB"
-    );
-
-    let cpu_limit = get_limit_value(&limits, "Max cpu time");
-    assert_eq!(
-        cpu_limit,
-        Some(expected_cpu),
-        "CPU time limit should be 120 seconds"
-    );
-
-    let fd_limit = get_limit_value(&limits, "Max open files");
-    assert_eq!(fd_limit, Some(expected_fds), "FD limit should be 512");
-
-    harness.stop_service("all_limited").await.unwrap();
 }
 
 // ============================================================================

@@ -144,11 +144,10 @@ impl BufferedLogWriter {
     /// Write the format buffer directly to disk without allocation.
     /// This avoids the borrow conflict of passing `self.format_buffer` to `write_to_disk`.
     fn write_format_buffer_to_disk(&mut self) {
-        if let Some(max_size) = self.max_log_size {
-            if self.bytes_written >= max_size {
+        if let Some(max_size) = self.max_log_size
+            && self.bytes_written >= max_size {
                 self.truncate_log_file();
             }
-        }
 
         if self.file.is_none() {
             self.file = Some(self.open_log_file());
@@ -168,11 +167,10 @@ impl BufferedLogWriter {
     /// Write data directly to disk
     fn write_to_disk(&mut self, data: &[u8]) {
         // Check if truncation is needed (only if max_log_size is specified)
-        if let Some(max_size) = self.max_log_size {
-            if self.bytes_written >= max_size {
+        if let Some(max_size) = self.max_log_size
+            && self.bytes_written >= max_size {
                 self.truncate_log_file();
             }
-        }
 
         // Get or create the file handle
         if self.file.is_none() {

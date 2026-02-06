@@ -210,11 +210,10 @@ pub fn expand_service_config(
     // at runtime, using the process's environment.
 
     // Expand resource limits
-    if let Some(ref mut limits) = service.limits {
-        if let Some(ref mut mem) = limits.memory {
+    if let Some(ref mut limits) = service.limits
+        && let Some(ref mut mem) = limits.memory {
             *mem = expand_value(mem, &expanded_context, sys_env);
         }
-    }
 
     // Expand restart watch patterns
     if let RestartConfig::Extended { ref mut watch, .. } = service.restart {

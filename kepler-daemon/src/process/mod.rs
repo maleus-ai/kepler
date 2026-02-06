@@ -12,7 +12,7 @@ mod command;
 mod spawn;
 mod validation;
 
-pub use command::{CommandSpec, CommandSpecBuilder};
+pub use command::CommandSpec;
 pub use spawn::{spawn_blocking, spawn_detached, BlockingMode, BlockingResult, DetachedResult};
 pub use validation::{kill_process_by_pid, validate_running_process};
 

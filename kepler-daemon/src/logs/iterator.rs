@@ -85,8 +85,8 @@ impl MergedLogIterator {
 
     fn read_next_into_heap(&mut self, source_idx: usize) {
         self.line_buf.clear();
-        if self.readers[source_idx].read_line(&mut self.line_buf).is_ok() && !self.line_buf.is_empty() {
-            if let Some(log_line) = LogReader::parse_log_line_arc(
+        if self.readers[source_idx].read_line(&mut self.line_buf).is_ok() && !self.line_buf.is_empty()
+            && let Some(log_line) = LogReader::parse_log_line_arc(
                 &self.line_buf,
                 &self.services[source_idx],
                 self.streams[source_idx],
@@ -97,7 +97,6 @@ impl MergedLogIterator {
                     source_idx,
                 });
             }
-        }
     }
 }
 

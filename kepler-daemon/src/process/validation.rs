@@ -2,6 +2,25 @@
 
 use tracing::{debug, error, info, trace, warn};
 
+#[cfg(unix)]
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+/// Query process UID and start time in a single sysinfo refresh.
+#[cfg(unix)]
+fn get_process_info(pid: u32) -> Option<(u32, i64)> {
+    let mut sys = System::new();
+    let sysinfo_pid = Pid::from_u32(pid);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[sysinfo_pid]),
+        false,
+        ProcessRefreshKind::nothing().with_user(UpdateKind::OnlyIfNotSet),
+    );
+    let process = sys.process(sysinfo_pid)?;
+    let uid = **process.user_id()?;
+    let start_time = process.start_time() as i64;
+    Some((uid, start_time))
+}
+
 /// Validate that a process with the given PID is still running.
 ///
 /// This is used during daemon restart to verify that a previously-recorded
@@ -29,32 +48,30 @@ pub fn validate_running_process(pid: u32, expected_start_time: Option<i64>) -> b
             return false;
         }
 
+        // Query UID and start time in a single sysinfo refresh
+        let Some((proc_uid, actual_start_time)) = get_process_info(pid) else {
+            trace!("Cannot query process info for PID {}, rejecting", pid);
+            return false;
+        };
+
         // Verify process is owned by daemon user (prevents cross-user confusion)
         let daemon_uid = nix::unistd::getuid().as_raw();
-        if let Some(proc_uid) = get_process_uid(pid) {
-            if proc_uid != daemon_uid {
-                trace!(
-                    "Process {} owned by UID {} but daemon runs as UID {}",
-                    pid, proc_uid, daemon_uid
-                );
-                return false;
-            }
+        if proc_uid != daemon_uid {
+            trace!(
+                "Process {} owned by UID {} but daemon runs as UID {}",
+                pid, proc_uid, daemon_uid
+            );
+            return false;
         }
 
         // Validate start time - CRITICAL for daemon restart safety
         if let Some(expected_ts) = expected_start_time {
-            if let Some(actual_ts) = get_process_start_time(pid) {
-                let diff = (expected_ts - actual_ts).abs();
-                if diff > 1 {  // Tight 1-second tolerance
-                    trace!(
-                        "Process {} start time mismatch: expected {}, got {} (diff {}s) - likely PID reuse",
-                        pid, expected_ts, actual_ts, diff
-                    );
-                    return false;
-                }
-            } else {
-                // Cannot read start time - don't trust this PID
-                trace!("Cannot verify start time for PID {}, rejecting", pid);
+            let diff = (expected_ts - actual_start_time).abs();
+            if diff > 1 {  // Tight 1-second tolerance
+                trace!(
+                    "Process {} start time mismatch: expected {}, got {} (diff {}s) - likely PID reuse",
+                    pid, expected_ts, actual_start_time, diff
+                );
                 return false;
             }
         } else {
@@ -72,76 +89,6 @@ pub fn validate_running_process(pid: u32, expected_start_time: Option<i64>) -> b
         let _ = (pid, expected_start_time);
         false
     }
-}
-
-/// Get process UID from /proc/{pid}/status
-#[cfg(unix)]
-fn get_process_uid(pid: u32) -> Option<u32> {
-    let status_path = format!("/proc/{}/status", pid);
-    let content = std::fs::read_to_string(&status_path).ok()?;
-
-    content
-        .lines()
-        .find(|line| line.starts_with("Uid:"))
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|s| s.parse::<u32>().ok())
-}
-
-/// Get the start time of a process from /proc/{pid}/stat.
-///
-/// Returns the start time as a Unix timestamp, or None if it can't be determined.
-#[cfg(unix)]
-fn get_process_start_time(pid: u32) -> Option<i64> {
-    use std::fs;
-
-    // Read /proc/{pid}/stat
-    let stat_path = format!("/proc/{}/stat", pid);
-    let stat_content = fs::read_to_string(&stat_path).ok()?;
-
-    // The stat file format has the start time as field 22 (1-indexed)
-    // Format: pid (comm) state ppid pgrp session tty_nr ... starttime ...
-    // We need to handle the case where comm might contain spaces or parentheses
-    let _start_paren = stat_content.find('(')?;
-    let end_paren = stat_content.rfind(')')?;
-    let fields_after_comm = &stat_content[end_paren + 2..];
-    let fields: Vec<&str> = fields_after_comm.split_whitespace().collect();
-
-    // Field 20 (0-indexed after comm) is starttime in clock ticks since boot
-    let starttime_ticks: u64 = fields.get(19)?.parse().ok()?;
-
-    // Get system boot time
-    let boot_time = get_boot_time()?;
-
-    // Get clock ticks per second (typically 100 on Linux)
-    let ticks_per_sec = get_clock_ticks_per_sec();
-
-    // Calculate absolute start time
-    let start_time = boot_time + (starttime_ticks / ticks_per_sec) as i64;
-
-    Some(start_time)
-}
-
-/// Get the system boot time from /proc/stat.
-#[cfg(unix)]
-fn get_boot_time() -> Option<i64> {
-    use std::fs;
-
-    let stat_content = fs::read_to_string("/proc/stat").ok()?;
-    for line in stat_content.lines() {
-        if line.starts_with("btime ") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            return parts.get(1)?.parse().ok();
-        }
-    }
-    None
-}
-
-/// Get the number of clock ticks per second.
-#[cfg(unix)]
-fn get_clock_ticks_per_sec() -> u64 {
-    // sysconf(_SC_CLK_TCK) typically returns 100 on Linux
-    // We could use libc::sysconf but 100 is the common default
-    100
 }
 
 /// Kill a process by PID.

@@ -108,14 +108,13 @@ impl ReverseLineReader {
         let mut search_end = end;
         while let Some(newline_pos) = memchr::memrchr(b'\n', &self.chunk_buf[..search_end]) {
             // Found a complete line: content is from newline_pos+1 to end
-            if newline_pos + 1 < end {
-                if let Ok(line) = std::str::from_utf8(&self.chunk_buf[newline_pos + 1..end]) {
+            if newline_pos + 1 < end
+                && let Ok(line) = std::str::from_utf8(&self.chunk_buf[newline_pos + 1..end]) {
                     let line = line.trim_end_matches('\r');
                     if !line.is_empty() {
                         lines.push(line.to_string());
                     }
                 }
-            }
             end = newline_pos;
             search_end = newline_pos;
         }
@@ -125,14 +124,13 @@ impl ReverseLineReader {
         // - A partial line (leftover for next chunk)
         if self.pos == 0 {
             // Beginning of file - this is a complete line
-            if end > 0 {
-                if let Ok(line) = std::str::from_utf8(&self.chunk_buf[0..end]) {
+            if end > 0
+                && let Ok(line) = std::str::from_utf8(&self.chunk_buf[0..end]) {
                     let line = line.trim_end_matches('\r');
                     if !line.is_empty() {
                         lines.push(line.to_string());
                     }
                 }
-            }
         } else {
             // Partial line - save for next chunk
             self.leftover = self.chunk_buf[0..end].to_vec();
@@ -264,12 +262,11 @@ impl ReverseMergedLogIterator {
                     // Current file exhausted, try next rotated file
                     if let Some(next_file) = source.remaining_files.first().cloned() {
                         source.remaining_files.remove(0);
-                        if let Ok(file) = File::open(&next_file) {
-                            if let Ok(reader) = ReverseLineReader::new(file) {
+                        if let Ok(file) = File::open(&next_file)
+                            && let Ok(reader) = ReverseLineReader::new(file) {
                                 source.reader = reader;
                                 continue; // Try reading from new file
                             }
-                        }
                     }
                     return None; // No more files
                 }
@@ -287,11 +284,10 @@ impl Iterator for ReverseMergedLogIterator {
         let source_idx = entry.source_idx;
 
         // Read next line from this source
-        if let Some(ref mut source) = self.sources[source_idx] {
-            if let Some(next_entry) = Self::read_next_entry(source, source_idx) {
+        if let Some(ref mut source) = self.sources[source_idx]
+            && let Some(next_entry) = Self::read_next_entry(source, source_idx) {
                 self.heap.push(next_entry);
             }
-        }
 
         Some(entry.log_line)
     }

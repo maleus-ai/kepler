@@ -9,7 +9,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
@@ -46,7 +47,7 @@ impl FilePosition {
 }
 
 /// State for a single cursor
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CursorState {
     /// File path -> position info
     positions: HashMap<PathBuf, FilePosition>,
@@ -99,13 +100,12 @@ impl From<std::io::Error> for CursorError {
     }
 }
 
+static CURSOR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Generate a unique cursor ID
 fn generate_cursor_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{:x}", nanos)
+    let id = CURSOR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("cursor_{:x}", id)
 }
 
 /// Manages server-side cursors for log streaming.
@@ -181,50 +181,58 @@ impl CursorManager {
         cursor_id: &str,
         config_path: &Path,
     ) -> Result<(Vec<LogLine>, bool), CursorError> {
-        // Get mutable reference to cursor
-        let mut cursor = self
-            .cursors
-            .get_mut(cursor_id)
-            .ok_or_else(|| CursorError::CursorExpired(cursor_id.to_string()))?;
+        // Phase 1: Lock, validate, clone state, drop lock
+        let (mut positions, service_filter, logs_dir) = {
+            let mut cursor = self
+                .cursors
+                .get_mut(cursor_id)
+                .ok_or_else(|| CursorError::CursorExpired(cursor_id.to_string()))?;
 
-        // Validate config path
-        if cursor.config_path != config_path {
-            return Err(CursorError::CursorConfigMismatch {
-                cursor_config: cursor.config_path.clone(),
-                requested_config: config_path.to_path_buf(),
-            });
-        }
+            // Validate config path
+            if cursor.config_path != config_path {
+                return Err(CursorError::CursorConfigMismatch {
+                    cursor_config: cursor.config_path.clone(),
+                    requested_config: config_path.to_path_buf(),
+                });
+            }
 
-        // Update last polled time
-        cursor.last_polled = Instant::now();
+            // Update last polled time
+            cursor.last_polled = Instant::now();
 
-        // Check for new log files
-        let reader = LogReader::new(cursor.logs_dir.clone());
-        let current_files = reader.collect_log_files(cursor.service_filter.as_deref());
+            // Clone what we need and drop the lock
+            (
+                cursor.positions.clone(),
+                cursor.service_filter.clone(),
+                cursor.logs_dir.clone(),
+            )
+        }; // RefMut dropped here
+
+        // Phase 2: File I/O without any lock
+        let reader = LogReader::new(logs_dir);
+        let current_files = reader.collect_log_files(service_filter.as_deref());
 
         // Add any new files we haven't seen before
         for (path, _service, _stream) in &current_files {
-            if !cursor.positions.contains_key(path) {
-                if let Ok(file) = File::open(path) {
+            if !positions.contains_key(path)
+                && let Ok(file) = File::open(path) {
                     // New file - start from beginning
                     if let Ok(pos) = FilePosition::at_start(&file) {
-                        cursor.positions.insert(path.clone(), pos);
+                        positions.insert(path.clone(), pos);
                     }
                 }
-            }
         }
 
         // Remove positions for files that no longer exist
         let current_paths: std::collections::HashSet<_> =
             current_files.iter().map(|(p, _, _)| p.clone()).collect();
-        cursor.positions.retain(|path, _| current_paths.contains(path));
+        positions.retain(|path, _| current_paths.contains(path));
 
         // Read entries from each file
         let mut all_entries: Vec<(LogLine, usize)> = Vec::new();
         let mut source_idx = 0;
 
         for (path, service, stream) in &current_files {
-            if let Some(position) = cursor.positions.get_mut(path) {
+            if let Some(position) = positions.get_mut(path) {
                 let file = match File::open(path) {
                     Ok(f) => f,
                     Err(_) => continue,
@@ -242,15 +250,15 @@ impl CursorManager {
 
                 // Only read if there's new content
                 if metadata.len() > position.offset {
-                    let mut reader = BufReader::new(file);
-                    if reader.seek(SeekFrom::Start(position.offset)).is_err() {
+                    let mut buf_reader = BufReader::new(file);
+                    if buf_reader.seek(SeekFrom::Start(position.offset)).is_err() {
                         continue;
                     }
 
                     let service_arc: Arc<str> = Arc::from(service.as_str());
                     let mut line_buf = String::with_capacity(256);
 
-                    while reader.read_line(&mut line_buf).unwrap_or(0) > 0 {
+                    while buf_reader.read_line(&mut line_buf).unwrap_or(0) > 0 {
                         if let Some(log_line) =
                             LogReader::parse_log_line_arc(&line_buf, &service_arc, *stream)
                         {
@@ -260,7 +268,7 @@ impl CursorManager {
                     }
 
                     // Update position
-                    if let Ok(new_pos) = reader.stream_position() {
+                    if let Ok(new_pos) = buf_reader.stream_position() {
                         position.offset = new_pos;
                     }
                     position.size = metadata.len();
@@ -279,6 +287,13 @@ impl CursorManager {
             .take(MAX_CURSOR_BATCH_SIZE)
             .map(|(entry, _)| entry)
             .collect();
+
+        // Phase 3: Lock again, write positions back
+        // If cursor was removed between phases (by cleanup_stale), silently discard
+        if let Some(mut cursor) = self.cursors.get_mut(cursor_id) {
+            cursor.positions = positions;
+            cursor.last_polled = Instant::now();
+        }
 
         Ok((entries, has_more))
     }

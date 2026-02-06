@@ -85,11 +85,10 @@ impl ConfigRegistry {
     /// Unload a config - stops the actor
     pub async fn unload(&self, config_path: &PathBuf) {
         // Canonicalize the path
-        if let Ok(canonical_path) = std::fs::canonicalize(config_path) {
-            if let Some((_, handle)) = self.actors.remove(&canonical_path) {
+        if let Ok(canonical_path) = std::fs::canonicalize(config_path)
+            && let Some((_, handle)) = self.actors.remove(&canonical_path) {
                 handle.shutdown().await;
             }
-        }
     }
 
     /// List all loaded config paths

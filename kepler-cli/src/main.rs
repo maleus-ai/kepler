@@ -308,14 +308,13 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
 fn which_daemon() -> Result<PathBuf> {
     // Try to find kepler-daemon binary
     // 1. Same directory as current executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
             let daemon_path = dir.join("kepler-daemon");
             if daemon_path.exists() {
                 return Ok(daemon_path);
             }
         }
-    }
 
     // 2. In PATH
     if let Ok(path) = which::which("kepler-daemon") {
@@ -500,11 +499,10 @@ fn print_multi_config_table(configs: &[ConfigStatus]) {
     // Abbreviate home directory with ~
     let home_dir = std::env::var("HOME").ok();
     let abbreviate_path = |path: &str| -> String {
-        if let Some(ref home) = home_dir {
-            if path.starts_with(home) {
+        if let Some(ref home) = home_dir
+            && path.starts_with(home) {
                 return format!("~{}", &path[home.len()..]);
             }
-        }
         path.to_string()
     };
 
@@ -748,11 +746,10 @@ const SERVICE_COLORS: &[Color] = &[
 
 fn get_base_service_name(service: &str) -> &str {
     // Extract base service name from hook patterns like "[backend.pre_start]"
-    if let Some(inner) = service.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-        if let Some(dot_pos) = inner.find('.') {
+    if let Some(inner) = service.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+        && let Some(dot_pos) = inner.find('.') {
             return &inner[..dot_pos];
         }
-    }
     service
 }
 

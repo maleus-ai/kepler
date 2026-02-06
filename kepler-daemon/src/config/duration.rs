@@ -44,13 +44,13 @@ pub fn format_duration(duration: &Duration) -> String {
     }
 
     // Use the largest unit that divides evenly
-    if millis % (24 * 60 * 60 * 1000) == 0 {
+    if millis.is_multiple_of(24 * 60 * 60 * 1000) {
         format!("{}d", millis / (24 * 60 * 60 * 1000))
-    } else if millis % (60 * 60 * 1000) == 0 {
+    } else if millis.is_multiple_of(60 * 60 * 1000) {
         format!("{}h", millis / (60 * 60 * 1000))
-    } else if millis % (60 * 1000) == 0 {
+    } else if millis.is_multiple_of(60 * 1000) {
         format!("{}m", millis / (60 * 1000))
-    } else if millis % 1000 == 0 {
+    } else if millis.is_multiple_of(1000) {
         format!("{}s", millis / 1000)
     } else {
         format!("{}ms", millis)

@@ -69,14 +69,13 @@ impl ServiceEventHandler {
             );
 
             // Handle restart propagation
-            if let ServiceEvent::Restart { .. } = event {
-                if let Err(e) = self.propagate_restart(service_name).await {
+            if let ServiceEvent::Restart { .. } = event
+                && let Err(e) = self.propagate_restart(service_name).await {
                     error!(
                         "Failed to propagate restart for {}: {}",
                         service_name, e
                     );
                 }
-            }
         }
 
         info!("ServiceEventHandler stopped for {:?}", self.config_path);
@@ -147,15 +146,14 @@ impl ServiceEventHandler {
                 }
 
                 // Check timeout if specified
-                if let Some(timeout) = dep_config.timeout {
-                    if start.elapsed() > timeout {
+                if let Some(timeout) = dep_config.timeout
+                    && start.elapsed() > timeout {
                         warn!(
                             "Timeout waiting for {} to satisfy condition for {} restart propagation",
                             restarted_service, service_name
                         );
                         break;
                     }
-                }
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }

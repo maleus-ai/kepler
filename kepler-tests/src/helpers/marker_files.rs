@@ -80,13 +80,11 @@ impl MarkerFileHelper {
         let start = Instant::now();
 
         while start.elapsed() < timeout {
-            if marker_path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&marker_path) {
-                    if !content.is_empty() {
+            if marker_path.exists()
+                && let Ok(content) = std::fs::read_to_string(&marker_path)
+                    && !content.is_empty() {
                         return Some(content);
                     }
-                }
-            }
             sleep(Duration::from_millis(50)).await;
         }
 

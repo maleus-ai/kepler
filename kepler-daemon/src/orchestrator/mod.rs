@@ -357,15 +357,14 @@ impl ServiceOrchestrator {
                 }
 
                 // Check timeout
-                if let Some(timeout) = dep_config.timeout {
-                    if start.elapsed() > timeout {
+                if let Some(timeout) = dep_config.timeout
+                    && start.elapsed() > timeout {
                         return Err(OrchestratorError::DependencyTimeout {
                             service: service_name.to_string(),
                             dependency: dep_name.clone(),
                             condition: dep_config.condition.clone(),
                         });
                     }
-                }
 
                 // Wait before checking again
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -425,8 +424,8 @@ impl ServiceOrchestrator {
         let global_hooks = config.global_hooks().cloned();
 
         // Run global pre_stop hook if stopping all services
-        if service_filter.is_none() {
-            if let Some(ref log_cfg) = log_config {
+        if service_filter.is_none()
+            && let Some(ref log_cfg) = log_config {
                 let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
@@ -441,7 +440,6 @@ impl ServiceOrchestrator {
                     warn!("Global pre_stop hook failed: {}", e);
                 }
             }
-        }
 
         let mut stopped = Vec::new();
 
@@ -476,21 +474,20 @@ impl ServiceOrchestrator {
                 .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
 
             // Run post_stop hook (after process stopped)
-            if let Some(ref ctx) = ctx {
-                if let Err(e) = self
+            if let Some(ref ctx) = ctx
+                && let Err(e) = self
                     .run_service_hook(ctx, service_name, ServiceHookType::PostStop)
                     .await
                 {
                     warn!("Hook post_stop failed for {}: {}", service_name, e);
                 }
-            }
 
             stopped.push(service_name.clone());
         }
 
         // Run global post_stop hook if stopping all and services were stopped
-        if service_filter.is_none() && !stopped.is_empty() {
-            if let Some(ref log_cfg) = log_config {
+        if service_filter.is_none() && !stopped.is_empty()
+            && let Some(ref log_cfg) = log_config {
                 let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
@@ -505,7 +502,6 @@ impl ServiceOrchestrator {
                     warn!("Global post_stop hook failed: {}", e);
                 }
             }
-        }
 
         // Run pre_cleanup if requested
         if service_filter.is_none() && clean {
@@ -698,8 +694,8 @@ impl ServiceOrchestrator {
         };
 
         // Run global pre_restart hook for full restart
-        if is_full_restart {
-            if let Some(ref log_cfg) = log_config {
+        if is_full_restart
+            && let Some(ref log_cfg) = log_config {
                 let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
@@ -714,7 +710,6 @@ impl ServiceOrchestrator {
                     warn!("Global pre_restart hook failed: {}", e);
                 }
             }
-        }
 
         // Phase 1: Run pre_restart hooks and stop (reverse dependency order)
         for service_name in &stop_order {
@@ -818,8 +813,8 @@ impl ServiceOrchestrator {
         }
 
         // Run global post_restart hook for full restart
-        if is_full_restart {
-            if let Some(ref log_cfg) = log_config {
+        if is_full_restart
+            && let Some(ref log_cfg) = log_config {
                 let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
@@ -834,7 +829,6 @@ impl ServiceOrchestrator {
                     warn!("Global post_restart hook failed: {}", e);
                 }
             }
-        }
 
         if restarted.is_empty() {
             Ok("No services were restarted".to_string())
@@ -868,11 +862,10 @@ impl ServiceOrchestrator {
         }
 
         // Clear snapshot to force re-expansion with new env
-        if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
-            if let Err(e) = handle.clear_snapshot().await {
+        if let Some(handle) = self.registry.get(&config_path.to_path_buf())
+            && let Err(e) = handle.clear_snapshot().await {
                 warn!("Failed to clear snapshot: {}", e);
             }
-        }
 
         // Unload the config actor completely
         self.registry.unload(&config_path.to_path_buf()).await;
@@ -1399,11 +1392,10 @@ impl ServiceOrchestrator {
 
             // Unload from registry BEFORE deleting state directory
             // Use the ORIGINAL source path which matches the registry key
-            if !is_orphaned {
-                if let Ok(canonical) = PathBuf::from(&original_path).canonicalize() {
+            if !is_orphaned
+                && let Ok(canonical) = PathBuf::from(&original_path).canonicalize() {
                     self.registry.unload(&canonical).await;
                 }
-            }
 
             // Delete entire state directory
             if let Err(e) = std::fs::remove_dir_all(&state_dir) {

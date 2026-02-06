@@ -314,11 +314,10 @@ impl KeplerConfig {
         }
 
         // Process global hooks in kepler namespace (no env_file, just sys_env)
-        if let Some(ref mut kepler) = self.kepler {
-            if let Some(ref mut hooks) = kepler.hooks {
+        if let Some(ref mut kepler) = self.kepler
+            && let Some(ref mut hooks) = kepler.hooks {
                 expand::expand_global_hooks(hooks, &HashMap::new(), sys_env);
             }
-        }
     }
 
     /// Validate the configuration
