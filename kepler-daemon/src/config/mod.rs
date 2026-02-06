@@ -1,8 +1,30 @@
-use serde::{Deserialize, Deserializer, Serializer};
+//! Configuration module for Kepler daemon
+//!
+//! This module provides:
+//! - `KeplerConfig` - Root configuration structure
+//! - `ServiceConfig` - Per-service configuration
+//! - Various helper types for dependencies, hooks, logs, etc.
+
+mod deps;
+mod duration;
+mod health;
+mod hooks;
+mod logs;
+mod resources;
+mod restart;
+
+pub use deps::{DependencyCondition, DependencyConfig, DependencyEntry, DependsOn, DependsOnFormat};
+pub use duration::{format_duration, parse_duration};
+pub use health::HealthCheck;
+pub use hooks::{GlobalHooks, HookCommand, ServiceHooks};
+pub use logs::{LogConfig, LogRetention, LogRetentionConfig, LogStoreConfig};
+pub use resources::{parse_memory_limit, ResourceLimits, SysEnvPolicy};
+pub use restart::{RestartConfig, RestartPolicy};
+
+use serde::Deserialize;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use crate::errors::{DaemonError, Result};
 use crate::lua_eval::{EvalContext, LuaEvaluator};
@@ -33,636 +55,29 @@ fn expand_with_context(s: &str, context: &HashMap<String, String>, sys_env: &Has
     .unwrap_or_else(|_| s.to_string())
 }
 
-/// Global Kepler configuration (under the `kepler` namespace)
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
-pub struct KeplerGlobalConfig {
-    /// Global system environment inheritance policy
-    /// Applied to all services unless overridden at the service level
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sys_env: Option<SysEnvPolicy>,
-
-    /// Global log configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub logs: Option<LogConfig>,
-
-    /// Global hooks that run at daemon lifecycle events
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hooks: Option<GlobalHooks>,
-}
-
-/// Root configuration structure
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-pub struct KeplerConfig {
-    /// Inline Lua code that runs in global scope to define functions
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lua: Option<String>,
-
-    /// Global Kepler configuration (sys_env, logs, hooks)
-    #[serde(default)]
-    pub kepler: Option<KeplerGlobalConfig>,
-
-    #[serde(default)]
-    pub services: HashMap<String, ServiceConfig>,
-}
-
-/// Global hooks that run at daemon lifecycle events
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
-pub struct GlobalHooks {
-    pub on_init: Option<HookCommand>,
-    pub pre_start: Option<HookCommand>,
-    pub post_start: Option<HookCommand>,
-    pub pre_stop: Option<HookCommand>,
-    pub post_stop: Option<HookCommand>,
-    pub pre_restart: Option<HookCommand>,
-    pub post_restart: Option<HookCommand>,
-    pub pre_cleanup: Option<HookCommand>,
-}
-
-/// Hook command - either a script or a command array
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-#[serde(untagged)]
-pub enum HookCommand {
-    Script {
-        run: String,
-        #[serde(default)]
-        user: Option<String>,
-        #[serde(default)]
-        group: Option<String>,
-        #[serde(default)]
-        working_dir: Option<PathBuf>,
-        #[serde(default)]
-        environment: Vec<String>,
-        #[serde(default)]
-        env_file: Option<PathBuf>,
-    },
-    Command {
-        command: Vec<String>,
-        #[serde(default)]
-        user: Option<String>,
-        #[serde(default)]
-        group: Option<String>,
-        #[serde(default)]
-        working_dir: Option<PathBuf>,
-        #[serde(default)]
-        environment: Vec<String>,
-        #[serde(default)]
-        env_file: Option<PathBuf>,
-    },
-}
-
-impl HookCommand {
-    pub fn user(&self) -> Option<&str> {
-        match self {
-            HookCommand::Script { user, .. } => user.as_deref(),
-            HookCommand::Command { user, .. } => user.as_deref(),
-        }
-    }
-
-    pub fn group(&self) -> Option<&str> {
-        match self {
-            HookCommand::Script { group, .. } => group.as_deref(),
-            HookCommand::Command { group, .. } => group.as_deref(),
-        }
-    }
-
-    pub fn working_dir(&self) -> Option<&Path> {
-        match self {
-            HookCommand::Script { working_dir, .. } => working_dir.as_deref(),
-            HookCommand::Command { working_dir, .. } => working_dir.as_deref(),
-        }
-    }
-
-    pub fn environment(&self) -> &[String] {
-        match self {
-            HookCommand::Script { environment, .. } => environment,
-            HookCommand::Command { environment, .. } => environment,
-        }
-    }
-
-    pub fn env_file(&self) -> Option<&Path> {
-        match self {
-            HookCommand::Script { env_file, .. } => env_file.as_deref(),
-            HookCommand::Command { env_file, .. } => env_file.as_deref(),
-        }
-    }
-}
-
-/// Resource limits for a service process
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
-pub struct ResourceLimits {
-    /// Memory limit (e.g., "512M", "1G", "2048K")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory: Option<String>,
-    /// CPU time limit in seconds
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_time: Option<u64>,
-    /// Maximum number of open file descriptors
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_fds: Option<u64>,
-}
-
-/// Parse memory limit string (e.g., "512M", "1G") to bytes
-pub fn parse_memory_limit(s: &str) -> std::result::Result<u64, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("Empty memory limit string".to_string());
-    }
-
-    let (num_str, unit) = s
-        .find(|c: char| !c.is_ascii_digit())
-        .map(|i| s.split_at(i))
-        .unwrap_or((s, "B"));
-
-    if num_str.is_empty() {
-        return Err(format!("Invalid number in memory limit: {}", s));
-    }
-
-    let num: u64 = num_str
-        .parse()
-        .map_err(|_| format!("Invalid number in memory limit: {}", num_str))?;
-
-    let multiplier = match unit.to_uppercase().as_str() {
-        "B" | "" => 1,
-        "K" | "KB" => 1024,
-        "M" | "MB" => 1024 * 1024,
-        "G" | "GB" => 1024 * 1024 * 1024,
-        _ => return Err(format!("Unknown memory unit: {}", unit)),
-    };
-
-    Ok(num * multiplier)
-}
-
-/// System environment inheritance policy
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum SysEnvPolicy {
-    /// Clear system environment, only pass explicit environment vars (secure default)
-    #[default]
-    Clear,
-    /// Inherit all system environment variables from the daemon process
-    Inherit,
-}
-
-/// Service configuration
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-pub struct ServiceConfig {
-    pub command: Vec<String>,
-    #[serde(default)]
-    pub working_dir: Option<PathBuf>,
-    #[serde(default)]
-    pub environment: Vec<String>,
-    #[serde(default)]
-    pub env_file: Option<PathBuf>,
-    /// System environment inheritance policy
-    /// - `clear` (default): Start with empty environment, only explicit vars are passed
-    /// - `inherit`: Inherit all system environment variables from the daemon
-    #[serde(default)]
-    pub sys_env: SysEnvPolicy,
-    #[serde(default)]
-    pub restart: RestartConfig,
-    /// Dependencies with optional conditions and timeouts
-    /// Simple form: `depends_on: [service-a, service-b]`
-    /// Extended form: `depends_on: [service-a, { service-b: { condition: service_healthy, timeout: 5m } }]`
-    #[serde(default)]
-    pub depends_on: DependsOn,
-    #[serde(default)]
-    pub healthcheck: Option<HealthCheck>,
-    #[serde(default)]
-    pub hooks: Option<ServiceHooks>,
-    #[serde(default)]
-    pub logs: Option<LogConfig>,
-    #[serde(default)]
-    pub user: Option<String>,
-    #[serde(default)]
-    pub group: Option<String>,
-    /// Resource limits for the process
-    #[serde(default)]
-    pub limits: Option<ResourceLimits>,
-}
-
-/// Restart policy for services
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum RestartPolicy {
-    #[default]
-    No,
-    Always,
-    OnFailure,
-}
-
-/// Restart configuration - supports both simple and extended forms
+/// Validate service name format
 ///
-/// Simple form: `restart: always`
-/// Extended form: `restart: { policy: always, watch: ["*.ts"] }`
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-#[serde(untagged)]
-pub enum RestartConfig {
-    /// Simple form: just the policy
-    /// e.g., restart: always
-    Simple(RestartPolicy),
-
-    /// Extended form: policy + optional watch patterns
-    /// e.g., restart: { policy: always, watch: ["*.ts"] }
-    Extended {
-        #[serde(default)]
-        policy: RestartPolicy,
-        #[serde(default)]
-        watch: Vec<String>,
-    },
-}
-
-impl Default for RestartConfig {
-    fn default() -> Self {
-        RestartConfig::Simple(RestartPolicy::No)
+/// Service names must contain only:
+/// - lowercase letters (a-z)
+/// - digits (0-9)
+/// - underscores (_)
+/// - hyphens (-)
+fn validate_service_name(name: &str) -> std::result::Result<(), String> {
+    if name.is_empty() {
+        return Err("Service name cannot be empty".to_string());
     }
-}
-
-impl RestartConfig {
-    /// Get the restart policy
-    pub fn policy(&self) -> &RestartPolicy {
-        match self {
-            RestartConfig::Simple(p) => p,
-            RestartConfig::Extended { policy, .. } => policy,
-        }
+    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+        return Err(format!(
+            "Service name '{}' contains invalid characters. Only lowercase letters (a-z), digits (0-9), underscores (_), and hyphens (-) are allowed.",
+            name
+        ));
     }
-
-    /// Get the watch patterns (empty for simple form)
-    pub fn watch_patterns(&self) -> &[String] {
-        match self {
-            RestartConfig::Simple(_) => &[],
-            RestartConfig::Extended { watch, .. } => watch,
-        }
-    }
-
-    /// Determine if the service should restart based on exit code
-    pub fn should_restart_on_exit(&self, exit_code: Option<i32>) -> bool {
-        match self.policy() {
-            RestartPolicy::No => false,
-            RestartPolicy::Always => true,
-            RestartPolicy::OnFailure => exit_code != Some(0),
-        }
-    }
-
-    /// Check if file watching is configured
-    pub fn should_restart_on_file_change(&self) -> bool {
-        !self.watch_patterns().is_empty()
-    }
-
-    /// Validate the restart configuration
-    pub fn validate(&self) -> std::result::Result<(), String> {
-        // watch requires policy to be always or on-failure
-        if !self.watch_patterns().is_empty() && self.policy() == &RestartPolicy::No {
-            return Err(
-                "watch patterns require restart to be enabled \
-                 (policy: always or on-failure)"
-                    .to_string(),
-            );
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
-/// Condition that must be satisfied before a dependent service can start
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DependencyCondition {
-    /// Service has started (status = Running, Healthy, or Unhealthy)
-    #[default]
-    ServiceStarted,
-    /// Service is healthy (status = Healthy, requires healthcheck)
-    ServiceHealthy,
-    /// Service completed successfully (exited with code 0)
-    ServiceCompletedSuccessfully,
-}
-
-/// Configuration for a single dependency (Docker Compose compatible)
-///
-/// Example:
-/// ```yaml
-/// depends_on:
-///   db:
-///     condition: service_healthy
-///     restart: true
-///   redis:
-///     condition: service_started
-/// ```
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
-pub struct DependencyConfig {
-    /// Condition that must be met before dependent can start
-    #[serde(default)]
-    pub condition: DependencyCondition,
-    /// Optional timeout for waiting on the condition
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_duration",
-        serialize_with = "serialize_optional_duration"
-    )]
-    pub timeout: Option<Duration>,
-    /// Whether to restart this service when the dependency restarts
-    /// When true, if the dependency is restarted, this service will also be restarted
-    #[serde(default)]
-    pub restart: bool,
-}
-
-fn deserialize_optional_duration<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<Duration>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let opt: Option<String> = Option::deserialize(deserializer)?;
-    match opt {
-        Some(s) => parse_duration(&s)
-            .map(Some)
-            .map_err(serde::de::Error::custom),
-        None => Ok(None),
-    }
-}
-
-fn serialize_optional_duration<S>(
-    duration: &Option<Duration>,
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    match duration {
-        Some(d) => serializer.serialize_str(&format_duration(d)),
-        None => serializer.serialize_none(),
-    }
-}
-
-/// A dependency entry - either simple (just a name) or extended (with config)
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-#[serde(untagged)]
-pub enum DependencyEntry {
-    /// Simple form: just the service name
-    Simple(String),
-    /// Extended form: service name with configuration (in list form)
-    Extended(HashMap<String, DependencyConfig>),
-}
-
-/// Raw depends_on format - either a list or a map (Docker Compose compatible)
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-#[serde(untagged)]
-pub enum DependsOnFormat {
-    /// List format: depends_on: [service-a, { service-b: { condition: ... } }]
-    List(Vec<DependencyEntry>),
-    /// Map format (Docker Compose style): depends_on: { db: { condition: ..., restart: true } }
-    Map(HashMap<String, DependencyConfig>),
-}
-
-/// Collection of dependencies with both simple and extended forms
-/// Supports both list format and Docker Compose map format
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct DependsOn(pub Vec<DependencyEntry>);
-
-impl<'de> Deserialize<'de> for DependsOn {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let format = DependsOnFormat::deserialize(deserializer)?;
-        Ok(match format {
-            DependsOnFormat::List(entries) => DependsOn(entries),
-            DependsOnFormat::Map(map) => {
-                // Convert map to list of extended entries
-                DependsOn(vec![DependencyEntry::Extended(map)])
-            }
-        })
-    }
-}
-
-impl DependsOn {
-    /// Get all dependency names (for backward compatibility)
-    pub fn names(&self) -> Vec<String> {
-        self.0
-            .iter()
-            .flat_map(|entry| match entry {
-                DependencyEntry::Simple(name) => vec![name.clone()],
-                DependencyEntry::Extended(map) => map.keys().cloned().collect(),
-            })
-            .collect()
-    }
-
-    /// Get configuration for a specific dependency
-    pub fn get(&self, name: &str) -> Option<DependencyConfig> {
-        for entry in &self.0 {
-            match entry {
-                DependencyEntry::Simple(n) if n == name => {
-                    return Some(DependencyConfig::default())
-                }
-                DependencyEntry::Extended(map) => {
-                    if let Some(config) = map.get(name) {
-                        return Some(config.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    /// Check if the collection is empty
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Iterate over (name, config) pairs
-    pub fn iter(&self) -> impl Iterator<Item = (String, DependencyConfig)> + '_ {
-        self.0.iter().flat_map(|entry| match entry {
-            DependencyEntry::Simple(name) => {
-                vec![(name.clone(), DependencyConfig::default())].into_iter()
-            }
-            DependencyEntry::Extended(map) => map
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<Vec<_>>()
-                .into_iter(),
-        })
-    }
-
-    /// Check if this service should restart when a specific dependency restarts
-    /// This is determined by the `restart: true` setting in the dependency config
-    pub fn should_restart_on_dependency(&self, dependency_name: &str) -> bool {
-        self.get(dependency_name)
-            .map(|config| config.restart)
-            .unwrap_or(false)
-    }
-
-    /// Get all dependencies that have restart enabled
-    pub fn dependencies_with_restart(&self) -> Vec<String> {
-        self.iter()
-            .filter(|(_, config)| config.restart)
-            .map(|(name, _)| name)
-            .collect()
-    }
-}
-
-impl From<Vec<String>> for DependsOn {
-    fn from(names: Vec<String>) -> Self {
-        DependsOn(names.into_iter().map(DependencyEntry::Simple).collect())
-    }
-}
-
-/// Health check configuration
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-pub struct HealthCheck {
-    pub test: Vec<String>,
-    #[serde(default = "default_interval", deserialize_with = "deserialize_duration", serialize_with = "serialize_duration")]
-    pub interval: Duration,
-    #[serde(default = "default_timeout", deserialize_with = "deserialize_duration", serialize_with = "serialize_duration")]
-    pub timeout: Duration,
-    #[serde(default = "default_retries")]
-    pub retries: u32,
-    #[serde(default = "default_start_period", deserialize_with = "deserialize_duration", serialize_with = "serialize_duration")]
-    pub start_period: Duration,
-}
-
-fn default_interval() -> Duration {
-    Duration::from_secs(30)
-}
-
-fn default_timeout() -> Duration {
-    Duration::from_secs(30)
-}
-
-fn default_retries() -> u32 {
-    3
-}
-
-fn default_start_period() -> Duration {
-    Duration::from_secs(0)
-}
-
-/// Service-specific hooks
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
-pub struct ServiceHooks {
-    pub on_init: Option<HookCommand>,
-    pub pre_start: Option<HookCommand>,
-    pub post_start: Option<HookCommand>,
-    pub pre_stop: Option<HookCommand>,
-    pub post_stop: Option<HookCommand>,
-    pub pre_restart: Option<HookCommand>,
-    pub post_restart: Option<HookCommand>,
-    pub post_exit: Option<HookCommand>,
-    pub post_healthcheck_success: Option<HookCommand>,
-    pub post_healthcheck_fail: Option<HookCommand>,
-}
-
-/// Log retention policy on service stop
-#[derive(Debug, Clone, Copy, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LogRetention {
-    #[default]
-    Clear,  // Default: clear logs on stop
-    Retain, // Keep logs after stop
-}
-
-/// Log storage configuration - supports simple bool or per-stream control
-#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum LogStoreConfig {
-    /// Simple form: store: true/false
-    Simple(bool),
-    /// Extended form: store: { stdout: true, stderr: false }
-    Extended {
-        #[serde(default = "default_true")]
-        stdout: bool,
-        #[serde(default = "default_true")]
-        stderr: bool,
-    },
-}
-
-fn default_true() -> bool {
-    true
-}
-
-impl Default for LogStoreConfig {
-    fn default() -> Self {
-        LogStoreConfig::Simple(true)
-    }
-}
-
-impl LogStoreConfig {
-    pub fn store_stdout(&self) -> bool {
-        match self {
-            LogStoreConfig::Simple(v) => *v,
-            LogStoreConfig::Extended { stdout, .. } => *stdout,
-        }
-    }
-
-    pub fn store_stderr(&self) -> bool {
-        match self {
-            LogStoreConfig::Simple(v) => *v,
-            LogStoreConfig::Extended { stderr, .. } => *stderr,
-        }
-    }
-}
-
-/// Log retention settings for different lifecycle events
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
-pub struct LogRetentionConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_stop: Option<LogRetention>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_start: Option<LogRetention>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_restart: Option<LogRetention>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_exit: Option<LogRetention>,
-}
-
-
-/// Log configuration
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
-pub struct LogConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<bool>,
-    /// Whether to store logs (default: true for both streams)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub store: Option<LogStoreConfig>,
-    /// Nested log retention settings
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retention: Option<LogRetentionConfig>,
-    /// Maximum size of a single log file before truncation (e.g., "10M", "100K")
-    /// If not specified, logs are unbounded (no truncation).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_size: Option<String>,
-    /// Buffer size in bytes before flushing to disk.
-    /// Default: 8KB (8192 bytes) for better performance.
-    /// 0 = write directly to disk (synchronous writes, safest for crash recovery).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub buffer_size: Option<usize>,
-}
-
-impl LogConfig {
-    /// Get on_stop retention from nested retention config
-    pub fn get_on_stop(&self) -> Option<LogRetention> {
-        self.retention.as_ref().and_then(|r| r.on_stop)
-    }
-
-    /// Get on_start retention from nested retention config
-    pub fn get_on_start(&self) -> Option<LogRetention> {
-        self.retention.as_ref().and_then(|r| r.on_start)
-    }
-
-    /// Get on_restart retention from nested retention config
-    pub fn get_on_restart(&self) -> Option<LogRetention> {
-        self.retention.as_ref().and_then(|r| r.on_restart)
-    }
-
-    /// Get on_exit retention from nested retention config
-    pub fn get_on_exit(&self) -> Option<LogRetention> {
-        self.retention.as_ref().and_then(|r| r.on_exit)
-    }
-
-    /// Parse max_size into bytes. Returns None if max_size is not specified (unbounded).
-    pub fn max_size_bytes(&self) -> Option<u64> {
-        self.max_size.as_ref().and_then(|s| parse_memory_limit(s).ok())
-    }
-}
+// ============================================================================
+// Resolve functions
+// ============================================================================
 
 /// Resolve sys_env policy for a service.
 /// Priority: service explicit setting > global setting > default (Clear)
@@ -740,92 +155,77 @@ pub fn resolve_log_buffer_size(
         .unwrap_or(default_buffer_size)
 }
 
-/// Deserialize duration from string like "10s", "5m", "1h"
-fn deserialize_duration<'de, D>(deserializer: D) -> std::result::Result<Duration, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    parse_duration(&s).map_err(serde::de::Error::custom)
+// ============================================================================
+// Main configuration types
+// ============================================================================
+
+/// Global Kepler configuration (under the `kepler` namespace)
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+pub struct KeplerGlobalConfig {
+    /// Global system environment inheritance policy
+    /// Applied to all services unless overridden at the service level
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sys_env: Option<SysEnvPolicy>,
+
+    /// Global log configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<LogConfig>,
+
+    /// Global hooks that run at daemon lifecycle events
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<GlobalHooks>,
 }
 
-/// Serialize duration to string like "10s", "5m", "1h", "100ms"
-fn serialize_duration<S>(duration: &Duration, serializer: S) -> std::result::Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.serialize_str(&format_duration(duration))
+/// Root configuration structure
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct KeplerConfig {
+    /// Inline Lua code that runs in global scope to define functions
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lua: Option<String>,
+
+    /// Global Kepler configuration (sys_env, logs, hooks)
+    #[serde(default)]
+    pub kepler: Option<KeplerGlobalConfig>,
+
+    #[serde(default)]
+    pub services: HashMap<String, ServiceConfig>,
 }
 
-/// Format duration as string (e.g., "10s", "5m", "1h", "100ms")
-pub fn format_duration(duration: &Duration) -> String {
-    let millis = duration.as_millis() as u64;
-
-    if millis == 0 {
-        return "0s".to_string();
-    }
-
-    // Use the largest unit that divides evenly
-    if millis % (24 * 60 * 60 * 1000) == 0 {
-        format!("{}d", millis / (24 * 60 * 60 * 1000))
-    } else if millis % (60 * 60 * 1000) == 0 {
-        format!("{}h", millis / (60 * 60 * 1000))
-    } else if millis % (60 * 1000) == 0 {
-        format!("{}m", millis / (60 * 1000))
-    } else if millis % 1000 == 0 {
-        format!("{}s", millis / 1000)
-    } else {
-        format!("{}ms", millis)
-    }
-}
-
-/// Parse duration string (e.g., "10s", "5m", "1h", "100ms")
-pub fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("Empty duration string".to_string());
-    }
-
-    // Find where the number ends and the unit begins
-    let (num_str, unit) = s
-        .find(|c: char| !c.is_ascii_digit())
-        .map(|i| s.split_at(i))
-        .unwrap_or((s, "s")); // Default to seconds if no unit
-
-    let num: u64 = num_str
-        .parse()
-        .map_err(|_| format!("Invalid number in duration: {}", num_str))?;
-
-    let multiplier = match unit.to_lowercase().as_str() {
-        "ms" => 1,
-        "s" | "" => 1000,
-        "m" => 60 * 1000,
-        "h" => 60 * 60 * 1000,
-        "d" => 24 * 60 * 60 * 1000,
-        _ => return Err(format!("Unknown duration unit: {}", unit)),
-    };
-
-    Ok(Duration::from_millis(num * multiplier))
-}
-
-/// Validate service name format
-///
-/// Service names must contain only:
-/// - lowercase letters (a-z)
-/// - digits (0-9)
-/// - underscores (_)
-/// - hyphens (-)
-fn validate_service_name(name: &str) -> std::result::Result<(), String> {
-    if name.is_empty() {
-        return Err("Service name cannot be empty".to_string());
-    }
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
-        return Err(format!(
-            "Service name '{}' contains invalid characters. Only lowercase letters (a-z), digits (0-9), underscores (_), and hyphens (-) are allowed.",
-            name
-        ));
-    }
-    Ok(())
+/// Service configuration
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct ServiceConfig {
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub working_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub environment: Vec<String>,
+    #[serde(default)]
+    pub env_file: Option<PathBuf>,
+    /// System environment inheritance policy
+    /// - `clear` (default): Start with empty environment, only explicit vars are passed
+    /// - `inherit`: Inherit all system environment variables from the daemon
+    #[serde(default)]
+    pub sys_env: SysEnvPolicy,
+    #[serde(default)]
+    pub restart: RestartConfig,
+    /// Dependencies with optional conditions and timeouts
+    /// Simple form: `depends_on: [service-a, service-b]`
+    /// Extended form: `depends_on: [service-a, { service-b: { condition: service_healthy, timeout: 5m } }]`
+    #[serde(default)]
+    pub depends_on: DependsOn,
+    #[serde(default)]
+    pub healthcheck: Option<HealthCheck>,
+    #[serde(default)]
+    pub hooks: Option<ServiceHooks>,
+    #[serde(default)]
+    pub logs: Option<LogConfig>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Resource limits for the process
+    #[serde(default)]
+    pub limits: Option<ResourceLimits>,
 }
 
 impl KeplerConfig {
@@ -1760,6 +1160,7 @@ impl KeplerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_parse_duration() {
