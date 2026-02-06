@@ -52,6 +52,8 @@ pub struct ConfigActor {
     restored_from_snapshot: bool,
     /// Whether an event handler has been spawned for this config
     event_handler_spawned: bool,
+    /// System environment variables captured from the CLI
+    sys_env: HashMap<String, String>,
 
     rx: mpsc::Receiver<ConfigCommand>,
 }
@@ -64,13 +66,11 @@ impl ConfigActor {
     /// - If no snapshot exists, parse fresh from source (snapshot taken on first start)
     ///
     /// The `sys_env` parameter provides system environment variables captured from the CLI.
-    /// If None, the daemon's current environment is used.
+    /// If None and no snapshot exists, defaults to an empty env with a warning.
     pub fn create(
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
     ) -> Result<(ConfigActorHandle, Self)> {
-        // Use provided sys_env or fall back to current daemon environment
-        let sys_env = sys_env.unwrap_or_else(|| std::env::vars().collect());
         // Canonicalize path first
         let canonical_path = std::fs::canonicalize(&config_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -109,7 +109,7 @@ impl ConfigActor {
         let _ = persistence.save_source_path(&canonical_path);
 
         // Check if we have an existing expanded config snapshot
-        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot) =
+        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_sys_env) =
             if let Ok(Some(snapshot)) = persistence.load_expanded_config() {
                 info!(
                     "Restoring config from snapshot (taken at {})",
@@ -161,6 +161,8 @@ impl ConfigActor {
                     .map(|ps| ps.config_initialized)
                     .unwrap_or(false);
 
+                let restored_sys_env = snapshot.sys_env;
+
                 (
                     snapshot.config,
                     snapshot.config_dir,
@@ -168,10 +170,19 @@ impl ConfigActor {
                     initialized,
                     true,  // snapshot was already taken
                     true,  // restored from snapshot
+                    restored_sys_env,
                 )
             } else {
                 // No snapshot - parse fresh from source
                 info!("Loading config fresh from source (no snapshot)");
+
+                let resolved_sys_env = match sys_env {
+                    Some(env) => env,
+                    None => {
+                        warn!("No sys_env provided and no snapshot exists; using empty environment");
+                        HashMap::new()
+                    }
+                };
 
                 // Read original file contents
                 let contents = std::fs::read(&canonical_path).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", canonical_path.display(), e)))?;
@@ -198,7 +209,7 @@ impl ConfigActor {
                 }
 
                 // Parse config from the secure copy (baking with sys_env)
-                let config = KeplerConfig::load(&copied_config_path, &sys_env)?;
+                let config = KeplerConfig::load(&copied_config_path, &resolved_sys_env)?;
 
                 // Get config directory
                 let config_dir = canonical_path
@@ -240,6 +251,7 @@ impl ConfigActor {
                     false, // not initialized
                     false, // snapshot not yet taken
                     false, // not restored from snapshot
+                    resolved_sys_env,
                 )
             };
 
@@ -269,6 +281,7 @@ impl ConfigActor {
             snapshot_taken,
             restored_from_snapshot,
             event_handler_spawned: false,
+            sys_env: resolved_sys_env,
             rx,
         };
 
@@ -377,6 +390,9 @@ impl ConfigActor {
             }
             ConfigCommand::GetGlobalSysEnv { reply } => {
                 let _ = reply.send(self.config.global_sys_env().cloned());
+            }
+            ConfigCommand::GetSysEnv { reply } => {
+                let _ = reply.send(self.sys_env.clone());
             }
             ConfigCommand::IsServiceRunning {
                 service_name,
@@ -659,6 +675,7 @@ impl ConfigActor {
             service_working_dirs,
             config_dir: self.config_dir.clone(),
             snapshot_time: chrono::Utc::now().timestamp(),
+            sys_env: self.sys_env.clone(),
         };
 
         // Save the snapshot

@@ -28,6 +28,21 @@ fn create_actor_with_state_dir(
     ),
     Box<dyn std::error::Error>,
 > {
+    create_actor_with_state_dir_and_env(config_path, state_dir, std::env::vars().collect())
+}
+
+/// Helper to create a config actor with isolated state directory and explicit sys_env.
+fn create_actor_with_state_dir_and_env(
+    config_path: PathBuf,
+    state_dir: PathBuf,
+    sys_env: HashMap<String, String>,
+) -> Result<
+    (
+        kepler_daemon::config_actor::ConfigActorHandle,
+        tokio::task::JoinHandle<()>,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let _guard = ENV_LOCK.lock().unwrap();
 
     // Set KEPLER_DAEMON_PATH to isolate state
@@ -35,7 +50,7 @@ fn create_actor_with_state_dir(
         std::env::set_var("KEPLER_DAEMON_PATH", &state_dir);
     }
 
-    let (handle, actor) = ConfigActor::create(config_path, None)?;
+    let (handle, actor) = ConfigActor::create(config_path, Some(sys_env))?;
     let task = tokio::spawn(actor.run());
     Ok((handle, task))
 }
@@ -422,6 +437,7 @@ services:
         service_working_dirs: service_working_dirs.clone(),
         config_dir: PathBuf::from("/home/user/project"),
         snapshot_time: 1234567890,
+        sys_env: HashMap::new(),
     };
 
     // Save and load
@@ -437,4 +453,154 @@ services:
     // Clear and verify
     persistence.clear_snapshot().unwrap();
     assert!(!persistence.has_expanded_config());
+}
+
+#[tokio::test]
+async fn test_sys_env_only_uses_cli_env_not_daemon_env() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().to_path_buf();
+    let state_dir = config_dir.join(".kepler");
+
+    // Set a daemon process env var that should NOT leak into the config
+    unsafe {
+        std::env::set_var("KEPLER_DAEMON_ONLY_VAR", "daemon_value");
+    }
+
+    // Create a config that references that var via ${} expansion
+    let config_content = r#"
+services:
+  test:
+    command: ["sleep", "infinity"]
+    environment:
+      - LEAKED=${KEPLER_DAEMON_ONLY_VAR}
+"#;
+    let config_path = config_dir.join("kepler.yaml");
+    std::fs::write(&config_path, config_content).unwrap();
+
+    // Create an actor with a controlled sys_env that does NOT contain KEPLER_DAEMON_ONLY_VAR
+    let mut cli_env = HashMap::new();
+    cli_env.insert("HOME".to_string(), "/home/test".to_string());
+    // Intentionally NOT including KEPLER_DAEMON_ONLY_VAR
+
+    let (handle, actor_task) =
+        create_actor_with_state_dir_and_env(config_path.clone(), state_dir.clone(), cli_env)
+            .unwrap();
+
+    let ctx = handle.get_service_context("test").await.unwrap();
+
+    // The var should NOT have been expanded from the daemon's process env.
+    // With sys_env: inherit, the config baking merges cli sys_env into the environment array.
+    // Since KEPLER_DAEMON_ONLY_VAR is not in our cli_env, the ${} should resolve to ""
+    // (the default sys_env policy is "inherit", so sys_env vars get baked into the env array)
+    let leaked_value = ctx.env.get("LEAKED").cloned().unwrap_or_default();
+    assert_ne!(
+        leaked_value, "daemon_value",
+        "Daemon process env must NOT leak into service environment"
+    );
+
+    handle.shutdown().await;
+    let _ = actor_task.await;
+
+    unsafe {
+        std::env::remove_var("KEPLER_DAEMON_ONLY_VAR");
+    }
+}
+
+#[tokio::test]
+async fn test_sys_env_persisted_in_snapshot() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().to_path_buf();
+    let state_dir = config_dir.join(".kepler");
+
+    let config_content = r#"
+services:
+  test:
+    command: ["sleep", "infinity"]
+"#;
+    let config_path = config_dir.join("kepler.yaml");
+    std::fs::write(&config_path, config_content).unwrap();
+
+    // Create actor with a known sys_env
+    let mut cli_env = HashMap::new();
+    cli_env.insert("CLI_VAR".to_string(), "from_cli".to_string());
+    cli_env.insert("ANOTHER".to_string(), "value".to_string());
+
+    let (handle, actor_task) =
+        create_actor_with_state_dir_and_env(config_path.clone(), state_dir.clone(), cli_env.clone())
+            .unwrap();
+
+    // Verify get_sys_env returns what we passed
+    let stored = handle.get_sys_env().await;
+    assert_eq!(stored.get("CLI_VAR"), Some(&"from_cli".to_string()));
+    assert_eq!(stored.get("ANOTHER"), Some(&"value".to_string()));
+
+    // Take snapshot and verify sys_env is persisted
+    handle.take_snapshot_if_needed().await.unwrap();
+
+    let config_hash = handle.config_hash().to_string();
+    let persistence = ConfigPersistence::new(state_dir.join("configs").join(&config_hash));
+    let snapshot = persistence.load_expanded_config().unwrap().unwrap();
+
+    assert_eq!(snapshot.sys_env.get("CLI_VAR"), Some(&"from_cli".to_string()));
+    assert_eq!(snapshot.sys_env.get("ANOTHER"), Some(&"value".to_string()));
+
+    handle.shutdown().await;
+    let _ = actor_task.await;
+}
+
+#[tokio::test]
+async fn test_sys_env_restored_from_snapshot_not_daemon() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().to_path_buf();
+    let state_dir = config_dir.join(".kepler");
+
+    let config_content = r#"
+services:
+  test:
+    command: ["sleep", "infinity"]
+"#;
+    let config_path = config_dir.join("kepler.yaml");
+    std::fs::write(&config_path, config_content).unwrap();
+
+    // First actor: create with CLI env containing CLI_ORIGINAL
+    let mut cli_env = HashMap::new();
+    cli_env.insert("CLI_ORIGINAL".to_string(), "original_value".to_string());
+
+    let (handle1, actor_task1) =
+        create_actor_with_state_dir_and_env(config_path.clone(), state_dir.clone(), cli_env)
+            .unwrap();
+
+    handle1.take_snapshot_if_needed().await.unwrap();
+    handle1.shutdown().await;
+    let _ = actor_task1.await;
+
+    // Second actor: restore from snapshot.
+    // Pass a DIFFERENT sys_env — it should be ignored because the snapshot exists.
+    let mut different_env = HashMap::new();
+    different_env.insert("CLI_ORIGINAL".to_string(), "changed_value".to_string());
+    different_env.insert("NEW_VAR".to_string(), "should_not_appear".to_string());
+
+    let (handle2, actor_task2) =
+        create_actor_with_state_dir_and_env(config_path.clone(), state_dir.clone(), different_env)
+            .unwrap();
+
+    assert!(
+        handle2.is_restored_from_snapshot().await,
+        "Should be restored from snapshot"
+    );
+
+    // The sys_env should be from the SNAPSHOT, not the new CLI env
+    let restored = handle2.get_sys_env().await;
+    assert_eq!(
+        restored.get("CLI_ORIGINAL"),
+        Some(&"original_value".to_string()),
+        "sys_env must come from the snapshot, not the new CLI env"
+    );
+    assert!(
+        !restored.contains_key("NEW_VAR"),
+        "New vars from the second CLI env must not appear when restoring from snapshot"
+    );
+
+    handle2.shutdown().await;
+    let _ = actor_task2.await;
 }

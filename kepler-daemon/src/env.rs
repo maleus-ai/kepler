@@ -19,11 +19,10 @@ static ENV_VAR_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 pub fn expand_env(s: &str, extra_env: &HashMap<String, String>) -> String {
     ENV_VAR_REGEX.replace_all(s, |caps: &regex::Captures| {
         let var_name = &caps[1];
-        // First check extra_env, then system env
+        // Look up in the provided environment only
         extra_env
             .get(var_name)
             .cloned()
-            .or_else(|| std::env::var(var_name).ok())
             .unwrap_or_default()
     })
     .into_owned()
@@ -185,5 +184,34 @@ mod tests {
     fn test_expand_env_no_vars() {
         let extra = HashMap::new();
         assert_eq!(expand_env("no variables here", &extra), "no variables here");
+    }
+
+    #[test]
+    fn test_expand_env_does_not_fallback_to_process_env() {
+        // Set a real process env var that should NOT be visible to expand_env
+        unsafe {
+            std::env::set_var("KEPLER_TEST_EXPAND_ISOLATION", "leaked");
+        }
+
+        let extra = HashMap::new();
+        // expand_env must return "" because the var is not in extra_env,
+        // even though it exists in the process environment
+        assert_eq!(
+            expand_env("${KEPLER_TEST_EXPAND_ISOLATION}", &extra),
+            "",
+            "expand_env must not fall back to std::env::var"
+        );
+
+        // But if explicitly provided in extra_env, it works
+        let mut with_var = HashMap::new();
+        with_var.insert("KEPLER_TEST_EXPAND_ISOLATION".to_string(), "explicit".to_string());
+        assert_eq!(
+            expand_env("${KEPLER_TEST_EXPAND_ISOLATION}", &with_var),
+            "explicit"
+        );
+
+        unsafe {
+            std::env::remove_var("KEPLER_TEST_EXPAND_ISOLATION");
+        }
     }
 }

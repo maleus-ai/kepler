@@ -72,6 +72,9 @@ pub enum ConfigCommand {
     GetGlobalSysEnv {
         reply: oneshot::Sender<Option<SysEnvPolicy>>,
     },
+    GetSysEnv {
+        reply: oneshot::Sender<HashMap<String, String>>,
+    },
     IsServiceRunning {
         service_name: String,
         reply: oneshot::Sender<bool>,

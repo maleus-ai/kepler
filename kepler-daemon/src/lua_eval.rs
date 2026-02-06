@@ -13,7 +13,7 @@ use std::path::Path;
 /// Context passed to each Lua evaluation.
 #[derive(Debug, Clone, Default)]
 pub struct EvalContext {
-    /// System environment variables (from std::env::vars())
+    /// System environment variables (captured from the CLI)
     pub sys_env: HashMap<String, String>,
     /// Variables loaded from env_file (empty if no env_file)
     pub env_file: HashMap<String, String>,

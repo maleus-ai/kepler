@@ -52,7 +52,6 @@ pub struct ServiceOrchestrator {
     registry: SharedConfigRegistry,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
     restart_tx: mpsc::Sender<FileChangeEvent>,
-    daemon_env: HashMap<String, String>,
 }
 
 impl ServiceOrchestrator {
@@ -66,7 +65,6 @@ impl ServiceOrchestrator {
             registry,
             exit_tx,
             restart_tx,
-            daemon_env: std::env::vars().collect(),
         }
     }
 
@@ -124,14 +122,16 @@ impl ServiceOrchestrator {
         let global_log_config = config.global_logs().cloned();
         let initialized = handle.is_config_initialized().await;
 
+        // Fetch stored sys_env once for all global hooks in this method
+        let stored_env = handle.get_sys_env().await;
+
         // Run global on_init hook if first time
         if !initialized {
-            let env = sys_env.clone().unwrap_or_else(|| self.daemon_env.clone());
             run_global_hook(
                 &global_hooks,
                 GlobalHookType::OnInit,
                 &config_dir,
-                &env,
+                &stored_env,
                 Some(&log_config),
                 global_log_config.as_ref(),
             )
@@ -139,12 +139,11 @@ impl ServiceOrchestrator {
         }
 
         // Run global pre_start hook
-        let env = sys_env.clone().unwrap_or_else(|| self.daemon_env.clone());
         run_global_hook(
             &global_hooks,
             GlobalHookType::PreStart,
             &config_dir,
-            &env,
+            &stored_env,
             Some(&log_config),
             global_log_config.as_ref(),
         )
@@ -241,12 +240,11 @@ impl ServiceOrchestrator {
             }
 
             // Run global post_start hook (after all services started)
-            let env = sys_env.clone().unwrap_or_else(|| self.daemon_env.clone());
             if let Err(e) = run_global_hook(
                 &global_hooks,
                 GlobalHookType::PostStart,
                 &config_dir,
-                &env,
+                &stored_env,
                 Some(&log_config),
                 global_log_config.as_ref(),
             )
@@ -425,15 +423,17 @@ impl ServiceOrchestrator {
         let global_log_config = config.global_logs().cloned();
         let global_hooks = config.global_hooks().cloned();
 
+        // Fetch stored sys_env once for all global hooks in this method
+        let stored_env = handle.get_sys_env().await;
+
         // Run global pre_stop hook if stopping all services
         if service_filter.is_none()
             && let Some(ref log_cfg) = log_config {
-                let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PreStop,
                     &config_dir,
-                    &env,
+                    &stored_env,
                     Some(log_cfg),
                     global_log_config.as_ref(),
                 )
@@ -490,12 +490,11 @@ impl ServiceOrchestrator {
         // Run global post_stop hook if stopping all and services were stopped
         if service_filter.is_none() && !stopped.is_empty()
             && let Some(ref log_cfg) = log_config {
-                let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PostStop,
                     &config_dir,
-                    &env,
+                    &stored_env,
                     Some(log_cfg),
                     global_log_config.as_ref(),
                 )
@@ -515,12 +514,11 @@ impl ServiceOrchestrator {
             }
 
             if let Some(ref log_cfg) = log_config {
-                let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PreCleanup,
                     &config_dir,
-                    &env,
+                    &stored_env,
                     Some(log_cfg),
                     global_log_config.as_ref(),
                 )
@@ -665,6 +663,9 @@ impl ServiceOrchestrator {
         let global_hooks = config.global_hooks().cloned();
         let global_log_config = config.global_logs().cloned();
 
+        // Fetch stored sys_env once for all global hooks in this method
+        let stored_env = handle.get_sys_env().await;
+
         // Get list of running services to restart
         let services_to_restart: Vec<String> = if is_full_restart {
             handle.get_running_services().await
@@ -706,12 +707,11 @@ impl ServiceOrchestrator {
         // Run global pre_restart hook for full restart
         if is_full_restart
             && let Some(ref log_cfg) = log_config {
-                let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PreRestart,
                     &config_dir,
-                    &env,
+                    &stored_env,
                     Some(log_cfg),
                     global_log_config.as_ref(),
                 )
@@ -825,12 +825,11 @@ impl ServiceOrchestrator {
         // Run global post_restart hook for full restart
         if is_full_restart
             && let Some(ref log_cfg) = log_config {
-                let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PostRestart,
                     &config_dir,
-                    &env,
+                    &stored_env,
                     Some(log_cfg),
                     global_log_config.as_ref(),
                 )
@@ -1394,10 +1393,9 @@ impl ServiceOrchestrator {
                 continue;
             }
 
-            // Run cleanup hook if config is readable (not orphaned)
+            // Run cleanup hook if snapshot exists (not orphaned)
             if !is_orphaned {
-                let config_file = state_dir.join("config.yaml");
-                self.run_cleanup_hook_for_prune(&config_file).await;
+                self.run_cleanup_hook_for_prune(&state_dir).await;
             }
 
             // Unload from registry BEFORE deleting state directory
@@ -1437,24 +1435,29 @@ impl ServiceOrchestrator {
     }
 
     /// Run pre_cleanup hook before pruning
-    async fn run_cleanup_hook_for_prune(&self, config_file: &Path) {
-        // Use daemon's cached environment for cleanup hooks during prune
-        if let Ok(config) = KeplerConfig::load(config_file, &self.daemon_env) {
-            let config_dir = config_file.parent().unwrap_or(Path::new("."));
-            let env = self.daemon_env.clone();
+    ///
+    /// Loads the baked config and sys_env directly from the persisted snapshot,
+    /// avoiding the need to re-parse the raw config.
+    async fn run_cleanup_hook_for_prune(&self, state_dir: &Path) {
+        use crate::persistence::ConfigPersistence;
+        let persistence = ConfigPersistence::new(state_dir.to_path_buf());
 
-            if let Err(e) = run_global_hook(
-                &config.global_hooks().cloned(),
-                GlobalHookType::PreCleanup,
-                config_dir,
-                &env,
-                None, // No log buffer for prune
-                config.global_logs(),
-            )
-            .await
-            {
-                warn!("pre_cleanup hook failed: {}", e);
-            }
+        let snapshot = match persistence.load_expanded_config() {
+            Ok(Some(s)) => s,
+            _ => return,
+        };
+
+        if let Err(e) = run_global_hook(
+            &snapshot.config.global_hooks().cloned(),
+            GlobalHookType::PreCleanup,
+            &snapshot.config_dir,
+            &snapshot.sys_env,
+            None, // No log buffer for prune
+            snapshot.config.global_logs(),
+        )
+        .await
+        {
+            warn!("pre_cleanup hook failed: {}", e);
         }
     }
 

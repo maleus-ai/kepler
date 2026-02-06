@@ -33,6 +33,8 @@ pub struct ExpandedConfigSnapshot {
     pub config_dir: PathBuf,
     /// Unix timestamp of when the snapshot was taken
     pub snapshot_time: i64,
+    /// System environment variables captured from the CLI at config load time
+    pub sys_env: HashMap<String, String>,
 }
 
 /// Persistence layer for a single config's state directory.
