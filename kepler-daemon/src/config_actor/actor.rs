@@ -494,11 +494,11 @@ impl ConfigActor {
                 let _ = reply.send(result);
             }
             ConfigCommand::ClearServiceLogs { service_name } => {
-                let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
+                let reader = LogReader::new(self.log_config.logs_dir.clone());
                 reader.clear_service(&service_name);
             }
             ConfigCommand::ClearServiceLogsPrefix { prefix } => {
-                let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
+                let reader = LogReader::new(self.log_config.logs_dir.clone());
                 reader.clear_service_prefix(&prefix);
             }
 
@@ -711,7 +711,7 @@ impl ConfigActor {
     }
 
     fn get_logs(&self, service: Option<&str>, lines: usize) -> Vec<LogEntry> {
-        let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
+        let reader = LogReader::new(self.log_config.logs_dir.clone());
         reader
             .tail(lines, service)
             .into_iter()
@@ -725,7 +725,7 @@ impl ConfigActor {
         lines: usize,
         max_bytes: Option<usize>,
     ) -> Vec<LogEntry> {
-        let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
+        let reader = LogReader::new(self.log_config.logs_dir.clone());
         reader
             .tail_bounded(lines, service, max_bytes)
             .into_iter()
@@ -740,7 +740,7 @@ impl ConfigActor {
         max_bytes: Option<usize>,
         mode: LogMode,
     ) -> Vec<LogEntry> {
-        let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
+        let reader = LogReader::new(self.log_config.logs_dir.clone());
         match mode {
             LogMode::Head => reader
                 .head(lines, service)
@@ -762,7 +762,7 @@ impl ConfigActor {
         offset: usize,
         limit: usize,
     ) -> (Vec<LogEntry>, usize) {
-        let reader = LogReader::new(self.log_config.logs_dir.clone(), 0);
+        let reader = LogReader::new(self.log_config.logs_dir.clone());
         let (logs, total) = reader.get_paginated(service, offset, limit);
         (logs.into_iter().map(|l| l.into()).collect(), total)
     }

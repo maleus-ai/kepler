@@ -35,7 +35,7 @@ fn test_large_log_file_bounded_read() {
     drop(writer); // Flush
 
     // Read with bounded tail should not OOM
-    let reader = LogReader::new(logs_dir.clone(), 0);
+    let reader = LogReader::new(logs_dir.clone());
     let entries = reader.tail(1000, Some("test-service"));
     assert_eq!(entries.len(), 1000);
 
@@ -170,7 +170,7 @@ fn test_bounded_read_respects_limits() {
     drop(writer);
 
     // Request more lines than the default limit - should be capped
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let entries = reader.tail_bounded(
         100_000, // Way more than DEFAULT_MAX_LINES
         Some("test-service"),
@@ -191,7 +191,7 @@ fn test_clear_during_heavy_writes() {
     let logs_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&logs_dir).unwrap();
 
-    let reader = LogReader::new(logs_dir.clone(), 0);
+    let reader = LogReader::new(logs_dir.clone());
 
     // Write logs and clear repeatedly
     for cycle in 0..10 {
@@ -309,7 +309,7 @@ fn test_truncated_logs_maintain_ordering() {
     }
 
     // Read back remaining logs
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let all_entries = reader.tail(1000, Some("test-service"));
 
     // Should have some entries (older ones truncated)
@@ -358,7 +358,7 @@ fn test_log_pagination_offset_limit() {
     }
     drop(writer);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // Test first page
     let (page1, total) = reader.get_paginated(Some("pagination-test"), 0, 10);
@@ -418,7 +418,7 @@ fn test_clear_service_removes_rotated_logs() {
     );
 
     // Now clear the service logs (simulating log retention policy)
-    let reader = LogReader::new(logs_dir.clone(), 0);
+    let reader = LogReader::new(logs_dir.clone());
     reader.clear_service("retention-test");
 
     // Verify main log file is gone
@@ -478,7 +478,7 @@ fn test_clear_service_prefix_removes_logs() {
     assert!(other_log.exists(), "other-service main log should exist");
 
     // Clear all services with the prefix
-    let reader = LogReader::new(logs_dir.clone(), 0);
+    let reader = LogReader::new(logs_dir.clone());
     reader.clear_service_prefix("_prefix_");
 
     // Verify hook1 and hook2 files are gone
@@ -547,7 +547,7 @@ fn test_clear_all_removes_all_logs() {
     );
 
     // Clear all logs
-    let reader = LogReader::new(logs_dir.clone(), 0);
+    let reader = LogReader::new(logs_dir.clone());
     reader.clear();
 
     // Verify logs directory is empty (or only contains non-log files like metadata)
@@ -736,7 +736,7 @@ fn test_buffer_with_truncation() {
     );
 
     // Verify we can read entries back
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let entries = reader.tail(100, Some("truncate-buffer"));
     assert!(
         !entries.is_empty(),
@@ -792,7 +792,7 @@ fn test_concurrent_writers_no_contention() {
     assert_eq!(completed.load(Ordering::SeqCst), num_threads);
 
     // Verify all services have their logs
-    let reader = LogReader::new((*logs_dir).clone(), 0);
+    let reader = LogReader::new((*logs_dir).clone());
     for thread_id in 0..num_threads {
         let service_name = format!("service-{}", thread_id);
         let entries = reader.tail(lines_per_thread * 2, Some(&service_name));

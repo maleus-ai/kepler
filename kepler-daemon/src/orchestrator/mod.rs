@@ -48,6 +48,7 @@ pub struct ServiceOrchestrator {
     registry: SharedConfigRegistry,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
     restart_tx: mpsc::Sender<FileChangeEvent>,
+    daemon_env: HashMap<String, String>,
 }
 
 impl ServiceOrchestrator {
@@ -61,6 +62,7 @@ impl ServiceOrchestrator {
             registry,
             exit_tx,
             restart_tx,
+            daemon_env: std::env::vars().collect(),
         }
     }
 
@@ -120,7 +122,7 @@ impl ServiceOrchestrator {
 
         // Run global on_init hook if first time
         if !initialized {
-            let env = sys_env.clone().unwrap_or_else(|| std::env::vars().collect());
+            let env = sys_env.clone().unwrap_or_else(|| self.daemon_env.clone());
             run_global_hook(
                 &global_hooks,
                 GlobalHookType::OnInit,
@@ -133,7 +135,7 @@ impl ServiceOrchestrator {
         }
 
         // Run global pre_start hook
-        let env = sys_env.clone().unwrap_or_else(|| std::env::vars().collect());
+        let env = sys_env.clone().unwrap_or_else(|| self.daemon_env.clone());
         run_global_hook(
             &global_hooks,
             GlobalHookType::PreStart,
@@ -235,7 +237,7 @@ impl ServiceOrchestrator {
             }
 
             // Run global post_start hook (after all services started)
-            let env = sys_env.clone().unwrap_or_else(|| std::env::vars().collect());
+            let env = sys_env.clone().unwrap_or_else(|| self.daemon_env.clone());
             if let Err(e) = run_global_hook(
                 &global_hooks,
                 GlobalHookType::PostStart,
@@ -421,7 +423,7 @@ impl ServiceOrchestrator {
         // Run global pre_stop hook if stopping all services
         if service_filter.is_none() {
             if let Some(ref log_cfg) = log_config {
-                let env = std::env::vars().collect();
+                let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PreStop,
@@ -485,7 +487,7 @@ impl ServiceOrchestrator {
         // Run global post_stop hook if stopping all and services were stopped
         if service_filter.is_none() && !stopped.is_empty() {
             if let Some(ref log_cfg) = log_config {
-                let env = std::env::vars().collect();
+                let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PostStop,
@@ -511,7 +513,7 @@ impl ServiceOrchestrator {
             }
 
             if let Some(ref log_cfg) = log_config {
-                let env = std::env::vars().collect();
+                let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PreCleanup,
@@ -530,7 +532,7 @@ impl ServiceOrchestrator {
         // Apply log retention using LogReader
         if let Some(ref log_cfg) = log_config {
             use crate::logs::LogReader;
-            let reader = LogReader::new(log_cfg.logs_dir.clone(), 0);
+            let reader = LogReader::new(log_cfg.logs_dir.clone());
 
             for service_name in &stopped {
                 // When clean is true, always clear logs (no retention policy check)
@@ -694,7 +696,7 @@ impl ServiceOrchestrator {
         // Run global pre_restart hook for full restart
         if is_full_restart {
             if let Some(ref log_cfg) = log_config {
-                let env: HashMap<String, String> = std::env::vars().collect();
+                let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PreRestart,
@@ -814,7 +816,7 @@ impl ServiceOrchestrator {
         // Run global post_restart hook for full restart
         if is_full_restart {
             if let Some(ref log_cfg) = log_config {
-                let env: HashMap<String, String> = std::env::vars().collect();
+                let env = self.daemon_env.clone();
                 if let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PostRestart,
@@ -1293,7 +1295,7 @@ impl ServiceOrchestrator {
         // Start file watcher if configured
         if !ctx.service_config.restart.watch_patterns().is_empty() {
             let task_handle = spawn_file_watcher(
-                handle.config_path().clone(),
+                handle.config_path().to_path_buf(),
                 service_name.to_string(),
                 ctx.service_config.restart.watch_patterns().to_vec(),
                 ctx.working_dir.clone(),
@@ -1435,11 +1437,10 @@ impl ServiceOrchestrator {
 
     /// Run pre_cleanup hook before pruning
     async fn run_cleanup_hook_for_prune(&self, config_file: &Path) {
-        // Use daemon's current environment for cleanup hooks during prune
-        let daemon_env: HashMap<String, String> = std::env::vars().collect();
-        if let Ok(config) = KeplerConfig::load(config_file, &daemon_env) {
+        // Use daemon's cached environment for cleanup hooks during prune
+        if let Ok(config) = KeplerConfig::load(config_file, &self.daemon_env) {
             let config_dir = config_file.parent().unwrap_or(Path::new("."));
-            let env: HashMap<String, String> = std::env::vars().collect();
+            let env = self.daemon_env.clone();
 
             if let Err(e) = run_global_hook(
                 &config.global_hooks().cloned(),

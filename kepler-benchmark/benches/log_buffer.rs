@@ -446,7 +446,7 @@ fn bench_log_reading(c: &mut Criterion) {
     for tail_size in [100, 1000, 5000, 10000] {
         group.throughput(Throughput::Elements(tail_size as u64));
         group.bench_function(format!("tail_{}", tail_size), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 let entries = black_box(reader.tail(tail_size, Some("read-test")));
                 entries
@@ -459,7 +459,7 @@ fn bench_log_reading(c: &mut Criterion) {
         // 5 pages * page_size = total elements read
         group.throughput(Throughput::Elements((5 * page_size) as u64));
         group.bench_function(format!("paginate_page{}", page_size), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 // Read 5 pages
                 for page in 0..5 {
@@ -517,7 +517,7 @@ fn bench_multi_service_reading(c: &mut Criterion) {
         // Benchmark reading all services (merge-sort)
         group.throughput(Throughput::Elements(1000));
         group.bench_function(format!("{}_tail_1000", label), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 let entries = black_box(reader.tail(1000, None));
                 entries
@@ -527,7 +527,7 @@ fn bench_multi_service_reading(c: &mut Criterion) {
         // Benchmark paginated read (full scan)
         group.throughput(Throughput::Elements(total_lines as u64));
         group.bench_function(format!("{}_paginate_all", label), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 let mut offset = 0;
                 let page_size = 1000;
@@ -584,7 +584,7 @@ fn bench_truncated_log_reading(c: &mut Criterion) {
     // Benchmark reading after truncation
     for tail_size in [100, 500, 1000, 2000] {
         group.bench_function(format!("tail_{}_truncated", tail_size), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 let entries = black_box(reader.tail(tail_size, None));
                 entries
@@ -594,7 +594,7 @@ fn bench_truncated_log_reading(c: &mut Criterion) {
 
     // Benchmark single service with truncated logs
     group.bench_function("tail_1000_single_truncated", |b| {
-        let reader = LogReader::new(logs_dir.clone(), 0);
+        let reader = LogReader::new(logs_dir.clone());
         b.iter(|| {
             let entries = black_box(reader.tail(1000, Some("truncated-svc-0")));
             entries
@@ -603,7 +603,7 @@ fn bench_truncated_log_reading(c: &mut Criterion) {
 
     // Benchmark paginated read
     group.bench_function("paginate_truncated", |b| {
-        let reader = LogReader::new(logs_dir.clone(), 0);
+        let reader = LogReader::new(logs_dir.clone());
         b.iter(|| {
             let mut offset = 0;
             let page_size = 500;
@@ -661,7 +661,7 @@ fn bench_bounded_reading(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(byte_limit as u64));
         group.bench_function(format!("bounded_{}", label), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 let entries = black_box(reader.tail_bounded(
                     10000,
@@ -741,7 +741,7 @@ fn bench_concurrent_read_write(c: &mut Criterion) {
                     .map(|reader_id| {
                         let logs_dir = Arc::clone(&logs_dir);
                         thread::spawn(move || {
-                            let reader = LogReader::new((*logs_dir).clone(), 0);
+                            let reader = LogReader::new((*logs_dir).clone());
                             for _ in 0..reads_per_reader {
                                 // Mix of operations
                                 if reader_id % 2 == 0 {
@@ -939,7 +939,7 @@ fn bench_iterator_vs_sort(c: &mut Criterion) {
 
         // Iterator approach: stops after N entries
         group.bench_function(format!("iterator_head_{}", read_count), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 let entries: Vec<_> = black_box(reader.head(read_count, None));
                 entries
@@ -948,7 +948,7 @@ fn bench_iterator_vs_sort(c: &mut Criterion) {
 
         // Sort approach: reads ALL entries, sorts, takes N
         group.bench_function(format!("sort_all_take_{}", read_count), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 let entries = black_box(reader.tail(read_count, None));
                 entries
@@ -960,7 +960,7 @@ fn bench_iterator_vs_sort(c: &mut Criterion) {
     group.throughput(Throughput::Elements(total_lines as u64));
 
     group.bench_function("iterator_all", |b| {
-        let reader = LogReader::new(logs_dir.clone(), 0);
+        let reader = LogReader::new(logs_dir.clone());
         b.iter(|| {
             let entries: Vec<_> = black_box(reader.iter(None).collect());
             entries
@@ -968,7 +968,7 @@ fn bench_iterator_vs_sort(c: &mut Criterion) {
     });
 
     group.bench_function("sort_all", |b| {
-        let reader = LogReader::new(logs_dir.clone(), 0);
+        let reader = LogReader::new(logs_dir.clone());
         b.iter(|| {
             let entries = black_box(reader.tail(total_lines, None));
             entries
@@ -1017,7 +1017,7 @@ fn bench_merge_strategies(c: &mut Criterion) {
         // Strategy 1: MergedLogIterator (heap-based merge, oldest first)
         // Reads one line at a time from each file, stops after N
         group.bench_function(format!("iterator_{}", read_count), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 let entries: Vec<_> = black_box(reader.iter(None).take(read_count).collect());
                 entries
@@ -1027,7 +1027,7 @@ fn bench_merge_strategies(c: &mut Criterion) {
         // Strategy 2: get_paginated (read all, sort, slice)
         // Reads everything, sorts in memory, returns slice
         group.bench_function(format!("paginated_{}", read_count), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 let (entries, _total) = black_box(reader.get_paginated(None, 0, read_count));
                 entries
@@ -1036,7 +1036,7 @@ fn bench_merge_strategies(c: &mut Criterion) {
 
         // Strategy 3: tail_bounded (read all, sort, take last N)
         group.bench_function(format!("tail_{}", read_count), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 let entries = black_box(reader.tail(read_count, None));
                 entries
@@ -1048,7 +1048,7 @@ fn bench_merge_strategies(c: &mut Criterion) {
     group.throughput(Throughput::Elements(total_lines as u64));
 
     group.bench_function("iterator_full", |b| {
-        let reader = LogReader::new(logs_dir.clone(), 0);
+        let reader = LogReader::new(logs_dir.clone());
         b.iter(|| {
             let entries: Vec<_> = black_box(reader.iter(None).collect());
             entries
@@ -1056,7 +1056,7 @@ fn bench_merge_strategies(c: &mut Criterion) {
     });
 
     group.bench_function("paginated_full", |b| {
-        let reader = LogReader::new(logs_dir.clone(), 0);
+        let reader = LogReader::new(logs_dir.clone());
         b.iter(|| {
             let (entries, _total) = black_box(reader.get_paginated(None, 0, total_lines));
             entries
@@ -1103,38 +1103,22 @@ fn bench_reverse_tail(c: &mut Criterion) {
 
         // New reverse-reading tail
         group.bench_function(format!("new_tail_{}", tail_count), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
+            let reader = LogReader::new(logs_dir.clone());
             b.iter(|| {
                 let entries = black_box(reader.tail(tail_count, None));
                 entries
             });
         });
 
-        // Legacy read-all-sort tail
-        group.bench_function(format!("legacy_tail_{}", tail_count), |b| {
-            let reader = LogReader::new(logs_dir.clone(), 0);
-            b.iter(|| {
-                let entries = black_box(reader.tail_legacy(tail_count, None));
-                entries
-            });
-        });
     }
 
     // Single service comparison
     group.throughput(Throughput::Elements(100));
 
     group.bench_function("new_tail_100_single_svc", |b| {
-        let reader = LogReader::new(logs_dir.clone(), 0);
+        let reader = LogReader::new(logs_dir.clone());
         b.iter(|| {
             let entries = black_box(reader.tail(100, Some("tail-svc-00")));
-            entries
-        });
-    });
-
-    group.bench_function("legacy_tail_100_single_svc", |b| {
-        let reader = LogReader::new(logs_dir.clone(), 0);
-        b.iter(|| {
-            let entries = black_box(reader.tail_legacy(100, Some("tail-svc-00")));
             entries
         });
     });

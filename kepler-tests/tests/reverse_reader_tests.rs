@@ -306,7 +306,7 @@ fn test_tail_returns_newest_entries_first_internally() {
     }
     drop(writer);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // Request last 5
     let last_5 = reader.tail(5, Some("test-service"));
@@ -339,7 +339,7 @@ fn test_tail_with_main_file_multiple_entries() {
         "1000\tLegacy rotated 1\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
 
     // Request tail(4) - should get all 4 entries from main file
     let logs = reader.tail(4, Some("multi-entry"));
@@ -372,7 +372,7 @@ fn test_tail_across_multiple_services() {
         "2000\tB-1\n4000\tB-2\n6000\tB-3\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // Request tail(4) across all services
     let logs = reader.tail(4, None);
@@ -404,7 +404,7 @@ fn test_tail_merges_stdout_stderr_correctly() {
         "2000\tstderr-1\n4000\tstderr-2\n6000\tstderr-3\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // Get all 6 entries
     let logs = reader.tail(10, Some("my-svc"));
@@ -443,7 +443,7 @@ fn test_tail_stops_early_when_count_reached() {
     }
     drop(writer);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // Request only 5 - should stop early without reading all 1000
     let logs = reader.tail(5, Some("test-service"));
@@ -462,49 +462,10 @@ fn test_tail_empty_service() {
 
     fs::create_dir_all(&logs_dir).unwrap();
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
     let logs = reader.tail(10, Some("nonexistent"));
 
     assert_eq!(logs.len(), 0);
-}
-
-#[test]
-fn test_tail_vs_legacy_consistency() {
-    let temp_dir = setup_test_dir();
-    let logs_dir = temp_dir.path().to_path_buf();
-
-    // Write entries
-    let mut writer = BufferedLogWriter::new(
-        &logs_dir,
-        "test-service",
-        LogStream::Stdout,
-        Some(10 * 1024 * 1024),
-        0,
-    );
-
-    for i in 0..50 {
-        writer.write(&format!("Message {:02}", i));
-        thread::sleep(Duration::from_millis(1));
-    }
-    drop(writer);
-
-    let reader = LogReader::new(logs_dir, 5);
-
-    // Compare new tail() with legacy tail_legacy()
-    let new_tail = reader.tail(10, Some("test-service"));
-    let legacy_tail = reader.tail_legacy(10, Some("test-service"));
-
-    assert_eq!(new_tail.len(), legacy_tail.len(), "Should return same count");
-
-    // Should return same entries in same order
-    for (new, legacy) in new_tail.iter().zip(legacy_tail.iter()) {
-        assert_eq!(new.line, legacy.line, "Lines should match");
-        assert_eq!(
-            new.timestamp.timestamp_millis(),
-            legacy.timestamp.timestamp_millis(),
-            "Timestamps should match"
-        );
-    }
 }
 
 #[test]
@@ -529,7 +490,7 @@ fn test_tail_with_truncation_and_many_entries() {
     }
     drop(writer);
 
-    let reader = LogReader::new(logs_dir.clone(), 0);
+    let reader = LogReader::new(logs_dir.clone());
 
     // Verify truncation happened (no rotated files)
     let main_file = logs_dir.join("truncating-service.stdout.log");
@@ -573,7 +534,7 @@ fn test_head_returns_oldest_first() {
     }
     drop(writer);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // head() should return oldest first
     let first_5 = reader.head(5, Some("test-service"));
@@ -602,7 +563,7 @@ fn test_head_merges_services_chronologically() {
         "2000\tB-1\n4000\tB-2\n6000\tB-3\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // head(4) should return 4 oldest entries merged
     let logs = reader.head(4, None);
@@ -632,7 +593,7 @@ fn test_head_stops_early() {
     }
     drop(writer);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // Request only 5 - iterator should stop early
     let logs = reader.head(5, Some("test-service"));
@@ -642,52 +603,3 @@ fn test_head_stops_early() {
     assert_eq!(logs[4].line, "Message 0004");
 }
 
-// ============================================================================
-// Performance comparison: tail() vs tail_legacy()
-// ============================================================================
-
-#[test]
-fn test_tail_is_efficient_for_small_count() {
-    let temp_dir = setup_test_dir();
-    let logs_dir = temp_dir.path().to_path_buf();
-
-    // Create a file with many entries
-    let mut writer = BufferedLogWriter::new(
-        &logs_dir,
-        "perf-test",
-        LogStream::Stdout,
-        Some(10 * 1024 * 1024),
-        0,
-    );
-
-    for i in 0..5000 {
-        writer.write(&format!("Message {:05} with some extra content", i));
-    }
-    drop(writer);
-
-    let reader = LogReader::new(logs_dir, 5);
-
-    // tail() should be efficient - it reads from end and stops
-    let start = std::time::Instant::now();
-    let logs = reader.tail(10, Some("perf-test"));
-    let tail_duration = start.elapsed();
-
-    assert_eq!(logs.len(), 10);
-    assert_eq!(logs[9].line, "Message 04999 with some extra content");
-
-    // Legacy reads everything
-    let start = std::time::Instant::now();
-    let legacy_logs = reader.tail_legacy(10, Some("perf-test"));
-    let legacy_duration = start.elapsed();
-
-    assert_eq!(legacy_logs.len(), 10);
-
-    // New tail should be noticeably faster (at least 2x for this test case)
-    // But we don't assert on timing as it's environment-dependent
-    println!(
-        "tail(): {:?}, tail_legacy(): {:?}, speedup: {:.1}x",
-        tail_duration,
-        legacy_duration,
-        legacy_duration.as_nanos() as f64 / tail_duration.as_nanos().max(1) as f64
-    );
-}

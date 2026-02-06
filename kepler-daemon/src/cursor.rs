@@ -144,7 +144,7 @@ impl CursorManager {
         let cursor_id = generate_cursor_id();
 
         // Collect current log files
-        let reader = LogReader::new(logs_dir.clone(), 0); // 0 rotated files (no rotation)
+        let reader = LogReader::new(logs_dir.clone());
         let files = reader.collect_log_files(service.as_deref());
 
         let mut positions = HashMap::new();
@@ -199,7 +199,7 @@ impl CursorManager {
         cursor.last_polled = Instant::now();
 
         // Check for new log files
-        let reader = LogReader::new(cursor.logs_dir.clone(), 0);
+        let reader = LogReader::new(cursor.logs_dir.clone());
         let current_files = reader.collect_log_files(cursor.service_filter.as_deref());
 
         // Add any new files we haven't seen before

@@ -415,33 +415,6 @@ async fn handle_request(
             }
         }
 
-        Request::LogsFollow {
-            config_path,
-            service,
-            cursor,
-        } => {
-            use kepler_protocol::protocol::LogFollowData;
-
-            let config_path = match canonicalize_config_path(config_path) {
-                Ok(p) => p,
-                Err(e) => return Response::error(e.to_string()),
-            };
-
-            match registry.get(&config_path) {
-                Some(handle) => {
-                    let (entries, new_cursor) = handle.get_logs_follow(service, cursor).await;
-                    Response::ok_with_data(ResponseData::LogFollow(LogFollowData {
-                        entries,
-                        cursor: new_cursor,
-                    }))
-                }
-                None => Response::ok_with_data(ResponseData::LogFollow(LogFollowData {
-                    entries: Vec::new(),
-                    cursor: String::new(),
-                })),
-            }
-        }
-
         Request::LogsCursor {
             config_path,
             service,

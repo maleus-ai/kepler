@@ -216,24 +216,6 @@ impl Client {
         self.send_request(&Request::Prune { force, dry_run }).await
     }
 
-    /// Get new log entries since last cursor (for follow mode)
-    ///
-    /// Pass `None` for cursor to start from the end of current files.
-    /// Returns entries and a new cursor to use for subsequent requests.
-    pub async fn logs_follow(
-        &mut self,
-        config_path: PathBuf,
-        service: Option<String>,
-        cursor: Option<String>,
-    ) -> Result<Response> {
-        self.send_request(&Request::LogsFollow {
-            config_path,
-            service,
-            cursor,
-        })
-        .await
-    }
-
     /// Cursor-based log streaming (for 'all' and 'follow' modes)
     ///
     /// - Pass `None` for `cursor_id` to create a new cursor

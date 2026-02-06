@@ -39,7 +39,7 @@ fn test_read_single_file() {
         "Third message",
     ]);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
     let logs = reader.tail(100, Some("my-service"));
 
     assert_eq!(logs.len(), 3, "Should have 3 log entries");
@@ -63,7 +63,7 @@ fn test_read_multiple_services() {
     write_log_entries(&logs_dir, "service-b", LogStream::Stdout, &["Message from B"]);
     write_log_entries(&logs_dir, "service-c", LogStream::Stdout, &["Message from C"]);
 
-    let reader = LogReader::new(logs_dir.clone(), 5);
+    let reader = LogReader::new(logs_dir.clone());
 
     // Read all services
     let all_logs = reader.tail(100, None);
@@ -112,7 +112,7 @@ fn test_merge_stdout_stderr_chronologically() {
     drop(stdout_writer);
     drop(stderr_writer);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
     let logs = reader.tail(100, Some("my-service"));
 
     assert_eq!(logs.len(), 4, "Should have 4 entries");
@@ -149,7 +149,7 @@ fn test_tail_returns_last_n_lines() {
     let message_refs: Vec<&str> = messages.iter().map(|s| s.as_str()).collect();
     write_log_entries(&logs_dir, "my-service", LogStream::Stdout, &message_refs);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // Request last 10
     let last_10 = reader.tail(10, Some("my-service"));
@@ -178,7 +178,7 @@ fn test_pagination_offset_limit() {
     let message_refs: Vec<&str> = messages.iter().map(|s| s.as_str()).collect();
     write_log_entries(&logs_dir, "my-service", LogStream::Stdout, &message_refs);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // First page
     let (page1, total) = reader.get_paginated(Some("my-service"), 0, 10);
@@ -238,7 +238,7 @@ fn test_truncated_file_continues_working() {
     assert!(!rotated_1.exists(), "No rotated files should exist with truncation model");
 
     // Read back all logs
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let logs = reader.tail(1000, Some("my-service"));
 
     // Some logs will be lost due to truncation, but remaining should be valid
@@ -264,7 +264,7 @@ fn test_filter_by_service() {
     write_log_entries(&logs_dir, "api", LogStream::Stdout, &["api log 1"]);
     write_log_entries(&logs_dir, "worker", LogStream::Stdout, &["worker log 1", "worker log 2", "worker log 3"]);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // Filter by specific service
     let web_logs = reader.tail(100, Some("web"));
@@ -297,7 +297,7 @@ fn test_clear_all_logs() {
     write_log_entries(&logs_dir, "service-a", LogStream::Stderr, &["err"]);
     write_log_entries(&logs_dir, "service-b", LogStream::Stdout, &["msg"]);
 
-    let reader = LogReader::new(logs_dir.clone(), 5);
+    let reader = LogReader::new(logs_dir.clone());
 
     // Verify logs exist
     let logs = reader.tail(100, None);
@@ -324,7 +324,7 @@ fn test_clear_service_logs() {
     write_log_entries(&logs_dir, "service-a", LogStream::Stdout, &["msg a"]);
     write_log_entries(&logs_dir, "service-b", LogStream::Stdout, &["msg b"]);
 
-    let reader = LogReader::new(logs_dir.clone(), 5);
+    let reader = LogReader::new(logs_dir.clone());
 
     // Clear only service-a
     reader.clear_service("service-a");
@@ -348,7 +348,7 @@ fn test_clear_service_prefix() {
     write_log_entries(&logs_dir, "api-orders", LogStream::Stdout, &["orders"]);
     write_log_entries(&logs_dir, "worker", LogStream::Stdout, &["worker"]);
 
-    let reader = LogReader::new(logs_dir.clone(), 5);
+    let reader = LogReader::new(logs_dir.clone());
 
     // Clear services starting with "api-"
     reader.clear_service_prefix("api-");
@@ -369,7 +369,7 @@ fn test_empty_logs_directory() {
     let temp_dir = setup_test_dir();
     let logs_dir = temp_dir.path().to_path_buf();
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     let logs = reader.tail(100, None);
     assert_eq!(logs.len(), 0);
@@ -386,7 +386,7 @@ fn test_nonexistent_service() {
 
     write_log_entries(&logs_dir, "existing", LogStream::Stdout, &["msg"]);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     let logs = reader.tail(100, Some("nonexistent"));
     assert_eq!(logs.len(), 0);
@@ -400,7 +400,7 @@ fn test_service_name_with_special_chars() {
     // Write with special characters in service name
     write_log_entries(&logs_dir, "my/special:service", LogStream::Stdout, &["special msg"]);
 
-    let reader = LogReader::new(logs_dir.clone(), 5);
+    let reader = LogReader::new(logs_dir.clone());
 
     // Should be able to read back using the same service name
     let logs = reader.tail(100, Some("my/special:service"));
@@ -415,7 +415,7 @@ fn test_log_line_metadata() {
 
     write_log_entries(&logs_dir, "test-svc", LogStream::Stdout, &["test message"]);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
     let logs = reader.tail(1, Some("test-svc"));
 
     assert_eq!(logs.len(), 1);
@@ -442,7 +442,7 @@ fn test_bounded_reading() {
     let message_refs: Vec<&str> = messages.iter().map(|s| s.as_str()).collect();
     write_log_entries(&logs_dir, "large-service", LogStream::Stdout, &message_refs);
 
-    let reader = LogReader::new(logs_dir, 5);
+    let reader = LogReader::new(logs_dir);
 
     // Bounded read should limit bytes read
     let logs = reader.tail_bounded(1000, Some("large-service"), Some(10 * 1024)); // 10KB limit
@@ -470,7 +470,7 @@ fn test_multiple_rotated_files() {
     let rotated1 = format!("{}.1", base_path.display());
     fs::write(&rotated1, "500\tLegacy rotated file\n").unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let logs = reader.tail(100, Some("manual-service"));
 
     assert_eq!(logs.len(), 4, "Should read all 4 entries from main file");
@@ -493,7 +493,7 @@ fn test_reader_from_config() {
 
     write_log_entries(&config.logs_dir, "test-svc", LogStream::Stdout, &["test"]);
 
-    let reader = LogReader::new(config.logs_dir.clone(), 0);
+    let reader = LogReader::new(config.logs_dir.clone());
     let logs = reader.tail(10, Some("test-svc"));
 
     assert_eq!(logs.len(), 1);
@@ -519,7 +519,7 @@ fn test_truncation_ignores_legacy_rotation_files() {
     let rotated2 = format!("{}.2", base_path.display());
     fs::write(&rotated2, "2000\tLegacy rotated 2\n").unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let logs = reader.tail(100, Some("truncation-test"));
 
     // Only main file is read (4 entries)
@@ -560,7 +560,7 @@ fn test_multi_service_chronological_merge() {
     let svc_c_base = logs_dir.join("service-c.stderr.log");
     fs::write(&svc_c_base, "2500\tC-stderr\n").unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
 
     // Read all services - should be chronologically merged
     let all_logs = reader.tail(100, None);
@@ -628,7 +628,7 @@ fn test_truncation_maintains_integrity() {
     drop(writer);
 
     // Read back
-    let reader = LogReader::new(logs_dir.clone(), 0);
+    let reader = LogReader::new(logs_dir.clone());
     let logs = reader.tail(1000, Some("heavy-truncation"));
 
     // With truncation, we'll have fewer logs since old ones are discarded

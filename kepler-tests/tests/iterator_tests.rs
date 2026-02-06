@@ -39,7 +39,7 @@ fn test_iterator_single_file() {
     }
     drop(writer);
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let mut iter = reader.iter(Some("test-service"));
 
     // First item should be oldest (Message 0)
@@ -75,7 +75,7 @@ fn test_iterator_multiple_files_merged() {
         "2000\tB-1\n4000\tB-2\n6000\tB-3\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let logs: Vec<_> = reader.iter(None).collect();
 
     assert_eq!(logs.len(), 6);
@@ -107,7 +107,7 @@ fn test_iterator_stdout_stderr_merged() {
         "2000\tstderr-1\n4000\tstderr-2\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let logs: Vec<_> = reader.iter(Some("my-svc")).collect();
 
     assert_eq!(logs.len(), 4);
@@ -129,7 +129,7 @@ fn test_iterator_empty_files() {
 
     fs::create_dir_all(&logs_dir).unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let logs: Vec<_> = reader.iter(None).collect();
 
     assert_eq!(logs.len(), 0);
@@ -157,7 +157,7 @@ fn test_iterator_single_file_only() {
         "3000\tNew-1\n4000\tNew-2\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let logs: Vec<_> = reader.iter(Some("single-svc")).collect();
 
     // Only reads from main file (truncation model ignores rotation files)
@@ -184,7 +184,7 @@ fn test_iterator_take_limits_iteration() {
     }
     drop(writer);
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
 
     // Use take() to limit iteration
     let first_5: Vec<_> = reader.iter(Some("test-service")).take(5).collect();
@@ -213,7 +213,7 @@ fn test_head_method() {
     }
     drop(writer);
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
 
     let first_10 = reader.head(10, Some("test-service"));
     assert_eq!(first_10.len(), 10);
@@ -248,7 +248,7 @@ fn test_head_across_services() {
         "300\tworker-1\n600\tworker-2\n900\tworker-3\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
 
     // Get first 5 across all services
     let first_5 = reader.head(5, None);
@@ -278,7 +278,7 @@ fn test_iterator_preserves_metadata() {
         "1234567891\tError message\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let logs: Vec<_> = reader.iter(Some("my-service")).collect();
 
     assert_eq!(logs.len(), 2);
@@ -318,7 +318,7 @@ fn test_iterator_handles_malformed_lines() {
          3000\tGood line 3\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let logs: Vec<_> = reader.iter(Some("test")).collect();
 
     assert_eq!(logs.len(), 3);
@@ -343,7 +343,7 @@ fn test_iterator_stops_on_malformed_line() {
          2000\tGood line 2\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let logs: Vec<_> = reader.iter(Some("test")).collect();
 
     // Only gets the first line before the malformed one
@@ -377,7 +377,7 @@ fn test_iterator_ignores_legacy_rotation_files() {
         "4000\tCurrent\n",
     ).unwrap();
 
-    let reader = LogReader::new(logs_dir, 0);
+    let reader = LogReader::new(logs_dir);
     let logs: Vec<_> = reader.iter(Some("wrap")).collect();
 
     // Only reads from main file (truncation model ignores rotation files)

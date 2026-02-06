@@ -2,10 +2,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::protocol::Request;
-
-/// Maximum message size (1MB)
-pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+use crate::protocol::{Request, MAX_MESSAGE_SIZE};
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {

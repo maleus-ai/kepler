@@ -24,10 +24,7 @@ pub struct LogReader {
 
 impl LogReader {
     /// Create a new LogReader for the given logs directory.
-    ///
-    /// The `_max_rotated_files` parameter is kept for backward compatibility
-    /// but is ignored since we no longer use rotation.
-    pub fn new(logs_dir: PathBuf, _max_rotated_files: u32) -> Self {
+    pub fn new(logs_dir: PathBuf) -> Self {
         Self { logs_dir }
     }
 
@@ -78,11 +75,7 @@ impl LogReader {
         }
 
         // Calculate per-file byte limit
-        let per_file_max_bytes = if files.is_empty() {
-            max_bytes
-        } else {
-            (max_bytes / files.len()).max(1024 * 1024)
-        };
+        let per_file_max_bytes = (max_bytes / files.len()).max(1024 * 1024);
 
         // Read entries from all files
         let mut entries = Vec::with_capacity(count);
@@ -147,23 +140,16 @@ impl LogReader {
             // Collect files for specific service
             self.collect_service_files(&mut files, svc);
         } else {
-            // Collect files for all services
+            // Collect files for all services directly from directory listing
             if let Ok(entries) = fs::read_dir(&self.logs_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if let Some((svc, _stream)) = self.parse_log_filename(&path) {
-                        // Only collect main files, we'll enumerate rotated files separately
-                        if path.extension().is_some_and(|ext| ext == "log") {
-                            self.collect_service_files(&mut files, &svc);
-                        }
+                    if let Some((svc, stream)) = self.parse_log_filename(&path) {
+                        files.push((path, svc, stream));
                     }
                 }
             }
         }
-
-        // Remove duplicates (same file collected multiple times)
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        files.dedup_by(|a, b| a.0 == b.0);
 
         files
     }
@@ -386,31 +372,6 @@ impl LogReader {
     /// Get logs directory
     pub fn logs_dir(&self) -> &Path {
         &self.logs_dir
-    }
-
-    /// Legacy tail implementation for benchmark comparison.
-    /// Reads ALL files, sorts everything, returns last N.
-    pub fn tail_legacy(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
-        let count = count.min(DEFAULT_MAX_LINES);
-        let files = self.collect_log_files(service);
-
-        if files.is_empty() {
-            return Vec::new();
-        }
-
-        // Read ALL entries from ALL files
-        let mut entries = Vec::with_capacity(count);
-        for (path, svc, stream) in files {
-            let file_entries = self.read_log_file_bounded(&path, &svc, stream, None, None);
-            entries.extend(file_entries);
-        }
-
-        // Sort ALL by timestamp
-        entries.sort_by_key(|e| e.timestamp);
-
-        // Return last N
-        let start = entries.len().saturating_sub(count);
-        entries.into_iter().skip(start).collect()
     }
 
     /// Create a merged iterator for streaming logs in chronological order (oldest first)

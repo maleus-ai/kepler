@@ -33,7 +33,7 @@ impl ConfigRegistry {
 
     /// Get daemon uptime in seconds
     pub fn uptime_secs(&self) -> u64 {
-        (Utc::now() - self.started_at).num_seconds() as u64
+        (Utc::now() - self.started_at).num_seconds().max(0) as u64
     }
 
     /// Get or create a config actor for a path.

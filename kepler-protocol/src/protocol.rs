@@ -119,15 +119,6 @@ pub enum Request {
         /// Show what would be pruned without deleting
         dry_run: bool,
     },
-    /// Get new log entries since last cursor position (for follow mode)
-    LogsFollow {
-        /// Path to the config file
-        config_path: PathBuf,
-        /// Service name (None = all services)
-        service: Option<String>,
-        /// Cursor from previous response (None = start from end of current files)
-        cursor: Option<String>,
-    },
     /// Cursor-based log streaming (for 'all' and 'follow' modes)
     LogsCursor {
         /// Path to the config file
@@ -201,8 +192,6 @@ pub enum ResponseData {
     Logs(Vec<LogEntry>),
     /// Log entries chunk (for large log responses)
     LogChunk(LogChunkData),
-    /// Log entries for follow mode (includes cursor for next request)
-    LogFollow(LogFollowData),
     /// Log entries for cursor-based streaming (all/follow modes)
     LogCursor(LogCursorData),
     /// Daemon info
@@ -235,15 +224,6 @@ pub struct LogChunkData {
     pub next_offset: usize,
     /// Total number of entries (if known)
     pub total: Option<usize>,
-}
-
-/// Log entries for follow mode
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogFollowData {
-    /// New log entries since last cursor
-    pub entries: Vec<LogEntry>,
-    /// Cursor for next request (serialized file positions)
-    pub cursor: String,
 }
 
 /// Log entries for cursor-based streaming (all/follow modes)

@@ -4,8 +4,9 @@
 //! a cheap-to-clone interface for sending commands to a ConfigActor.
 
 use chrono::{DateTime, Utc};
+use tracing::warn;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -43,7 +44,7 @@ impl ConfigActorHandle {
     }
 
     /// Get the config path this handle is for
-    pub fn config_path(&self) -> &PathBuf {
+    pub fn config_path(&self) -> &Path {
         &self.config_path
     }
 
@@ -59,13 +60,17 @@ impl ConfigActorHandle {
     /// This is a single round-trip instead of 5.
     pub async fn get_service_context(&self, service_name: &str) -> Option<ServiceContext> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetServiceContext {
                 service_name: service_name.to_string(),
                 reply: reply_tx,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetServiceContext");
+        }
         reply_rx.await.ok().flatten()
     }
 
@@ -90,14 +95,18 @@ impl ConfigActorHandle {
     /// Get logs
     pub async fn get_logs(&self, service: Option<String>, lines: usize) -> Vec<LogEntry> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetLogs {
                 service,
                 lines,
                 reply: reply_tx,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetLogs");
+        }
         reply_rx.await.unwrap_or_default()
     }
 
@@ -109,7 +118,7 @@ impl ConfigActorHandle {
         max_bytes: Option<usize>,
     ) -> Vec<LogEntry> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetLogsBounded {
                 service,
@@ -117,7 +126,11 @@ impl ConfigActorHandle {
                 max_bytes,
                 reply: reply_tx,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetLogsBounded");
+        }
         reply_rx.await.unwrap_or_default()
     }
 
@@ -130,7 +143,7 @@ impl ConfigActorHandle {
         mode: LogMode,
     ) -> Vec<LogEntry> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetLogsWithMode {
                 service,
@@ -139,7 +152,11 @@ impl ConfigActorHandle {
                 mode,
                 reply: reply_tx,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetLogsWithMode");
+        }
         reply_rx.await.unwrap_or_default()
     }
 
@@ -151,7 +168,7 @@ impl ConfigActorHandle {
         limit: usize,
     ) -> (Vec<LogEntry>, usize) {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetLogsPaginated {
                 service,
@@ -159,152 +176,191 @@ impl ConfigActorHandle {
                 limit,
                 reply: reply_tx,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetLogsPaginated");
+        }
         reply_rx.await.unwrap_or_else(|_| (Vec::new(), 0))
-    }
-
-    /// Get logs for follow mode (deprecated - use cursor-based streaming via LogsCursor request)
-    ///
-    /// This method is kept for backward compatibility but returns empty data.
-    /// New code should use the LogsCursor request instead.
-    pub async fn get_logs_follow(
-        &self,
-        _service: Option<String>,
-        _cursor: Option<String>,
-    ) -> (Vec<LogEntry>, String) {
-        // Return empty data - use LogsCursor request for cursor-based streaming
-        (Vec::new(), String::new())
     }
 
     /// Get a service configuration
     pub async fn get_service_config(&self, service_name: &str) -> Option<ServiceConfig> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetServiceConfig {
                 service_name: service_name.to_string(),
                 reply: reply_tx,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetServiceConfig");
+        }
         reply_rx.await.ok().flatten()
     }
 
     /// Get the full config
     pub async fn get_config(&self) -> Option<KeplerConfig> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetConfig { reply: reply_tx })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetConfig");
+        }
         reply_rx.await.ok()
     }
 
     /// Get config directory
     pub async fn get_config_dir(&self) -> PathBuf {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetConfigDir { reply: reply_tx })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetConfigDir");
+        }
         reply_rx.await.unwrap_or_else(|_| PathBuf::from("."))
     }
 
     /// Get log config
     pub async fn get_log_config(&self) -> Option<LogWriterConfig> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetLogConfig { reply: reply_tx })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetLogConfig");
+        }
         reply_rx.await.ok()
     }
 
     /// Get global log config
     pub async fn get_global_log_config(&self) -> Option<LogConfig> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetGlobalLogConfig { reply: reply_tx })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetGlobalLogConfig");
+        }
         reply_rx.await.ok().flatten()
     }
 
     /// Get global sys_env policy
     pub async fn get_global_sys_env(&self) -> Option<SysEnvPolicy> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetGlobalSysEnv { reply: reply_tx })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetGlobalSysEnv");
+        }
         reply_rx.await.ok().flatten()
     }
 
     /// Check if a service is running
     pub async fn is_service_running(&self, service_name: &str) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::IsServiceRunning {
                 service_name: service_name.to_string(),
                 reply: reply_tx,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send IsServiceRunning");
+        }
         reply_rx.await.unwrap_or(false)
     }
 
     /// Get list of running services
     pub async fn get_running_services(&self) -> Vec<String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetRunningServices { reply: reply_tx })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetRunningServices");
+        }
         reply_rx.await.unwrap_or_default()
     }
 
     /// Check if config is initialized
     pub async fn is_config_initialized(&self) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::IsConfigInitialized { reply: reply_tx })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send IsConfigInitialized");
+        }
         reply_rx.await.unwrap_or(false)
     }
 
     /// Check if service is initialized
     pub async fn is_service_initialized(&self, service_name: &str) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::IsServiceInitialized {
                 service_name: service_name.to_string(),
                 reply: reply_tx,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send IsServiceInitialized");
+        }
         reply_rx.await.unwrap_or(false)
     }
 
     /// Get service state (clone)
     pub async fn get_service_state(&self, service_name: &str) -> Option<ServiceState> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetServiceState {
                 service_name: service_name.to_string(),
                 reply: reply_tx,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetServiceState");
+        }
         reply_rx.await.ok().flatten()
     }
 
     /// Check if all services are stopped
     pub async fn all_services_stopped(&self) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::AllServicesStopped { reply: reply_tx })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send AllServicesStopped");
+        }
         reply_rx.await.unwrap_or(true)
     }
 
@@ -484,13 +540,17 @@ impl ConfigActorHandle {
     /// Remove and return a process handle
     pub async fn remove_process_handle(&self, service_name: &str) -> Option<ProcessHandle> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::RemoveProcessHandle {
                 service_name: service_name.to_string(),
                 reply: reply_tx,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send RemoveProcessHandle");
+        }
         reply_rx.await.ok().flatten()
     }
 
@@ -554,10 +614,14 @@ impl ConfigActorHandle {
     /// Check if this config was restored from a snapshot.
     pub async fn is_restored_from_snapshot(&self) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::IsRestoredFromSnapshot { reply: reply_tx })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send IsRestoredFromSnapshot");
+        }
         reply_rx.await.unwrap_or(false)
     }
 
@@ -566,13 +630,17 @@ impl ConfigActorHandle {
     /// Create an event channel for a service, returns receiver for orchestrator
     pub async fn create_event_channel(&self, service_name: &str) -> Option<ServiceEventReceiver> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::CreateEventChannel {
                 service_name: service_name.to_string(),
                 reply: reply_tx,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send CreateEventChannel");
+        }
         reply_rx.await.ok()
     }
 
@@ -600,20 +668,28 @@ impl ConfigActorHandle {
     /// Get all event receivers for the orchestrator to poll
     pub async fn get_all_event_receivers(&self) -> Vec<(String, ServiceEventReceiver)> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::GetAllEventReceivers { reply: reply_tx })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetAllEventReceivers");
+        }
         reply_rx.await.unwrap_or_default()
     }
 
     /// Check if an event handler has been spawned for this config
     pub async fn has_event_handler(&self) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ConfigCommand::HasEventHandler { reply: reply_tx })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send HasEventHandler");
+        }
         reply_rx.await.unwrap_or(false)
     }
 

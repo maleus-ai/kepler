@@ -610,7 +610,7 @@ fn format_uptime(started_at_ts: i64) -> String {
 
     if let Some(started) = started_at {
         let duration = now - started;
-        let secs = duration.num_seconds();
+        let secs = duration.num_seconds().max(0);
 
         if secs < 60 {
             format!("{}s", secs)
@@ -764,8 +764,7 @@ const SERVICE_COLORS: &[Color] = &[
 
 fn get_base_service_name(service: &str) -> &str {
     // Extract base service name from hook patterns like "[backend.pre_start]"
-    if service.starts_with('[') && service.ends_with(']') {
-        let inner = &service[1..service.len() - 1];
+    if let Some(inner) = service.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         if let Some(dot_pos) = inner.find('.') {
             return &inner[..dot_pos];
         }

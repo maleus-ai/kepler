@@ -357,7 +357,7 @@ fn test_multiple_writes_preserve_order() {
     drop(writer);
 
     // Read and verify order
-    let reader = LogReader::new(logs_dir.clone(), 0);
+    let reader = LogReader::new(logs_dir.clone());
     let logs = reader.tail(200, Some("test-service"));
 
     assert_eq!(logs.len(), 100, "Should have all 100 lines");
@@ -442,7 +442,7 @@ fn test_multiline_message() {
     writer.write("Single line message without newlines");
     drop(writer);
 
-    let reader = LogReader::new(logs_dir.clone(), 0);
+    let reader = LogReader::new(logs_dir.clone());
     let logs = reader.tail(10, Some("test-service"));
 
     assert_eq!(logs.len(), 1, "Should have exactly one log entry");

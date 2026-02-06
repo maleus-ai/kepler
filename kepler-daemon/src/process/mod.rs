@@ -130,7 +130,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
     // Spawn process monitor with the Child (signal-based monitoring)
-    let config_path = handle.config_path().clone();
+    let config_path = handle.config_path().to_path_buf();
     let service_name_clone = service_name.to_string();
     let handle_clone = handle.clone();
 
