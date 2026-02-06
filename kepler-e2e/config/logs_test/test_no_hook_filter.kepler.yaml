@@ -1,0 +1,10 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  no-hook-service:
+    command: ["sh", "-c", "echo NO_HOOK_SERVICE_MSG; sleep 300"]
+    hooks:
+      pre_start:
+        run: echo NO_HOOK_PRE_START_MSG

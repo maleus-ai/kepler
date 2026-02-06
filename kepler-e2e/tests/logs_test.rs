@@ -487,3 +487,66 @@ async fn test_log_chronological_ordering() -> E2eResult<()> {
 
     Ok(())
 }
+
+/// Test that --no-hook flag filters out hook log entries
+///
+/// This test verifies that:
+/// 1. Hook output (pre_start) appears in normal logs
+/// 2. Hook output is excluded when using --no-hook
+/// 3. Regular service output is preserved with --no-hook
+#[tokio::test]
+async fn test_logs_no_hook_filter() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_no_hook_filter")?;
+
+    harness.start_daemon().await?;
+
+    // Start the service
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    // Wait for service to produce logs
+    harness
+        .wait_for_service_status(&config_path, "no-hook-service", "running", Duration::from_secs(10))
+        .await?;
+
+    // Wait for the main service output
+    harness
+        .wait_for_log_content(&config_path, "NO_HOOK_SERVICE_MSG", Duration::from_secs(10))
+        .await?;
+
+    // Small sleep to ensure hook output is flushed
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Normal logs should contain both service and hook output
+    let all_logs = harness.get_logs(&config_path, None, 100).await?;
+    all_logs.assert_success();
+    assert!(
+        all_logs.stdout_contains("NO_HOOK_PRE_START_MSG"),
+        "Normal logs should contain hook output. stdout: {}",
+        all_logs.stdout
+    );
+    assert!(
+        all_logs.stdout_contains("NO_HOOK_SERVICE_MSG"),
+        "Normal logs should contain service output. stdout: {}",
+        all_logs.stdout
+    );
+
+    // Logs with --no-hook should exclude hook output but keep service output
+    let filtered_logs = harness.get_logs_no_hooks(&config_path, None, 100).await?;
+    filtered_logs.assert_success();
+    assert!(
+        filtered_logs.stdout_contains("NO_HOOK_SERVICE_MSG"),
+        "Filtered logs should contain service output. stdout: {}",
+        filtered_logs.stdout
+    );
+    assert!(
+        !filtered_logs.stdout_contains("NO_HOOK_PRE_START_MSG"),
+        "Filtered logs should NOT contain hook output. stdout: {}",
+        filtered_logs.stdout
+    );
+
+    harness.stop_daemon().await?;
+
+    Ok(())
+}

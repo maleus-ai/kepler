@@ -621,6 +621,28 @@ impl E2eHarness {
         self.run_cli(&args).await
     }
 
+    /// Get logs for services with --no-hook flag (filters out hook logs)
+    pub async fn get_logs_no_hooks(
+        &self,
+        config_path: &Path,
+        service: Option<&str>,
+        lines: usize,
+    ) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+
+        let lines_str = lines.to_string();
+        let mut args = vec!["-f", config_str, "logs", "--tail", &lines_str, "--no-hook"];
+        let service_owned;
+        if let Some(s) = service {
+            service_owned = s.to_string();
+            args.push(&service_owned);
+        }
+
+        self.run_cli(&args).await
+    }
+
     /// Prune orphaned config state
     pub async fn prune(&self, force: bool) -> E2eResult<CommandOutput> {
         let mut args = vec!["prune"];

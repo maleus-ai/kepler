@@ -499,6 +499,124 @@ fn test_reader_from_config() {
     assert_eq!(logs.len(), 1);
 }
 
+// ── no_hooks filtering tests ──
+
+#[test]
+fn test_no_hooks_filters_hook_logs() {
+    let temp_dir = setup_test_dir();
+    let logs_dir = temp_dir.path().to_path_buf();
+
+    write_log_entries(&logs_dir, "backend", LogStream::Stdout, &["service msg"]);
+    write_log_entries(&logs_dir, "backend.pre_start", LogStream::Stdout, &["hook msg"]);
+
+    let reader = LogReader::new(logs_dir);
+
+    // Without no_hooks: both entries
+    let all = reader.tail(100, None, false);
+    assert_eq!(all.len(), 2, "Should have 2 entries without filtering");
+
+    // With no_hooks: only the regular service
+    let filtered = reader.tail(100, None, true);
+    assert_eq!(filtered.len(), 1, "Should have 1 entry with no_hooks");
+    assert_eq!(&*filtered[0].service, "backend");
+}
+
+#[test]
+fn test_no_hooks_with_service_filter() {
+    let temp_dir = setup_test_dir();
+    let logs_dir = temp_dir.path().to_path_buf();
+
+    write_log_entries(&logs_dir, "myapp", LogStream::Stdout, &["app msg"]);
+    write_log_entries(&logs_dir, "myapp.pre_start", LogStream::Stdout, &["pre_start msg"]);
+    write_log_entries(&logs_dir, "myapp.post_stop", LogStream::Stdout, &["post_stop msg"]);
+
+    let reader = LogReader::new(logs_dir);
+
+    // Filter by service + no_hooks: only the regular myapp entry
+    let filtered = reader.tail(100, Some("myapp"), true);
+    assert_eq!(filtered.len(), 1, "Should have 1 entry for myapp with no_hooks");
+    assert_eq!(&*filtered[0].service, "myapp");
+
+    // no_hooks without service filter: only non-hook entries
+    let no_hooks = reader.tail(100, None, true);
+    assert_eq!(no_hooks.len(), 1, "Should have 1 non-hook entry total");
+
+    // No filtering: all 3 entries
+    let all = reader.tail(100, None, false);
+    assert_eq!(all.len(), 3, "Should have 3 entries without filtering");
+}
+
+#[test]
+fn test_no_hooks_head() {
+    let temp_dir = setup_test_dir();
+    let logs_dir = temp_dir.path().to_path_buf();
+
+    write_log_entries(&logs_dir, "svc", LogStream::Stdout, &["regular msg"]);
+    write_log_entries(&logs_dir, "svc.pre_start", LogStream::Stdout, &["hook msg"]);
+
+    let reader = LogReader::new(logs_dir);
+
+    let filtered = reader.head(100, None, true);
+    assert_eq!(filtered.len(), 1, "head with no_hooks should exclude hooks");
+    assert_eq!(&*filtered[0].service, "svc");
+
+    let all = reader.head(100, None, false);
+    assert_eq!(all.len(), 2, "head without no_hooks should include all");
+}
+
+#[test]
+fn test_no_hooks_iter() {
+    let temp_dir = setup_test_dir();
+    let logs_dir = temp_dir.path().to_path_buf();
+
+    write_log_entries(&logs_dir, "app", LogStream::Stdout, &["app msg"]);
+    write_log_entries(&logs_dir, "app.post_stop", LogStream::Stdout, &["hook msg"]);
+
+    let reader = LogReader::new(logs_dir);
+
+    let filtered: Vec<_> = reader.iter(None, true).collect();
+    assert_eq!(filtered.len(), 1, "iter with no_hooks should exclude hooks");
+    assert_eq!(&*filtered[0].service, "app");
+
+    let all: Vec<_> = reader.iter(None, false).collect();
+    assert_eq!(all.len(), 2, "iter without no_hooks should include all");
+}
+
+#[test]
+fn test_no_hooks_get_paginated() {
+    let temp_dir = setup_test_dir();
+    let logs_dir = temp_dir.path().to_path_buf();
+
+    write_log_entries(&logs_dir, "web", LogStream::Stdout, &["web msg"]);
+    write_log_entries(&logs_dir, "web.pre_start", LogStream::Stdout, &["hook msg"]);
+
+    let reader = LogReader::new(logs_dir);
+
+    let (filtered, _) = reader.get_paginated(None, 0, 100, true);
+    assert_eq!(filtered.len(), 1, "get_paginated with no_hooks should exclude hooks");
+    assert_eq!(&*filtered[0].service, "web");
+
+    let (all, _) = reader.get_paginated(None, 0, 100, false);
+    assert_eq!(all.len(), 2, "get_paginated without no_hooks should include all");
+}
+
+#[test]
+fn test_no_hooks_only_hooks_returns_empty() {
+    let temp_dir = setup_test_dir();
+    let logs_dir = temp_dir.path().to_path_buf();
+
+    write_log_entries(&logs_dir, "svc.pre_start", LogStream::Stdout, &["hook 1"]);
+    write_log_entries(&logs_dir, "svc.post_stop", LogStream::Stdout, &["hook 2"]);
+
+    let reader = LogReader::new(logs_dir);
+
+    let filtered = reader.tail(100, None, true);
+    assert_eq!(filtered.len(), 0, "Should return empty when only hooks exist and no_hooks=true");
+
+    let all = reader.tail(100, None, false);
+    assert_eq!(all.len(), 2, "Should return 2 entries when no_hooks=false");
+}
+
 /// Test that truncation model ignores legacy rotation files.
 /// With truncation, only the main file is read - any .1, .2, etc files are ignored.
 #[test]
