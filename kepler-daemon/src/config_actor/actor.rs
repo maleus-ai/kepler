@@ -461,6 +461,9 @@ impl ConfigActor {
                 reply,
             } => {
                 let result = self.set_service_status(&service_name, status);
+                if result.is_ok() {
+                    let _ = self.save_state();
+                }
                 let _ = reply.send(result);
             }
             ConfigCommand::SetServicePid {
@@ -470,6 +473,9 @@ impl ConfigActor {
                 reply,
             } => {
                 let result = self.set_service_pid(&service_name, pid, started_at);
+                if result.is_ok() {
+                    let _ = self.save_state();
+                }
                 let _ = reply.send(result);
             }
             ConfigCommand::RecordProcessExit {
@@ -478,6 +484,9 @@ impl ConfigActor {
                 reply,
             } => {
                 let result = self.record_process_exit(&service_name, exit_code);
+                if result.is_ok() {
+                    let _ = self.save_state();
+                }
                 let _ = reply.send(result);
             }
             ConfigCommand::UpdateHealthCheck {
@@ -487,10 +496,16 @@ impl ConfigActor {
                 reply,
             } => {
                 let result = self.update_health_check(&service_name, passed, retries);
+                if let Ok(ref update) = result {
+                    if update.previous_status != update.new_status {
+                        let _ = self.save_state();
+                    }
+                }
                 let _ = reply.send(result);
             }
             ConfigCommand::MarkConfigInitialized { reply } => {
                 self.initialized = true;
+                let _ = self.save_state();
                 let _ = reply.send(Ok(()));
             }
             ConfigCommand::MarkServiceInitialized {
@@ -503,6 +518,9 @@ impl ConfigActor {
                 } else {
                     Err(DaemonError::ServiceNotFound(service_name))
                 };
+                if result.is_ok() {
+                    let _ = self.save_state();
+                }
                 let _ = reply.send(result);
             }
             ConfigCommand::IncrementRestartCount {
@@ -515,6 +533,9 @@ impl ConfigActor {
                 } else {
                     Err(DaemonError::ServiceNotFound(service_name))
                 };
+                if result.is_ok() {
+                    let _ = self.save_state();
+                }
                 let _ = reply.send(result);
             }
             ConfigCommand::ClearServiceLogs { service_name } => {
@@ -935,6 +956,11 @@ impl ConfigActor {
 
     /// Cleanup all resources when shutting down
     fn cleanup(&mut self) {
+        // Save state as safety net (in case shutdown wasn't triggered via command)
+        if let Err(e) = self.save_state() {
+            warn!("Failed to save state during cleanup: {}", e);
+        }
+
         // Cancel all health checks
         for (_, handle) in self.health_checks.drain() {
             handle.abort();

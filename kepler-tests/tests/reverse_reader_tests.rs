@@ -347,10 +347,10 @@ fn test_tail_with_main_file_multiple_entries() {
     assert_eq!(logs.len(), 4, "Should return 4 entries");
 
     // tail() returns in chronological order, so oldest of the 4 first
-    assert_eq!(logs[0].timestamp.timestamp_millis(), 7000);
-    assert_eq!(logs[1].timestamp.timestamp_millis(), 8000);
-    assert_eq!(logs[2].timestamp.timestamp_millis(), 9000);
-    assert_eq!(logs[3].timestamp.timestamp_millis(), 10000);
+    assert_eq!(logs[0].timestamp, 7000);
+    assert_eq!(logs[1].timestamp, 8000);
+    assert_eq!(logs[2].timestamp, 9000);
+    assert_eq!(logs[3].timestamp, 10000);
 }
 
 #[test]

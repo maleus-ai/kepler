@@ -287,13 +287,13 @@ fn test_iterator_preserves_metadata() {
     assert_eq!(&*logs[0].service, "my-service");
     assert_eq!(logs[0].line, "Test message");
     assert_eq!(logs[0].stream, LogStream::Stdout);
-    assert_eq!(logs[0].timestamp.timestamp_millis(), 1234567890);
+    assert_eq!(logs[0].timestamp, 1234567890);
 
     // Second log (stderr)
     assert_eq!(&*logs[1].service, "my-service");
     assert_eq!(logs[1].line, "Error message");
     assert_eq!(logs[1].stream, LogStream::Stderr);
-    assert_eq!(logs[1].timestamp.timestamp_millis(), 1234567891);
+    assert_eq!(logs[1].timestamp, 1234567891);
 }
 
 #[test]
@@ -384,7 +384,7 @@ fn test_iterator_ignores_legacy_rotation_files() {
     // Only reads from main file (truncation model ignores rotation files)
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].line, "Current");
-    assert_eq!(logs[0].timestamp.timestamp_millis(), 4000);
+    assert_eq!(logs[0].timestamp, 4000);
 }
 
 // ============================================================================

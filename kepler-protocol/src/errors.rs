@@ -7,13 +7,10 @@ use crate::protocol::MAX_MESSAGE_SIZE;
 #[derive(Debug, Error)]
 pub enum ProtocolError {
     #[error("failed to encode message: {0}")]
-    Encode(#[source] serde_json::Error),
+    Encode(#[source] bincode::Error),
 
     #[error("failed to decode message: {0}")]
-    Decode(#[source] serde_json::Error),
-
-    #[error("invalid UTF-8 in message: {0}")]
-    InvalidUtf8(#[from] std::str::Utf8Error),
+    Decode(#[source] bincode::Error),
 
     #[error("message exceeds maximum size of {MAX_MESSAGE_SIZE} bytes")]
     MessageTooLarge,

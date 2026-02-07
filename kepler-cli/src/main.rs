@@ -4,8 +4,10 @@ mod errors;
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::io::{BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{commands::Commands, commands::DaemonCommands, config::Config, errors::{CliError, Result}};
@@ -16,7 +18,7 @@ use kepler_daemon::Daemon;
 use kepler_protocol::{
     client::Client,
     errors::ClientError,
-    protocol::{ConfigStatus, LogCursorData, LogEntry, LogMode, Response, ResponseData, ServiceInfo, StartMode},
+    protocol::{ConfigStatus, CursorLogEntry, LogCursorData, LogEntry, LogMode, Response, ResponseData, ServiceInfo, StartMode},
 };
 use tracing_subscriber::EnvFilter;
 
@@ -787,119 +789,183 @@ impl FollowClient for Client {
     }
 }
 
-/// Core loop for following logs until quiescence or shutdown.
+/// Cursor streaming mode.
+#[derive(Clone, Copy, PartialEq)]
+enum StreamMode {
+    /// Read all existing logs from start, exit when done.
+    All,
+    /// Follow logs from end indefinitely.
+    Follow,
+    /// Follow logs from start, exit when all services reach terminal state.
+    /// On shutdown signal: sends stop, then polls until quiescent.
+    UntilQuiescent,
+}
+
+/// Unified cursor-based log streaming loop.
 ///
 /// Generic over the client (real or mock) and shutdown signal, enabling unit tests.
-/// `on_entry` is called for each log entry (production: prints to stdout, tests: collects).
-async fn follow_logs_loop(
+/// `on_batch` receives each batch's service table and entries for efficient output.
+async fn stream_cursor_logs(
     client: &impl FollowClient,
     config_path: &Path,
     service: Option<&str>,
+    no_hooks: bool,
+    mode: StreamMode,
     shutdown: impl Future<Output = ()>,
-    mut on_entry: impl FnMut(&LogEntry),
+    mut on_batch: impl FnMut(&[Arc<str>], &[CursorLogEntry]),
 ) -> Result<()> {
+    let from_start = mode != StreamMode::Follow;
     let mut cursor_id: Option<String> = None;
     tokio::pin!(shutdown);
     let mut stopping = false;
-
-    let mut has_more_data;
 
     loop {
         if stopping {
             // After shutdown signal: skip log reads, only poll for quiescence
             if let Ok(status_response) = client.status(Some(config_path.to_path_buf())).await {
-                if let Response::Ok {
-                    data: Some(ResponseData::ServiceStatus(services)),
-                    ..
-                } = status_response
-                {
-                    let all_terminal = !services.is_empty() && services.values().all(|info| {
-                        matches!(info.status.as_str(), "stopped" | "failed")
-                    });
-                    if all_terminal {
-                        break;
-                    }
+                if is_all_terminal(&status_response) {
+                    break;
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
 
-        let log_response = client.logs_cursor(config_path, service, cursor_id.as_deref(), true, false).await;
+        let log_response = client
+            .logs_cursor(config_path, service, cursor_id.as_deref(), from_start, no_hooks)
+            .await;
 
+        let has_more_data;
         match log_response {
-            Ok(response) => {
-                match response {
-                    Response::Ok {
-                        data: Some(ResponseData::LogCursor(LogCursorData {
-                            entries,
-                            cursor_id: new_cursor_id,
-                            has_more,
-                        })),
-                        ..
-                    } => {
-                        cursor_id = Some(new_cursor_id);
-                        has_more_data = has_more;
-                        for entry in &entries {
-                            on_entry(entry);
-                        }
-                    }
-                    Response::Error { message } => {
-                        if message.starts_with("Cursor expired or invalid") {
-                            cursor_id = None;
-                            continue;
-                        }
-                        eprintln!("Error: {}", message);
-                        break;
-                    }
-                    _ => {
-                        has_more_data = false;
+            Ok(response) => match response {
+                Response::Ok {
+                    data: Some(ResponseData::LogCursor(LogCursorData {
+                        service_table,
+                        entries,
+                        cursor_id: new_cursor_id,
+                        has_more,
+                    })),
+                    ..
+                } => {
+                    cursor_id = Some(new_cursor_id);
+                    has_more_data = has_more;
+                    if !entries.is_empty() {
+                        on_batch(&service_table, &entries);
                     }
                 }
-            }
+                Response::Error { message } => {
+                    if message.starts_with("Cursor expired or invalid") {
+                        cursor_id = None;
+                        continue;
+                    }
+                    eprintln!("Error: {}", message);
+                    break;
+                }
+                _ => {
+                    has_more_data = false;
+                }
+            },
             Err(_) => {
                 eprintln!("\nDaemon disconnected");
                 break;
             }
         }
 
-        // When caught up, check quiescence
-        if !has_more_data {
-            if let Ok(status_response) = client.status(Some(config_path.to_path_buf())).await {
-                if let Response::Ok {
-                    data: Some(ResponseData::ServiceStatus(services)),
-                    ..
-                } = status_response
-                {
-                    let all_terminal = !services.is_empty() && services.values().all(|info| {
-                        matches!(info.status.as_str(), "stopped" | "failed")
-                    });
-                    if all_terminal {
-                        break;
-                    }
+        match mode {
+            StreamMode::All => {
+                if !has_more_data {
+                    break;
                 }
             }
-        }
-
-        // Poll immediately when draining, wait 100ms when caught up
-        let delay = if has_more_data {
-            Duration::ZERO
-        } else {
-            Duration::from_millis(100)
-        };
-        tokio::select! {
-            biased;
-            _ = &mut shutdown => {
-                stopping = true;
-                eprintln!("\nGracefully stopping...");
-                let _ = client.stop(config_path.to_path_buf(), service.map(String::from), false, None).await;
-                // Next iteration enters the stopping branch
+            StreamMode::Follow => {
+                if !has_more_data {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
             }
-            _ = tokio::time::sleep(delay) => {}
+            StreamMode::UntilQuiescent => {
+                // When caught up, check quiescence
+                if !has_more_data {
+                    if let Ok(status_response) = client.status(Some(config_path.to_path_buf())).await {
+                        if is_all_terminal(&status_response) {
+                            break;
+                        }
+                    }
+                }
+
+                let delay = if has_more_data {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(100)
+                };
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown => {
+                        stopping = true;
+                        eprintln!("\nGracefully stopping...");
+                        let _ = client.stop(config_path.to_path_buf(), service.map(String::from), false, None).await;
+                    }
+                    _ = tokio::time::sleep(delay) => {}
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+fn is_all_terminal(response: &Response) -> bool {
+    if let Response::Ok {
+        data: Some(ResponseData::ServiceStatus(services)),
+        ..
+    } = response
+    {
+        !services.is_empty()
+            && services
+                .values()
+                .all(|info| matches!(info.status.as_str(), "stopped" | "failed"))
+    } else {
+        false
+    }
+}
+
+/// Write a batch of cursor log entries to stdout using BufWriter.
+fn write_cursor_batch(
+    service_table: &[Arc<str>],
+    entries: &[CursorLogEntry],
+    color_map: &mut HashMap<String, Color>,
+    cached_ts_secs: &mut i64,
+    cached_ts_str: &mut String,
+    use_color: bool,
+) {
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
+
+    for entry in entries {
+        let service_name = &service_table[entry.service_id as usize];
+        let stream_prefix = if entry.stream.is_stderr() { "err" } else { "out" };
+        let secs = entry.timestamp / 1000;
+
+        if secs != *cached_ts_secs {
+            *cached_ts_secs = secs;
+            if let Some(dt) = DateTime::<Utc>::from_timestamp_millis(entry.timestamp) {
+                let local: DateTime<Local> = dt.into();
+                cached_ts_str.clear();
+                use std::fmt::Write as FmtWrite;
+                let _ = write!(cached_ts_str, "{}", local.format("%Y-%m-%d %H:%M:%S"));
+            } else {
+                cached_ts_str.clear();
+            }
+        }
+
+        if use_color {
+            let color = get_service_color(service_name, color_map);
+            let service_label = format!("[{}: {}]", stream_prefix, service_name);
+            let colored_service = service_label.color(color);
+            let _ = writeln!(out, "{} {} | {}", cached_ts_str, colored_service, entry.line);
+        } else {
+            let _ = writeln!(out, "{} [{}: {}] | {}", cached_ts_str, stream_prefix, service_name, entry.line);
+        }
+    }
 }
 
 /// Follow logs until all services reach a terminal state (quiescent) or Ctrl+C.
@@ -911,13 +977,21 @@ async fn follow_logs_until_quiescent(
     config_path: &Path,
     service: Option<&str>,
 ) -> Result<()> {
+    let use_color = std::io::stdout().is_terminal();
     let mut color_map: HashMap<String, Color> = HashMap::new();
-    follow_logs_loop(
+    let mut cached_ts_secs: i64 = i64::MIN;
+    let mut cached_ts_str = String::new();
+
+    stream_cursor_logs(
         client,
         config_path,
         service,
+        false,
+        StreamMode::UntilQuiescent,
         async { let _ = tokio::signal::ctrl_c().await; },
-        |entry| print_log_entry(entry, &mut color_map),
+        |service_table, entries| {
+            write_cursor_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
+        },
     )
     .await
 }
@@ -966,75 +1040,36 @@ async fn handle_logs(
     }
 
     // For 'all' mode (default) and 'follow' mode, use cursor-based streaming
-    // from_start=true for 'all' mode (read from beginning)
-    // from_start=false for 'follow' mode (read from end)
-    let from_start = !follow;
-    let mut cursor_id: Option<String> = None;
+    let stream_mode = if follow { StreamMode::Follow } else { StreamMode::All };
+    let use_color = std::io::stdout().is_terminal();
+    let mut cached_ts_secs: i64 = i64::MIN;
+    let mut cached_ts_str = String::new();
 
-    loop {
-        let response = match client
-            .logs_cursor(
-                &config_path,
-                service.as_deref(),
-                cursor_id.as_deref(),
-                from_start,
-                no_hooks,
-            )
-            .await
-        {
-            Ok(resp) => resp,
-            Err(_) => {
-                eprintln!("\nDaemon disconnected");
-                break;
-            }
-        };
+    let mut total_entries: usize = 0;
+    let mut total_batches: usize = 0;
+    let wall_start = std::time::Instant::now();
 
-        match response {
-            Response::Ok {
-                data: Some(ResponseData::LogCursor(LogCursorData {
-                    entries,
-                    cursor_id: new_cursor_id,
-                    has_more,
-                })),
-                ..
-            } => {
-                cursor_id = Some(new_cursor_id);
+    stream_cursor_logs(
+        client,
+        &config_path,
+        service.as_deref(),
+        no_hooks,
+        stream_mode,
+        std::future::pending(),
+        |service_table, entries| {
+            total_batches += 1;
+            total_entries += entries.len();
+            write_cursor_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
+        },
+    )
+    .await?;
 
-                for entry in &entries {
-                    print_log_entry(entry, &mut color_map);
-                }
-
-                if follow {
-                    // Follow mode: only sleep when caught up (no more data)
-                    if !has_more {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    }
-                } else {
-                    // All mode: continue until no more entries
-                    if !has_more {
-                        break;
-                    }
-                }
-            }
-            Response::Error { message } => {
-                // Check if cursor expired (exact prefix match)
-                if message.starts_with("Cursor expired or invalid") {
-                    // Reset cursor and retry
-                    cursor_id = None;
-                    continue;
-                }
-                eprintln!("Error: {}", message);
-                std::process::exit(1);
-            }
-            _ => {
-                if !follow {
-                    // In 'all' mode with no data, we're done
-                    break;
-                }
-                // In follow mode, keep polling
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            }
-        }
+    if !follow {
+        let wall = wall_start.elapsed();
+        eprintln!(
+            "[perf] {} entries in {} batches | wall {:.2}s",
+            total_entries, total_batches, wall.as_secs_f64(),
+        );
     }
 
     Ok(())
@@ -1087,7 +1122,7 @@ fn get_service_color(service: &str, color_map: &mut HashMap<String, Color>) -> C
     color
 }
 
-fn print_log_entry(entry: &kepler_protocol::protocol::LogEntry, color_map: &mut HashMap<String, Color>) {
+fn print_log_entry(entry: &LogEntry, color_map: &mut HashMap<String, Color>) {
     let timestamp_str = entry
         .timestamp
         .and_then(DateTime::<Utc>::from_timestamp_millis)
@@ -1098,7 +1133,7 @@ fn print_log_entry(entry: &kepler_protocol::protocol::LogEntry, color_map: &mut 
         .unwrap_or_default();
 
     let color = get_service_color(&entry.service, color_map);
-    let stream_prefix = if entry.stream == "stderr" { "err" } else { "out" };
+    let stream_prefix = if entry.stream.is_stderr() { "err" } else { "out" };
     let service_label = format!("[{}: {}]", stream_prefix, entry.service);
     let colored_service = service_label.color(color);
 
@@ -1184,7 +1219,9 @@ fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use kepler_protocol::protocol::{CursorLogEntry, StreamType};
 
     type ClientResult = std::result::Result<Response, ClientError>;
 
@@ -1262,17 +1299,34 @@ mod tests {
     // ========================================================================
 
     fn cursor_response(entries: &[(&str, &str)], has_more: bool) -> ClientResult {
+        // Build service table and compact entries
+        let mut service_table: Vec<Arc<str>> = Vec::new();
+        let mut service_map: HashMap<&str, u16> = HashMap::new();
+        let compact_entries: Vec<CursorLogEntry> = entries
+            .iter()
+            .map(|(svc, line)| {
+                let service_id = match service_map.get(svc) {
+                    Some(&id) => id,
+                    None => {
+                        let id = service_table.len() as u16;
+                        service_table.push(Arc::from(*svc));
+                        service_map.insert(svc, id);
+                        id
+                    }
+                };
+                CursorLogEntry {
+                    service_id,
+                    line: line.to_string(),
+                    timestamp: 1000,
+                    stream: StreamType::Stdout,
+                }
+            })
+            .collect();
+
         Ok(Response::ok_with_data(ResponseData::LogCursor(
             LogCursorData {
-                entries: entries
-                    .iter()
-                    .map(|(svc, line)| LogEntry {
-                        service: svc.to_string(),
-                        line: line.to_string(),
-                        timestamp: Some(1000),
-                        stream: "stdout".to_string(),
-                    })
-                    .collect(),
+                service_table,
+                entries: compact_entries,
                 cursor_id: "test-cursor".to_string(),
                 has_more,
             },
@@ -1281,6 +1335,7 @@ mod tests {
 
     fn empty_cursor_response() -> Response {
         Response::ok_with_data(ResponseData::LogCursor(LogCursorData {
+            service_table: vec![],
             entries: vec![],
             cursor_id: "test-cursor".to_string(),
             has_more: false,
@@ -1317,6 +1372,13 @@ mod tests {
         std::future::pending()
     }
 
+    /// Helper: collect lines from a batch callback
+    fn collect_batch(collected: &mut Vec<String>, _service_table: &[Arc<str>], entries: &[CursorLogEntry]) {
+        for entry in entries {
+            collected.push(entry.line.clone());
+        }
+    }
+
     // ========================================================================
     // Normal cursor polling
     // ========================================================================
@@ -1332,15 +1394,11 @@ mod tests {
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        follow_logs_loop(
-            &mock,
-            &config_path,
-            None,
-            never_shutdown(),
-            |entry| collected.push(entry.line.clone()),
-        )
-        .await
-        .unwrap();
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
 
         assert_eq!(collected, vec!["line-1", "line-2", "line-3"]);
         assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 2);
@@ -1359,15 +1417,11 @@ mod tests {
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        follow_logs_loop(
-            &mock,
-            &config_path,
-            None,
-            never_shutdown(),
-            |entry| collected.push(entry.line.clone()),
-        )
-        .await
-        .unwrap();
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
 
         assert_eq!(collected, vec!["a", "b", "c"]);
         assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 3);
@@ -1389,15 +1443,11 @@ mod tests {
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        follow_logs_loop(
-            &mock,
-            &config_path,
-            None,
-            never_shutdown(),
-            |entry| collected.push(entry.line.clone()),
-        )
-        .await
-        .unwrap();
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
 
         assert_eq!(collected, vec!["a", "b"]);
         assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 2);
@@ -1426,15 +1476,11 @@ mod tests {
         let mut collected = Vec::new();
 
         // Shutdown resolves immediately — the biased select picks it up after first cursor read
-        follow_logs_loop(
-            &mock,
-            &config_path,
-            None,
-            async {},
-            |entry| collected.push(entry.line.clone()),
-        )
-        .await
-        .unwrap();
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, async {},
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
 
         assert_eq!(collected.len(), 1, "Only one cursor batch before shutdown");
         assert_eq!(collected[0], "line-0");
@@ -1463,21 +1509,18 @@ mod tests {
         let notify = std::sync::Arc::new(tokio::sync::Notify::new());
         let notify_clone = notify.clone();
 
-        // Trigger shutdown after 3 entries are collected
-        follow_logs_loop(
-            &mock,
-            &config_path,
-            None,
+        // Trigger shutdown after 3 batches are collected
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent,
             async move { notify_clone.notified().await },
-            |entry| {
-                collected.push(entry.line.clone());
+            |st, entries| {
+                collect_batch(&mut collected, st, entries);
                 if collected.len() == 3 {
                     notify.notify_one();
                 }
             },
-        )
-        .await
-        .unwrap();
+        ).await.unwrap();
 
         // 3 cursor reads consumed, then shutdown fires in select, then status poll
         assert_eq!(collected.len(), 3);
@@ -1498,15 +1541,11 @@ mod tests {
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        follow_logs_loop(
-            &mock,
-            &config_path,
-            None,
-            never_shutdown(),
-            |entry| collected.push(entry.line.clone()),
-        )
-        .await
-        .unwrap();
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
 
         assert!(collected.is_empty());
         assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 1);
@@ -1525,15 +1564,11 @@ mod tests {
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        follow_logs_loop(
-            &mock,
-            &config_path,
-            None,
-            never_shutdown(),
-            |entry| collected.push(entry.line.clone()),
-        )
-        .await
-        .unwrap();
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
 
         assert_eq!(collected, vec!["line-1"]);
         assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 2);
@@ -1548,15 +1583,11 @@ mod tests {
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        follow_logs_loop(
-            &mock,
-            &config_path,
-            None,
-            never_shutdown(),
-            |entry| collected.push(entry.line.clone()),
-        )
-        .await
-        .unwrap();
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
 
         assert!(collected.is_empty());
     }
@@ -1575,15 +1606,11 @@ mod tests {
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        follow_logs_loop(
-            &mock,
-            &config_path,
-            None,
-            never_shutdown(),
-            |entry| collected.push(entry.line.clone()),
-        )
-        .await
-        .unwrap();
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
 
         assert!(collected.is_empty());
         assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 1);
@@ -1604,15 +1631,11 @@ mod tests {
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        follow_logs_loop(
-            &mock,
-            &config_path,
-            None,
-            never_shutdown(),
-            |entry| collected.push(entry.line.clone()),
-        )
-        .await
-        .unwrap();
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
 
         assert_eq!(collected, vec!["line-1"]);
         assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 2);
@@ -1633,15 +1656,11 @@ mod tests {
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        follow_logs_loop(
-            &mock,
-            &config_path,
-            None,
-            async {},
-            |entry| collected.push(entry.line.clone()),
-        )
-        .await
-        .unwrap();
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, async {},
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
 
         assert!(mock.stop_called.load(Ordering::SeqCst));
         assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 4);

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::errors::ProtocolError;
 
@@ -13,9 +14,33 @@ pub const MAX_LINES_ONE_SHOT: usize = 10_000;
 /// Maximum entries per cursor batch (secondary cap; byte budget is the primary limit)
 pub const MAX_CURSOR_BATCH_SIZE: usize = 50_000;
 
+/// Stream type for log entries (stdout/stderr)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StreamType {
+    Stdout,
+    Stderr,
+}
+
+impl StreamType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+    pub fn is_stderr(&self) -> bool {
+        matches!(self, Self::Stderr)
+    }
+}
+
+impl std::fmt::Display for StreamType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Log reading mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
 pub enum LogMode {
     /// Read all logs chronologically using forward iterator (default)
     #[default]
@@ -28,7 +53,6 @@ pub enum LogMode {
 
 /// Start mode for service startup behavior
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum StartMode {
     /// Wait for startup cluster to be ready (default for foreground and --wait)
     #[default]
@@ -39,7 +63,6 @@ pub enum StartMode {
 
 /// Request sent from CLI to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case")]
 pub enum Request {
     /// Start service(s)
     Start {
@@ -188,15 +211,12 @@ impl Request {
 
 /// Response sent from daemon to CLI
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
     /// Successful response
     Ok {
         /// Optional message
-        #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
         /// Optional data payload
-        #[serde(skip_serializing_if = "Option::is_none")]
         data: Option<ResponseData>,
     },
     /// Error response
@@ -233,7 +253,6 @@ impl Response {
 
 /// Data payload in response
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ResponseData {
     /// Service status information for a single config
     ServiceStatus(HashMap<String, ServiceInfo>),
@@ -279,11 +298,27 @@ pub struct LogChunkData {
     pub total: Option<usize>,
 }
 
+/// Compact log entry for cursor-based streaming.
+/// Uses a u16 service index into the service_table instead of a full service name per entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorLogEntry {
+    /// Index into LogCursorData::service_table
+    pub service_id: u16,
+    /// Log line content
+    pub line: String,
+    /// Timestamp in milliseconds since Unix epoch
+    pub timestamp: i64,
+    /// Stream (stdout/stderr)
+    pub stream: StreamType,
+}
+
 /// Log entries for cursor-based streaming (all/follow modes)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogCursorData {
-    /// Log entries in this batch
-    pub entries: Vec<LogEntry>,
+    /// Service name table: CursorLogEntry::service_id indexes into this vec
+    pub service_table: Vec<Arc<str>>,
+    /// Compact log entries (service stored as u16 index)
+    pub entries: Vec<CursorLogEntry>,
     /// Cursor ID to use for next request
     pub cursor_id: String,
     /// Whether there are more entries to read (false when EOF reached for 'all' mode)
@@ -326,7 +361,7 @@ pub struct ServiceInfo {
     /// Health check failures
     pub health_check_failures: u32,
     /// Exit code (for stopped/failed services)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub exit_code: Option<i32>,
 }
 
@@ -334,13 +369,13 @@ pub struct ServiceInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     /// Service name
-    pub service: String,
+    pub service: Arc<str>,
     /// Log line content
     pub line: String,
     /// Timestamp
     pub timestamp: Option<i64>,
     /// Stream (stdout/stderr)
-    pub stream: String,
+    pub stream: StreamType,
 }
 
 /// Information about the daemon
@@ -358,17 +393,14 @@ pub struct DaemonInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestEnvelope {
     pub id: u64,
-    #[serde(flatten)]
     pub request: Request,
 }
 
 /// Server-to-client message: either a response to a request, or a pushed event
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ServerMessage {
     Response {
         id: u64,
-        #[serde(flatten)]
         response: Response,
     },
     Event {
@@ -378,42 +410,38 @@ pub enum ServerMessage {
 
 /// Server-pushed events (extensible for future use)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum ServerEvent {
     // Future: LogLine, ServiceStateChanged, etc.
 }
 
-/// Frame delimiter for messages over socket
-pub const FRAME_DELIMITER: u8 = b'\n';
-
 pub type Result<T> = std::result::Result<T, ProtocolError>;
 
-/// Encode a request envelope to bytes
+/// Encode a request envelope to length-prefixed bincode bytes
 pub fn encode_envelope(envelope: &RequestEnvelope) -> Result<Vec<u8>> {
-    let json = serde_json::to_string(envelope).map_err(ProtocolError::Encode)?;
-    let mut bytes = json.into_bytes();
-    bytes.push(FRAME_DELIMITER);
-    Ok(bytes)
+    let payload = bincode::serialize(envelope).map_err(ProtocolError::Encode)?;
+    let len = payload.len() as u32;
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend(payload);
+    Ok(frame)
 }
 
-/// Decode a request envelope from bytes
+/// Decode a request envelope from raw bincode payload (framing already stripped)
 pub fn decode_envelope(bytes: &[u8]) -> Result<RequestEnvelope> {
-    let json = std::str::from_utf8(bytes)?;
-    let envelope: RequestEnvelope = serde_json::from_str(json).map_err(ProtocolError::Decode)?;
-    Ok(envelope)
+    bincode::deserialize(bytes).map_err(ProtocolError::Decode)
 }
 
-/// Encode a server message to bytes
+/// Encode a server message to length-prefixed bincode bytes
 pub fn encode_server_message(msg: &ServerMessage) -> Result<Vec<u8>> {
-    let json = serde_json::to_string(msg).map_err(ProtocolError::Encode)?;
-    let mut bytes = json.into_bytes();
-    bytes.push(FRAME_DELIMITER);
-    Ok(bytes)
+    let payload = bincode::serialize(msg).map_err(ProtocolError::Encode)?;
+    let len = payload.len() as u32;
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend(payload);
+    Ok(frame)
 }
 
-/// Decode a server message from bytes
+/// Decode a server message from raw bincode payload (framing already stripped)
 pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage> {
-    let json = std::str::from_utf8(bytes)?;
-    let msg: ServerMessage = serde_json::from_str(json).map_err(ProtocolError::Decode)?;
-    Ok(msg)
+    bincode::deserialize(bytes).map_err(ProtocolError::Decode)
 }

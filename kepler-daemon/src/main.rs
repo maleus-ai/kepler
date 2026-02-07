@@ -197,8 +197,27 @@ async fn main() -> anyhow::Result<()> {
     // Spawn file change handler using ServiceOrchestrator
     orchestrator.clone().spawn_file_change_handler(restart_rx);
 
-    // Run server (blocks until shutdown)
-    server.run().await?;
+    // Run server — race against Ctrl+C (SIGINT)
+    tokio::select! {
+        result = server.run() => {
+            // Server stopped via Request::Shutdown (graceful shutdown already done by handler)
+            result?;
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received Ctrl+C, shutting down gracefully");
+
+            // Stop all services
+            let config_paths = registry.list_paths();
+            for config_path in config_paths {
+                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
+                    error!("Error stopping services during shutdown: {}", e);
+                }
+            }
+
+            // Shutdown all actors (triggers save_state for each)
+            registry.shutdown_all().await;
+        }
+    }
 
     // Cleanup
     info!("Daemon shutting down");
@@ -493,11 +512,53 @@ async fn handle_request(
             };
 
             // Read entries from cursor
+            let t_read = std::time::Instant::now();
             match cursor_manager.read_entries(&cursor_id, &config_path) {
                 Ok((entries, has_more)) => {
-                    let entries = entries.into_iter().map(|l| l.into()).collect();
+                    let read_ms = t_read.elapsed().as_secs_f64() * 1000.0;
+                    let entry_count = entries.len();
+
+                    let t_convert = std::time::Instant::now();
+
+                    // Build service table and compact entries with u16 service_id
+                    use kepler_protocol::protocol::CursorLogEntry;
+                    let mut service_table: Vec<Arc<str>> = Vec::new();
+                    let mut service_map: HashMap<Arc<str>, u16> = HashMap::new();
+                    let mut compact_entries = Vec::with_capacity(entries.len());
+
+                    for log_line in entries {
+                        let service_id = match service_map.get(&log_line.service) {
+                            Some(&id) => id,
+                            None => {
+                                let id = service_table.len() as u16;
+                                service_table.push(Arc::clone(&log_line.service));
+                                service_map.insert(Arc::clone(&log_line.service), id);
+                                id
+                            }
+                        };
+                        compact_entries.push(CursorLogEntry {
+                            service_id,
+                            line: log_line.line,
+                            timestamp: log_line.timestamp,
+                            stream: match log_line.stream {
+                                kepler_daemon::logs::LogStream::Stdout => kepler_protocol::protocol::StreamType::Stdout,
+                                kepler_daemon::logs::LogStream::Stderr => kepler_protocol::protocol::StreamType::Stderr,
+                            },
+                        });
+                    }
+
+                    let convert_ms = t_convert.elapsed().as_secs_f64() * 1000.0;
+
+                    if entry_count > 0 {
+                        eprintln!(
+                            "[daemon-perf] {} entries | read {:.1}ms | convert {:.1}ms | has_more={}",
+                            entry_count, read_ms, convert_ms, has_more,
+                        );
+                    }
+
                     Response::ok_with_data(ResponseData::LogCursor(LogCursorData {
-                        entries,
+                        service_table,
+                        entries: compact_entries,
                         cursor_id,
                         has_more,
                     }))

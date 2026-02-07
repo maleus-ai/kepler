@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -15,7 +15,7 @@ use tracing::debug;
 use crate::{
     errors::ClientError,
     protocol::{
-        FRAME_DELIMITER, LogMode, MAX_MESSAGE_SIZE, Request, RequestEnvelope, Response,
+        LogMode, MAX_MESSAGE_SIZE, Request, RequestEnvelope, Response,
         ServerMessage, StartMode, decode_server_message, encode_envelope,
     },
 };
@@ -58,48 +58,49 @@ impl Client {
             let _ = write_half.shutdown().await;
         });
 
-        // Reader task: reads frames from stream, dispatches to pending map
+        // Reader task: reads length-prefixed frames from stream, dispatches to pending map
         let reader_pending = pending.clone();
         let reader_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(read_half);
-            let mut line = Vec::new();
+            let mut reader = read_half;
 
             loop {
-                line.clear();
-
-                loop {
-                    let bytes_read = match reader.read_until(FRAME_DELIMITER, &mut line).await {
-                        Ok(n) => n,
-                        Err(e) => {
-                            debug!("Client reader error: {}", e);
-                            return;
-                        }
-                    };
-
-                    if bytes_read == 0 {
-                        // EOF - server disconnected
+                // Read 4-byte length header
+                let mut len_buf = [0u8; 4];
+                if let Err(e) = reader.read_exact(&mut len_buf).await {
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
                         debug!("Server disconnected (EOF)");
                         return;
                     }
+                    debug!("Client reader error: {}", e);
+                    return;
+                }
+                let msg_len = u32::from_be_bytes(len_buf) as usize;
 
-                    if line.len() > MAX_MESSAGE_SIZE {
-                        debug!("Server message exceeds maximum size");
-                        return;
-                    }
-
-                    if line.last() == Some(&FRAME_DELIMITER) {
-                        break;
-                    }
+                if msg_len > MAX_MESSAGE_SIZE {
+                    debug!("Server message exceeds maximum size");
+                    return;
                 }
 
-                // Remove delimiter
-                if line.last() == Some(&FRAME_DELIMITER) {
-                    line.pop();
+                // Read payload
+                let mut payload = vec![0u8; msg_len];
+                if let Err(e) = reader.read_exact(&mut payload).await {
+                    debug!("Client reader error: {}", e);
+                    return;
                 }
 
                 // Decode server message
-                match decode_server_message(&line) {
+                let t_decode = std::time::Instant::now();
+                match decode_server_message(&payload) {
                     Ok(ServerMessage::Response { id, response }) => {
+                        let decode_ms = t_decode.elapsed().as_secs_f64() * 1000.0;
+                        if msg_len > 100_000 {
+                            eprintln!(
+                                "[client-perf] id={} | decode {:.1}ms ({:.2} MB)",
+                                id,
+                                decode_ms,
+                                msg_len as f64 / (1024.0 * 1024.0),
+                            );
+                        }
                         if let Some((_, tx)) = reader_pending.remove(&id) {
                             let _ = tx.send(response);
                         } else {

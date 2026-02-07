@@ -11,14 +11,13 @@ use super::{LogLine, LogReader, LogStream};
 /// Entry in the priority queue for merge-sort iteration
 #[derive(Debug)]
 struct HeapEntry {
-    timestamp: i64,
     log_line: LogLine,
     source_idx: usize,
 }
 
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.timestamp == other.timestamp
+        self.log_line.timestamp == other.log_line.timestamp
     }
 }
 
@@ -33,7 +32,7 @@ impl PartialOrd for HeapEntry {
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse ordering for min-heap (smallest timestamp first)
-        other.timestamp.cmp(&self.timestamp)
+        other.log_line.timestamp.cmp(&self.log_line.timestamp)
     }
 }
 
@@ -44,12 +43,6 @@ pub struct MergedLogIterator {
     services: Vec<Arc<str>>,
     streams: Vec<LogStream>,
     heap: BinaryHeap<HeapEntry>,
-    /// Reusable line buffer to avoid allocation per read
-    line_buf: String,
-    /// File paths (needed for position export)
-    paths: Vec<PathBuf>,
-    /// Byte offset before the last read_next_into_heap() per source
-    pre_read_positions: Vec<u64>,
 }
 
 impl MergedLogIterator {
@@ -59,7 +52,6 @@ impl MergedLogIterator {
         let mut readers = Vec::with_capacity(capacity);
         let mut services: Vec<Arc<str>> = Vec::with_capacity(capacity);
         let mut streams = Vec::with_capacity(capacity);
-        let mut paths = Vec::with_capacity(capacity);
         let heap = BinaryHeap::new();
 
         for (path, service, stream) in files.into_iter() {
@@ -68,14 +60,8 @@ impl MergedLogIterator {
                 readers.push(reader);
                 services.push(Arc::from(service.as_str()));
                 streams.push(stream);
-                paths.push(path);
-            } else {
-                continue;
             }
         }
-
-        let source_count = readers.len();
-        let pre_read_positions = vec![0u64; source_count];
 
         // Initialize heap with first entry from each reader
         let mut iter = Self {
@@ -83,9 +69,6 @@ impl MergedLogIterator {
             services,
             streams,
             heap,
-            line_buf: String::with_capacity(256),
-            paths,
-            pre_read_positions,
         };
 
         for i in 0..iter.readers.len() {
@@ -107,8 +90,6 @@ impl MergedLogIterator {
         let mut readers = Vec::with_capacity(capacity);
         let mut services: Vec<Arc<str>> = Vec::with_capacity(capacity);
         let mut streams = Vec::with_capacity(capacity);
-        let mut paths = Vec::with_capacity(capacity);
-        let mut pre_read_positions = Vec::with_capacity(capacity);
         let heap = BinaryHeap::new();
 
         for (path, service, stream) in files.into_iter() {
@@ -136,8 +117,6 @@ impl MergedLogIterator {
             readers.push(reader);
             services.push(Arc::from(service.as_str()));
             streams.push(stream);
-            paths.push(path);
-            pre_read_positions.push(seek_pos);
         }
 
         let mut iter = Self {
@@ -145,9 +124,6 @@ impl MergedLogIterator {
             services,
             streams,
             heap,
-            line_buf: String::with_capacity(256),
-            paths,
-            pre_read_positions,
         };
 
         for i in 0..iter.readers.len() {
@@ -159,25 +135,19 @@ impl MergedLogIterator {
 
     fn read_next_into_heap(&mut self, source_idx: usize) {
         loop {
-            // Save position before reading
-            if let Ok(pos) = self.readers[source_idx].stream_position() {
-                self.pre_read_positions[source_idx] = pos;
-            }
-
-            self.line_buf.clear();
-            match self.readers[source_idx].read_line(&mut self.line_buf) {
+            let mut line = String::new();
+            match self.readers[source_idx].read_line(&mut line) {
                 Ok(0) => return,  // EOF
                 Ok(_) => {}
                 Err(_) => return, // I/O error
             }
 
-            if let Some(log_line) = LogReader::parse_log_line_arc(
-                &self.line_buf,
+            if let Some(log_line) = LogReader::parse_log_line_inplace(
+                line,
                 &self.services[source_idx],
                 self.streams[source_idx],
             ) {
                 self.heap.push(HeapEntry {
-                    timestamp: log_line.timestamp.timestamp_millis(),
                     log_line,
                     source_idx,
                 });
@@ -192,32 +162,22 @@ impl MergedLogIterator {
         !self.heap.is_empty()
     }
 
-    /// Export current positions for each source file.
+    /// Retry reading from all sources that previously hit EOF.
     ///
-    /// For sources with an entry still in the heap (un-yielded): returns the
-    /// position before that entry was read (so it will be re-read next time).
-    /// For exhausted sources: returns the current stream position.
-    pub fn export_positions(&mut self) -> HashMap<PathBuf, u64> {
-        // Collect which source indices still have entries in the heap
+    /// Useful for follow mode where files may grow after the iterator
+    /// was created. Sources that already have an entry in the heap are skipped.
+    pub fn retry_eof_sources(&mut self) {
         let mut in_heap = vec![false; self.readers.len()];
         for entry in self.heap.iter() {
             in_heap[entry.source_idx] = true;
         }
-
-        let mut positions = HashMap::new();
         for i in 0..self.readers.len() {
-            let pos = if in_heap[i] {
-                // This source has an un-yielded entry — return position before it
-                self.pre_read_positions[i]
-            } else {
-                // Source exhausted — return current position (EOF)
-                self.readers[i].stream_position().unwrap_or(self.pre_read_positions[i])
-            };
-            positions.insert(self.paths[i].clone(), pos);
+            if !in_heap[i] {
+                self.read_next_into_heap(i);
+            }
         }
-
-        positions
     }
+
 }
 
 impl Iterator for MergedLogIterator {

@@ -48,3 +48,6 @@ nix = { version = "0.31.1", features = [
 ] }
 
 [dev-dependencies]
+
+[profile.release]
+debug = true

@@ -4,7 +4,7 @@ compile_error!("kepler-protocol server requires a unix target for socket securit
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     sync::mpsc,
 };
@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     errors::ServerError,
     protocol::{
-        FRAME_DELIMITER, MAX_MESSAGE_SIZE, Response, ServerMessage,
+        MAX_MESSAGE_SIZE, Response, ServerMessage,
         decode_envelope, encode_server_message,
     },
 };
@@ -155,68 +155,66 @@ where
     // Spawn writer task: receives encoded bytes and writes to stream
     let writer_task = tokio::spawn(async move {
         while let Some(bytes) = write_rx.recv().await {
+            let len = bytes.len();
+            let t_write = std::time::Instant::now();
             if let Err(e) = write_half.write_all(&bytes).await {
                 warn!("Failed to write to client: {}", e);
                 break;
+            }
+            let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
+            if len > 100_000 {
+                eprintln!(
+                    "[writer-perf] socket_write {:.1}ms ({:.2} MB)",
+                    write_ms,
+                    len as f64 / (1024.0 * 1024.0),
+                );
             }
         }
         // Flush before exiting
         let _ = write_half.shutdown().await;
     });
 
-    // Reader loop: read frames, dispatch to handler
-    let mut reader = BufReader::new(read_half);
-    let mut line = Vec::new();
+    // Reader loop: read length-prefixed frames
+    let mut reader = read_half;
 
     loop {
-        line.clear();
-
-        // Read one frame (up to delimiter)
-        loop {
-            let bytes_read = reader
-                .read_until(FRAME_DELIMITER, &mut line)
-                .await
-                .map_err(ServerError::Receive)?;
-
-            if bytes_read == 0 {
-                // EOF - client disconnected
+        // Read 4-byte length header
+        let mut len_buf = [0u8; 4];
+        if let Err(e) = reader.read_exact(&mut len_buf).await {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 debug!("Client disconnected (EOF)");
                 drop(write_tx);
                 let _ = writer_task.await;
                 return Ok(());
             }
+            return Err(ServerError::Receive(e));
+        }
+        let msg_len = u32::from_be_bytes(len_buf) as usize;
 
-            // Check message size limit
-            if line.len() > MAX_MESSAGE_SIZE {
-                debug!("Request exceeds maximum message size: {} bytes", line.len());
-                let msg = ServerMessage::Response {
-                    id: 0,
-                    response: Response::error(format!(
-                        "Request exceeds maximum message size of {} bytes",
-                        MAX_MESSAGE_SIZE
-                    )),
-                };
-                if let Ok(bytes) = encode_server_message(&msg) {
-                    let _ = write_tx.send(bytes).await;
-                }
-                drop(write_tx);
-                let _ = writer_task.await;
-                return Err(ServerError::MessageTooLarge);
+        // Check message size limit
+        if msg_len > MAX_MESSAGE_SIZE {
+            debug!("Request exceeds maximum message size: {} bytes", msg_len);
+            let msg = ServerMessage::Response {
+                id: 0,
+                response: Response::error(format!(
+                    "Request exceeds maximum message size of {} bytes",
+                    MAX_MESSAGE_SIZE
+                )),
+            };
+            if let Ok(bytes) = encode_server_message(&msg) {
+                let _ = write_tx.send(bytes).await;
             }
-
-            // Check if we found the delimiter
-            if line.last() == Some(&FRAME_DELIMITER) {
-                break;
-            }
+            drop(write_tx);
+            let _ = writer_task.await;
+            return Err(ServerError::MessageTooLarge);
         }
 
-        // Remove delimiter
-        if line.last() == Some(&FRAME_DELIMITER) {
-            line.pop();
-        }
+        // Read payload
+        let mut payload = vec![0u8; msg_len];
+        reader.read_exact(&mut payload).await.map_err(ServerError::Receive)?;
 
         // Parse envelope
-        let envelope = match decode_envelope(&line) {
+        let envelope = match decode_envelope(&payload) {
             Ok(env) => env,
             Err(e) => {
                 debug!("Failed to parse request envelope: {}", e);
@@ -246,10 +244,24 @@ where
                 id: request_id,
                 response,
             };
+            let t_encode = std::time::Instant::now();
             match encode_server_message(&msg) {
                 Ok(bytes) => {
+                    let encode_ms = t_encode.elapsed().as_secs_f64() * 1000.0;
+                    let byte_len = bytes.len();
+                    let t_send = std::time::Instant::now();
                     if let Err(e) = write_tx.send(bytes).await {
                         debug!("Failed to send response for request {}: {}", request_id, e);
+                    }
+                    let send_ms = t_send.elapsed().as_secs_f64() * 1000.0;
+                    if byte_len > 100_000 {
+                        eprintln!(
+                            "[server-perf] id={} | encode {:.1}ms ({:.2} MB) | chan_send {:.1}ms",
+                            request_id,
+                            encode_ms,
+                            byte_len as f64 / (1024.0 * 1024.0),
+                            send_ms,
+                        );
                     }
                 }
                 Err(e) => {

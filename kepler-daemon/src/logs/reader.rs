@@ -1,6 +1,5 @@
 //! Stateless log reader for querying logs from disk
 
-use chrono::{TimeZone, Utc};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -293,17 +292,36 @@ impl LogReader {
     /// Note: line may contain trailing newline from read_line()
     pub fn parse_log_line_arc(line: &str, service: &Arc<str>, stream: LogStream) -> Option<LogLine> {
         let line = line.trim_end_matches('\n').trim_end_matches('\r');
-        let mut parts = line.splitn(2, '\t');
 
-        let timestamp_str = parts.next()?;
-        let content = parts.next().unwrap_or("");
-
-        let timestamp = timestamp_str.parse::<i64>().ok()?;
+        let tab_pos = memchr::memchr(b'\t', line.as_bytes())?;
+        let timestamp = line[..tab_pos].parse::<i64>().ok()?;
+        let content = &line[tab_pos + 1..];
 
         Some(LogLine {
-            service: Arc::clone(service), // Cheap: just increment reference count
+            service: Arc::clone(service),
             line: content.to_string(),
-            timestamp: Utc.timestamp_millis_opt(timestamp).single()?,
+            timestamp,
+            stream,
+        })
+    }
+
+    /// Parse a log line in-place from an owned String.
+    /// Avoids the `content.to_string()` allocation by draining the timestamp prefix.
+    pub fn parse_log_line_inplace(mut line: String, service: &Arc<str>, stream: LogStream) -> Option<LogLine> {
+        // Trim trailing newline/CR
+        if line.ends_with('\n') { line.pop(); }
+        if line.ends_with('\r') { line.pop(); }
+
+        let tab_pos = memchr::memchr(b'\t', line.as_bytes())?;
+        let timestamp = line[..tab_pos].parse::<i64>().ok()?;
+
+        // Remove timestamp prefix + tab in-place (just a memmove, no allocation)
+        line.drain(..=tab_pos);
+
+        Some(LogLine {
+            service: Arc::clone(service),
+            line,
+            timestamp,
             stream,
         })
     }

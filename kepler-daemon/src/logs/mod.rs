@@ -18,8 +18,7 @@ pub use reader::LogReader;
 pub use reverse::{ReverseLineReader, ReverseMergedLogIterator};
 pub use writer::BufferedLogWriter;
 
-use chrono::{DateTime, Utc};
-use kepler_protocol::protocol::LogEntry;
+use kepler_protocol::protocol::{LogEntry, StreamType};
 use std::sync::Arc;
 
 /// Default maximum bytes to read when tailing logs (10MB)
@@ -53,7 +52,8 @@ pub struct LogLine {
     /// Service name (Arc for cheap cloning when reading many lines from same service)
     pub service: Arc<str>,
     pub line: String,
-    pub timestamp: DateTime<Utc>,
+    /// Timestamp in milliseconds since Unix epoch (raw i64, avoids chrono in hot path)
+    pub timestamp: i64,
     pub stream: LogStream,
 }
 
@@ -102,10 +102,13 @@ impl std::fmt::Display for LogStream {
 impl From<LogLine> for LogEntry {
     fn from(line: LogLine) -> Self {
         LogEntry {
-            service: line.service.to_string(),
+            service: line.service,
             line: line.line,
-            timestamp: Some(line.timestamp.timestamp_millis()),
-            stream: line.stream.as_str().to_string(),
+            timestamp: Some(line.timestamp),
+            stream: match line.stream {
+                LogStream::Stdout => StreamType::Stdout,
+                LogStream::Stderr => StreamType::Stderr,
+            },
         }
     }
 }
@@ -113,10 +116,13 @@ impl From<LogLine> for LogEntry {
 impl From<&LogLine> for LogEntry {
     fn from(line: &LogLine) -> Self {
         LogEntry {
-            service: line.service.to_string(),
+            service: Arc::clone(&line.service),
             line: line.line.clone(),
-            timestamp: Some(line.timestamp.timestamp_millis()),
-            stream: line.stream.as_str().to_string(),
+            timestamp: Some(line.timestamp),
+            stream: match line.stream {
+                LogStream::Stdout => StreamType::Stdout,
+                LogStream::Stderr => StreamType::Stderr,
+            },
         }
     }
 }

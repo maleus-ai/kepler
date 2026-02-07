@@ -24,3 +24,6 @@ colored = "2"
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["full", "process", "test-util"] }
+
+[profile.release]
+debug = true

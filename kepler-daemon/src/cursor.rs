@@ -5,9 +5,9 @@
 //! reading, allowing efficient incremental reads without re-scanning files.
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -19,21 +19,14 @@ use kepler_protocol::protocol::{MAX_CURSOR_BATCH_SIZE, MAX_MESSAGE_SIZE};
 /// Leaves headroom for the Response envelope JSON overhead.
 const CURSOR_RESPONSE_BUDGET: usize = MAX_MESSAGE_SIZE * 8 / 10;
 
-/// State for a single cursor
-#[derive(Debug, Clone)]
+/// State for a single cursor — holds the iterator with open file handles.
 pub struct CursorState {
-    /// File path -> byte offset
-    positions: HashMap<PathBuf, u64>,
-    /// Service filter (None = all services)
-    service_filter: Option<String>,
-    /// Whether to exclude hook log files
-    no_hooks: bool,
+    /// Persistent iterator that keeps file handles open across batches
+    iterator: MergedLogIterator,
     /// Last time this cursor was polled (for TTL)
     last_polled: Instant,
     /// Config this cursor belongs to (for validation)
     config_path: PathBuf,
-    /// Logs directory for this cursor
-    logs_dir: PathBuf,
 }
 
 /// Error types for cursor operations
@@ -86,10 +79,12 @@ fn generate_cursor_id() -> String {
 /// Manages server-side cursors for log streaming.
 ///
 /// Cursors are stored at the daemon level (not per-config) to centralize TTL cleanup.
-/// Each cursor tracks file positions for efficient incremental reads.
+/// Each cursor holds a `MergedLogIterator` with open file handles, wrapped in
+/// `Arc<Mutex<>>` so the DashMap shard lock is held only for an Arc clone (~ns),
+/// and all file I/O happens under the per-cursor Mutex.
 pub struct CursorManager {
-    /// Map of cursor ID -> cursor state
-    cursors: DashMap<String, CursorState>,
+    /// Map of cursor ID -> cursor state (Arc<Mutex<>> for per-cursor locking)
+    cursors: DashMap<String, Arc<Mutex<CursorState>>>,
     /// Time-to-live for cursors (based on last poll time)
     ttl: Duration,
 }
@@ -119,37 +114,39 @@ impl CursorManager {
     ) -> String {
         let cursor_id = generate_cursor_id();
 
-        let mut positions = HashMap::new();
+        let reader = LogReader::new(logs_dir);
+        let files = reader.collect_log_files(service.as_deref(), no_hooks);
 
-        if !from_start {
+        let iterator = if from_start {
+            MergedLogIterator::new(files)
+        } else {
             // For follow mode, start at end of existing files
-            let reader = LogReader::new(logs_dir.clone());
-            let files = reader.collect_log_files(service.as_deref(), no_hooks);
-
-            for (path, _service, _stream) in files {
-                if let Ok(file) = File::open(&path) {
-                    if let Ok(metadata) = file.metadata() {
-                        positions.insert(path, metadata.len());
-                    }
+            let mut positions = HashMap::new();
+            for (path, _, _) in &files {
+                if let Ok(metadata) = std::fs::metadata(path) {
+                    positions.insert(path.clone(), metadata.len());
                 }
             }
-        }
-        // For from_start=true, positions is empty → all files start at offset 0
+            MergedLogIterator::with_positions(files, &positions)
+        };
 
-        let state = CursorState {
-            positions,
-            service_filter: service,
-            no_hooks,
+        let state = Arc::new(Mutex::new(CursorState {
+            iterator,
             last_polled: Instant::now(),
             config_path,
-            logs_dir,
-        };
+        }));
 
         self.cursors.insert(cursor_id.clone(), state);
         cursor_id
     }
 
-    /// Read entries using a cursor, updating positions.
+    /// Read entries using a cursor, iterating in-place.
+    ///
+    /// Locking protocol:
+    /// 1. DashMap read lock on shard (shared, brief) → clone Arc
+    /// 2. Drop DashMap Ref → shard unlocked
+    /// 3. Per-cursor Mutex lock → file I/O
+    /// 4. Drop MutexGuard → cursor unlocked
     ///
     /// Returns (entries, has_more) where has_more indicates if there's more data to read.
     pub fn read_entries(
@@ -157,61 +154,41 @@ impl CursorManager {
         cursor_id: &str,
         config_path: &Path,
     ) -> Result<(Vec<crate::logs::LogLine>, bool), CursorError> {
-        // Phase 1: Lock, validate, clone state, drop lock
-        let (positions, service_filter, no_hooks, logs_dir) = {
-            let mut cursor = self
-                .cursors
-                .get_mut(cursor_id)
-                .ok_or_else(|| CursorError::CursorExpired(cursor_id.to_string()))?;
+        // Clone Arc, then DashMap Ref is dropped → shard unlocked
+        let arc = self
+            .cursors
+            .get(cursor_id)
+            .ok_or_else(|| CursorError::CursorExpired(cursor_id.to_string()))?
+            .clone();
 
-            // Validate config path
-            if cursor.config_path != config_path {
-                return Err(CursorError::CursorConfigMismatch {
-                    cursor_config: cursor.config_path.clone(),
-                    requested_config: config_path.to_path_buf(),
-                });
-            }
+        let mut cursor = arc.lock().unwrap();
 
-            // Update last polled time
-            cursor.last_polled = Instant::now();
+        // Validate config path
+        if cursor.config_path != config_path {
+            return Err(CursorError::CursorConfigMismatch {
+                cursor_config: cursor.config_path.clone(),
+                requested_config: config_path.to_path_buf(),
+            });
+        }
 
-            // Clone what we need and drop the lock
-            (
-                cursor.positions.clone(),
-                cursor.service_filter.clone(),
-                cursor.no_hooks,
-                cursor.logs_dir.clone(),
-            )
-        }; // RefMut dropped here
+        cursor.last_polled = Instant::now();
 
-        // Phase 2: File I/O without any lock
-        let reader = LogReader::new(logs_dir);
-        let files = reader.collect_log_files(service_filter.as_deref(), no_hooks);
-
-        let mut iter = MergedLogIterator::with_positions(files, &positions);
+        // Retry sources that previously hit EOF (picks up appended data in follow mode)
+        cursor.iterator.retry_eof_sources();
 
         let mut entries = Vec::with_capacity(MAX_CURSOR_BATCH_SIZE.min(8_000));
         let mut estimated_size: usize = 0;
 
-        for log_line in iter.by_ref() {
-            // Estimate JSON size: ~64 bytes overhead + service name + line content
-            estimated_size += 64 + log_line.service.len() + log_line.line.len();
+        for log_line in cursor.iterator.by_ref() {
+            // Estimate bincode size: ~20 bytes overhead + service name + line content
+            estimated_size += 20 + log_line.service.len() + log_line.line.len();
             entries.push(log_line);
             if entries.len() >= MAX_CURSOR_BATCH_SIZE || estimated_size >= CURSOR_RESPONSE_BUDGET {
                 break;
             }
         }
 
-        let has_more = iter.has_more();
-        let new_positions = iter.export_positions();
-
-        // Phase 3: Lock again, write positions back
-        // If cursor was removed between phases (by cleanup_stale), silently discard
-        if let Some(mut cursor) = self.cursors.get_mut(cursor_id) {
-            cursor.positions = new_positions;
-            cursor.last_polled = Instant::now();
-        }
-
+        let has_more = cursor.iterator.has_more();
         Ok((entries, has_more))
     }
 
@@ -219,8 +196,10 @@ impl CursorManager {
     /// Called periodically by a background task.
     pub fn cleanup_stale(&self) {
         let now = Instant::now();
-        self.cursors
-            .retain(|_id, state| now.duration_since(state.last_polled) < self.ttl);
+        self.cursors.retain(|_id, arc| {
+            let cursor = arc.lock().unwrap();
+            now.duration_since(cursor.last_polled) < self.ttl
+        });
     }
 }
 
@@ -283,11 +262,11 @@ mod tests {
         // Budget overshoot is at most one entry
         let estimated: usize = entries
             .iter()
-            .map(|e| 64 + e.service.len() + e.line.len())
+            .map(|e| 20 + e.service.len() + e.line.len())
             .sum();
         let max_entry = entries
             .iter()
-            .map(|e| 64 + e.service.len() + e.line.len())
+            .map(|e| 20 + e.service.len() + e.line.len())
             .max()
             .unwrap();
         assert!(
@@ -364,11 +343,11 @@ mod tests {
             if entries.len() > 1 {
                 let batch_size: usize = entries
                     .iter()
-                    .map(|e| 64 + e.service.len() + e.line.len())
+                    .map(|e| 20 + e.service.len() + e.line.len())
                     .sum();
                 let max_entry = entries
                     .iter()
-                    .map(|e| 64 + e.service.len() + e.line.len())
+                    .map(|e| 20 + e.service.len() + e.line.len())
                     .max()
                     .unwrap();
                 assert!(

@@ -150,14 +150,13 @@ impl ReverseLineReader {
 /// Entry in the max-heap (newest timestamp first)
 #[derive(Debug)]
 struct MaxHeapEntry {
-    timestamp: i64,
     log_line: LogLine,
     source_idx: usize,
 }
 
 impl PartialEq for MaxHeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.timestamp == other.timestamp
+        self.log_line.timestamp == other.log_line.timestamp
     }
 }
 
@@ -172,7 +171,7 @@ impl PartialOrd for MaxHeapEntry {
 impl Ord for MaxHeapEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Normal ordering for max-heap (largest timestamp first)
-        self.timestamp.cmp(&other.timestamp)
+        self.log_line.timestamp.cmp(&other.log_line.timestamp)
     }
 }
 
@@ -250,7 +249,6 @@ impl ReverseMergedLogIterator {
                         source.stream,
                     ) {
                         return Some(MaxHeapEntry {
-                            timestamp: log_line.timestamp.timestamp_millis(),
                             log_line,
                             source_idx,
                         });

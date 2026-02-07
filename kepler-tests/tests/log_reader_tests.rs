@@ -427,8 +427,8 @@ fn test_log_line_metadata() {
 
     // Timestamp should be recent (within last minute)
     let now = chrono::Utc::now();
-    let diff = now.signed_duration_since(log.timestamp);
-    assert!(diff.num_seconds() < 60, "Timestamp should be recent");
+    let diff_ms = now.timestamp_millis() - log.timestamp;
+    assert!(diff_ms < 60_000, "Timestamp should be recent");
 }
 
 #[test]
@@ -645,16 +645,16 @@ fn test_truncation_ignores_legacy_rotation_files() {
 
     // Verify chronological order from main file only
     assert_eq!(logs[0].line, "Entry 1");
-    assert_eq!(logs[0].timestamp.timestamp_millis(), 3000);
+    assert_eq!(logs[0].timestamp, 3000);
 
     assert_eq!(logs[1].line, "Entry 2");
-    assert_eq!(logs[1].timestamp.timestamp_millis(), 4000);
+    assert_eq!(logs[1].timestamp, 4000);
 
     assert_eq!(logs[2].line, "Entry 3");
-    assert_eq!(logs[2].timestamp.timestamp_millis(), 5000);
+    assert_eq!(logs[2].timestamp, 5000);
 
     assert_eq!(logs[3].line, "Entry 4");
-    assert_eq!(logs[3].timestamp.timestamp_millis(), 6000);
+    assert_eq!(logs[3].timestamp, 6000);
 }
 
 /// Test that multiple services are merged chronologically.
@@ -708,18 +708,18 @@ fn test_multi_service_chronological_merge() {
             i, exp_line, all_logs[i].line
         );
         assert_eq!(
-            all_logs[i].timestamp.timestamp_millis(), *exp_ts,
+            all_logs[i].timestamp, *exp_ts,
             "Entry {} timestamp mismatch: expected {}, got {}",
-            i, exp_ts, all_logs[i].timestamp.timestamp_millis()
+            i, exp_ts, all_logs[i].timestamp
         );
     }
 
     // Verify filtering still works correctly
     let svc_a_only = reader.tail(100, Some("service-a"), false);
     assert_eq!(svc_a_only.len(), 3);
-    assert_eq!(svc_a_only[0].timestamp.timestamp_millis(), 1000);
-    assert_eq!(svc_a_only[1].timestamp.timestamp_millis(), 3000);
-    assert_eq!(svc_a_only[2].timestamp.timestamp_millis(), 5000);
+    assert_eq!(svc_a_only[0].timestamp, 1000);
+    assert_eq!(svc_a_only[1].timestamp, 3000);
+    assert_eq!(svc_a_only[2].timestamp, 5000);
 }
 
 /// Test truncation with repeated writes to ensure data integrity
