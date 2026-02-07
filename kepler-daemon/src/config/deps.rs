@@ -17,6 +17,115 @@ pub enum DependencyCondition {
     ServiceHealthy,
     /// Service completed successfully (exited with code 0)
     ServiceCompletedSuccessfully,
+    /// Service became unhealthy (was healthy before, requires healthcheck)
+    ServiceUnhealthy,
+    /// Service failed (exited with non-zero code)
+    ServiceFailed,
+    /// Service stopped (exited normally or failed)
+    ServiceStopped,
+}
+
+/// A single entry in an exit code filter — either a range string or a single integer
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(untagged)]
+enum ExitCodeEntry {
+    Range(String),
+    Single(i32),
+}
+
+/// A parsed exit code range (inclusive on both ends)
+#[derive(Debug, Clone)]
+pub struct ExitCodeRange {
+    pub start: i32,
+    pub end: i32,
+}
+
+/// Filter for matching exit codes — a list of ranges/single values
+#[derive(Debug, Clone, Default)]
+pub struct ExitCodeFilter(pub Vec<ExitCodeRange>);
+
+impl ExitCodeFilter {
+    /// Returns true if the given code matches any range in the filter.
+    /// If the filter is empty (no ranges specified), matches any code.
+    pub fn matches(&self, code: i32) -> bool {
+        if self.0.is_empty() {
+            return true;
+        }
+        self.0.iter().any(|r| code >= r.start && code <= r.end)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl serde::Serialize for ExitCodeFilter {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for range in &self.0 {
+            if range.start == range.end {
+                seq.serialize_element(&ExitCodeEntry::Single(range.start))?;
+            } else {
+                seq.serialize_element(&ExitCodeEntry::Range(format!(
+                    "{}:{}",
+                    range.start, range.end
+                )))?;
+            }
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ExitCodeFilter {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries: Vec<ExitCodeEntry> = Vec::deserialize(deserializer)?;
+        let mut ranges = Vec::with_capacity(entries.len());
+
+        for entry in entries {
+            match entry {
+                ExitCodeEntry::Single(n) => {
+                    ranges.push(ExitCodeRange { start: n, end: n });
+                }
+                ExitCodeEntry::Range(s) => {
+                    let parts: Vec<&str> = s.splitn(2, ':').collect();
+                    if parts.len() != 2 {
+                        return Err(serde::de::Error::custom(format!(
+                            "invalid exit code range '{}': expected 'start:end'",
+                            s
+                        )));
+                    }
+                    let start: i32 = parts[0].trim().parse().map_err(|_| {
+                        serde::de::Error::custom(format!(
+                            "invalid exit code range '{}': start is not a valid integer",
+                            s
+                        ))
+                    })?;
+                    let end: i32 = parts[1].trim().parse().map_err(|_| {
+                        serde::de::Error::custom(format!(
+                            "invalid exit code range '{}': end is not a valid integer",
+                            s
+                        ))
+                    })?;
+                    if start > end {
+                        return Err(serde::de::Error::custom(format!(
+                            "invalid exit code range '{}': start ({}) > end ({})",
+                            s, start, end
+                        )));
+                    }
+                    ranges.push(ExitCodeRange { start, end });
+                }
+            }
+        }
+
+        Ok(ExitCodeFilter(ranges))
+    }
 }
 
 /// Configuration for a single dependency (Docker Compose compatible)
@@ -47,6 +156,27 @@ pub struct DependencyConfig {
     /// When true, if the dependency is restarted, this service will also be restarted
     #[serde(default)]
     pub restart: bool,
+    /// Optional exit code filter for service_failed and service_stopped conditions
+    #[serde(default, skip_serializing_if = "ExitCodeFilter::is_empty")]
+    pub exit_code: ExitCodeFilter,
+    /// Whether to wait for this dependency during --wait/startup.
+    /// None = use condition default (startup conditions = true, deferred = false)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<bool>,
+}
+
+impl DependencyCondition {
+    /// Whether this condition naturally resolves during startup.
+    /// Startup conditions: service_started, service_healthy, service_completed_successfully
+    /// Deferred conditions: service_unhealthy, service_failed, service_stopped
+    pub fn is_startup_condition(&self) -> bool {
+        matches!(
+            self,
+            DependencyCondition::ServiceStarted
+                | DependencyCondition::ServiceHealthy
+                | DependencyCondition::ServiceCompletedSuccessfully
+        )
+    }
 }
 
 /// A dependency entry - either simple (just a name) or extended (with config)

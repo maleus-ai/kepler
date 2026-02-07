@@ -153,8 +153,9 @@ services:
 
 ```bash
 kepler daemon start -d   # Start daemon in background
-kepler start             # Start services and follow logs (Ctrl+C to stop)
-kepler start -d          # Start services and return immediately (detached)
+kepler start             # Start services, follow logs (Ctrl+C to stop)
+kepler start -d          # Return immediately, startup runs in background
+kepler start -d --wait   # Block until startup cluster ready, then return
 ```
 
 **3. Monitor and manage:**
@@ -188,11 +189,11 @@ Commands that operate on services (require config):
 
 | Command | Description |
 |---------|-------------|
-| `kepler start [-d] [service]` | Start services, follow logs (Ctrl+C stops). `-d` to detach |
+| `kepler start [-d [--wait [--timeout T]]] [service]` | Start services. Default: follow logs until quiescent (Ctrl+C stops). `-d` detaches immediately. `-d --wait` blocks until startup cluster ready |
 | `kepler stop [-s SIGNAL] [--clean] [service]` | Stop services. Optional `--signal` (default: SIGTERM) |
-| `kepler restart [-d] [services...]` | Restart services, follow logs (Ctrl+C stops). `-d` to detach |
-| `kepler recreate [-d]` | Re-bake config, clear state, start fresh, follow logs (Ctrl+C stops). `-d` to detach |
-| `kepler ps [--all]` | List services and states (`--all` for all loaded configs) |
+| `kepler restart [-d [--wait [--timeout T]]] [services...]` | Restart services, follow logs (Ctrl+C stops). `-d` to detach. `-d --wait` blocks until complete |
+| `kepler recreate [-d [--wait [--timeout T]]]` | Re-bake config, clear state, start fresh, follow logs (Ctrl+C stops). `-d` to detach. `-d --wait` blocks until complete |
+| `kepler ps [--all]` | List services and states with exit codes (`--all` for all loaded configs) |
 | `kepler logs [--follow] [--head N\|--tail N] [--no-hook] [service]` | View logs |
 | `kepler prune [--force] [--dry-run]` | Prune stopped/orphaned config state directories |
 
@@ -202,7 +203,9 @@ Commands that operate on services (require config):
 |--------|-------------|
 | `-f, --file <FILE>` | Config file path (default: `kepler.yaml`, also accepts `kepler.yml`) |
 | `-v, --verbose` | Enable verbose output |
-| `-d, --detach` | Start services and return immediately (don't follow logs) |
+| `-d, --detach` | Start services and return immediately (don't follow logs, don't wait for dependencies) |
+| `--wait` | Block until startup cluster is ready, then return (requires `-d`; deferred services continue in background) |
+| `--timeout <DURATION>` | Timeout for `--wait` mode (e.g., `30s`, `5m`). Requires `--wait` |
 | `-s, --signal <SIGNAL>` | Signal to send on stop (e.g., `SIGKILL`, `TERM`, `9`). Default: SIGTERM |
 | `--clean` | Run cleanup hooks after stopping |
 
@@ -215,6 +218,7 @@ Commands that operate on services (require config):
 ```yaml
 kepler:
   sys_env: clear         # Global sys_env policy (clear or inherit), default: clear
+  timeout: 30s           # Global default timeout for dependency waits
   logs:
     buffer_size: 16384   # 16KB buffer for better write throughput
     max_size: "50MB"     # Truncate logs when they exceed this size
@@ -359,16 +363,47 @@ depends_on:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `condition` | `string` | `service_started` | When to consider dependency ready |
-| `timeout` | `duration` | none | Max time to wait for condition |
+| `timeout` | `duration` | global | Max time to wait for condition (falls back to `kepler.timeout`) |
 | `restart` | `bool` | `false` | Restart this service when dependency restarts |
+| `exit_code` | `list` | none | Exit code filter for `service_failed`/`service_stopped` (e.g. `[5, '1:10']`) |
+| `wait` | `bool` | condition default | Override whether `--wait`/foreground blocks on this dependency (see Startup vs Deferred below) |
 
 **Dependency conditions:**
 
-| Condition | Description |
-|-----------|-------------|
-| `service_started` | Dependency status is Running, Healthy, or Unhealthy (default) |
-| `service_healthy` | Dependency status is Healthy (requires healthcheck) |
-| `service_completed_successfully` | Dependency exited with code 0 |
+| Condition | Default wait | Description |
+|-----------|-------------|-------------|
+| `service_started` | **startup** | Dependency status is Running, Healthy, or Unhealthy (default) |
+| `service_healthy` | **startup** | Dependency status is Healthy (requires healthcheck) |
+| `service_completed_successfully` | **startup** | Dependency exited with code 0 |
+| `service_unhealthy` | **deferred** | Dependency was Healthy then became Unhealthy (requires healthcheck) |
+| `service_failed` | **deferred** | Dependency exited with non-zero code. Optional `exit_code` filter |
+| `service_stopped` | **deferred** | Dependency is Stopped or Failed. Optional `exit_code` filter |
+
+**Startup vs Deferred conditions:**
+
+Conditions are classified as **startup** (naturally resolved during startup) or **deferred** (reactive, waiting for transitions). This affects how `start`, `start --wait`, and `start -d` behave:
+
+| Flags | Blocks until | Then |
+|-------|-------------|------|
+| `start` (no flags) | All services quiescent | Follow logs, Ctrl+C stops all and waits |
+| `start -d` | Immediately | Returns |
+| `start -d --wait` | Startup cluster ready | Returns (deferred continue in background) |
+| `start -d --wait --timeout 30s` | Startup cluster ready OR timeout | Returns |
+
+A service is in the **startup cluster** if all its dependency edges are startup dependencies and all its dependency targets are also in the startup cluster. This propagates transitively.
+
+**Foreground quiescence:** In foreground mode (`start` with no flags), the CLI follows logs and exits automatically when all services reach a terminal state (stopped or failed). If a deferred service's dependency is permanently unsatisfied (the dependency has stopped and won't restart), the deferred service is marked as failed so the CLI can exit cleanly.
+
+**Same pattern for `restart` and `recreate`:** Both commands support the same `-d`, `-d --wait`, and `-d --wait --timeout` flags. Without `-d`, they follow logs until quiescent. With `-d --wait`, they block until the operation completes.
+
+You can override the default classification per dependency edge with `wait: true/false`:
+
+```yaml
+depends_on:
+  long_batch_job:
+    condition: service_completed_successfully
+    wait: false   # Don't block --wait for this
+```
 
 **Restart propagation:**
 

@@ -1,0 +1,31 @@
+# Test depends_on with service_unhealthy condition
+# Alert should wait for monitor to become healthy then transition to unhealthy
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  monitor:
+    command: ["sh", "-c", "echo MONITOR_STARTED; sleep 300"]
+    healthcheck:
+      # Healthcheck passes for first ~2s (file doesn't exist yet), then fails
+      # We create a marker file after the service becomes healthy
+      test: ["sh", "-c", "test ! -f {{MARKER_PATH}}"]
+      interval: 500ms
+      timeout: 1s
+      retries: 1
+      start_period: 0s
+    hooks:
+      post_healthcheck_success:
+        run: "sleep 1; touch {{MARKER_PATH}}"
+    logs:
+      timestamp: true
+
+  alert:
+    command: ["sh", "-c", "echo ALERT_STARTED; sleep 300"]
+    depends_on:
+      monitor:
+        condition: service_unhealthy
+    logs:
+      timestamp: true

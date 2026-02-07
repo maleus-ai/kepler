@@ -1,0 +1,21 @@
+# Test depends_on with service_failed condition
+# Handler should wait for worker to fail (exit non-zero) before starting
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  worker:
+    command: ["sh", "-c", "echo WORKER_STARTED; sleep 0.5; echo WORKER_FAILING; exit 1"]
+    restart: no
+    logs:
+      timestamp: true
+
+  handler:
+    command: ["sh", "-c", "echo HANDLER_STARTED; sleep 300"]
+    depends_on:
+      worker:
+        condition: service_failed
+    logs:
+      timestamp: true

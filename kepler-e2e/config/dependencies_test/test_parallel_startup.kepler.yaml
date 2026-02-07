@@ -1,0 +1,37 @@
+# Test that services at the same dependency level start in parallel
+# root has no deps (level 0)
+# worker-a, worker-b, worker-c all depend on root (level 1)
+# aggregator depends on all three workers (level 2)
+#
+# Each worker sleeps 3s then echoes a marker. If parallel, all markers
+# appear after ~3s total. If sequential, it would take ~9s.
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  root:
+    command: ["sh", "-c", "echo ROOT_STARTED; sleep 300"]
+
+  worker-a:
+    command: ["sh", "-c", "sleep 3; echo WORKER_A_DONE; sleep 300"]
+    depends_on:
+      - root
+
+  worker-b:
+    command: ["sh", "-c", "sleep 3; echo WORKER_B_DONE; sleep 300"]
+    depends_on:
+      - root
+
+  worker-c:
+    command: ["sh", "-c", "sleep 3; echo WORKER_C_DONE; sleep 300"]
+    depends_on:
+      - root
+
+  aggregator:
+    command: ["sh", "-c", "echo AGGREGATOR_STARTED; sleep 300"]
+    depends_on:
+      - worker-a
+      - worker-b
+      - worker-c

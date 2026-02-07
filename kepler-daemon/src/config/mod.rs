@@ -15,7 +15,7 @@ mod lua;
 mod resources;
 mod restart;
 
-pub use deps::{DependencyCondition, DependencyConfig, DependencyEntry, DependsOn, DependsOnFormat};
+pub use deps::{DependencyCondition, DependencyConfig, DependencyEntry, DependsOn, DependsOnFormat, ExitCodeFilter};
 pub use duration::{format_duration, parse_duration};
 pub use expand::resolve_sys_env;
 pub use health::HealthCheck;
@@ -27,8 +27,13 @@ pub use restart::{RestartConfig, RestartPolicy};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 use crate::errors::{DaemonError, Result};
+
+fn default_effective_wait() -> bool {
+    true
+}
 
 /// Load environment variables from an env_file.
 /// Returns an empty HashMap if the file doesn't exist or can't be parsed.
@@ -144,6 +149,16 @@ pub struct KeplerGlobalConfig {
     /// Global hooks that run at daemon lifecycle events
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<GlobalHooks>,
+
+    /// Global default timeout for dependency waits.
+    /// Used as fallback when a dependency doesn't specify its own timeout.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "duration::deserialize_optional_duration",
+        serialize_with = "duration::serialize_optional_duration"
+    )]
+    pub timeout: Option<std::time::Duration>,
 }
 
 /// Root configuration structure
@@ -196,6 +211,14 @@ pub struct ServiceConfig {
     /// Resource limits for the process
     #[serde(default)]
     pub limits: Option<ResourceLimits>,
+    /// Whether to wait for this service during startup (--wait mode).
+    /// None = auto-compute from dependencies (propagation algorithm)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<bool>,
+    /// Computed effective wait value. True = startup cluster, False = deferred.
+    /// Resolved by resolve_effective_wait() after config validation.
+    #[serde(skip, default = "default_effective_wait")]
+    pub effective_wait: bool,
 }
 
 impl KeplerConfig {
@@ -252,6 +275,9 @@ impl KeplerConfig {
 
         // Validate the config
         config.validate(path)?;
+
+        // Resolve effective_wait for each service based on dependency graph
+        crate::deps::resolve_effective_wait(&mut config.services)?;
 
         Ok(config)
     }
@@ -346,6 +372,22 @@ impl KeplerConfig {
                         "Service '{}': depends on '{}' which is not defined",
                         name, dep
                     ));
+                }
+            }
+
+            // Warn if exit_code is used with conditions that don't support it
+            for (dep_name, dep_config) in service.depends_on.iter() {
+                if !dep_config.exit_code.is_empty() {
+                    match dep_config.condition {
+                        DependencyCondition::ServiceFailed | DependencyCondition::ServiceStopped => {}
+                        _ => {
+                            warn!(
+                                "Service '{}': exit_code filter on dependency '{}' has no effect with condition '{:?}' \
+                                 (only service_failed and service_stopped support exit_code filtering)",
+                                name, dep_name, dep_config.condition
+                            );
+                        }
+                    }
                 }
             }
 
@@ -731,5 +773,185 @@ services:
             cache_entry.unwrap().1.condition,
             DependencyCondition::ServiceHealthy
         );
+    }
+
+    #[test]
+    fn test_depends_on_service_unhealthy_condition() {
+        let yaml = r#"
+services:
+  monitor:
+    command: ["./monitor"]
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+  alert:
+    command: ["./alert"]
+    depends_on:
+      monitor:
+        condition: service_unhealthy
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let alert = config.services.get("alert").unwrap();
+        let dep_config = alert.depends_on.get("monitor").unwrap();
+        assert_eq!(dep_config.condition, DependencyCondition::ServiceUnhealthy);
+    }
+
+    #[test]
+    fn test_depends_on_service_failed_condition() {
+        let yaml = r#"
+services:
+  worker:
+    command: ["./worker"]
+  handler:
+    command: ["./handler"]
+    depends_on:
+      worker:
+        condition: service_failed
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let handler = config.services.get("handler").unwrap();
+        let dep_config = handler.depends_on.get("worker").unwrap();
+        assert_eq!(dep_config.condition, DependencyCondition::ServiceFailed);
+        assert!(dep_config.exit_code.is_empty());
+    }
+
+    #[test]
+    fn test_depends_on_service_stopped_condition() {
+        let yaml = r#"
+services:
+  worker:
+    command: ["./worker"]
+  cleanup:
+    command: ["./cleanup"]
+    depends_on:
+      worker:
+        condition: service_stopped
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let cleanup = config.services.get("cleanup").unwrap();
+        let dep_config = cleanup.depends_on.get("worker").unwrap();
+        assert_eq!(dep_config.condition, DependencyCondition::ServiceStopped);
+    }
+
+    #[test]
+    fn test_exit_code_single_values() {
+        let yaml = r#"
+services:
+  worker:
+    command: ["./worker"]
+  handler:
+    command: ["./handler"]
+    depends_on:
+      worker:
+        condition: service_failed
+        exit_code:
+          - 1
+          - 5
+          - 42
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let handler = config.services.get("handler").unwrap();
+        let dep_config = handler.depends_on.get("worker").unwrap();
+        assert_eq!(dep_config.condition, DependencyCondition::ServiceFailed);
+        assert!(!dep_config.exit_code.is_empty());
+        assert!(dep_config.exit_code.matches(1));
+        assert!(dep_config.exit_code.matches(5));
+        assert!(dep_config.exit_code.matches(42));
+        assert!(!dep_config.exit_code.matches(2));
+        assert!(!dep_config.exit_code.matches(0));
+    }
+
+    #[test]
+    fn test_exit_code_ranges() {
+        let yaml = r#"
+services:
+  worker:
+    command: ["./worker"]
+  handler:
+    command: ["./handler"]
+    depends_on:
+      worker:
+        condition: service_failed
+        exit_code:
+          - '1:10'
+          - '21:42'
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let handler = config.services.get("handler").unwrap();
+        let dep_config = handler.depends_on.get("worker").unwrap();
+        assert!(dep_config.exit_code.matches(1));
+        assert!(dep_config.exit_code.matches(5));
+        assert!(dep_config.exit_code.matches(10));
+        assert!(!dep_config.exit_code.matches(11));
+        assert!(!dep_config.exit_code.matches(20));
+        assert!(dep_config.exit_code.matches(21));
+        assert!(dep_config.exit_code.matches(30));
+        assert!(dep_config.exit_code.matches(42));
+        assert!(!dep_config.exit_code.matches(43));
+    }
+
+    #[test]
+    fn test_exit_code_mixed() {
+        let yaml = r#"
+services:
+  worker:
+    command: ["./worker"]
+  handler:
+    command: ["./handler"]
+    depends_on:
+      worker:
+        condition: service_stopped
+        exit_code:
+          - '1:10'
+          - 42
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let handler = config.services.get("handler").unwrap();
+        let dep_config = handler.depends_on.get("worker").unwrap();
+        assert!(dep_config.exit_code.matches(1));
+        assert!(dep_config.exit_code.matches(10));
+        assert!(dep_config.exit_code.matches(42));
+        assert!(!dep_config.exit_code.matches(15));
+        assert!(!dep_config.exit_code.matches(0));
+    }
+
+    #[test]
+    fn test_exit_code_omitted_matches_all() {
+        let yaml = r#"
+services:
+  worker:
+    command: ["./worker"]
+  handler:
+    command: ["./handler"]
+    depends_on:
+      worker:
+        condition: service_failed
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let handler = config.services.get("handler").unwrap();
+        let dep_config = handler.depends_on.get("worker").unwrap();
+        assert!(dep_config.exit_code.is_empty());
+        assert!(dep_config.exit_code.matches(0));
+        assert!(dep_config.exit_code.matches(1));
+        assert!(dep_config.exit_code.matches(-1));
+        assert!(dep_config.exit_code.matches(255));
+    }
+
+    #[test]
+    fn test_exit_code_invalid_range_start_gt_end() {
+        let yaml = r#"
+services:
+  worker:
+    command: ["./worker"]
+  handler:
+    command: ["./handler"]
+    depends_on:
+      worker:
+        condition: service_failed
+        exit_code:
+          - '10:1'
+"#;
+        let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
     }
 }

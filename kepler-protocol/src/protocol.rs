@@ -26,6 +26,17 @@ pub enum LogMode {
     Head,
 }
 
+/// Start mode for service startup behavior
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StartMode {
+    /// Wait for startup cluster to be ready (default for foreground and --wait)
+    #[default]
+    WaitStartup,
+    /// Return immediately, startup runs in background (-d)
+    Detached,
+}
+
 /// Request sent from CLI to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -39,6 +50,9 @@ pub enum Request {
         /// System environment variables captured from CLI
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
+        /// Start mode (detached or wait for startup cluster)
+        #[serde(default)]
+        mode: StartMode,
     },
     /// Stop service(s)
     Stop {
@@ -62,6 +76,9 @@ pub enum Request {
         /// System environment variables (unused, kept for API compatibility)
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
+        /// If true, run restart in background and return immediately
+        #[serde(default)]
+        detach: bool,
     },
     /// Recreate services - re-bake config, clear state, start fresh
     Recreate {
@@ -70,6 +87,9 @@ pub enum Request {
         /// System environment variables captured from CLI (for re-baking config snapshot)
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
+        /// If true, run recreate in background and return immediately
+        #[serde(default)]
+        detach: bool,
     },
     /// Get status of services
     Status {
@@ -305,6 +325,9 @@ pub struct ServiceInfo {
     pub started_at: Option<i64>,
     /// Health check failures
     pub health_check_failures: u32,
+    /// Exit code (for stopped/failed services)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 /// A log entry

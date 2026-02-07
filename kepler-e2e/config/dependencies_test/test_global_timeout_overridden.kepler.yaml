@@ -1,0 +1,25 @@
+# Test that per-dependency timeout overrides global timeout
+# Global timeout is 30s, but per-dep timeout is 2s.
+# The per-dep timeout should win.
+
+kepler:
+  timeout: 30s
+  logs:
+    buffer_size: 0
+
+services:
+  database:
+    command: ["sh", "-c", "echo DATABASE_STARTED; sleep 300"]
+    healthcheck:
+      test: ["false"]  # Always fails
+      interval: 500ms
+      timeout: 1s
+      retries: 1
+      start_period: 0s
+
+  backend:
+    command: ["sh", "-c", "echo BACKEND_STARTED; sleep 300"]
+    depends_on:
+      database:
+        condition: service_healthy
+        timeout: 2s  # Overrides global 30s

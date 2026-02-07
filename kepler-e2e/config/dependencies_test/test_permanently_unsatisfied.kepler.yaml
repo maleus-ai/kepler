@@ -1,0 +1,19 @@
+# Test permanently unsatisfied dependency detection
+# "setup" exits immediately with code 0 and has restart: no.
+# "monitor" depends on "setup" with condition: service_failed (wants non-zero exit).
+# Since setup exited with 0 and won't restart, monitor's dependency is permanently unsatisfied.
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  setup:
+    command: ["sh", "-c", "echo SETUP_DONE; exit 0"]
+    restart: no
+
+  monitor:
+    command: ["sh", "-c", "echo MONITOR_STARTED; sleep 300"]
+    depends_on:
+      setup:
+        condition: service_failed

@@ -240,13 +240,14 @@ async fn handle_request(
             config_path,
             service,
             sys_env,
+            mode,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
             match orchestrator
-                .start_services(&config_path, service.as_deref(), sys_env)
+                .start_services(&config_path, service.as_deref(), sys_env, mode)
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -288,38 +289,66 @@ async fn handle_request(
             config_path,
             services,
             sys_env,
+            detach,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
 
-            // restart_services now properly preserves state and calls restart hooks
-            // for both full restarts (empty services) and specific service restarts
-            match orchestrator
-                .restart_services(&config_path, &services, sys_env)
-                .await
-            {
-                Ok(msg) => Response::ok_with_message(msg),
-                Err(e) => Response::error(e.to_string()),
+            if detach {
+                let orchestrator = orchestrator.clone();
+                let config_path_clone = config_path.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = orchestrator
+                        .restart_services(&config_path_clone, &services, sys_env)
+                        .await
+                    {
+                        tracing::error!("Background restart failed: {}", e);
+                    }
+                });
+                Response::ok_with_message("Restarting services in background".to_string())
+            } else {
+                match orchestrator
+                    .restart_services(&config_path, &services, sys_env)
+                    .await
+                {
+                    Ok(msg) => Response::ok_with_message(msg),
+                    Err(e) => Response::error(e.to_string()),
+                }
             }
         }
 
         Request::Recreate {
             config_path,
             sys_env,
+            detach,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
 
-            match orchestrator
-                .recreate_services(&config_path, sys_env)
-                .await
-            {
-                Ok(msg) => Response::ok_with_message(msg),
-                Err(e) => Response::error(e.to_string()),
+            if detach {
+                let orchestrator = orchestrator.clone();
+                let config_path_clone = config_path.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = orchestrator
+                        .recreate_services(&config_path_clone, sys_env)
+                        .await
+                    {
+                        tracing::error!("Background recreate failed: {}", e);
+                    }
+                });
+                Response::ok_with_message("Recreating services in background".to_string())
+            } else {
+                match orchestrator
+                    .recreate_services(&config_path, sys_env)
+                    .await
+                {
+                    Ok(msg) => Response::ok_with_message(msg),
+                    Err(e) => Response::error(e.to_string()),
+                }
             }
         }
 
@@ -580,7 +609,7 @@ async fn discover_existing_configs(
 
                     for service_name in &services_to_respawn {
                         match orchestrator
-                            .start_services(&source_path, Some(service_name), None)
+                            .start_services(&source_path, Some(service_name), None, kepler_protocol::protocol::StartMode::WaitStartup)
                             .await
                         {
                             Ok(_) => {

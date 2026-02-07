@@ -236,6 +236,8 @@ fn test_dependency_levels() {
             user: None,
             group: None,
             limits: None,
+            wait: None,
+            effective_wait: true,
         }
     }
 

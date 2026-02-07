@@ -4,8 +4,10 @@
 //! - Global sys_env configuration inheritance
 //! - Service sys_env override of global settings
 //! - Kepler namespace full config parsing
+//! - Global timeout parsing
 
 use kepler_daemon::config::{resolve_sys_env, KeplerConfig, SysEnvPolicy};
+use std::time::Duration;
 use tempfile::TempDir;
 
 /// Test that global sys_env: inherit is properly parsed
@@ -251,4 +253,98 @@ fn test_resolve_sys_env_function() {
     // No global, service explicit inherit
     let result = resolve_sys_env(&SysEnvPolicy::Inherit, None);
     assert_eq!(result, SysEnvPolicy::Inherit);
+}
+
+/// Test that kepler.timeout parses correctly
+#[test]
+fn test_global_timeout_parsing() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  timeout: 30s
+
+services:
+  app:
+    command: ["./app"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    let kepler = config.kepler.as_ref().expect("kepler namespace should exist");
+    assert_eq!(kepler.timeout, Some(Duration::from_secs(30)));
+}
+
+/// Test global timeout with different duration formats
+#[test]
+fn test_global_timeout_various_formats() {
+    let temp_dir = TempDir::new().unwrap();
+
+    for (input, expected) in [
+        ("5s", Duration::from_secs(5)),
+        ("2m", Duration::from_secs(120)),
+        ("1h", Duration::from_secs(3600)),
+        ("500ms", Duration::from_millis(500)),
+    ] {
+        let config_path = temp_dir.path().join("kepler.yaml");
+        let yaml = format!(
+            "kepler:\n  timeout: {}\n\nservices:\n  app:\n    command: [\"./app\"]\n",
+            input
+        );
+        std::fs::write(&config_path, &yaml).unwrap();
+        let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+        let kepler = config.kepler.as_ref().unwrap();
+        assert_eq!(kepler.timeout, Some(expected), "Failed for input: {}", input);
+    }
+}
+
+/// Test that global timeout defaults to None when not specified
+#[test]
+fn test_global_timeout_defaults_to_none() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  sys_env: inherit
+
+services:
+  app:
+    command: ["./app"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    let kepler = config.kepler.as_ref().expect("kepler namespace should exist");
+    assert_eq!(kepler.timeout, None, "timeout should default to None");
+}
+
+/// Test that global timeout coexists with other kepler fields
+#[test]
+fn test_global_timeout_with_other_fields() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  sys_env: inherit
+  timeout: 1m
+  logs:
+    max_size: 10M
+
+services:
+  app:
+    command: ["./app"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    let kepler = config.kepler.as_ref().unwrap();
+    assert_eq!(kepler.timeout, Some(Duration::from_secs(60)));
+    assert_eq!(kepler.sys_env, Some(SysEnvPolicy::Inherit));
+    assert!(kepler.logs.is_some());
 }

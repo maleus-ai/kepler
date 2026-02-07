@@ -824,3 +824,114 @@ services:
     // Database should not have restart (defaults to false)
     assert!(!service.depends_on.should_restart_on_dependency("database"));
 }
+
+/// Test: Lua deserialization of new dependency conditions
+#[test]
+fn test_lua_depends_on_new_conditions() {
+    use kepler_daemon::config::DependencyCondition;
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  worker:
+    command: ["echo", "worker"]
+  monitor:
+    command: ["echo", "monitor"]
+    depends_on: !lua |
+      return {
+        worker = {
+          condition = "service_unhealthy"
+        }
+      }
+  handler:
+    command: ["echo", "handler"]
+    depends_on: !lua |
+      return {
+        worker = {
+          condition = "service_failed"
+        }
+      }
+  cleanup:
+    command: ["echo", "cleanup"]
+    depends_on: !lua |
+      return {
+        worker = {
+          condition = "service_stopped"
+        }
+      }
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+
+    let monitor = config.services.get("monitor").unwrap();
+    let dep = monitor.depends_on.get("worker").unwrap();
+    assert_eq!(dep.condition, DependencyCondition::ServiceUnhealthy);
+
+    let handler = config.services.get("handler").unwrap();
+    let dep = handler.depends_on.get("worker").unwrap();
+    assert_eq!(dep.condition, DependencyCondition::ServiceFailed);
+
+    let cleanup = config.services.get("cleanup").unwrap();
+    let dep = cleanup.depends_on.get("worker").unwrap();
+    assert_eq!(dep.condition, DependencyCondition::ServiceStopped);
+}
+
+/// Test: Lua exit_code with mixed types (ranges and single values)
+#[test]
+fn test_lua_depends_on_exit_code_mixed() {
+    use kepler_daemon::config::DependencyCondition;
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  worker:
+    command: ["echo", "worker"]
+  handler:
+    command: ["echo", "handler"]
+    depends_on: !lua |
+      return {
+        worker = {
+          condition = "service_failed",
+          exit_code = {"1:10", 42}
+        }
+      }
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let handler = config.services.get("handler").unwrap();
+    let dep = handler.depends_on.get("worker").unwrap();
+    assert_eq!(dep.condition, DependencyCondition::ServiceFailed);
+    assert!(!dep.exit_code.is_empty());
+    assert!(dep.exit_code.matches(1));
+    assert!(dep.exit_code.matches(5));
+    assert!(dep.exit_code.matches(10));
+    assert!(dep.exit_code.matches(42));
+    assert!(!dep.exit_code.matches(15));
+    assert!(!dep.exit_code.matches(0));
+}
+
+/// Test: Lua individual field templating for exit_code
+#[test]
+fn test_lua_depends_on_exit_code_field() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  worker:
+    command: ["echo", "worker"]
+  handler:
+    command: ["echo", "handler"]
+    depends_on:
+      worker:
+        condition: service_stopped
+        exit_code: !lua |
+          return {"1:10"}
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let handler = config.services.get("handler").unwrap();
+    let dep = handler.depends_on.get("worker").unwrap();
+    assert!(dep.exit_code.matches(1));
+    assert!(dep.exit_code.matches(10));
+    assert!(!dep.exit_code.matches(11));
+}

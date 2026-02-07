@@ -15,6 +15,12 @@ pub enum Commands {
         /// Detach and return immediately (don't follow logs)
         #[arg(short, long)]
         detach: bool,
+        /// Block until startup cluster is ready, then return (requires -d)
+        #[arg(long, requires = "detach")]
+        wait: bool,
+        /// Timeout for --wait mode (e.g. "30s", "5m")
+        #[arg(long, requires = "wait")]
+        timeout: Option<String>,
     },
     /// Stop services (requires daemon to be running)
     Stop {
@@ -35,12 +41,24 @@ pub enum Commands {
         /// Detach and return immediately (don't follow logs)
         #[arg(short, long)]
         detach: bool,
+        /// Block until restart is complete, then return (requires -d)
+        #[arg(long, requires = "detach")]
+        wait: bool,
+        /// Timeout for --wait mode (e.g. "30s", "5m")
+        #[arg(long, requires = "wait")]
+        timeout: Option<String>,
     },
     /// Recreate services (re-bake config, clear state, start fresh)
     Recreate {
         /// Detach and return immediately (don't follow logs)
         #[arg(short, long)]
         detach: bool,
+        /// Block until recreate is complete, then return (requires -d)
+        #[arg(long, requires = "detach")]
+        wait: bool,
+        /// Timeout for --wait mode (e.g. "30s", "5m")
+        #[arg(long, requires = "wait")]
+        timeout: Option<String>,
     },
     /// View service logs
     Logs {

@@ -62,6 +62,7 @@ impl TestConfigBuilder {
             sys_env: self.sys_env.clone(),
             logs: self.logs.clone(),
             hooks: self.hooks.clone(),
+            timeout: None,
         })
     }
 
@@ -106,12 +107,14 @@ pub struct TestServiceBuilder {
     sys_env: SysEnvPolicy,
     restart: RestartConfig,
     depends_on: Vec<String>,
+    depends_on_extended: Option<DependsOn>,
     healthcheck: Option<HealthCheck>,
     hooks: Option<ServiceHooks>,
     logs: Option<LogConfig>,
     limits: Option<ResourceLimits>,
     user: Option<String>,
     group: Option<String>,
+    wait: Option<bool>,
 }
 
 impl TestServiceBuilder {
@@ -124,12 +127,14 @@ impl TestServiceBuilder {
             sys_env: SysEnvPolicy::default(),
             restart: RestartConfig::default(),
             depends_on: Vec::new(),
+            depends_on_extended: None,
             healthcheck: None,
             hooks: None,
             logs: None,
             limits: None,
             user: None,
             group: None,
+            wait: None,
         }
     }
 
@@ -216,6 +221,18 @@ impl TestServiceBuilder {
         self
     }
 
+    /// Set extended dependencies with conditions and optional edge-level wait
+    pub fn with_depends_on_extended(mut self, deps: DependsOn) -> Self {
+        self.depends_on_extended = Some(deps);
+        self
+    }
+
+    /// Set the service-level wait field
+    pub fn with_wait(mut self, wait: Option<bool>) -> Self {
+        self.wait = wait;
+        self
+    }
+
     pub fn with_healthcheck(mut self, healthcheck: HealthCheck) -> Self {
         self.healthcheck = Some(healthcheck);
         self
@@ -249,6 +266,11 @@ impl TestServiceBuilder {
     }
 
     pub fn build(self) -> ServiceConfig {
+        let depends_on = if let Some(extended) = self.depends_on_extended {
+            extended
+        } else {
+            DependsOn::from(self.depends_on)
+        };
         ServiceConfig {
             command: self.command,
             working_dir: self.working_dir,
@@ -256,13 +278,15 @@ impl TestServiceBuilder {
             env_file: self.env_file,
             sys_env: self.sys_env,
             restart: self.restart,
-            depends_on: DependsOn::from(self.depends_on),
+            depends_on,
             healthcheck: self.healthcheck,
             hooks: self.hooks,
             logs: self.logs,
             user: self.user,
             group: self.group,
             limits: self.limits,
+            wait: self.wait,
+            effective_wait: true,
         }
     }
 }

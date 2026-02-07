@@ -33,6 +33,14 @@ pub enum OrchestratorError {
         condition: DependencyCondition,
     },
 
+    #[error("Dependency unsatisfied: {service} cannot start because {dependency} (condition: {condition:?}) is permanently unsatisfied: {reason}")]
+    DependencyUnsatisfied {
+        service: String,
+        dependency: String,
+        condition: DependencyCondition,
+        reason: String,
+    },
+
     #[error("Daemon error: {0}")]
     DaemonError(#[from] crate::errors::DaemonError),
 }

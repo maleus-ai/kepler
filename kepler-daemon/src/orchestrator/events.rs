@@ -137,16 +137,20 @@ impl ServiceEventHandler {
                 .get(restarted_service)
                 .unwrap_or_default();
 
+            // Use per-dependency timeout, falling back to global timeout from config
+            let global_timeout = config.kepler.as_ref().and_then(|k| k.timeout);
+            let effective_timeout = dep_config.timeout.or(global_timeout);
+
             let start = Instant::now();
             loop {
-                if check_dependency_satisfied(restarted_service, &dep_config.condition, &self.handle)
+                if check_dependency_satisfied(restarted_service, &dep_config, &self.handle)
                     .await
                 {
                     break;
                 }
 
-                // Check timeout if specified
-                if let Some(timeout) = dep_config.timeout
+                // Check timeout
+                if let Some(timeout) = effective_timeout
                     && start.elapsed() > timeout {
                         warn!(
                             "Timeout waiting for {} to satisfy condition for {} restart propagation",

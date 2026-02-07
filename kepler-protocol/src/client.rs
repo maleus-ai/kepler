@@ -8,7 +8,7 @@ use tokio::{
 
 use crate::{
     errors::ClientError,
-    protocol::{FRAME_DELIMITER, LogMode, MAX_MESSAGE_SIZE, Request, Response, decode_response, encode_request},
+    protocol::{FRAME_DELIMITER, LogMode, MAX_MESSAGE_SIZE, Request, Response, StartMode, decode_response, encode_request},
 };
 
 pub type Result<T> = std::result::Result<T, ClientError>;
@@ -102,11 +102,13 @@ impl Client {
         config_path: PathBuf,
         service: Option<String>,
         sys_env: Option<HashMap<String, String>>,
+        mode: StartMode,
     ) -> Result<Response> {
         self.send_request(Request::Start {
             config_path,
             service,
             sys_env,
+            mode,
         })
         .await
     }
@@ -134,11 +136,13 @@ impl Client {
         config_path: PathBuf,
         services: Vec<String>,
         sys_env: Option<HashMap<String, String>>,
+        detach: bool,
     ) -> Result<Response> {
         self.send_request(Request::Restart {
             config_path,
             services,
             sys_env,
+            detach,
         })
         .await
     }
@@ -148,10 +152,12 @@ impl Client {
         &mut self,
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
+        detach: bool,
     ) -> Result<Response> {
         self.send_request(Request::Recreate {
             config_path,
             sys_env,
+            detach,
         })
         .await
     }

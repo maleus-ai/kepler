@@ -1,0 +1,23 @@
+# Test depends_on with service_failed condition and exit_code filter
+# Handler should wait for worker to fail with code 5 (which is in range 1:10)
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  worker:
+    command: ["sh", "-c", "echo WORKER_STARTED; sleep 0.5; echo WORKER_FAILING; exit 5"]
+    restart: no
+    logs:
+      timestamp: true
+
+  handler:
+    command: ["sh", "-c", "echo HANDLER_STARTED; sleep 300"]
+    depends_on:
+      worker:
+        condition: service_failed
+        exit_code:
+          - '1:10'
+    logs:
+      timestamp: true

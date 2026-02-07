@@ -1,0 +1,33 @@
+# Test effective_wait: deferred propagation through dependency chain
+# database = startup (no deps)
+# monitor = deferred (service_failed condition)
+# alerter = deferred (depends on deferred monitor with service_started)
+#
+# With --wait mode, CLI should return after only database is running.
+# monitor and alerter are both deferred and start in background.
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  database:
+    command: ["sh", "-c", "echo DATABASE_STARTED; sleep 300"]
+    logs:
+      timestamp: true
+
+  monitor:
+    command: ["sh", "-c", "echo MONITOR_STARTED; sleep 300"]
+    depends_on:
+      database:
+        condition: service_failed
+    logs:
+      timestamp: true
+
+  alerter:
+    command: ["sh", "-c", "echo ALERTER_STARTED; sleep 300"]
+    depends_on:
+      monitor:
+        condition: service_started
+    logs:
+      timestamp: true

@@ -59,6 +59,8 @@ pub struct ServiceState {
     pub computed_env: HashMap<String, String>,
     /// Pre-computed working directory for this service
     pub working_dir: PathBuf,
+    /// Whether the service was healthy at some point (for service_unhealthy condition)
+    pub was_healthy: bool,
 }
 
 impl Default for ServiceState {
@@ -73,6 +75,7 @@ impl Default for ServiceState {
             initialized: false,
             computed_env: HashMap::new(),
             working_dir: PathBuf::new(),
+            was_healthy: false,
         }
     }
 }
@@ -90,6 +93,7 @@ impl From<&ServiceState> for ServiceInfo {
             pid: state.pid,
             started_at: state.started_at.map(|dt| dt.timestamp()),
             health_check_failures: state.health_check_failures,
+            exit_code: state.exit_code,
         }
     }
 }
@@ -169,6 +173,8 @@ pub struct PersistedServiceState {
     pub health_check_failures: u32,
     pub restart_count: u32,
     pub initialized: bool,
+    #[serde(default)]
+    pub was_healthy: bool,
 }
 
 impl From<&ServiceState> for PersistedServiceState {
@@ -181,6 +187,7 @@ impl From<&ServiceState> for PersistedServiceState {
             health_check_failures: state.health_check_failures,
             restart_count: state.restart_count,
             initialized: state.initialized,
+            was_healthy: state.was_healthy,
         }
     }
 }
@@ -204,6 +211,7 @@ impl PersistedServiceState {
             initialized: self.initialized,
             computed_env,
             working_dir,
+            was_healthy: self.was_healthy,
         }
     }
 }

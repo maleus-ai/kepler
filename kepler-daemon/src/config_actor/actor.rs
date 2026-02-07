@@ -163,8 +163,12 @@ impl ConfigActor {
 
                 let restored_sys_env = snapshot.sys_env;
 
+                // Recompute effective_wait (not serialized in snapshot due to #[serde(skip)])
+                let mut config = snapshot.config;
+                crate::deps::resolve_effective_wait(&mut config.services)?;
+
                 (
-                    snapshot.config,
+                    config,
                     snapshot.config_dir,
                     services,
                     initialized,
@@ -857,6 +861,9 @@ impl ConfigActor {
             .services
             .get_mut(service_name)
             .ok_or_else(|| DaemonError::ServiceNotFound(service_name.to_string()))?;
+        if status == ServiceStatus::Starting {
+            service_state.was_healthy = false;
+        }
         service_state.status = status;
         Ok(())
     }
@@ -908,6 +915,7 @@ impl ConfigActor {
                 || service_state.status == ServiceStatus::Unhealthy
             {
                 service_state.status = ServiceStatus::Healthy;
+                service_state.was_healthy = true;
             }
         } else {
             service_state.health_check_failures += 1;

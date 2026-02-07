@@ -1,6 +1,8 @@
 //! Config parsing tests
 
 use kepler_daemon::config::{parse_duration, HookCommand, KeplerConfig};
+use kepler_daemon::state::{ServiceState, ServiceStatus};
+use kepler_protocol::protocol::ServiceInfo;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -955,4 +957,391 @@ fn test_invalid_memory_limit() {
 fn test_max_message_size_constant() {
     use kepler_protocol::protocol::MAX_MESSAGE_SIZE;
     assert_eq!(MAX_MESSAGE_SIZE, 1024 * 1024); // 1MB
+}
+
+// ============================================================================
+// Effective Wait Resolution Tests (YAML → resolve_effective_wait)
+// ============================================================================
+
+/// Service-level wait: true is deserialized and resolved correctly
+#[test]
+fn test_wait_field_deserialization_service_level() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  database:
+    command: ["sleep", "3600"]
+  app:
+    command: ["sleep", "3600"]
+    wait: true
+    depends_on:
+      database:
+        condition: service_failed
+  worker:
+    command: ["sleep", "3600"]
+    wait: false
+    depends_on:
+      - database
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    // database: no deps → effective_wait = true
+    assert!(config.services["database"].effective_wait, "database should be startup");
+    assert_eq!(config.services["database"].wait, None);
+
+    // app: wait: true overrides deferred service_failed condition
+    assert!(config.services["app"].effective_wait, "app should be startup (wait: true override)");
+    assert_eq!(config.services["app"].wait, Some(true));
+
+    // worker: wait: false overrides startup service_started condition
+    assert!(!config.services["worker"].effective_wait, "worker should be deferred (wait: false override)");
+    assert_eq!(config.services["worker"].wait, Some(false));
+}
+
+/// Edge-level wait overrides condition defaults
+#[test]
+fn test_wait_field_deserialization_edge_level() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  database:
+    command: ["sleep", "3600"]
+  monitor:
+    command: ["sleep", "3600"]
+    depends_on:
+      database:
+        condition: service_failed
+        wait: true
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    // monitor: edge wait: true overrides service_failed's default of false
+    assert!(config.services["monitor"].effective_wait, "monitor should be startup (edge wait: true)");
+
+    // Verify the edge wait was deserialized
+    let dep = config.services["monitor"].depends_on.get("database").unwrap();
+    assert_eq!(dep.wait, Some(true));
+}
+
+/// All startup conditions produce effective_wait = true by default
+#[test]
+fn test_effective_wait_startup_conditions() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  base:
+    command: ["sleep", "3600"]
+  dep-started:
+    command: ["sleep", "3600"]
+    depends_on:
+      base:
+        condition: service_started
+  dep-healthy:
+    command: ["sleep", "3600"]
+    depends_on:
+      base:
+        condition: service_healthy
+  dep-completed:
+    command: ["sleep", "3600"]
+    depends_on:
+      base:
+        condition: service_completed_successfully
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    assert!(config.services["dep-started"].effective_wait, "service_started should be startup");
+    assert!(config.services["dep-healthy"].effective_wait, "service_healthy should be startup");
+    assert!(config.services["dep-completed"].effective_wait, "service_completed_successfully should be startup");
+}
+
+/// service_stopped produces effective_wait = false (deferred condition)
+#[test]
+fn test_effective_wait_service_stopped_is_deferred() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  base:
+    command: ["sleep", "3600"]
+  dep-stopped:
+    command: ["sleep", "3600"]
+    depends_on:
+      base:
+        condition: service_stopped
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    assert!(!config.services["dep-stopped"].effective_wait, "service_stopped should be deferred");
+}
+
+/// Deferred conditions produce effective_wait = false by default
+#[test]
+fn test_effective_wait_deferred_conditions() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  base:
+    command: ["sleep", "3600"]
+  dep-unhealthy:
+    command: ["sleep", "3600"]
+    depends_on:
+      base:
+        condition: service_unhealthy
+  dep-failed:
+    command: ["sleep", "3600"]
+    depends_on:
+      base:
+        condition: service_failed
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    assert!(!config.services["dep-unhealthy"].effective_wait, "service_unhealthy should be deferred");
+    assert!(!config.services["dep-failed"].effective_wait, "service_failed should be deferred");
+}
+
+/// Deferred status propagates through dependency chain
+#[test]
+fn test_effective_wait_deferred_propagation_yaml() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  database:
+    command: ["sleep", "3600"]
+  monitor:
+    command: ["sleep", "3600"]
+    depends_on:
+      database:
+        condition: service_failed
+  alerter:
+    command: ["sleep", "3600"]
+    depends_on:
+      monitor:
+        condition: service_started
+  dashboard:
+    command: ["sleep", "3600"]
+    depends_on:
+      alerter:
+        condition: service_started
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    assert!(config.services["database"].effective_wait, "database (no deps) = startup");
+    assert!(!config.services["monitor"].effective_wait, "monitor (service_failed edge) = deferred");
+    assert!(!config.services["alerter"].effective_wait, "alerter (depends on deferred monitor) = deferred");
+    assert!(!config.services["dashboard"].effective_wait, "dashboard (depends on deferred alerter) = deferred");
+}
+
+/// wait: true on a service stops deferred propagation
+#[test]
+fn test_effective_wait_override_stops_propagation() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  database:
+    command: ["sleep", "3600"]
+  monitor:
+    command: ["sleep", "3600"]
+    depends_on:
+      database:
+        condition: service_failed
+  alerter:
+    command: ["sleep", "3600"]
+    wait: true
+    depends_on:
+      monitor:
+        condition: service_started
+  dashboard:
+    command: ["sleep", "3600"]
+    depends_on:
+      alerter:
+        condition: service_started
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    assert!(config.services["database"].effective_wait);
+    assert!(!config.services["monitor"].effective_wait, "monitor = deferred");
+    assert!(config.services["alerter"].effective_wait, "alerter = startup (wait: true override)");
+    assert!(config.services["dashboard"].effective_wait, "dashboard = startup (alerter is startup)");
+}
+
+/// Mixed dependency edges: one startup + one deferred → deferred
+#[test]
+fn test_effective_wait_mixed_edges_yaml() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  db:
+    command: ["sleep", "3600"]
+  cache:
+    command: ["sleep", "3600"]
+  app:
+    command: ["sleep", "3600"]
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_failed
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    assert!(config.services["db"].effective_wait);
+    assert!(config.services["cache"].effective_wait);
+    assert!(!config.services["app"].effective_wait, "app should be deferred (one deferred edge makes AND false)");
+}
+
+/// wait field is not serialized when None (skip_serializing_if)
+#[test]
+fn test_wait_field_not_serialized_when_none() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    command: ["sleep", "3600"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    // Serialize and check wait is not present
+    let serialized = serde_yaml::to_string(&config).unwrap();
+    assert!(!serialized.contains("wait:"), "wait should not be in serialized output when None");
+    assert!(!serialized.contains("effective_wait"), "effective_wait should never be serialized");
+}
+
+/// Simple depends_on format (list of names) still works with effective_wait
+#[test]
+fn test_effective_wait_simple_depends_on_format() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  database:
+    command: ["sleep", "3600"]
+  app:
+    command: ["sleep", "3600"]
+    depends_on:
+      - database
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    // Simple format defaults to service_started → startup
+    assert!(config.services["database"].effective_wait);
+    assert!(config.services["app"].effective_wait, "Simple depends_on defaults to service_started = startup");
+}
+
+/// Test that ServiceInfo includes exit_code for stopped services
+#[test]
+fn test_service_info_exit_code_stopped() {
+    let mut state = ServiceState::default();
+    state.status = ServiceStatus::Stopped;
+    state.exit_code = Some(0);
+
+    let info: ServiceInfo = (&state).into();
+    assert_eq!(info.status, "stopped");
+    assert_eq!(info.exit_code, Some(0));
+}
+
+/// Test that ServiceInfo includes exit_code for failed services
+#[test]
+fn test_service_info_exit_code_failed() {
+    let mut state = ServiceState::default();
+    state.status = ServiceStatus::Failed;
+    state.exit_code = Some(1);
+
+    let info: ServiceInfo = (&state).into();
+    assert_eq!(info.status, "failed");
+    assert_eq!(info.exit_code, Some(1));
+}
+
+/// Test that ServiceInfo has None exit_code for running services
+#[test]
+fn test_service_info_exit_code_running() {
+    let mut state = ServiceState::default();
+    state.status = ServiceStatus::Running;
+    state.pid = Some(1234);
+
+    let info: ServiceInfo = (&state).into();
+    assert_eq!(info.status, "running");
+    assert_eq!(info.exit_code, None);
+}
+
+/// Test that signal-killed processes map to exit_code -1
+#[test]
+fn test_service_info_exit_code_signal_killed() {
+    let mut state = ServiceState::default();
+    state.status = ServiceStatus::Failed;
+    state.exit_code = None; // Signal-killed processes have no exit code
+
+    let info: ServiceInfo = (&state).into();
+    assert_eq!(info.exit_code, None);
+}
+
+/// Test ServiceInfo serialization round-trip preserves exit_code
+#[test]
+fn test_service_info_serialization_with_exit_code() {
+    let info = ServiceInfo {
+        status: "failed".to_string(),
+        pid: None,
+        started_at: None,
+        health_check_failures: 0,
+        exit_code: Some(42),
+    };
+
+    let yaml = serde_yaml::to_string(&info).unwrap();
+    let deserialized: ServiceInfo = serde_yaml::from_str(&yaml).unwrap();
+    assert_eq!(deserialized.exit_code, Some(42));
+}
+
+/// Test ServiceInfo serialization omits exit_code when None
+#[test]
+fn test_service_info_serialization_omits_none_exit_code() {
+    let info = ServiceInfo {
+        status: "running".to_string(),
+        pid: Some(1234),
+        started_at: None,
+        health_check_failures: 0,
+        exit_code: None,
+    };
+
+    let yaml = serde_yaml::to_string(&info).unwrap();
+    assert!(!yaml.contains("exit_code"), "exit_code should be omitted when None");
+
+    let deserialized: ServiceInfo = serde_yaml::from_str(&yaml).unwrap();
+    assert_eq!(deserialized.exit_code, None);
 }

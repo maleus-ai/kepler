@@ -14,7 +14,7 @@ use colored::{Color, Colorize};
 use kepler_daemon::Daemon;
 use kepler_protocol::{
     client::Client,
-    protocol::{ConfigStatus, LogCursorData, LogMode, Response, ResponseData, ServiceInfo},
+    protocol::{ConfigStatus, LogCursorData, LogMode, Response, ResponseData, ServiceInfo, StartMode},
 };
 use tracing_subscriber::EnvFilter;
 
@@ -93,22 +93,41 @@ async fn run() -> Result<()> {
         .map_err(|_| CliError::ConfigNotFound(config_path.clone()))?;
 
     match cli.command {
-        Commands::Start { service, detach } => {
+        Commands::Start { service, detach, wait, timeout } => {
             let sys_env: HashMap<String, String> = std::env::vars().collect();
-            let response = client.start(canonical_path.clone(), service.clone(), Some(sys_env)).await?;
-            handle_response(response);
 
-            if !detach {
-                // Follow logs until Ctrl+C, then stop services
-                follow_logs_until_ctrl_c(&mut client, &canonical_path, service.as_deref(), false).await?;
-
-                // Ctrl+C received — stop services via fresh connection
-                eprintln!("\nGracefully stopping...");
-                let daemon_socket = Daemon::get_socket_path()
-                    .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
-                let mut stop_client = Client::connect(&daemon_socket).await?;
-                let response = stop_client.stop(canonical_path, service, false, None).await?;
+            if detach && wait {
+                // -d --wait: block until startup cluster ready, with optional timeout
+                let mode = StartMode::WaitStartup;
+                if let Some(ref timeout_str) = timeout {
+                    let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
+                        .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
+                    let result = tokio::time::timeout(
+                        timeout_duration,
+                        client.start(canonical_path.clone(), service.clone(), Some(sys_env), mode),
+                    ).await;
+                    match result {
+                        Ok(Ok(response)) => handle_response(response),
+                        Ok(Err(e)) => return Err(e.into()),
+                        Err(_) => {
+                            eprintln!("Timeout: startup did not complete within {}", timeout_str);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    let response = client.start(canonical_path.clone(), service.clone(), Some(sys_env), mode).await?;
+                    handle_response(response);
+                }
+            } else if detach {
+                // -d: fire-and-forget
+                let response = client.start(canonical_path.clone(), service.clone(), Some(sys_env), StartMode::Detached).await?;
                 handle_response(response);
+            } else {
+                // Foreground mode (no flags): start all, follow logs, exit on quiescence or Ctrl+C
+                let response = client.start(canonical_path.clone(), service.clone(), Some(sys_env), StartMode::WaitStartup).await?;
+                handle_response(response);
+
+                follow_logs_until_quiescent(&mut client, &canonical_path, service.as_deref()).await?;
             }
         }
 
@@ -117,37 +136,77 @@ async fn run() -> Result<()> {
             handle_response(response);
         }
 
-        Commands::Restart { services, detach } => {
+        Commands::Restart { services, detach, wait, timeout } => {
             let sys_env: HashMap<String, String> = std::env::vars().collect();
-            let response = client.restart(canonical_path.clone(), services, Some(sys_env)).await?;
-            handle_response(response);
 
-            if !detach {
-                follow_logs_until_ctrl_c(&mut client, &canonical_path, None, false).await?;
-
-                eprintln!("\nGracefully stopping...");
-                let daemon_socket = Daemon::get_socket_path()
-                    .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
-                let mut stop_client = Client::connect(&daemon_socket).await?;
-                let response = stop_client.stop(canonical_path, None, false, None).await?;
+            if detach && wait {
+                // -d --wait: block until restart complete, with optional timeout
+                if let Some(ref timeout_str) = timeout {
+                    let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
+                        .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
+                    let result = tokio::time::timeout(
+                        timeout_duration,
+                        client.restart(canonical_path.clone(), services, Some(sys_env), false),
+                    ).await;
+                    match result {
+                        Ok(Ok(response)) => handle_response(response),
+                        Ok(Err(e)) => return Err(e.into()),
+                        Err(_) => {
+                            eprintln!("Timeout: restart did not complete within {}", timeout_str);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    let response = client.restart(canonical_path.clone(), services, Some(sys_env), false).await?;
+                    handle_response(response);
+                }
+            } else if detach {
+                // -d: fire-and-forget
+                let response = client.restart(canonical_path.clone(), services, Some(sys_env), true).await?;
                 handle_response(response);
+            } else {
+                // Foreground mode: restart, follow logs, exit on quiescence or Ctrl+C
+                let response = client.restart(canonical_path.clone(), services, Some(sys_env), false).await?;
+                handle_response(response);
+
+                follow_logs_until_quiescent(&mut client, &canonical_path, None).await?;
             }
         }
 
-        Commands::Recreate { detach } => {
+        Commands::Recreate { detach, wait, timeout } => {
             let sys_env: HashMap<String, String> = std::env::vars().collect();
-            let response = client.recreate(canonical_path.clone(), Some(sys_env)).await?;
-            handle_response(response);
 
-            if !detach {
-                follow_logs_until_ctrl_c(&mut client, &canonical_path, None, false).await?;
-
-                eprintln!("\nGracefully stopping...");
-                let daemon_socket = Daemon::get_socket_path()
-                    .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
-                let mut stop_client = Client::connect(&daemon_socket).await?;
-                let response = stop_client.stop(canonical_path, None, false, None).await?;
+            if detach && wait {
+                // -d --wait: block until recreate complete, with optional timeout
+                if let Some(ref timeout_str) = timeout {
+                    let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
+                        .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
+                    let result = tokio::time::timeout(
+                        timeout_duration,
+                        client.recreate(canonical_path.clone(), Some(sys_env), false),
+                    ).await;
+                    match result {
+                        Ok(Ok(response)) => handle_response(response),
+                        Ok(Err(e)) => return Err(e.into()),
+                        Err(_) => {
+                            eprintln!("Timeout: recreate did not complete within {}", timeout_str);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    let response = client.recreate(canonical_path.clone(), Some(sys_env), false).await?;
+                    handle_response(response);
+                }
+            } else if detach {
+                // -d: fire-and-forget
+                let response = client.recreate(canonical_path.clone(), Some(sys_env), true).await?;
                 handle_response(response);
+            } else {
+                // Foreground mode: recreate, follow logs, exit on quiescence or Ctrl+C
+                let response = client.recreate(canonical_path.clone(), Some(sys_env), false).await?;
+                handle_response(response);
+
+                follow_logs_until_quiescent(&mut client, &canonical_path, None).await?;
             }
         }
 
@@ -451,6 +510,16 @@ async fn handle_ps_all(client: &mut Client) -> Result<()> {
     }
 }
 
+/// Format status with inline exit code for stopped/failed services
+fn format_status_with_exit_code(info: &ServiceInfo) -> String {
+    match info.exit_code {
+        Some(code) if info.status == "stopped" || info.status == "failed" => {
+            format!("{} ({})", info.status, code)
+        }
+        _ => info.status.clone(),
+    }
+}
+
 fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>) {
     // Calculate column widths
     let name_width = services
@@ -459,7 +528,12 @@ fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>
         .max()
         .unwrap_or(4)
         .max(4);
-    let status_width = 10;
+    let status_width = services
+        .values()
+        .map(|info| format_status_with_exit_code(info).len())
+        .max()
+        .unwrap_or(10)
+        .max(10);
     let pid_width = 8;
     let uptime_width = 12;
     let health_width = 8;
@@ -489,6 +563,7 @@ fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>
     sorted.sort_by(|a, b| a.0.cmp(b.0));
 
     for (name, info) in sorted {
+        let status_str = format_status_with_exit_code(info);
         let pid_str = info
             .pid
             .map(|p| p.to_string())
@@ -512,7 +587,7 @@ fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>
         println!(
             "{:<name_width$}  {:<status_width$}  {:<pid_width$}  {:<uptime_width$}  {:<health_width$}",
             name,
-            info.status,
+            status_str,
             pid_str,
             uptime_str,
             health_str,
@@ -560,7 +635,12 @@ fn print_multi_config_table(configs: &[ConfigStatus]) {
         .max()
         .unwrap_or(4)
         .max(4);
-    let status_width = 10;
+    let status_width = rows
+        .iter()
+        .map(|(_, _, info)| format_status_with_exit_code(info).len())
+        .max()
+        .unwrap_or(10)
+        .max(10);
     let pid_width = 8;
     let uptime_width = 12;
     let health_width = 8;
@@ -589,6 +669,7 @@ fn print_multi_config_table(configs: &[ConfigStatus]) {
 
     for (config_path, name, info) in rows {
         let abbreviated_path = abbreviate_path(config_path);
+        let status_str = format_status_with_exit_code(info);
         let pid_str = info
             .pid
             .map(|p| p.to_string())
@@ -613,7 +694,7 @@ fn print_multi_config_table(configs: &[ConfigStatus]) {
             "{:<config_width$}  {:<name_width$}  {:<status_width$}  {:<pid_width$}  {:<uptime_width$}  {:<health_width$}",
             abbreviated_path,
             name,
-            info.status,
+            status_str,
             pid_str,
             uptime_str,
             health_str,
@@ -649,67 +730,98 @@ fn format_uptime(started_at_ts: i64) -> String {
     }
 }
 
-async fn follow_logs_until_ctrl_c(
-    client: &mut Client,
+/// Follow logs until all services reach a terminal state (quiescent) or Ctrl+C.
+///
+/// On Ctrl+C: sends stop, then continues polling until all services actually stopped.
+/// On quiescence (all services stopped/failed): exits cleanly.
+async fn follow_logs_until_quiescent(
+    _client: &mut Client,
     config_path: &Path,
     service: Option<&str>,
-    no_hooks: bool,
 ) -> Result<()> {
     let mut color_map: HashMap<String, Color> = HashMap::new();
     let mut cursor_id: Option<String> = None;
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    let mut stopping = false;
+
+    let socket = Daemon::get_socket_path()
+        .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
 
     loop {
-        // Always complete the RPC before checking Ctrl+C (keeps socket clean)
-        let response = match client
-            .logs_cursor(config_path, service, cursor_id.as_deref(), true, no_hooks)
-            .await
-        {
-            Ok(resp) => resp,
+        // Each RPC needs a fresh connection (server handles one request per connection)
+        let log_response = match Client::connect(&socket).await {
+            Ok(mut c) => c.logs_cursor(config_path, service, cursor_id.as_deref(), true, false).await,
             Err(_) => {
-                // Reconnect on request error
-                let socket = Daemon::get_socket_path()
-                    .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
-                *client = match Client::connect(&socket).await {
-                    Ok(c) => c,
-                    Err(_) => {
-                        eprintln!("\nDaemon disconnected");
-                        break;
-                    }
-                };
-                continue;
+                eprintln!("\nDaemon disconnected");
+                break;
             }
         };
 
-        match response {
-            Response::Ok {
-                data: Some(ResponseData::LogCursor(LogCursorData {
-                    entries,
-                    cursor_id: new_cursor_id,
-                    ..
-                })),
-                ..
-            } => {
-                cursor_id = Some(new_cursor_id);
-                for entry in &entries {
-                    print_log_entry(entry, &mut color_map);
+        match log_response {
+            Ok(response) => {
+                match response {
+                    Response::Ok {
+                        data: Some(ResponseData::LogCursor(LogCursorData {
+                            entries,
+                            cursor_id: new_cursor_id,
+                            ..
+                        })),
+                        ..
+                    } => {
+                        cursor_id = Some(new_cursor_id);
+                        for entry in &entries {
+                            print_log_entry(entry, &mut color_map);
+                        }
+                    }
+                    Response::Error { message } => {
+                        if message.starts_with("Cursor expired or invalid") {
+                            cursor_id = None;
+                            continue;
+                        }
+                        eprintln!("Error: {}", message);
+                        break;
+                    }
+                    _ => {}
                 }
             }
-            Response::Error { message } => {
-                if message.starts_with("Cursor expired or invalid") {
-                    cursor_id = None;
-                    continue;
-                }
-                eprintln!("Error: {}", message);
+            Err(_) => {
+                eprintln!("\nDaemon disconnected");
                 break;
             }
-            _ => {}
+        }
+
+        // Check quiescence: all services in terminal state (stopped/failed)
+        if let Ok(mut status_client) = Client::connect(&socket).await {
+            if let Ok(status_response) = status_client.status(Some(config_path.to_path_buf())).await {
+                if let Response::Ok {
+                    data: Some(ResponseData::ServiceStatus(services)),
+                    ..
+                } = status_response
+                {
+                    let all_terminal = !services.is_empty() && services.values().all(|info| {
+                        matches!(info.status.as_str(), "stopped" | "failed")
+                    });
+                    if all_terminal {
+                        break;
+                    }
+                }
+            }
         }
 
         // Wait 500ms or break on Ctrl+C
         tokio::select! {
-            _ = &mut ctrl_c => break,
+            _ = &mut ctrl_c => {
+                if !stopping {
+                    stopping = true;
+                    eprintln!("\nGracefully stopping...");
+                    // Send stop via fresh connection
+                    if let Ok(mut stop_client) = Client::connect(&socket).await {
+                        let _ = stop_client.stop(config_path.to_path_buf(), service.map(String::from), false, None).await;
+                    }
+                    // Continue polling until all services actually stopped
+                }
+            }
             _ = tokio::time::sleep(Duration::from_millis(500)) => {}
         }
     }

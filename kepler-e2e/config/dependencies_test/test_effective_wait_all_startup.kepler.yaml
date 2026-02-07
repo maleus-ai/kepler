@@ -1,0 +1,34 @@
+# Test effective_wait: all services use startup conditions
+# With --wait mode, the CLI should block until ALL services are running
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  database:
+    command: ["sh", "-c", "echo DATABASE_STARTED; sleep 300"]
+    healthcheck:
+      test: ["true"]
+      interval: 500ms
+      timeout: 1s
+      retries: 1
+      start_period: 0s
+    logs:
+      timestamp: true
+
+  backend:
+    command: ["sh", "-c", "echo BACKEND_STARTED; sleep 300"]
+    depends_on:
+      database:
+        condition: service_healthy
+    logs:
+      timestamp: true
+
+  frontend:
+    command: ["sh", "-c", "echo FRONTEND_STARTED; sleep 300"]
+    depends_on:
+      backend:
+        condition: service_started
+    logs:
+      timestamp: true
