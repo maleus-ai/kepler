@@ -670,6 +670,7 @@ dependencies = [
  "colored",
  "kepler-daemon",
  "kepler-protocol",
+ "libc",
  "thiserror",
  "tokio",
  "tracing",

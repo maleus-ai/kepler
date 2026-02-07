@@ -421,6 +421,18 @@ fn start_daemon_detached(daemon_path: &PathBuf, allow_root: bool) -> Result<()> 
     if allow_root {
         cmd.arg("--allow-root");
     }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
     cmd.spawn()
         .map_err(|source| CliError::DaemonSpawn {
             path: daemon_path.clone(),
