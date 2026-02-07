@@ -4,14 +4,14 @@ use std::path::PathBuf;
 
 use crate::errors::ProtocolError;
 
-/// Maximum message size (1MB)
-pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+/// Maximum message size (10MB) — local Unix socket, no network concerns
+pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Maximum lines for one-shot queries (head/tail)
 pub const MAX_LINES_ONE_SHOT: usize = 10_000;
 
-/// Maximum entries per cursor batch (for all/follow modes)
-pub const MAX_CURSOR_BATCH_SIZE: usize = 1_000;
+/// Maximum entries per cursor batch (secondary cap; byte budget is the primary limit)
+pub const MAX_CURSOR_BATCH_SIZE: usize = 50_000;
 
 /// Log reading mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -354,37 +354,66 @@ pub struct DaemonInfo {
     pub uptime_secs: u64,
 }
 
+/// Client-to-server message with request ID for multiplexing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestEnvelope {
+    pub id: u64,
+    #[serde(flatten)]
+    pub request: Request,
+}
+
+/// Server-to-client message: either a response to a request, or a pushed event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ServerMessage {
+    Response {
+        id: u64,
+        #[serde(flatten)]
+        response: Response,
+    },
+    Event {
+        event: ServerEvent,
+    },
+}
+
+/// Server-pushed events (extensible for future use)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event_type", rename_all = "snake_case")]
+pub enum ServerEvent {
+    // Future: LogLine, ServiceStateChanged, etc.
+}
+
 /// Frame delimiter for messages over socket
 pub const FRAME_DELIMITER: u8 = b'\n';
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
 
-/// Encode a request to bytes
-pub fn encode_request(request: &Request) -> Result<Vec<u8>> {
-    let json = serde_json::to_string(request).map_err(ProtocolError::Encode)?;
+/// Encode a request envelope to bytes
+pub fn encode_envelope(envelope: &RequestEnvelope) -> Result<Vec<u8>> {
+    let json = serde_json::to_string(envelope).map_err(ProtocolError::Encode)?;
     let mut bytes = json.into_bytes();
     bytes.push(FRAME_DELIMITER);
     Ok(bytes)
 }
 
-/// Encode a response to bytes
-pub fn encode_response(response: &Response) -> Result<Vec<u8>> {
-    let json = serde_json::to_string(response).map_err(ProtocolError::Encode)?;
+/// Decode a request envelope from bytes
+pub fn decode_envelope(bytes: &[u8]) -> Result<RequestEnvelope> {
+    let json = std::str::from_utf8(bytes)?;
+    let envelope: RequestEnvelope = serde_json::from_str(json).map_err(ProtocolError::Decode)?;
+    Ok(envelope)
+}
+
+/// Encode a server message to bytes
+pub fn encode_server_message(msg: &ServerMessage) -> Result<Vec<u8>> {
+    let json = serde_json::to_string(msg).map_err(ProtocolError::Encode)?;
     let mut bytes = json.into_bytes();
     bytes.push(FRAME_DELIMITER);
     Ok(bytes)
 }
 
-/// Decode a request from bytes
-pub fn decode_request(bytes: &[u8]) -> Result<Request> {
+/// Decode a server message from bytes
+pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage> {
     let json = std::str::from_utf8(bytes)?;
-    let request: Request = serde_json::from_str(json).map_err(ProtocolError::Decode)?;
-    Ok(request)
-}
-
-/// Decode a response from bytes
-pub fn decode_response(bytes: &[u8]) -> Result<Response> {
-    let json = std::str::from_utf8(bytes)?;
-    let response: Response = serde_json::from_str(json).map_err(ProtocolError::Decode)?;
-    Ok(response)
+    let msg: ServerMessage = serde_json::from_str(json).map_err(ProtocolError::Decode)?;
+    Ok(msg)
 }

@@ -163,7 +163,7 @@ impl ConfigActor {
 
                 let restored_sys_env = snapshot.sys_env;
 
-                // Recompute effective_wait (not serialized in snapshot due to #[serde(skip)])
+                // Recompute wait values (safety net for old snapshots missing resolved wait)
                 let mut config = snapshot.config;
                 crate::deps::resolve_effective_wait(&mut config.services)?;
 

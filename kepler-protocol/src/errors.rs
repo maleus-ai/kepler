@@ -41,6 +41,9 @@ pub enum ClientError {
     #[error("response message exceeds maximum size of {MAX_MESSAGE_SIZE} bytes")]
     MessageTooLarge,
 
+    #[error("connection to daemon was lost")]
+    Disconnected,
+
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
 }

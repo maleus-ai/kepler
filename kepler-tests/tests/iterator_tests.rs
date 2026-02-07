@@ -328,14 +328,14 @@ fn test_iterator_handles_malformed_lines() {
 }
 
 #[test]
-fn test_iterator_stops_on_malformed_line() {
+fn test_iterator_skips_malformed_lines() {
     let temp_dir = setup_test_dir();
     let logs_dir = temp_dir.path().to_path_buf();
 
     fs::create_dir_all(&logs_dir).unwrap();
 
-    // File with malformed line after valid one
-    // Iterator will return first line, then stop when it hits the bad line
+    // File with malformed line between valid ones
+    // Iterator should skip the bad line and continue
     fs::write(
         logs_dir.join("test.stdout.log"),
         "1000\tGood line 1\n\
@@ -346,9 +346,10 @@ fn test_iterator_stops_on_malformed_line() {
     let reader = LogReader::new(logs_dir);
     let logs: Vec<_> = reader.iter(Some("test"), false).collect();
 
-    // Only gets the first line before the malformed one
-    assert_eq!(logs.len(), 1);
+    // Skips the malformed line, returns both valid lines
+    assert_eq!(logs.len(), 2);
     assert_eq!(logs[0].line, "Good line 1");
+    assert_eq!(logs[1].line, "Good line 2");
 }
 
 #[test]

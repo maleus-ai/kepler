@@ -254,13 +254,13 @@ impl ServiceOrchestrator {
                     ).await?;
                     Ok(result)
                 } else {
-                    // Use effective_wait field to partition services
+                    // Use wait field to partition services (always resolved after config load)
                     let startup_services: Vec<String> = services_to_start.iter()
-                        .filter(|s| config.services.get(*s).map_or(true, |c| c.effective_wait))
+                        .filter(|s| config.services.get(*s).map_or(true, |c| c.wait.expect("wait should have been resolved by resolve_effective_wait")))
                         .cloned()
                         .collect();
                     let deferred_services: Vec<String> = services_to_start.iter()
-                        .filter(|s| config.services.get(*s).map_or(false, |c| !c.effective_wait))
+                        .filter(|s| config.services.get(*s).map_or(false, |c| !c.wait.expect("wait should have been resolved by resolve_effective_wait")))
                         .cloned()
                         .collect();
 

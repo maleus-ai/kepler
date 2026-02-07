@@ -287,6 +287,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -662,7 +676,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
- "dashmap",
+ "dashmap 5.5.3",
  "dirs",
  "dotenvy",
  "futures",
@@ -707,6 +721,7 @@ dependencies = [
 name = "kepler-protocol"
 version = "0.1.0"
 dependencies = [
+ "dashmap 6.1.0",
  "libc",
  "nix",
  "serde",

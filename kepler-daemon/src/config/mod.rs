@@ -31,10 +31,6 @@ use tracing::warn;
 
 use crate::errors::{DaemonError, Result};
 
-fn default_effective_wait() -> bool {
-    true
-}
-
 /// Load environment variables from an env_file.
 /// Returns an empty HashMap if the file doesn't exist or can't be parsed.
 fn load_env_file(path: &Path) -> HashMap<String, String> {
@@ -212,13 +208,10 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub limits: Option<ResourceLimits>,
     /// Whether to wait for this service during startup (--wait mode).
-    /// None = auto-compute from dependencies (propagation algorithm)
+    /// None in YAML = auto-compute from dependencies (propagation algorithm).
+    /// After resolve_effective_wait(), always Some(bool).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<bool>,
-    /// Computed effective wait value. True = startup cluster, False = deferred.
-    /// Resolved by resolve_effective_wait() after config validation.
-    #[serde(skip, default = "default_effective_wait")]
-    pub effective_wait: bool,
 }
 
 impl KeplerConfig {

@@ -952,11 +952,11 @@ fn test_invalid_memory_limit() {
 // Protocol Message Size Tests
 // ============================================================================
 
-/// MAX_MESSAGE_SIZE constant is 1MB
+/// MAX_MESSAGE_SIZE constant is 10MB
 #[test]
 fn test_max_message_size_constant() {
     use kepler_protocol::protocol::MAX_MESSAGE_SIZE;
-    assert_eq!(MAX_MESSAGE_SIZE, 1024 * 1024); // 1MB
+    assert_eq!(MAX_MESSAGE_SIZE, 10 * 1024 * 1024); // 10MB
 }
 
 // ============================================================================
@@ -989,17 +989,14 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    // database: no deps → effective_wait = true
-    assert!(config.services["database"].effective_wait, "database should be startup");
-    assert_eq!(config.services["database"].wait, None);
+    // database: no deps → wait resolved to true
+    assert_eq!(config.services["database"].wait, Some(true), "database should be startup");
 
     // app: wait: true overrides deferred service_failed condition
-    assert!(config.services["app"].effective_wait, "app should be startup (wait: true override)");
-    assert_eq!(config.services["app"].wait, Some(true));
+    assert_eq!(config.services["app"].wait, Some(true), "app should be startup (wait: true override)");
 
     // worker: wait: false overrides startup service_started condition
-    assert!(!config.services["worker"].effective_wait, "worker should be deferred (wait: false override)");
-    assert_eq!(config.services["worker"].wait, Some(false));
+    assert_eq!(config.services["worker"].wait, Some(false), "worker should be deferred (wait: false override)");
 }
 
 /// Edge-level wait overrides condition defaults
@@ -1024,7 +1021,7 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     // monitor: edge wait: true overrides service_failed's default of false
-    assert!(config.services["monitor"].effective_wait, "monitor should be startup (edge wait: true)");
+    assert!(config.services["monitor"].wait.unwrap(), "monitor should be startup (edge wait: true)");
 
     // Verify the edge wait was deserialized
     let dep = config.services["monitor"].depends_on.get("database").unwrap();
@@ -1061,9 +1058,9 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    assert!(config.services["dep-started"].effective_wait, "service_started should be startup");
-    assert!(config.services["dep-healthy"].effective_wait, "service_healthy should be startup");
-    assert!(config.services["dep-completed"].effective_wait, "service_completed_successfully should be startup");
+    assert!(config.services["dep-started"].wait.unwrap(), "service_started should be startup");
+    assert!(config.services["dep-healthy"].wait.unwrap(), "service_healthy should be startup");
+    assert!(config.services["dep-completed"].wait.unwrap(), "service_completed_successfully should be startup");
 }
 
 /// service_stopped produces effective_wait = false (deferred condition)
@@ -1086,7 +1083,7 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    assert!(!config.services["dep-stopped"].effective_wait, "service_stopped should be deferred");
+    assert!(!config.services["dep-stopped"].wait.unwrap(), "service_stopped should be deferred");
 }
 
 /// Deferred conditions produce effective_wait = false by default
@@ -1114,8 +1111,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    assert!(!config.services["dep-unhealthy"].effective_wait, "service_unhealthy should be deferred");
-    assert!(!config.services["dep-failed"].effective_wait, "service_failed should be deferred");
+    assert!(!config.services["dep-unhealthy"].wait.unwrap(), "service_unhealthy should be deferred");
+    assert!(!config.services["dep-failed"].wait.unwrap(), "service_failed should be deferred");
 }
 
 /// Deferred status propagates through dependency chain
@@ -1148,10 +1145,10 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    assert!(config.services["database"].effective_wait, "database (no deps) = startup");
-    assert!(!config.services["monitor"].effective_wait, "monitor (service_failed edge) = deferred");
-    assert!(!config.services["alerter"].effective_wait, "alerter (depends on deferred monitor) = deferred");
-    assert!(!config.services["dashboard"].effective_wait, "dashboard (depends on deferred alerter) = deferred");
+    assert!(config.services["database"].wait.unwrap(), "database (no deps) = startup");
+    assert!(!config.services["monitor"].wait.unwrap(), "monitor (service_failed edge) = deferred");
+    assert!(!config.services["alerter"].wait.unwrap(), "alerter (depends on deferred monitor) = deferred");
+    assert!(!config.services["dashboard"].wait.unwrap(), "dashboard (depends on deferred alerter) = deferred");
 }
 
 /// wait: true on a service stops deferred propagation
@@ -1185,10 +1182,10 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    assert!(config.services["database"].effective_wait);
-    assert!(!config.services["monitor"].effective_wait, "monitor = deferred");
-    assert!(config.services["alerter"].effective_wait, "alerter = startup (wait: true override)");
-    assert!(config.services["dashboard"].effective_wait, "dashboard = startup (alerter is startup)");
+    assert!(config.services["database"].wait.unwrap());
+    assert!(!config.services["monitor"].wait.unwrap(), "monitor = deferred");
+    assert!(config.services["alerter"].wait.unwrap(), "alerter = startup (wait: true override)");
+    assert!(config.services["dashboard"].wait.unwrap(), "dashboard = startup (alerter is startup)");
 }
 
 /// Mixed dependency edges: one startup + one deferred → deferred
@@ -1215,14 +1212,14 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    assert!(config.services["db"].effective_wait);
-    assert!(config.services["cache"].effective_wait);
-    assert!(!config.services["app"].effective_wait, "app should be deferred (one deferred edge makes AND false)");
+    assert!(config.services["db"].wait.unwrap());
+    assert!(config.services["cache"].wait.unwrap());
+    assert!(!config.services["app"].wait.unwrap(), "app should be deferred (one deferred edge makes AND false)");
 }
 
-/// wait field is not serialized when None (skip_serializing_if)
+/// After resolve_effective_wait, wait is always set (stored as bool in snapshot)
 #[test]
-fn test_wait_field_not_serialized_when_none() {
+fn test_wait_field_resolved_in_snapshot() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("kepler.yaml");
 
@@ -1235,10 +1232,12 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    // Serialize and check wait is not present
+    // After resolve_effective_wait, wait should be Some(true) for a service with no deps
+    assert_eq!(config.services["test"].wait, Some(true));
+
+    // Serialize: wait should appear as a bool in snapshot
     let serialized = serde_yaml::to_string(&config).unwrap();
-    assert!(!serialized.contains("wait:"), "wait should not be in serialized output when None");
-    assert!(!serialized.contains("effective_wait"), "effective_wait should never be serialized");
+    assert!(serialized.contains("wait:"), "wait should be in serialized snapshot");
 }
 
 /// Simple depends_on format (list of names) still works with effective_wait
@@ -1261,8 +1260,8 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     // Simple format defaults to service_started → startup
-    assert!(config.services["database"].effective_wait);
-    assert!(config.services["app"].effective_wait, "Simple depends_on defaults to service_started = startup");
+    assert!(config.services["database"].wait.unwrap());
+    assert!(config.services["app"].wait.unwrap(), "Simple depends_on defaults to service_started = startup");
 }
 
 /// Test that ServiceInfo includes exit_code for stopped services

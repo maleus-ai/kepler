@@ -257,7 +257,7 @@ fn collect_deps(
 /// 2. `S.wait = Some(false)` → `effective_wait = false`
 /// 3. `S.wait = None` + no dependencies → `effective_wait = true`
 /// 4. `S.wait = None` + has dependencies → `effective_wait = AND` over all deps of:
-///    `[dep.effective_wait AND edge_wait]`
+///    `[dep.wait.unwrap() AND edge_wait]`
 ///    where `edge_wait = dep_config.wait.unwrap_or(condition.is_startup_condition())`
 ///
 /// When a service gets `effective_wait=false` without explicitly setting `wait: false`
@@ -282,7 +282,7 @@ pub fn resolve_effective_wait(
                 if config.depends_on.is_empty() {
                     true
                 } else {
-                    // AND over all deps: dep.effective_wait AND edge_wait
+                    // AND over all deps: dep.wait.unwrap() AND edge_wait
                     config.depends_on.iter().all(|(dep_name, dep_config)| {
                         let dep_effective = effective_map.get(&dep_name).copied().unwrap_or(true);
                         let edge_wait = dep_config.wait.unwrap_or_else(|| dep_config.condition.is_startup_condition());
@@ -321,10 +321,10 @@ pub fn resolve_effective_wait(
         effective_map.insert(name.clone(), effective_wait);
     }
 
-    // Apply computed values back to configs
+    // Apply computed values back into wait field
     for (name, effective_wait) in &effective_map {
         if let Some(config) = services.get_mut(name) {
-            config.effective_wait = *effective_wait;
+            config.wait = Some(*effective_wait);
         }
     }
 
@@ -457,7 +457,6 @@ mod tests {
             group: None,
             limits: None,
             wait: None,
-            effective_wait: true,
         }
     }
 
@@ -497,7 +496,6 @@ mod tests {
             group: None,
             limits: None,
             wait: None,
-            effective_wait: true,
         }
     }
 
@@ -573,9 +571,9 @@ mod tests {
         ]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(services["b"].effective_wait);
-        assert!(services["c"].effective_wait);
+        assert!(services["a"].wait.unwrap());
+        assert!(services["b"].wait.unwrap());
+        assert!(services["c"].wait.unwrap());
     }
 
     #[test]
@@ -592,9 +590,9 @@ mod tests {
         ]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["d"].effective_wait, "D should be startup");
-        assert!(!services["e"].effective_wait, "E should be deferred (service_failed condition)");
-        assert!(!services["f"].effective_wait, "F should be deferred (depends on deferred E)");
+        assert!(services["d"].wait.unwrap(), "D should be startup");
+        assert!(!services["e"].wait.unwrap(), "E should be deferred (service_failed condition)");
+        assert!(!services["f"].wait.unwrap(), "F should be deferred (depends on deferred E)");
     }
 
     #[test]
@@ -624,13 +622,13 @@ mod tests {
         ]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(services["b"].effective_wait);
-        assert!(services["c"].effective_wait);
-        assert!(services["d"].effective_wait);
-        assert!(!services["e"].effective_wait);
-        assert!(!services["f"].effective_wait);
-        assert!(!services["g"].effective_wait);
+        assert!(services["a"].wait.unwrap());
+        assert!(services["b"].wait.unwrap());
+        assert!(services["c"].wait.unwrap());
+        assert!(services["d"].wait.unwrap());
+        assert!(!services["e"].wait.unwrap());
+        assert!(!services["f"].wait.unwrap());
+        assert!(!services["g"].wait.unwrap());
     }
 
     #[test]
@@ -643,8 +641,8 @@ mod tests {
         services.insert("b".to_string(), make_service(vec![]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["b"].effective_wait, "B (no deps) should be startup");
-        assert!(!services["a"].effective_wait, "A (deferred dep) should be deferred");
+        assert!(services["b"].wait.unwrap(), "B (no deps) should be startup");
+        assert!(!services["a"].wait.unwrap(), "A (deferred dep) should be deferred");
     }
 
     #[test]
@@ -661,9 +659,9 @@ mod tests {
         ], Some(true)));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(!services["b"].effective_wait, "B should be deferred");
-        assert!(services["c"].effective_wait, "C should be startup due to wait: true override");
+        assert!(services["a"].wait.unwrap());
+        assert!(!services["b"].wait.unwrap(), "B should be deferred");
+        assert!(services["c"].wait.unwrap(), "C should be startup due to wait: true override");
     }
 
     #[test]
@@ -674,8 +672,8 @@ mod tests {
         services.insert("b".to_string(), make_service_with_wait(vec!["a"], Some(false)));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(!services["b"].effective_wait, "B should be deferred due to wait: false");
+        assert!(services["a"].wait.unwrap());
+        assert!(!services["b"].wait.unwrap(), "B should be deferred due to wait: false");
     }
 
     #[test]
@@ -688,8 +686,8 @@ mod tests {
         ]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(services["b"].effective_wait, "B should be startup due to edge wait: true");
+        assert!(services["a"].wait.unwrap());
+        assert!(services["b"].wait.unwrap(), "B should be startup due to edge wait: true");
     }
 
     #[test]
@@ -702,8 +700,8 @@ mod tests {
         ]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(!services["b"].effective_wait, "B should be deferred due to edge wait: false");
+        assert!(services["a"].wait.unwrap());
+        assert!(!services["b"].wait.unwrap(), "B should be deferred due to edge wait: false");
     }
 
     #[test]
@@ -714,8 +712,8 @@ mod tests {
         services.insert("b".to_string(), make_service(vec![]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(services["b"].effective_wait);
+        assert!(services["a"].wait.unwrap());
+        assert!(services["b"].wait.unwrap());
     }
 
     #[test]
@@ -728,8 +726,8 @@ mod tests {
         ]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(!services["b"].effective_wait, "B should be deferred (service_stopped is a deferred condition)");
+        assert!(services["a"].wait.unwrap());
+        assert!(!services["b"].wait.unwrap(), "B should be deferred (service_stopped is a deferred condition)");
     }
 
     // --- Topological sort tests ---
@@ -922,9 +920,9 @@ mod tests {
         ]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(services["b"].effective_wait);
-        assert!(!services["c"].effective_wait, "C should be deferred (one deferred edge makes AND false)");
+        assert!(services["a"].wait.unwrap());
+        assert!(services["b"].wait.unwrap());
+        assert!(!services["c"].wait.unwrap(), "C should be deferred (one deferred edge makes AND false)");
     }
 
     #[test]
@@ -948,7 +946,7 @@ mod tests {
 
             resolve_effective_wait(&mut services).unwrap();
             assert_eq!(
-                services["svc"].effective_wait, expected,
+                services["svc"].wait.unwrap(), expected,
                 "Condition {:?} should produce effective_wait={}", label, expected
             );
         }
@@ -972,10 +970,10 @@ mod tests {
         ]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(services["b"].effective_wait, "B startup path");
-        assert!(!services["c"].effective_wait, "C deferred path");
-        assert!(!services["d"].effective_wait, "D deferred because C (one dep) is deferred");
+        assert!(services["a"].wait.unwrap());
+        assert!(services["b"].wait.unwrap(), "B startup path");
+        assert!(!services["c"].wait.unwrap(), "C deferred path");
+        assert!(!services["d"].wait.unwrap(), "D deferred because C (one dep) is deferred");
     }
 
     #[test]
@@ -997,11 +995,11 @@ mod tests {
         ]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(!services["b"].effective_wait);
-        assert!(!services["c"].effective_wait);
-        assert!(!services["d"].effective_wait);
-        assert!(!services["e"].effective_wait, "Deferred should propagate through 4-deep chain");
+        assert!(services["a"].wait.unwrap());
+        assert!(!services["b"].wait.unwrap());
+        assert!(!services["c"].wait.unwrap());
+        assert!(!services["d"].wait.unwrap());
+        assert!(!services["e"].wait.unwrap(), "Deferred should propagate through 4-deep chain");
     }
 
     #[test]
@@ -1020,10 +1018,10 @@ mod tests {
         ]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].effective_wait);
-        assert!(!services["b"].effective_wait, "B deferred from service_failed");
-        assert!(services["c"].effective_wait, "C forced startup by wait: true");
-        assert!(services["d"].effective_wait, "D startup because C is startup");
+        assert!(services["a"].wait.unwrap());
+        assert!(!services["b"].wait.unwrap(), "B deferred from service_failed");
+        assert!(services["c"].wait.unwrap(), "C forced startup by wait: true");
+        assert!(services["d"].wait.unwrap(), "D startup because C is startup");
     }
 
     #[test]
@@ -1040,7 +1038,7 @@ mod tests {
 
         resolve_effective_wait(&mut services).unwrap();
         // Both edges are startup (edge override makes service_failed edge startup, service_started is default startup)
-        assert!(services["c"].effective_wait, "C startup because both edges are wait=true");
+        assert!(services["c"].wait.unwrap(), "C startup because both edges are wait=true");
     }
 
     #[test]
@@ -1050,7 +1048,7 @@ mod tests {
         services.insert("lonely".to_string(), make_service(vec![]));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(services["lonely"].effective_wait);
+        assert!(services["lonely"].wait.unwrap());
     }
 
     #[test]
@@ -1060,7 +1058,7 @@ mod tests {
         services.insert("a".to_string(), make_service_with_wait(vec![], Some(false)));
 
         resolve_effective_wait(&mut services).unwrap();
-        assert!(!services["a"].effective_wait, "Explicit wait: false should override even with no deps");
+        assert!(!services["a"].wait.unwrap(), "Explicit wait: false should override even with no deps");
     }
 
     #[test]
