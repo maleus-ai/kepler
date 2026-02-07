@@ -2,7 +2,7 @@
 
 use kepler_daemon::config::SysEnvPolicy;
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
-use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
+use kepler_tests::helpers::daemon_harness::{TestDaemonHarness, ENV_LOCK};
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -369,12 +369,6 @@ async fn test_system_var_passed_and_expandable() {
     let marker = MarkerFileHelper::new(temp_dir.path());
     let marker_path = marker.marker_path("sys_var");
 
-    // Set a system env var in the test process (simulating daemon having it)
-    // SAFETY: This is a test environment, and we clean up the var at the end
-    unsafe {
-        std::env::set_var("KEPLER_TEST_VAR", "test_value_123");
-    }
-
     let config = TestConfigBuilder::new()
         .add_service(
             "test",
@@ -401,18 +395,31 @@ async fn test_system_var_passed_and_expandable() {
         )
         .build();
 
-    let harness = TestDaemonHarness::new(config, temp_dir.path())
-        .await
-        .unwrap();
+    // Hold ENV_LOCK around set_var + harness creation so the env snapshot
+    // is taken atomically (prevents race with parallel tests' env mutations).
+    let harness = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: We hold ENV_LOCK, so no parallel test can mutate env concurrently.
+        unsafe {
+            std::env::set_var("KEPLER_TEST_VAR", "test_value_123");
+        }
+        let h = TestDaemonHarness::new_with_env_lock_held(config, temp_dir.path())
+            .await
+            .unwrap();
+        unsafe {
+            std::env::remove_var("KEPLER_TEST_VAR");
+        }
+        h
+    };
 
     harness.start_service("test").await.unwrap();
 
-    let content = marker
-        .wait_for_marker_content("sys_var", Duration::from_secs(2))
-        .await;
-
-    assert!(content.is_some(), "Service should have written env vars");
-    let content = content.unwrap();
+    // Wait for both lines to be written (DIRECT= and EXPANDED=)
+    assert!(
+        marker.wait_for_marker_lines("sys_var", 2, Duration::from_secs(2)).await,
+        "Service should have written both env var lines"
+    );
+    let content = marker.read_marker("sys_var").unwrap();
 
     // KEPLER_TEST_VAR SHOULD exist in process runtime environment
     // (all system vars are now inherited)
@@ -428,12 +435,6 @@ async fn test_system_var_passed_and_expandable() {
         "Var expanded via ${{VAR}} at config time should be in runtime env. Got: {}",
         content
     );
-
-    // Cleanup
-    // SAFETY: This is a test environment cleanup
-    unsafe {
-        std::env::remove_var("KEPLER_TEST_VAR");
-    }
 
     harness.stop_service("test").await.unwrap();
 }

@@ -614,3 +614,64 @@ async fn test_multiple_services_with_healthchecks() {
 
     harness.stop_all().await.unwrap();
 }
+
+/// Verify that stopping a service kills the entire process group (no orphans)
+#[tokio::test]
+async fn test_process_group_cleanup_on_stop() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Service spawns child processes via sh -c
+    let service = TestServiceBuilder::new(vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "sleep 3600 & sleep 3600 & wait".to_string(),
+    ]);
+
+    let config = TestConfigBuilder::new()
+        .add_service("pgtest", service.build())
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path()).await.unwrap();
+
+    harness.start_service("pgtest").await.unwrap();
+    wait_for_running(harness.handle(), "pgtest", Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    // Get the PID (which is also the PGID since we set process_group(0))
+    let pid = harness
+        .handle()
+        .get_service_state("pgtest")
+        .await
+        .and_then(|s| s.pid)
+        .expect("Service should have a PID");
+
+    // Verify the process group exists before stopping
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::killpg;
+        use nix::unistd::Pid;
+        let pgid = Pid::from_raw(pid as i32);
+        assert!(
+            killpg(pgid, None).is_ok(),
+            "Process group should exist before stop"
+        );
+    }
+
+    harness.stop_service("pgtest").await.unwrap();
+
+    // Give a moment for cleanup
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify the entire process group is gone
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::killpg;
+        use nix::unistd::Pid;
+        let pgid = Pid::from_raw(pid as i32);
+        assert!(
+            killpg(pgid, None).is_err(),
+            "Process group should be dead after stop"
+        );
+    }
+}

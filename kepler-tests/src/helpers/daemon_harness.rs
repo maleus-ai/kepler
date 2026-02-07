@@ -9,12 +9,14 @@ use kepler_daemon::process::{spawn_service, stop_service, ProcessExitEvent, Spaw
 use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 /// Mutex to synchronize environment variable setting and ConfigActor creation.
-/// This ensures that parallel tests don't interfere with each other's KEPLER_DAEMON_PATH.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+/// This ensures that parallel tests don't interfere with each other's env vars.
+/// Public so tests that need to set env vars atomically with harness creation
+/// can acquire the lock externally and use `new_with_env_lock_held`.
+pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Test harness for managing daemon state
 pub struct TestDaemonHarness {
@@ -25,33 +27,50 @@ pub struct TestDaemonHarness {
     exit_rx: Option<mpsc::Receiver<ProcessExitEvent>>,
     restart_tx: mpsc::Sender<FileChangeEvent>,
     restart_rx: Option<mpsc::Receiver<FileChangeEvent>>,
+    /// Track spawned PIDs so Drop can kill their process groups on panic
+    tracked_pids: Arc<Mutex<Vec<u32>>>,
 }
 
 impl TestDaemonHarness {
     /// Create a new test harness with the given config
     pub async fn new(config: KeplerConfig, config_dir: &Path) -> std::io::Result<Self> {
-        // Write config to file first (outside the lock)
-        let config_path = config_dir.join("kepler.yaml");
-        let config_yaml = serde_yaml::to_string(&config)
-            .map_err(std::io::Error::other)?;
-        std::fs::write(&config_path, config_yaml)?;
+        let config_path = Self::write_config(&config, config_dir)?;
 
-        // Lock to ensure atomic env var setting + ConfigActor creation
-        // This prevents race conditions when tests run in parallel
         let (handle, actor) = {
             let _guard = ENV_LOCK.lock().unwrap();
-
-            // Set KEPLER_DAEMON_PATH to isolate state within this test's directory
-            // SAFETY: We hold ENV_LOCK, so no other test can interfere between
-            // setting the env var and creating the ConfigActor.
-            let kepler_state_dir = config_dir.join(".kepler");
-            unsafe {
-                std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
-            }
-
-            ConfigActor::create(config_path.clone(), Some(std::env::vars().collect()))
-                .map_err(|e| std::io::Error::other(e.to_string()))?
+            Self::create_actor(&config_path, config_dir)?
         };
+
+        Self::finish(handle, actor, config_path, config_dir)
+    }
+
+    /// Create a new test harness assuming the caller already holds `ENV_LOCK`.
+    /// Use when you need to set env vars atomically with harness creation.
+    pub async fn new_with_env_lock_held(config: KeplerConfig, config_dir: &Path) -> std::io::Result<Self> {
+        let config_path = Self::write_config(&config, config_dir)?;
+        let (handle, actor) = Self::create_actor(&config_path, config_dir)?;
+        Self::finish(handle, actor, config_path, config_dir)
+    }
+
+    fn write_config(config: &KeplerConfig, config_dir: &Path) -> std::io::Result<PathBuf> {
+        let config_path = config_dir.join("kepler.yaml");
+        let config_yaml = serde_yaml::to_string(config)
+            .map_err(std::io::Error::other)?;
+        std::fs::write(&config_path, &config_yaml)?;
+        Ok(config_path)
+    }
+
+    fn create_actor(config_path: &Path, config_dir: &Path) -> std::io::Result<(ConfigActorHandle, ConfigActor)> {
+        let kepler_state_dir = config_dir.join(".kepler");
+        // SAFETY: Caller must hold ENV_LOCK to prevent races with parallel tests.
+        unsafe {
+            std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
+        }
+        ConfigActor::create(config_path.to_path_buf(), Some(std::env::vars().collect()))
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    fn finish(handle: ConfigActorHandle, actor: ConfigActor, config_path: PathBuf, config_dir: &Path) -> std::io::Result<Self> {
         tokio::spawn(actor.run());
 
         let (exit_tx, exit_rx) = mpsc::channel(32);
@@ -59,12 +78,13 @@ impl TestDaemonHarness {
 
         Ok(Self {
             handle,
-            config_path: config_path.clone(),
+            config_path,
             config_dir: config_dir.to_path_buf(),
             exit_tx,
             exit_rx: Some(exit_rx),
             restart_tx,
             restart_rx: Some(restart_rx),
+            tracked_pids: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -76,36 +96,12 @@ impl TestDaemonHarness {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
 
-        // Lock to ensure atomic env var setting + ConfigActor creation
-        // This prevents race conditions when tests run in parallel
         let (handle, actor) = {
             let _guard = ENV_LOCK.lock().unwrap();
-
-            // Set KEPLER_DAEMON_PATH to isolate state within this test's directory
-            // SAFETY: We hold ENV_LOCK, so no other test can interfere between
-            // setting the env var and creating the ConfigActor.
-            let kepler_state_dir = config_dir.join(".kepler");
-            unsafe {
-                std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
-            }
-
-            ConfigActor::create(config_path.clone(), Some(std::env::vars().collect()))
-                .map_err(|e| std::io::Error::other(e.to_string()))?
+            Self::create_actor(&config_path, &config_dir)?
         };
-        tokio::spawn(actor.run());
 
-        let (exit_tx, exit_rx) = mpsc::channel(32);
-        let (restart_tx, restart_rx) = mpsc::channel(32);
-
-        Ok(Self {
-            handle,
-            config_path,
-            config_dir,
-            exit_tx,
-            exit_rx: Some(exit_rx),
-            restart_tx,
-            restart_rx: Some(restart_rx),
-        })
+        Self::finish(handle, actor, config_path, &config_dir)
     }
 
     /// Take the exit event receiver (can only be taken once)
@@ -204,6 +200,13 @@ impl TestDaemonHarness {
         self.handle
             .store_process_handle(service_name, process_handle)
             .await;
+
+        // Track PID for cleanup on drop (handles panic unwind)
+        if let Some(state) = self.handle.get_service_state(service_name).await {
+            if let Some(pid) = state.pid {
+                self.tracked_pids.lock().unwrap().push(pid);
+            }
+        }
 
         // Update status to Running (PID is already set by spawn_service)
         let _ = self.handle
@@ -360,6 +363,7 @@ impl TestDaemonHarness {
     pub fn spawn_file_change_handler(&self, mut restart_rx: mpsc::Receiver<FileChangeEvent>) {
         let handle = self.handle.clone();
         let exit_tx = self.exit_tx.clone();
+        let tracked_pids = self.tracked_pids.clone();
 
         tokio::spawn(async move {
             while let Some(event) = restart_rx.recv().await {
@@ -430,6 +434,13 @@ impl TestDaemonHarness {
                         .store_process_handle(&event.service_name, process_handle)
                         .await;
 
+                    // Track new PID for cleanup on drop
+                    if let Some(state) = handle.get_service_state(&event.service_name).await {
+                        if let Some(pid) = state.pid {
+                            tracked_pids.lock().unwrap().push(pid);
+                        }
+                    }
+
                     let _ = handle
                         .set_service_status(&event.service_name, ServiceStatus::Running)
                         .await;
@@ -447,6 +458,7 @@ impl TestDaemonHarness {
     pub fn spawn_process_exit_handler(&self, mut exit_rx: mpsc::Receiver<ProcessExitEvent>) {
         let handle = self.handle.clone();
         let exit_tx = self.exit_tx.clone();
+        let tracked_pids = self.tracked_pids.clone();
 
         tokio::spawn(async move {
             while let Some(event) = exit_rx.recv().await {
@@ -549,6 +561,13 @@ impl TestDaemonHarness {
                             .store_process_handle(&event.service_name, process_handle)
                             .await;
 
+                        // Track new PID for cleanup on drop
+                        if let Some(state) = handle.get_service_state(&event.service_name).await {
+                            if let Some(pid) = state.pid {
+                                tracked_pids.lock().unwrap().push(pid);
+                            }
+                        }
+
                         let _ = handle
                             .set_service_status(&event.service_name, ServiceStatus::Running)
                             .await;
@@ -573,6 +592,22 @@ impl TestDaemonHarness {
     pub async fn reload_config(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.handle.reload_config().await?;
         Ok(())
+    }
+}
+
+impl Drop for TestDaemonHarness {
+    fn drop(&mut self) {
+        // Kill all tracked process groups to prevent orphans on test panic
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{killpg, Signal};
+            use nix::unistd::Pid;
+
+            let pids = self.tracked_pids.lock().unwrap();
+            for &pid in pids.iter() {
+                let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+            }
+        }
     }
 }
 

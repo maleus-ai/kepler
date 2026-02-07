@@ -106,7 +106,7 @@ pub fn validate_running_process(pid: u32, expected_start_time: Option<i64>) -> b
 pub async fn kill_process_by_pid(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        use nix::sys::signal::{kill, Signal};
+        use nix::sys::signal::{kill, killpg, Signal};
         use nix::unistd::Pid;
 
         let nix_pid = Pid::from_raw(pid as i32);
@@ -117,11 +117,11 @@ pub async fn kill_process_by_pid(pid: u32) -> bool {
             return true;
         }
 
-        info!("Killing orphaned process {} (SIGTERM)", pid);
+        info!("Killing orphaned process group {} (SIGTERM)", pid);
 
-        // Send SIGTERM for graceful shutdown
-        if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
-            warn!("Failed to send SIGTERM to process {}: {}", pid, e);
+        // Send SIGTERM to the entire process group for graceful shutdown
+        if let Err(e) = killpg(nix_pid, Signal::SIGTERM) {
+            warn!("Failed to send SIGTERM to process group {}: {}", pid, e);
             return false;
         }
 
@@ -131,15 +131,15 @@ pub async fn kill_process_by_pid(pid: u32) -> bool {
 
             // Check if process is still alive
             if kill(nix_pid, None).is_err() {
-                debug!("Process {} terminated gracefully", pid);
+                debug!("Process group {} terminated gracefully", pid);
                 return true;
             }
         }
 
-        // Process still alive, send SIGKILL
-        warn!("Process {} did not respond to SIGTERM, sending SIGKILL", pid);
-        if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
-            warn!("Failed to send SIGKILL to process {}: {}", pid, e);
+        // Process still alive, send SIGKILL to the entire process group
+        warn!("Process group {} did not respond to SIGTERM, sending SIGKILL", pid);
+        if let Err(e) = killpg(nix_pid, Signal::SIGKILL) {
+            warn!("Failed to send SIGKILL to process group {}: {}", pid, e);
             return false;
         }
 
@@ -148,7 +148,7 @@ pub async fn kill_process_by_pid(pid: u32) -> bool {
 
         // Verify process is gone
         if kill(nix_pid, None).is_err() {
-            debug!("Process {} killed with SIGKILL", pid);
+            debug!("Process group {} killed with SIGKILL", pid);
             true
         } else {
             error!("Process {} survived SIGKILL", pid);

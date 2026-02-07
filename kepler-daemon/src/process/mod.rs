@@ -218,14 +218,14 @@ async fn monitor_process(
             #[cfg(unix)]
             {
                 if let Some(pid) = child.id() {
-                    debug!("Sending signal {} to process {}", signal_num, pid);
-                    use nix::sys::signal::{kill, Signal};
+                    debug!("Sending signal {} to process group {}", signal_num, pid);
+                    use nix::sys::signal::{killpg, Signal};
                     use nix::unistd::Pid;
                     if let Ok(sig) = Signal::try_from(signal_num) {
-                        let _ = kill(Pid::from_raw(pid as i32), sig);
+                        let _ = killpg(Pid::from_raw(pid as i32), sig);
                     } else {
                         warn!("Invalid signal number {}, falling back to SIGTERM", signal_num);
-                        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                        let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGTERM);
                     }
                 }
             }
@@ -251,9 +251,15 @@ async fn monitor_process(
                     warn!("Error waiting for service {}: {}", service_name, e);
                 }
                 Err(_) => {
-                    // Timeout - force kill
+                    // Timeout - force kill the entire process group
                     warn!("Service {} did not stop gracefully, force killing", service_name);
-                    let _ = child.kill().await;
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id() {
+                        use nix::sys::signal::{killpg, Signal};
+                        use nix::unistd::Pid;
+                        let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                    }
+                    let _ = child.kill().await; // reap zombie
                 }
             }
 

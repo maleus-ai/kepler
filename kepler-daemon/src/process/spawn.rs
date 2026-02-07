@@ -83,6 +83,10 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // Create a new process group so we can kill all descendants
+    #[cfg(unix)]
+    cmd.process_group(0);
+
     // Clear environment if requested (secure default)
     if spec.clear_env {
         cmd.env_clear();

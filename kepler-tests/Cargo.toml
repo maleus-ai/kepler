@@ -17,10 +17,11 @@ chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
+nix = { version = "0.31.1", features = ["signal"] }
 
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full", "test-util", "macros"] }
 libc = "0.2"
-nix = { version = "0.31.1", features = ["user"] }
+nix = { version = "0.31.1", features = ["user", "signal"] }
 mlua = { version = "0.10", features = ["luau"] }
 sysinfo = "0.37"
