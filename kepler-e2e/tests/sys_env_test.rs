@@ -260,14 +260,24 @@ services:
         logs.stdout
     );
 
-    // Recreate with updated value - should use UPDATED value (config re-baked)
+    // Stop, recreate with updated value (re-bakes config), then start
+    harness.stop_services(&config_path).await?;
+    harness
+        .wait_for_service_status(&config_path, "env-checker", "stopped", Duration::from_secs(10))
+        .await?;
+
     let recreate_output = harness
         .run_cli_with_env(
-            &["-f", config_path.to_str().unwrap(), "recreate", "-d"],
+            &["-f", config_path.to_str().unwrap(), "recreate"],
             &[(TEST_VAR, UPDATED_VALUE)],
         )
         .await?;
     recreate_output.assert_success();
+
+    let start_output = harness
+        .start_services_with_env(&config_path, &[(TEST_VAR, UPDATED_VALUE)])
+        .await?;
+    start_output.assert_success();
 
     harness
         .wait_for_service_status(&config_path, "env-checker", "running", Duration::from_secs(10))

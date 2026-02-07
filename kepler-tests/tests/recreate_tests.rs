@@ -268,10 +268,11 @@ async fn test_restart_preserves_baked_config() {
 }
 
 // ============================================================================
-// Recreate Tests - Re-bakes Config
+// Recreate Tests - Re-bakes Config (no start/stop)
 // ============================================================================
 
 /// recreate re-bakes config (re-expands environment variables)
+/// Flow: start → stop → recreate (with new env) → start → verify new env value
 #[tokio::test]
 async fn test_recreate_rebakes_config() {
     let temp_dir = TempDir::new().unwrap();
@@ -330,6 +331,10 @@ async fn test_recreate_rebakes_config() {
         "First run should have original value"
     );
 
+    // Stop services before recreate
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // Change the environment variable
     {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -341,23 +346,29 @@ async fn test_recreate_rebakes_config() {
     // Clear the marker file to see new output
     std::fs::remove_file(&env_output_path).ok();
 
-    // Recreate the service (should re-bake config with new env)
+    // Recreate config (only rebakes, does not start services)
     let mut new_sys_env: HashMap<String, String> = std::env::vars().collect();
     new_sys_env.insert(env_var_name.clone(), "changed_value".to_string());
     orchestrator
-        .recreate_services(&config_path, Some(new_sys_env))
+        .recreate_services(&config_path, Some(new_sys_env.clone()))
         .await
         .unwrap();
 
-    // Wait for service to recreate and log env
+    // Start services again with new baked config
+    orchestrator
+        .start_services(&config_path, None, Some(new_sys_env), kepler_protocol::protocol::StartMode::WaitStartup)
+        .await
+        .unwrap();
+
+    // Wait for service to start and log env
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let second_run = marker
         .wait_for_marker_content("env_output", Duration::from_secs(2))
         .await;
-    assert!(second_run.is_some(), "Service should recreate and log env");
+    assert!(second_run.is_some(), "Service should start and log env after recreate");
 
-    // The value should be "changed_value" because recreate re-bakes config
+    // The value should be "changed_value" because recreate re-baked config
     assert!(
         second_run.unwrap().contains("VAR=changed_value"),
         "Recreate should use new env value, not original baked value"
@@ -373,7 +384,8 @@ async fn test_recreate_rebakes_config() {
     }
 }
 
-/// recreate runs on_init hook (because state is cleared)
+/// recreate clears state so on_init fires again on next start
+/// Flow: start → stop → recreate → start → verify on_init fires again
 #[tokio::test]
 async fn test_recreate_runs_init_hooks() {
     let temp_dir = TempDir::new().unwrap();
@@ -430,16 +442,31 @@ async fn test_recreate_runs_init_hooks() {
     let init_count_1 = marker.count_marker_lines("on_init");
     assert_eq!(init_count_1, 1, "on_init should fire once on first start");
 
-    // Recreate the service (should clear state and run on_init again)
+    // Stop services before recreate
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Recreate config (only rebakes, clears state)
     orchestrator
-        .recreate_services(&config_path, Some(sys_env))
+        .recreate_services(&config_path, Some(sys_env.clone()))
         .await
         .unwrap();
 
-    // Wait for service to recreate
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Clear started marker to detect next start
+    std::fs::remove_file(&started_path).ok();
 
-    // Count on_init calls after recreate
+    // Start services again — on_init should fire because state was cleared by recreate
+    orchestrator
+        .start_services(&config_path, None, Some(sys_env), kepler_protocol::protocol::StartMode::WaitStartup)
+        .await
+        .unwrap();
+
+    // Wait for service to start
+    marker
+        .wait_for_marker("started", Duration::from_secs(2))
+        .await;
+
+    // Count on_init calls after recreate + start
     let init_count_2 = marker.count_marker_lines("on_init");
     assert_eq!(
         init_count_2, 2,
@@ -814,66 +841,22 @@ async fn test_stop_respects_reverse_dependency_order() {
 // Recreate Order and Hooks Tests
 // ============================================================================
 
-/// recreate stops in reverse order, then starts in forward order
+/// recreate rejects while services are running, succeeds after stop
 #[tokio::test]
 async fn test_recreate_respects_dependency_order() {
     let temp_dir = TempDir::new().unwrap();
-    let marker = MarkerFileHelper::new(temp_dir.path());
-    let order_path = marker.marker_path("recreate_order");
-
-    let backend_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::Script {
-            run: format!("echo 'STOP_BACKEND' >> {}", order_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        pre_start: Some(HookCommand::Script {
-            run: format!("echo 'START_BACKEND' >> {}", order_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        ..Default::default()
-    };
-
-    let frontend_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::Script {
-            run: format!("echo 'STOP_FRONTEND' >> {}", order_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        pre_start: Some(HookCommand::Script {
-            run: format!("echo 'START_FRONTEND' >> {}", order_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        ..Default::default()
-    };
 
     // frontend depends on backend
     let config = TestConfigBuilder::new()
         .add_service(
             "backend",
             TestServiceBuilder::long_running()
-                .with_hooks(backend_hooks)
                 .build(),
         )
         .add_service(
             "frontend",
             TestServiceBuilder::long_running()
                 .with_depends_on(vec!["backend".to_string()])
-                .with_hooks(frontend_hooks)
                 .build(),
         )
         .build();
@@ -894,63 +877,30 @@ async fn test_recreate_respects_dependency_order() {
     // Wait for services to start
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Clear the order file
-    std::fs::remove_file(&order_path).ok();
-
-    // Recreate all services
-    orchestrator
-        .recreate_services(&config_path, Some(sys_env))
-        .await
-        .unwrap();
-
-    // Wait for recreate
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Check the order
-    let content = std::fs::read_to_string(&order_path).unwrap_or_default();
-    let lines: Vec<&str> = content.lines().collect();
-
-    // Expected order:
-    // 1. Stop frontend (dependent) first
-    // 2. Stop backend (dependency) second
-    // 3. Start backend (dependency) first
-    // 4. Start frontend (dependent) second
-
-    let stop_frontend_pos = lines.iter().position(|l| *l == "STOP_FRONTEND");
-    let stop_backend_pos = lines.iter().position(|l| *l == "STOP_BACKEND");
-    let start_backend_pos = lines.iter().position(|l| *l == "START_BACKEND");
-    let start_frontend_pos = lines.iter().position(|l| *l == "START_FRONTEND");
-
+    // Recreate should fail while services are running
+    let result = orchestrator
+        .recreate_services(&config_path, Some(sys_env.clone()))
+        .await;
+    assert!(result.is_err(), "Recreate should fail while services are running");
+    let err_msg = result.unwrap_err().to_string();
     assert!(
-        stop_frontend_pos.is_some() && stop_backend_pos.is_some(),
-        "Both services should be stopped. Lines: {:?}",
-        lines
-    );
-    assert!(
-        start_backend_pos.is_some() && start_frontend_pos.is_some(),
-        "Both services should be started. Lines: {:?}",
-        lines
+        err_msg.contains("Cannot recreate while services are running"),
+        "Error should mention running services: {}",
+        err_msg
     );
 
-    // Verify stop order: frontend before backend
-    assert!(
-        stop_frontend_pos.unwrap() < stop_backend_pos.unwrap(),
-        "Frontend (dependent) should stop BEFORE backend (dependency). Lines: {:?}",
-        lines
-    );
-
-    // Verify start order: backend before frontend
-    assert!(
-        start_backend_pos.unwrap() < start_frontend_pos.unwrap(),
-        "Backend (dependency) should start BEFORE frontend (dependent). Lines: {:?}",
-        lines
-    );
-
-    // Cleanup
+    // Stop all services
     orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Recreate should succeed after stop
+    let result = orchestrator
+        .recreate_services(&config_path, Some(sys_env))
+        .await;
+    assert!(result.is_ok(), "Recreate should succeed after stopping services: {:?}", result.err());
 }
 
-/// recreate calls all lifecycle hooks: pre_stop, post_stop during stop; on_init, pre_start, post_start during start
+/// recreate does not fire any hooks; on_init fires on next start
 #[tokio::test]
 async fn test_recreate_calls_all_lifecycle_hooks() {
     let temp_dir = TempDir::new().unwrap();
@@ -1032,59 +982,100 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     assert!(content.contains("PRE_START"), "First start should call PRE_START");
     assert!(content.contains("POST_START"), "First start should call POST_START");
 
-    // Clear the hooks file
+    // Stop services
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Clear the hooks file before recreate
     std::fs::remove_file(&hooks_path).ok();
 
-    // Recreate service
+    // Recreate config (only rebakes, no hooks should fire)
     orchestrator
-        .recreate_services(&config_path, Some(sys_env))
+        .recreate_services(&config_path, Some(sys_env.clone()))
         .await
         .unwrap();
 
-    // Wait for recreate
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // No hooks should have been called during recreate
+    let content = std::fs::read_to_string(&hooks_path).unwrap_or_default();
+    assert!(
+        content.is_empty(),
+        "No hooks should fire during recreate. Content: {:?}",
+        content
+    );
 
-    // Check all hooks were called
+    // Start services again — on_init should fire because state was cleared
+    orchestrator
+        .start_services(&config_path, None, Some(sys_env), kepler_protocol::protocol::StartMode::WaitStartup)
+        .await
+        .unwrap();
+
+    // Wait for service to start
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Check hooks fired on the subsequent start
     let content = std::fs::read_to_string(&hooks_path).unwrap_or_default();
     let lines: Vec<&str> = content.lines().collect();
 
-    // Stop phase hooks
-    assert!(
-        lines.iter().any(|l| *l == "PRE_STOP"),
-        "Recreate should call PRE_STOP. Lines: {:?}",
-        lines
-    );
-    assert!(
-        lines.iter().any(|l| *l == "POST_STOP"),
-        "Recreate should call POST_STOP. Lines: {:?}",
-        lines
-    );
-
-    // Start phase hooks (including PRE_INIT since state was cleared)
+    // on_init should fire again (state was cleared by recreate)
     assert!(
         lines.iter().any(|l| *l == "PRE_INIT"),
-        "Recreate should call PRE_INIT (state cleared). Lines: {:?}",
+        "on_init should fire on start after recreate. Lines: {:?}",
         lines
     );
     assert!(
         lines.iter().any(|l| *l == "PRE_START"),
-        "Recreate should call PRE_START. Lines: {:?}",
+        "pre_start should fire on start after recreate. Lines: {:?}",
         lines
     );
     assert!(
         lines.iter().any(|l| *l == "POST_START"),
-        "Recreate should call POST_START. Lines: {:?}",
+        "post_start should fire on start after recreate. Lines: {:?}",
         lines
     );
 
-    // Verify order: stop hooks before start hooks
-    let pre_stop_pos = lines.iter().position(|l| *l == "PRE_STOP");
-    let on_init_pos = lines.iter().position(|l| *l == "PRE_INIT");
+    // Cleanup
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+}
 
+/// recreate fails while services are running
+#[tokio::test]
+async fn test_recreate_fails_while_services_running() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .build(),
+        )
+        .build();
+
+    let config_yaml = serde_yaml::to_string(&config).unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, config_yaml).unwrap();
+
+    let (orchestrator, _, _, _) = setup_orchestrator(&temp_dir).await;
+
+    // Start service
+    let sys_env: HashMap<String, String> = std::env::vars().collect();
+    orchestrator
+        .start_services(&config_path, None, Some(sys_env.clone()), kepler_protocol::protocol::StartMode::WaitStartup)
+        .await
+        .unwrap();
+
+    // Wait for service to start
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Attempt recreate while running — should fail
+    let result = orchestrator
+        .recreate_services(&config_path, Some(sys_env))
+        .await;
+    assert!(result.is_err(), "Recreate should fail while services are running");
+    let err_msg = result.unwrap_err().to_string();
     assert!(
-        pre_stop_pos.unwrap() < on_init_pos.unwrap(),
-        "PRE_STOP should come BEFORE PRE_INIT. Lines: {:?}",
-        lines
+        err_msg.contains("Cannot recreate while services are running"),
+        "Error should indicate services are running: {}",
+        err_msg
     );
 
     // Cleanup

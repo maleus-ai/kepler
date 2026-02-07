@@ -214,17 +214,15 @@ impl Client {
         .await
     }
 
-    /// Recreate services for a config (re-bake config, clear state, start fresh)
+    /// Recreate config for a config (re-bake config snapshot, no start/stop)
     pub async fn recreate(
         &self,
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
-        detach: bool,
     ) -> Result<Response> {
         self.send_request(Request::Recreate {
             config_path,
             sys_env,
-            detach,
         })
         .await
     }

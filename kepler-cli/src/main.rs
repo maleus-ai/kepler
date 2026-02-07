@@ -177,41 +177,10 @@ async fn run() -> Result<()> {
             }
         }
 
-        Commands::Recreate { detach, wait, timeout } => {
+        Commands::Recreate => {
             let sys_env: HashMap<String, String> = std::env::vars().collect();
-
-            if detach && wait {
-                // -d --wait: block until recreate complete, with optional timeout
-                if let Some(ref timeout_str) = timeout {
-                    let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
-                        .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
-                    let result = tokio::time::timeout(
-                        timeout_duration,
-                        client.recreate(canonical_path.clone(), Some(sys_env), false),
-                    ).await;
-                    match result {
-                        Ok(Ok(response)) => handle_response(response),
-                        Ok(Err(e)) => return Err(e.into()),
-                        Err(_) => {
-                            eprintln!("Timeout: recreate did not complete within {}", timeout_str);
-                            std::process::exit(1);
-                        }
-                    }
-                } else {
-                    let response = client.recreate(canonical_path.clone(), Some(sys_env), false).await?;
-                    handle_response(response);
-                }
-            } else if detach {
-                // -d: fire-and-forget
-                let response = client.recreate(canonical_path.clone(), Some(sys_env), true).await?;
-                handle_response(response);
-            } else {
-                // Foreground mode: recreate, follow logs, exit on quiescence or Ctrl+C
-                let response = client.recreate(canonical_path.clone(), Some(sys_env), false).await?;
-                handle_response(response);
-
-                follow_logs_until_quiescent(&client, &canonical_path, None).await?;
-            }
+            let response = client.recreate(canonical_path.clone(), Some(sys_env)).await?;
+            handle_response(response);
         }
 
         Commands::Logs {

@@ -115,39 +115,33 @@ async fn test_restart_detached_returns_immediately() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that `kepler recreate -d` returns immediately (fire-and-forget)
+/// Test that `kepler recreate` returns quickly (it only re-bakes config, no start/stop)
 #[tokio::test]
-async fn test_recreate_detached_returns_immediately() -> E2eResult<()> {
+async fn test_recreate_returns_immediately() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_start_attached")?;
 
     harness.start_daemon().await?;
 
-    // First start services
+    // Start and then stop services
     harness.start_services(&config_path).await?;
     harness
         .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
         .await?;
+    harness.stop_services(&config_path).await?;
+    harness
+        .wait_for_service_status(&config_path, "test-service", "stopped", Duration::from_secs(10))
+        .await?;
 
-    // Recreate in detached mode with a tight timeout — should return quickly
+    // Recreate with a tight timeout — should return quickly (no start/stop)
     let output = harness
         .run_cli_with_timeout(
-            &[
-                "-f",
-                config_path.to_str().unwrap(),
-                "recreate",
-                "-d",
-            ],
+            &["-f", config_path.to_str().unwrap(), "recreate"],
             Duration::from_secs(5),
         )
         .await?;
 
     output.assert_success();
-
-    // Service should eventually come back to running
-    harness
-        .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(15))
-        .await?;
 
     harness.stop_daemon().await?;
 

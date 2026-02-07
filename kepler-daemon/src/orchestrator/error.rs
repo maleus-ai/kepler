@@ -41,6 +41,9 @@ pub enum OrchestratorError {
         reason: String,
     },
 
+    #[error("Cannot recreate while services are running for {0}. Stop all services first.")]
+    RecreateWhileRunning(String),
+
     #[error("Daemon error: {0}")]
     DaemonError(#[from] crate::errors::DaemonError),
 }

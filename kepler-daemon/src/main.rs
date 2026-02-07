@@ -341,33 +341,18 @@ async fn handle_request(
         Request::Recreate {
             config_path,
             sys_env,
-            detach,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
 
-            if detach {
-                let orchestrator = orchestrator.clone();
-                let config_path_clone = config_path.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = orchestrator
-                        .recreate_services(&config_path_clone, sys_env)
-                        .await
-                    {
-                        tracing::error!("Background recreate failed: {}", e);
-                    }
-                });
-                Response::ok_with_message("Recreating services in background".to_string())
-            } else {
-                match orchestrator
-                    .recreate_services(&config_path, sys_env)
-                    .await
-                {
-                    Ok(msg) => Response::ok_with_message(msg),
-                    Err(e) => Response::error(e.to_string()),
-                }
+            match orchestrator
+                .recreate_services(&config_path, sys_env)
+                .await
+            {
+                Ok(msg) => Response::ok_with_message(msg),
+                Err(e) => Response::error(e.to_string()),
             }
         }
 

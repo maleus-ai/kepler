@@ -103,16 +103,13 @@ pub enum Request {
         #[serde(default)]
         detach: bool,
     },
-    /// Recreate services - re-bake config, clear state, start fresh
+    /// Recreate config - re-bake config snapshot (no start/stop)
     Recreate {
         /// Path to the config file
         config_path: PathBuf,
         /// System environment variables captured from CLI (for re-baking config snapshot)
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
-        /// If true, run recreate in background and return immediately
-        #[serde(default)]
-        detach: bool,
     },
     /// Get status of services
     Status {

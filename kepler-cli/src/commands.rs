@@ -48,18 +48,8 @@ pub enum Commands {
         #[arg(long, requires = "wait")]
         timeout: Option<String>,
     },
-    /// Recreate services (re-bake config, clear state, start fresh)
-    Recreate {
-        /// Detach and return immediately (don't follow logs)
-        #[arg(short, long)]
-        detach: bool,
-        /// Block until recreate is complete, then return (requires -d)
-        #[arg(long, requires = "detach")]
-        wait: bool,
-        /// Timeout for --wait mode (e.g. "30s", "5m")
-        #[arg(long, requires = "wait")]
-        timeout: Option<String>,
-    },
+    /// Recreate config (re-bake config snapshot, no start/stop)
+    Recreate,
     /// View service logs
     Logs {
         /// Specific service to view logs for (shows all if not specified)

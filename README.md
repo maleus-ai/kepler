@@ -192,7 +192,7 @@ Commands that operate on services (require config):
 | `kepler start [-d [--wait [--timeout T]]] [service]` | Start services. Default: follow logs until quiescent (Ctrl+C stops). `-d` detaches immediately. `-d --wait` blocks until startup cluster ready |
 | `kepler stop [-s SIGNAL] [--clean] [service]` | Stop services. Optional `--signal` (default: SIGTERM) |
 | `kepler restart [-d [--wait [--timeout T]]] [services...]` | Restart services, follow logs (Ctrl+C stops). `-d` to detach. `-d --wait` blocks until complete |
-| `kepler recreate [-d [--wait [--timeout T]]]` | Re-bake config, clear state, start fresh, follow logs (Ctrl+C stops). `-d` to detach. `-d --wait` blocks until complete |
+| `kepler recreate` | Re-bake config snapshot (requires all services stopped). Does not start/stop services |
 | `kepler ps [--all]` | List services and states with exit codes (`--all` for all loaded configs) |
 | `kepler logs [--follow] [--head N\|--tail N] [--no-hook] [service]` | View logs |
 | `kepler prune [--force] [--dry-run]` | Prune stopped/orphaned config state directories |
@@ -394,7 +394,7 @@ A service is in the **startup cluster** if all its dependency edges are startup 
 
 **Foreground quiescence:** In foreground mode (`start` with no flags), the CLI follows logs and exits automatically when all services reach a terminal state (stopped or failed). If a deferred service's dependency is permanently unsatisfied (the dependency has stopped and won't restart), the deferred service is marked as failed so the CLI can exit cleanly.
 
-**Same pattern for `restart` and `recreate`:** Both commands support the same `-d`, `-d --wait`, and `-d --wait --timeout` flags. Without `-d`, they follow logs until quiescent. With `-d --wait`, they block until the operation completes.
+**Same pattern for `restart`:** The `restart` command supports the same `-d`, `-d --wait`, and `-d --wait --timeout` flags. Without `-d`, it follows logs until quiescent. With `-d --wait`, it blocks until the operation completes. Note: `recreate` does not support these flags — it only rebakes the config and requires all services to be stopped first.
 
 You can override the default classification per dependency edge with `wait: true/false`:
 
@@ -578,7 +578,7 @@ services:
 
 Kepler supports Lua scripting (using sandboxed Luau) for dynamic config generation via `!lua` and `!lua_file` YAML tags.
 
-**Single evaluation:** Lua scripts are evaluated **once** when the config is first loaded. The returned values are then "baked" into the configuration and persisted. Scripts do not re-run on service restart or daemon restart. To re-evaluate, use `kepler recreate`. See [ARCHITECTURE.md](ARCHITECTURE.md#lua-scripting-security) for details on the sandbox and security model.
+**Single evaluation:** Lua scripts are evaluated **once** when the config is first loaded. The returned values are then "baked" into the configuration and persisted. Scripts do not re-run on service restart or daemon restart. To re-evaluate, stop all services and use `kepler recreate` to rebake the config, then `kepler start`. See [ARCHITECTURE.md](ARCHITECTURE.md#lua-scripting-security) for details on the sandbox and security model.
 
 ```yaml
 lua: |

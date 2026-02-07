@@ -128,25 +128,29 @@ flowchart TD
 
 ### CLI Recreate Command
 
-The `recreate` command forces a full re-bake, discarding the existing snapshot:
+The `recreate` command forces a full re-bake, discarding the existing snapshot. It only rebakes the config — it does **not** start or stop any services. All services must be stopped (or the config must not be loaded) before running `recreate`.
 
 ```mermaid
 flowchart TD
     A[CLI: recreate] --> B[Daemon]
-    B --> C[Stop running services]
-    C --> D[Delete existing snapshot]
-    D --> E[Copy config to state dir]
-    E --> F[Copy env_files to state dir]
-    F --> G[Apply shell expansion]
-    G --> H[Evaluate Lua scripts]
-    H --> I[Bake into new snapshot]
-    I --> J[Run services with new config]
+    B --> C{Services stopped?}
+    C -->|No| X[Error: stop services first]
+    C -->|Yes| D[Delete existing snapshot]
+    D --> E[Unload config actor]
+    E --> F[Copy config to state dir]
+    F --> G[Copy env_files to state dir]
+    G --> H[Apply shell expansion]
+    H --> I[Evaluate Lua scripts]
+    I --> J[Bake into new snapshot]
+    J --> K[Done - run 'kepler start' to use new config]
 ```
 
 Use `recreate` when:
 - The original config file has changed
 - Environment variables have changed
 - env_files have been modified
+
+Typical workflow: `kepler stop` → `kepler recreate` → `kepler start`
 
 ### CLI PS Command
 
@@ -584,7 +588,7 @@ flowchart TD
 | `-d --wait` | Startup cluster starts level-by-level (blocking). Deferred cluster spawns in background. Returns after startup cluster is ready |
 | (no flags) | Foreground mode. Starts all services, follows logs, exits when all services reach a terminal state. Ctrl+C sends stop and waits for graceful shutdown |
 
-The same flag pattern applies to `restart` and `recreate`.
+The same flag pattern applies to `restart`. Note: `recreate` does not support these flags — it only rebakes the config snapshot and requires all services to be stopped first.
 
 ### Relevant Files
 

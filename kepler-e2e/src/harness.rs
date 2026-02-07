@@ -302,32 +302,61 @@ impl E2eHarness {
         env: &[(&str, &str)],
         timeout_duration: Duration,
     ) -> E2eResult<CommandOutput> {
-        let result = timeout(timeout_duration, async {
-            let mut cmd = Command::new(&self.kepler_bin);
-            cmd.args(args)
-                .env("KEPLER_DAEMON_PATH", self.temp_dir.path());
+        let mut cmd = Command::new(&self.kepler_bin);
+        cmd.args(args)
+            .env("KEPLER_DAEMON_PATH", self.temp_dir.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let mut child = cmd.spawn()?;
 
-            // Add custom environment variables
-            for (key, value) in env {
-                cmd.env(key, value);
+        // Take stdout/stderr handles so we can read them in spawned tasks
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+
+        // Spawn tasks to drain stdout/stderr (these complete when the pipes close)
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut out) = stdout_pipe {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
             }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut err) = stderr_pipe {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
+            }
+            buf
+        });
 
-            let output = cmd.output().await?;
-
-            Ok::<CommandOutput, E2eError>(CommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code().unwrap_or(-1),
-            })
-        })
-        .await;
+        // Wait for the process with timeout — child is NOT moved into the future
+        let result = timeout(timeout_duration, child.wait()).await;
 
         match result {
-            Ok(r) => r,
-            Err(_) => Err(E2eError::Timeout(format!(
-                "CLI command: {:?}",
-                args.join(" ")
-            ))),
+            Ok(Ok(status)) => {
+                let stdout = stdout_task.await.unwrap_or_default();
+                let stderr = stderr_task.await.unwrap_or_default();
+                Ok(CommandOutput {
+                    stdout: String::from_utf8_lossy(&stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&stderr).to_string(),
+                    exit_code: status.code().unwrap_or(-1),
+                })
+            }
+            Ok(Err(e)) => Err(E2eError::SpawnFailed(e)),
+            Err(_) => {
+                // Timeout — kill the child process to prevent orphans
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                Err(E2eError::Timeout(format!(
+                    "CLI command: {:?}",
+                    args.join(" ")
+                )))
+            }
         }
     }
 
@@ -350,28 +379,7 @@ impl E2eHarness {
         args: &[&str],
         timeout_duration: Duration,
     ) -> E2eResult<CommandOutput> {
-        let result = timeout(timeout_duration, async {
-            let output = Command::new(&self.kepler_bin)
-                .args(args)
-                .env("KEPLER_DAEMON_PATH", self.temp_dir.path())
-                .output()
-                .await?;
-
-            Ok::<CommandOutput, E2eError>(CommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code().unwrap_or(-1),
-            })
-        })
-        .await;
-
-        match result {
-            Ok(r) => r,
-            Err(_) => Err(E2eError::Timeout(format!(
-                "CLI command: {:?}",
-                args.join(" ")
-            ))),
-        }
+        self.run_cli_with_env_and_timeout(args, &[], timeout_duration).await
     }
 
     /// Start services from a config file (detached mode for tests)
@@ -425,12 +433,15 @@ impl E2eHarness {
         self.run_cli(&["-f", config_str, "restart", "-d", "--wait", service]).await
     }
 
-    /// Recreate all services (re-bake config, clear state, start fresh)
+    /// Recreate all services (stop → re-bake config → start fresh)
     pub async fn recreate_services(&self, config_path: &Path) -> E2eResult<CommandOutput> {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        self.run_cli(&["-f", config_str, "recreate", "-d", "--wait"]).await
+        // Stop first, then recreate (re-bake), then start
+        self.run_cli(&["-f", config_str, "stop"]).await?;
+        self.run_cli(&["-f", config_str, "recreate"]).await?;
+        self.run_cli(&["-f", config_str, "start", "-d", "--wait"]).await
     }
 
     /// Recreate services with custom environment variables
@@ -442,7 +453,10 @@ impl E2eHarness {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        self.run_cli_with_env(&["-f", config_str, "recreate", "-d", "--wait"], env).await
+        // Stop first, then recreate with env (re-bake), then start with env
+        self.run_cli(&["-f", config_str, "stop"]).await?;
+        self.run_cli_with_env(&["-f", config_str, "recreate"], env).await?;
+        self.run_cli_with_env(&["-f", config_str, "start", "-d", "--wait"], env).await
     }
 
     /// Start a specific service (detached mode for tests)
