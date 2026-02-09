@@ -118,38 +118,17 @@ async fn test_service_dependencies_order() {
 
     // Create services with dependencies: frontend -> backend -> database
     let frontend_hooks = ServiceHooks {
-        pre_start: Some(kepler_daemon::config::HookCommand::Script {
-            run: format!("echo 'frontend' >> {}", order_file.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_start: Some(kepler_daemon::config::HookCommand::script(format!("echo 'frontend' >> {}", order_file.display()))),
         ..Default::default()
     };
 
     let backend_hooks = ServiceHooks {
-        pre_start: Some(kepler_daemon::config::HookCommand::Script {
-            run: format!("echo 'backend' >> {}", order_file.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_start: Some(kepler_daemon::config::HookCommand::script(format!("echo 'backend' >> {}", order_file.display()))),
         ..Default::default()
     };
 
     let database_hooks = ServiceHooks {
-        pre_start: Some(kepler_daemon::config::HookCommand::Script {
-            run: format!("echo 'database' >> {}", order_file.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_start: Some(kepler_daemon::config::HookCommand::script(format!("echo 'database' >> {}", order_file.display()))),
         ..Default::default()
     };
 

@@ -21,6 +21,7 @@ tokio = { version = "1.49.0", features = ["full", "process"] }
 chrono = "0.4"
 which = "6.0"
 colored = "2"
+tabled = "0.17"
 libc = "0.2"
 
 [dev-dependencies]

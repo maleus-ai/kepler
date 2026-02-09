@@ -19,7 +19,7 @@ pub use deps::{DependencyCondition, DependencyConfig, DependencyEntry, DependsOn
 pub use duration::{format_duration, parse_duration};
 pub use expand::resolve_sys_env;
 pub use health::HealthCheck;
-pub use hooks::{GlobalHooks, HookCommand, ServiceHooks};
+pub use hooks::{GlobalHooks, HookCommand, HookCommon, ServiceHooks};
 pub use logs::{LogConfig, LogRetention, LogRetentionConfig, LogStoreConfig};
 pub use resources::{parse_memory_limit, ResourceLimits, SysEnvPolicy};
 pub use restart::{RestartConfig, RestartPolicy};
@@ -33,14 +33,8 @@ use crate::errors::{DaemonError, Result};
 
 /// Load environment variables from an env_file.
 /// Returns an empty HashMap if the file doesn't exist or can't be parsed.
-fn load_env_file(path: &Path) -> HashMap<String, String> {
-    let mut env = HashMap::with_capacity(32); // Typical env file ~20-30 vars
-    if let Ok(iter) = dotenvy::from_path_iter(path) {
-        for item in iter.flatten() {
-            env.insert(item.0, item.1);
-        }
-    }
-    env
+fn try_load_env_file(path: &Path) -> HashMap<String, String> {
+    crate::env::load_env_file(path).unwrap_or_default()
 }
 
 /// Validate service name format
@@ -329,7 +323,7 @@ impl KeplerConfig {
 
             // Step 2: Load env_file if specified
             let env_file_vars = if let Some(ref ef) = service.env_file {
-                load_env_file(ef)
+                try_load_env_file(ef)
             } else {
                 HashMap::new()
             };

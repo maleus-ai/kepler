@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::errors::{DaemonError, Result};
 use crate::lua_eval::{EvalContext, LuaEvaluator};
 
-use super::load_env_file;
+use super::try_load_env_file;
 
 /// Process Lua scripts in the config value tree.
 ///
@@ -138,7 +138,7 @@ fn process_service_lua(
         } else {
             PathBuf::from(env_file_path)
         };
-        load_env_file(&path)
+        try_load_env_file(&path)
     } else {
         HashMap::new()
     };

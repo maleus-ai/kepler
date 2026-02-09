@@ -1,5 +1,6 @@
 //! Forward log iterator using min-heap (oldest entries first)
 
+use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -8,7 +9,9 @@ use std::sync::Arc;
 
 use super::{LogLine, LogReader, LogStream};
 
-/// Entry in the priority queue for merge-sort iteration
+/// Entry in the priority queue for merge-sort iteration.
+/// Natural ordering is max-heap (largest timestamp first).
+/// Wrapped in `Reverse` for the forward iterator's min-heap.
 #[derive(Debug)]
 struct HeapEntry {
     log_line: LogLine,
@@ -31,8 +34,8 @@ impl PartialOrd for HeapEntry {
 
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Reverse ordering for min-heap (smallest timestamp first)
-        other.log_line.timestamp.cmp(&self.log_line.timestamp)
+        // Natural max-heap ordering (largest timestamp first)
+        self.log_line.timestamp.cmp(&other.log_line.timestamp)
     }
 }
 
@@ -42,7 +45,7 @@ pub struct MergedLogIterator {
     /// Service names as Arc<str> for cheap cloning
     services: Vec<Arc<str>>,
     streams: Vec<LogStream>,
-    heap: BinaryHeap<HeapEntry>,
+    heap: BinaryHeap<Reverse<HeapEntry>>,
     /// Stashed entry from a previous `next()` call that the caller didn't consume.
     /// Drained first by `next()` before touching the heap.
     pending: Option<LogLine>,
@@ -152,10 +155,10 @@ impl MergedLogIterator {
                 &self.services[source_idx],
                 self.streams[source_idx],
             ) {
-                self.heap.push(HeapEntry {
+                self.heap.push(Reverse(HeapEntry {
                     log_line,
                     source_idx,
-                });
+                }));
                 return;
             }
             // Line failed to parse — skip it and try the next one
@@ -186,7 +189,7 @@ impl MergedLogIterator {
     /// was created. Sources that already have an entry in the heap are skipped.
     pub fn retry_eof_sources(&mut self) {
         let mut in_heap = vec![false; self.readers.len()];
-        for entry in self.heap.iter() {
+        for Reverse(entry) in self.heap.iter() {
             in_heap[entry.source_idx] = true;
         }
         for (i, is_in_heap) in in_heap.iter().enumerate() {
@@ -207,7 +210,7 @@ impl Iterator for MergedLogIterator {
             return Some(line);
         }
 
-        let entry = self.heap.pop()?;
+        let Reverse(entry) = self.heap.pop()?;
         self.read_next_into_heap(entry.source_idx);
         Some(entry.log_line)
     }

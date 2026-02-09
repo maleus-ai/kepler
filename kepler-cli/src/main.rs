@@ -20,6 +20,8 @@ use kepler_protocol::{
     errors::ClientError,
     protocol::{ConfigStatus, CursorLogEntry, LogCursorData, LogEntry, LogMode, Response, ResponseData, ServiceInfo, StartMode},
 };
+use tabled::{Table, Tabled};
+use tabled::settings::Style;
 use tracing_subscriber::EnvFilter;
 
 /// Kepler - A process orchestrator for managing application lifecycles
@@ -96,43 +98,17 @@ async fn run() -> Result<()> {
         .canonicalize()
         .map_err(|_| CliError::ConfigNotFound(config_path.clone()))?;
 
+    // Collect system environment once for commands that need it
+    let sys_env: HashMap<String, String> = std::env::vars().collect();
+
     match cli.command {
         Commands::Start { service, detach, wait, timeout } => {
-            let sys_env: HashMap<String, String> = std::env::vars().collect();
-
-            if detach && wait {
-                // -d --wait: block until startup cluster ready, with optional timeout
-                let mode = StartMode::WaitStartup;
-                if let Some(ref timeout_str) = timeout {
-                    let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
-                        .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
-                    let result = tokio::time::timeout(
-                        timeout_duration,
-                        client.start(canonical_path.clone(), service.clone(), Some(sys_env), mode),
-                    ).await;
-                    match result {
-                        Ok(Ok(response)) => handle_response(response),
-                        Ok(Err(e)) => return Err(e.into()),
-                        Err(_) => {
-                            eprintln!("Timeout: startup did not complete within {}", timeout_str);
-                            std::process::exit(1);
-                        }
-                    }
-                } else {
-                    let response = client.start(canonical_path.clone(), service.clone(), Some(sys_env), mode).await?;
-                    handle_response(response);
-                }
-            } else if detach {
-                // -d: fire-and-forget
-                let response = client.start(canonical_path.clone(), service.clone(), Some(sys_env), StartMode::Detached).await?;
-                handle_response(response);
-            } else {
-                // Foreground mode (no flags): start all, follow logs, exit on quiescence or Ctrl+C
-                let response = client.start(canonical_path.clone(), service.clone(), Some(sys_env), StartMode::WaitStartup).await?;
-                handle_response(response);
-
-                follow_logs_until_quiescent(&client, &canonical_path, service.as_deref()).await?;
-            }
+            execute_lifecycle(
+                &client, &canonical_path, detach, wait, &timeout,
+                client.start(canonical_path.clone(), service.clone(), Some(sys_env.clone()), StartMode::WaitStartup),
+                client.start(canonical_path.clone(), service.clone(), Some(sys_env), StartMode::Detached),
+                service.as_deref(),
+            ).await?;
         }
 
         Commands::Stop { service, clean, signal } => {
@@ -141,44 +117,15 @@ async fn run() -> Result<()> {
         }
 
         Commands::Restart { services, detach, wait, timeout } => {
-            let sys_env: HashMap<String, String> = std::env::vars().collect();
-
-            if detach && wait {
-                // -d --wait: block until restart complete, with optional timeout
-                if let Some(ref timeout_str) = timeout {
-                    let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
-                        .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
-                    let result = tokio::time::timeout(
-                        timeout_duration,
-                        client.restart(canonical_path.clone(), services, Some(sys_env), false),
-                    ).await;
-                    match result {
-                        Ok(Ok(response)) => handle_response(response),
-                        Ok(Err(e)) => return Err(e.into()),
-                        Err(_) => {
-                            eprintln!("Timeout: restart did not complete within {}", timeout_str);
-                            std::process::exit(1);
-                        }
-                    }
-                } else {
-                    let response = client.restart(canonical_path.clone(), services, Some(sys_env), false).await?;
-                    handle_response(response);
-                }
-            } else if detach {
-                // -d: fire-and-forget
-                let response = client.restart(canonical_path.clone(), services, Some(sys_env), true).await?;
-                handle_response(response);
-            } else {
-                // Foreground mode: restart, follow logs, exit on quiescence or Ctrl+C
-                let response = client.restart(canonical_path.clone(), services, Some(sys_env), false).await?;
-                handle_response(response);
-
-                follow_logs_until_quiescent(&client, &canonical_path, None).await?;
-            }
+            execute_lifecycle(
+                &client, &canonical_path, detach, wait, &timeout,
+                client.restart(canonical_path.clone(), services.clone(), Some(sys_env.clone()), false),
+                client.restart(canonical_path.clone(), services, Some(sys_env), true),
+                None,
+            ).await?;
         }
 
         Commands::Recreate => {
-            let sys_env: HashMap<String, String> = std::env::vars().collect();
             let response = client.recreate(canonical_path.clone(), Some(sys_env)).await?;
             handle_response(response);
         }
@@ -217,6 +164,50 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+/// Execute a lifecycle command (start/restart) with shared detach/wait/foreground logic.
+///
+/// - `wait_action`: async fn to call for wait/foreground modes (blocking)
+/// - `detach_action`: async fn to call for detach mode (fire-and-forget)
+/// - `follow_service`: service filter to pass to follow_logs in foreground mode (None = all)
+#[allow(clippy::too_many_arguments)]
+async fn execute_lifecycle(
+    client: &Client,
+    config_path: &Path,
+    detach: bool,
+    wait: bool,
+    timeout: &Option<String>,
+    wait_action: impl Future<Output = std::result::Result<Response, kepler_protocol::errors::ClientError>>,
+    detach_action: impl Future<Output = std::result::Result<Response, kepler_protocol::errors::ClientError>>,
+    follow_service: Option<&str>,
+) -> Result<()> {
+    if detach && wait {
+        if let Some(timeout_str) = timeout {
+            let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
+                .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
+            let result = tokio::time::timeout(timeout_duration, wait_action).await;
+            match result {
+                Ok(Ok(response)) => handle_response(response),
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => {
+                    eprintln!("Timeout: operation did not complete within {}", timeout_str);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            let response = wait_action.await?;
+            handle_response(response);
+        }
+    } else if detach {
+        let response = detach_action.await?;
+        handle_response(response);
+    } else {
+        let response = wait_action.await?;
+        handle_response(response);
+        follow_logs_until_quiescent(client, config_path, follow_service).await?;
+    }
+    Ok(())
+}
+
 fn handle_response(response: Response) {
     match response {
         Response::Ok { message, .. } => {
@@ -250,19 +241,8 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
 
             if *detach {
                 // Start daemon in background
-                let daemon_path = std::env::current_exe()?
-                    .parent()
-                    .ok_or(CliError::DaemonNotFound)?
-                    .join("kepler-daemon");
-
-                // Check if daemon binary exists
-                if !daemon_path.exists() {
-                    // Try looking in same directory as kepler binary
-                    let alt_path = which_daemon()?;
-                    start_daemon_detached(&alt_path)?;
-                } else {
-                    start_daemon_detached(&daemon_path)?;
-                }
+                let daemon_path = which_daemon()?;
+                start_daemon_detached(&daemon_path)?;
 
                 // Wait for daemon to start
                 for _ in 0..50 {
@@ -301,20 +281,7 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
 
             let client = Client::connect(&daemon_socket).await?;
             let response = client.shutdown().await?;
-
-            match response {
-                Response::Ok { message, .. } => {
-                    if let Some(msg) = message {
-                        println!("{}", msg);
-                    } else {
-                        println!("Daemon stopped");
-                    }
-                }
-                Response::Error { message } => {
-                    eprintln!("Error stopping daemon: {}", message);
-                    std::process::exit(1);
-                }
-            }
+            handle_response(response);
         }
 
         DaemonCommands::Restart { detach } => {
@@ -407,7 +374,7 @@ fn which_daemon() -> Result<PathBuf> {
     Err(CliError::DaemonNotFound)
 }
 
-fn start_daemon_detached(daemon_path: &PathBuf) -> Result<()> {
+fn start_daemon_detached(daemon_path: &Path) -> Result<()> {
     use std::process::Command;
 
     let mut cmd = Command::new(daemon_path);
@@ -428,7 +395,7 @@ fn start_daemon_detached(daemon_path: &PathBuf) -> Result<()> {
 
     cmd.spawn()
         .map_err(|source| CliError::DaemonSpawn {
-            path: daemon_path.clone(),
+            path: daemon_path.to_path_buf(),
             source,
         })?;
 
@@ -498,61 +465,27 @@ fn format_status_with_exit_code(info: &ServiceInfo) -> String {
     }
 }
 
-fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>) {
-    // Calculate column widths
-    let name_width = services
-        .keys()
-        .map(|s| s.len())
-        .max()
-        .unwrap_or(4)
-        .max(4);
-    let status_width = services
-        .values()
-        .map(|info| format_status_with_exit_code(info).len())
-        .max()
-        .unwrap_or(10)
-        .max(10);
-    let pid_width = 8;
-    let uptime_width = 12;
-    let health_width = 8;
+#[derive(Tabled)]
+struct ServiceRow {
+    #[tabled(rename = "NAME")]
+    name: String,
+    #[tabled(rename = "STATUS")]
+    status: String,
+    #[tabled(rename = "PID")]
+    pid: String,
+    #[tabled(rename = "UPTIME")]
+    uptime: String,
+    #[tabled(rename = "HEALTH")]
+    health: String,
+}
 
-    // Print header
-    println!(
-        "{:<name_width$}  {:<status_width$}  {:<pid_width$}  {:<uptime_width$}  {:<health_width$}",
-        "NAME", "STATUS", "PID", "UPTIME", "HEALTH",
-        name_width = name_width,
-        status_width = status_width,
-        pid_width = pid_width,
-        uptime_width = uptime_width,
-        health_width = health_width
-    );
-    println!(
-        "{:-<name_width$}  {:-<status_width$}  {:-<pid_width$}  {:-<uptime_width$}  {:-<health_width$}",
-        "", "", "", "", "",
-        name_width = name_width,
-        status_width = status_width,
-        pid_width = pid_width,
-        uptime_width = uptime_width,
-        health_width = health_width
-    );
-
-    // Sort services by name
-    let mut sorted: Vec<_> = services.iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(b.0));
-
-    for (name, info) in sorted {
-        let status_str = format_status_with_exit_code(info);
-        let pid_str = info
-            .pid
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "-".to_string());
-
-        let uptime_str = info
-            .started_at
-            .map(format_uptime)
-            .unwrap_or_else(|| "-".to_string());
-
-        let health_str = if info.health_check_failures > 0 {
+fn format_service_row(name: &str, info: &ServiceInfo) -> ServiceRow {
+    ServiceRow {
+        name: name.to_string(),
+        status: format_status_with_exit_code(info),
+        pid: info.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+        uptime: info.started_at.map(format_uptime).unwrap_or_else(|| "-".to_string()),
+        health: if info.health_check_failures > 0 {
             format!("{} fail", info.health_check_failures)
         } else if info.status == "healthy" {
             "ok".to_string()
@@ -560,35 +493,47 @@ fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>
             "failing".to_string()
         } else {
             "-".to_string()
-        };
-
-        println!(
-            "{:<name_width$}  {:<status_width$}  {:<pid_width$}  {:<uptime_width$}  {:<health_width$}",
-            name,
-            status_str,
-            pid_str,
-            uptime_str,
-            health_str,
-            name_width = name_width,
-            status_width = status_width,
-            pid_width = pid_width,
-            uptime_width = uptime_width,
-            health_width = health_width
-        );
+        },
     }
 }
 
+#[derive(Tabled)]
+struct MultiConfigRow {
+    #[tabled(rename = "CONFIG")]
+    config: String,
+    #[tabled(rename = "NAME")]
+    name: String,
+    #[tabled(rename = "STATUS")]
+    status: String,
+    #[tabled(rename = "PID")]
+    pid: String,
+    #[tabled(rename = "UPTIME")]
+    uptime: String,
+    #[tabled(rename = "HEALTH")]
+    health: String,
+}
+
+fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>) {
+    let mut sorted: Vec<_> = services.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+
+    let rows: Vec<ServiceRow> = sorted
+        .into_iter()
+        .map(|(name, info)| format_service_row(name, info))
+        .collect();
+
+    let table = Table::new(rows).with(Style::blank()).to_string();
+    println!("{table}");
+}
+
 fn print_multi_config_table(configs: &[ConfigStatus]) {
-    // Collect all services with their config paths
-    let mut rows: Vec<(&str, &str, &ServiceInfo)> = Vec::new();
+    let mut raw_rows: Vec<(&str, &str, &ServiceInfo)> = Vec::new();
     for config in configs {
         for (name, info) in &config.services {
-            rows.push((&config.config_path, name, info));
+            raw_rows.push((&config.config_path, name, info));
         }
     }
-
-    // Sort by config path, then by service name
-    rows.sort_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(b.1)));
+    raw_rows.sort_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(b.1)));
 
     // Abbreviate home directory with ~
     let home_dir = std::env::var("HOME").ok();
@@ -600,90 +545,23 @@ fn print_multi_config_table(configs: &[ConfigStatus]) {
         path.to_string()
     };
 
-    // Calculate column widths
-    let config_width = rows
-        .iter()
-        .map(|(p, _, _)| abbreviate_path(p).len())
-        .max()
-        .unwrap_or(6)
-        .max(6);
-    let name_width = rows
-        .iter()
-        .map(|(_, n, _)| n.len())
-        .max()
-        .unwrap_or(4)
-        .max(4);
-    let status_width = rows
-        .iter()
-        .map(|(_, _, info)| format_status_with_exit_code(info).len())
-        .max()
-        .unwrap_or(10)
-        .max(10);
-    let pid_width = 8;
-    let uptime_width = 12;
-    let health_width = 8;
+    let rows: Vec<MultiConfigRow> = raw_rows
+        .into_iter()
+        .map(|(config_path, name, info)| {
+            let service = format_service_row(name, info);
+            MultiConfigRow {
+                config: abbreviate_path(config_path),
+                name: service.name,
+                status: service.status,
+                pid: service.pid,
+                uptime: service.uptime,
+                health: service.health,
+            }
+        })
+        .collect();
 
-    // Print header
-    println!(
-        "{:<config_width$}  {:<name_width$}  {:<status_width$}  {:<pid_width$}  {:<uptime_width$}  {:<health_width$}",
-        "CONFIG", "NAME", "STATUS", "PID", "UPTIME", "HEALTH",
-        config_width = config_width,
-        name_width = name_width,
-        status_width = status_width,
-        pid_width = pid_width,
-        uptime_width = uptime_width,
-        health_width = health_width
-    );
-    println!(
-        "{:-<config_width$}  {:-<name_width$}  {:-<status_width$}  {:-<pid_width$}  {:-<uptime_width$}  {:-<health_width$}",
-        "", "", "", "", "", "",
-        config_width = config_width,
-        name_width = name_width,
-        status_width = status_width,
-        pid_width = pid_width,
-        uptime_width = uptime_width,
-        health_width = health_width
-    );
-
-    for (config_path, name, info) in rows {
-        let abbreviated_path = abbreviate_path(config_path);
-        let status_str = format_status_with_exit_code(info);
-        let pid_str = info
-            .pid
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "-".to_string());
-
-        let uptime_str = info
-            .started_at
-            .map(format_uptime)
-            .unwrap_or_else(|| "-".to_string());
-
-        let health_str = if info.health_check_failures > 0 {
-            format!("{} fail", info.health_check_failures)
-        } else if info.status == "healthy" {
-            "ok".to_string()
-        } else if info.status == "unhealthy" {
-            "failing".to_string()
-        } else {
-            "-".to_string()
-        };
-
-        println!(
-            "{:<config_width$}  {:<name_width$}  {:<status_width$}  {:<pid_width$}  {:<uptime_width$}  {:<health_width$}",
-            abbreviated_path,
-            name,
-            status_str,
-            pid_str,
-            uptime_str,
-            health_str,
-            config_width = config_width,
-            name_width = name_width,
-            status_width = status_width,
-            pid_width = pid_width,
-            uptime_width = uptime_width,
-            health_width = health_width
-        );
-    }
+    let table = Table::new(rows).with(Style::blank()).to_string();
+    println!("{table}");
 }
 
 fn format_uptime(started_at_ts: i64) -> String {

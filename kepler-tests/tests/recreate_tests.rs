@@ -67,22 +67,8 @@ async fn test_restart_calls_restart_hooks() {
     let started_path = marker.marker_path("started");
 
     let hooks = ServiceHooks {
-        pre_restart: Some(HookCommand::Script {
-            run: format!("echo 'PRE_RESTART' >> {}", pre_restart_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        post_restart: Some(HookCommand::Script {
-            run: format!("echo 'POST_RESTART' >> {}", post_restart_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_restart: Some(HookCommand::script(format!("echo 'PRE_RESTART' >> {}", pre_restart_path.display()))),
+        post_restart: Some(HookCommand::script(format!("echo 'POST_RESTART' >> {}", post_restart_path.display()))),
         ..Default::default()
     };
 
@@ -394,14 +380,7 @@ async fn test_recreate_runs_init_hooks() {
     let started_path = marker.marker_path("started");
 
     let hooks = ServiceHooks {
-        on_init: Some(HookCommand::Script {
-            run: format!("echo 'PRE_INIT' >> {}", on_init_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        on_init: Some(HookCommand::script(format!("echo 'PRE_INIT' >> {}", on_init_path.display()))),
         ..Default::default()
     };
 
@@ -490,26 +469,12 @@ async fn test_restart_specific_service_hooks() {
     let svc2_restart_path = marker.marker_path("svc2_restart");
 
     let hooks1 = ServiceHooks {
-        pre_restart: Some(HookCommand::Script {
-            run: format!("echo 'SVC1_RESTART' >> {}", svc1_restart_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_restart: Some(HookCommand::script(format!("echo 'SVC1_RESTART' >> {}", svc1_restart_path.display()))),
         ..Default::default()
     };
 
     let hooks2 = ServiceHooks {
-        pre_restart: Some(HookCommand::Script {
-            run: format!("echo 'SVC2_RESTART' >> {}", svc2_restart_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_restart: Some(HookCommand::script(format!("echo 'SVC2_RESTART' >> {}", svc2_restart_path.display()))),
         ..Default::default()
     };
 
@@ -581,42 +546,14 @@ async fn test_restart_respects_dependency_order() {
     let order_path = marker.marker_path("order");
 
     let frontend_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::Script {
-            run: format!("echo 'STOP_FRONTEND' >> {}", order_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        pre_start: Some(HookCommand::Script {
-            run: format!("echo 'START_FRONTEND' >> {}", order_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_stop: Some(HookCommand::script(format!("echo 'STOP_FRONTEND' >> {}", order_path.display()))),
+        pre_start: Some(HookCommand::script(format!("echo 'START_FRONTEND' >> {}", order_path.display()))),
         ..Default::default()
     };
 
     let backend_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::Script {
-            run: format!("echo 'STOP_BACKEND' >> {}", order_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        pre_start: Some(HookCommand::Script {
-            run: format!("echo 'START_BACKEND' >> {}", order_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_stop: Some(HookCommand::script(format!("echo 'STOP_BACKEND' >> {}", order_path.display()))),
+        pre_start: Some(HookCommand::script(format!("echo 'START_BACKEND' >> {}", order_path.display()))),
         ..Default::default()
     };
 
@@ -723,38 +660,17 @@ async fn test_stop_respects_reverse_dependency_order() {
     let order_path = marker.marker_path("stop_order");
 
     let db_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::Script {
-            run: format!("echo 'STOP_DB' >> {}", order_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_stop: Some(HookCommand::script(format!("echo 'STOP_DB' >> {}", order_path.display()))),
         ..Default::default()
     };
 
     let api_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::Script {
-            run: format!("echo 'STOP_API' >> {}", order_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_stop: Some(HookCommand::script(format!("echo 'STOP_API' >> {}", order_path.display()))),
         ..Default::default()
     };
 
     let web_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::Script {
-            run: format!("echo 'STOP_WEB' >> {}", order_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_stop: Some(HookCommand::script(format!("echo 'STOP_WEB' >> {}", order_path.display()))),
         ..Default::default()
     };
 
@@ -908,46 +824,11 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     let hooks_path = marker.marker_path("hooks");
 
     let hooks = ServiceHooks {
-        on_init: Some(HookCommand::Script {
-            run: format!("echo 'PRE_INIT' >> {}", hooks_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        pre_start: Some(HookCommand::Script {
-            run: format!("echo 'PRE_START' >> {}", hooks_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        post_start: Some(HookCommand::Script {
-            run: format!("echo 'POST_START' >> {}", hooks_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        pre_stop: Some(HookCommand::Script {
-            run: format!("echo 'PRE_STOP' >> {}", hooks_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        post_stop: Some(HookCommand::Script {
-            run: format!("echo 'POST_STOP' >> {}", hooks_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        on_init: Some(HookCommand::script(format!("echo 'PRE_INIT' >> {}", hooks_path.display()))),
+        pre_start: Some(HookCommand::script(format!("echo 'PRE_START' >> {}", hooks_path.display()))),
+        post_start: Some(HookCommand::script(format!("echo 'POST_START' >> {}", hooks_path.display()))),
+        pre_stop: Some(HookCommand::script(format!("echo 'PRE_STOP' >> {}", hooks_path.display()))),
+        post_stop: Some(HookCommand::script(format!("echo 'POST_STOP' >> {}", hooks_path.display()))),
         ..Default::default()
     };
 
@@ -1090,54 +971,12 @@ async fn test_restart_calls_all_restart_hooks_in_order() {
     let hooks_path = marker.marker_path("restart_hooks");
 
     let hooks = ServiceHooks {
-        pre_restart: Some(HookCommand::Script {
-            run: format!("echo 'PRE_RESTART' >> {}", hooks_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        pre_stop: Some(HookCommand::Script {
-            run: format!("echo 'PRE_STOP' >> {}", hooks_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        post_stop: Some(HookCommand::Script {
-            run: format!("echo 'POST_STOP' >> {}", hooks_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        pre_start: Some(HookCommand::Script {
-            run: format!("echo 'PRE_START' >> {}", hooks_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        post_start: Some(HookCommand::Script {
-            run: format!("echo 'POST_START' >> {}", hooks_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        post_restart: Some(HookCommand::Script {
-            run: format!("echo 'POST_RESTART' >> {}", hooks_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_restart: Some(HookCommand::script(format!("echo 'PRE_RESTART' >> {}", hooks_path.display()))),
+        pre_stop: Some(HookCommand::script(format!("echo 'PRE_STOP' >> {}", hooks_path.display()))),
+        post_stop: Some(HookCommand::script(format!("echo 'POST_STOP' >> {}", hooks_path.display()))),
+        pre_start: Some(HookCommand::script(format!("echo 'PRE_START' >> {}", hooks_path.display()))),
+        post_start: Some(HookCommand::script(format!("echo 'POST_START' >> {}", hooks_path.display()))),
+        post_restart: Some(HookCommand::script(format!("echo 'POST_RESTART' >> {}", hooks_path.display()))),
         ..Default::default()
     };
 

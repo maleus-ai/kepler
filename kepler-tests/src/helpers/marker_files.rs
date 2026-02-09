@@ -27,27 +27,13 @@ impl MarkerFileHelper {
     /// Create a hook command that will create a marker file
     pub fn create_marker_hook(&self, name: &str) -> HookCommand {
         let marker_path = self.marker_path(name);
-        HookCommand::Script {
-            run: format!("touch {}", marker_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }
+        HookCommand::script(format!("touch {}", marker_path.display()))
     }
 
     /// Create a hook command that writes the current timestamp to a marker file
     pub fn create_timestamped_marker_hook(&self, name: &str) -> HookCommand {
         let marker_path = self.marker_path(name);
-        HookCommand::Script {
-            run: format!("date +%s >> {}", marker_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }
+        HookCommand::script(format!("date +%s >> {}", marker_path.display()))
     }
 
     /// Check if a marker file exists

@@ -89,6 +89,22 @@ impl std::fmt::Display for GlobalHookType {
     }
 }
 
+impl GlobalHookType {
+    /// Get the hook slot for this type from a GlobalHooks struct.
+    pub fn get(self, hooks: &GlobalHooks) -> &Option<HookCommand> {
+        match self {
+            Self::OnInit => &hooks.on_init,
+            Self::PreStart => &hooks.pre_start,
+            Self::PostStart => &hooks.post_start,
+            Self::PreStop => &hooks.pre_stop,
+            Self::PostStop => &hooks.post_stop,
+            Self::PreRestart => &hooks.pre_restart,
+            Self::PostRestart => &hooks.post_restart,
+            Self::PreCleanup => &hooks.pre_cleanup,
+        }
+    }
+}
+
 /// Types of service hooks
 #[derive(Debug, Clone, Copy)]
 pub enum ServiceHookType {
@@ -124,6 +140,24 @@ impl ServiceHookType {
 impl std::fmt::Display for ServiceHookType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl ServiceHookType {
+    /// Get the hook slot for this type from a ServiceHooks struct.
+    pub fn get(self, hooks: &ServiceHooks) -> &Option<HookCommand> {
+        match self {
+            Self::OnInit => &hooks.on_init,
+            Self::PreStart => &hooks.pre_start,
+            Self::PostStart => &hooks.post_start,
+            Self::PreStop => &hooks.pre_stop,
+            Self::PostStop => &hooks.post_stop,
+            Self::PreRestart => &hooks.pre_restart,
+            Self::PostRestart => &hooks.post_restart,
+            Self::PostExit => &hooks.post_exit,
+            Self::PostHealthcheckSuccess => &hooks.post_healthcheck_success,
+            Self::PostHealthcheckFail => &hooks.post_healthcheck_fail,
+        }
     }
 }
 
@@ -231,18 +265,7 @@ pub async fn run_global_hook(
         None => return Ok(()),
     };
 
-    let hook = match hook_type {
-        GlobalHookType::OnInit => &hooks.on_init,
-        GlobalHookType::PreStart => &hooks.pre_start,
-        GlobalHookType::PostStart => &hooks.post_start,
-        GlobalHookType::PreStop => &hooks.pre_stop,
-        GlobalHookType::PostStop => &hooks.post_stop,
-        GlobalHookType::PreRestart => &hooks.pre_restart,
-        GlobalHookType::PostRestart => &hooks.post_restart,
-        GlobalHookType::PreCleanup => &hooks.pre_cleanup,
-    };
-
-    if let Some(hook) = hook {
+    if let Some(hook) = hook_type.get(hooks) {
         info!("Running global {} hook", hook_type.as_str());
         let service_name = global_hook_service_name(hook_type);
         // Resolve store settings from global config
@@ -281,20 +304,7 @@ pub async fn run_service_hook(
         None => return Ok(()),
     };
 
-    let hook = match hook_type {
-        ServiceHookType::OnInit => &hooks.on_init,
-        ServiceHookType::PreStart => &hooks.pre_start,
-        ServiceHookType::PostStart => &hooks.post_start,
-        ServiceHookType::PreStop => &hooks.pre_stop,
-        ServiceHookType::PostStop => &hooks.post_stop,
-        ServiceHookType::PreRestart => &hooks.pre_restart,
-        ServiceHookType::PostRestart => &hooks.post_restart,
-        ServiceHookType::PostExit => &hooks.post_exit,
-        ServiceHookType::PostHealthcheckSuccess => &hooks.post_healthcheck_success,
-        ServiceHookType::PostHealthcheckFail => &hooks.post_healthcheck_fail,
-    };
-
-    if let Some(hook) = hook {
+    if let Some(hook) = hook_type.get(hooks) {
         info!(
             "Running {} hook for service {}",
             hook_type.as_str(),

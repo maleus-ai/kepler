@@ -199,14 +199,7 @@ async fn test_on_restart_hook_fires() {
     let restart_hook_path = marker.marker_path("restart_hook");
 
     let hooks = ServiceHooks {
-        pre_restart: Some(HookCommand::Script {
-            run: format!("echo 'restart_hook' >> {}", restart_hook_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_restart: Some(HookCommand::script(format!("echo 'restart_hook' >> {}", restart_hook_path.display()))),
         ..Default::default()
     };
 
@@ -503,14 +496,7 @@ async fn test_watch_restart_fires_on_restart_hook() {
     std::fs::write(&watched_file, "// initial").unwrap();
 
     let hooks = ServiceHooks {
-        pre_restart: Some(HookCommand::Script {
-            run: format!("echo 'restart_hook' >> {}", restart_hook_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_restart: Some(HookCommand::script(format!("echo 'restart_hook' >> {}", restart_hook_path.display()))),
         ..Default::default()
     };
 

@@ -1,6 +1,6 @@
 //! Hook execution tests
 
-use kepler_daemon::config::{HookCommand, ServiceHooks};
+use kepler_daemon::config::{HookCommand, HookCommon, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -14,14 +14,7 @@ async fn test_script_format_hook() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
-            run: format!("touch {}", marker.marker_path("script").display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_start: Some(HookCommand::script(format!("touch {}", marker.marker_path("script").display()))),
         ..Default::default()
     };
 
@@ -63,11 +56,7 @@ async fn test_command_format_hook() {
                 "touch".to_string(),
                 marker_path.to_string_lossy().to_string(),
             ],
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
+            common: HookCommon::default(),
         }),
         ..Default::default()
     };
@@ -105,14 +94,7 @@ async fn test_hook_environment_variables() {
     let marker_path = marker.marker_path("env");
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
-            run: format!("echo \"TEST_VAR=$TEST_VAR\" >> {}", marker_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_start: Some(HookCommand::script(format!("echo \"TEST_VAR=$TEST_VAR\" >> {}", marker_path.display()))),
         ..Default::default()
     };
 
@@ -159,14 +141,7 @@ async fn test_hook_working_directory() {
     let marker_path = marker.marker_path("pwd");
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
-            run: format!("pwd >> {}", marker_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_start: Some(HookCommand::script(format!("pwd >> {}", marker_path.display()))),
         ..Default::default()
     };
 
@@ -330,14 +305,7 @@ async fn test_hook_failure_doesnt_block_service() {
     let temp_dir = TempDir::new().unwrap();
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
-            run: "exit 1".to_string(), // Always fails
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_start: Some(HookCommand::script("exit 1")), // Always fails
         ..Default::default()
     };
 
@@ -370,22 +338,8 @@ async fn test_hook_execution_order() {
     let order_file = temp_dir.path().join("order.txt");
 
     let hooks = ServiceHooks {
-        on_init: Some(HookCommand::Script {
-            run: format!("echo 'init' >> {}", order_file.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
-        pre_start: Some(HookCommand::Script {
-            run: format!("echo 'start' >> {}", order_file.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        on_init: Some(HookCommand::script(format!("echo 'init' >> {}", order_file.display()))),
+        pre_start: Some(HookCommand::script(format!("echo 'start' >> {}", order_file.display()))),
         ..Default::default()
     };
 
@@ -427,11 +381,10 @@ async fn test_hook_own_environment_variables() {
     let hooks = ServiceHooks {
         pre_start: Some(HookCommand::Script {
             run: format!("echo \"HOOK_VAR=$HOOK_VAR\" >> {}", marker_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: vec!["HOOK_VAR=from_hook".to_string()],
-            env_file: None,
+            common: HookCommon {
+                environment: vec!["HOOK_VAR=from_hook".to_string()],
+                ..Default::default()
+            },
         }),
         ..Default::default()
     };
@@ -481,11 +434,10 @@ async fn test_hook_env_file() {
     let hooks = ServiceHooks {
         pre_start: Some(HookCommand::Script {
             run: format!("echo \"HOOK_FILE_VAR=$HOOK_FILE_VAR\" >> {}", marker_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: Some(env_file_path),
+            common: HookCommon {
+                env_file: Some(env_file_path),
+                ..Default::default()
+            },
         }),
         ..Default::default()
     };
@@ -535,11 +487,10 @@ async fn test_hook_env_overrides_service_env() {
     let hooks = ServiceHooks {
         pre_start: Some(HookCommand::Script {
             run: format!("echo SHARED_VAR=$(printenv SHARED_VAR) >> {}", marker_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: vec!["SHARED_VAR=from_hook".to_string()],
-            env_file: None,
+            common: HookCommon {
+                environment: vec!["SHARED_VAR=from_hook".to_string()],
+                ..Default::default()
+            },
         }),
         ..Default::default()
     };
@@ -586,11 +537,10 @@ async fn test_hook_env_expansion_with_service_env() {
     let hooks = ServiceHooks {
         pre_start: Some(HookCommand::Script {
             run: format!("echo \"COMBINED=$COMBINED\" >> {}", marker_path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: vec!["COMBINED=${SERVICE_VAR}_plus_hook".to_string()],
-            env_file: None,
+            common: HookCommon {
+                environment: vec!["COMBINED=${SERVICE_VAR}_plus_hook".to_string()],
+                ..Default::default()
+            },
         }),
         ..Default::default()
     };
@@ -654,11 +604,11 @@ async fn test_hook_env_priority() {
                 marker_path.display(),
                 marker_path.display()
             ),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: vec!["VAR3=hook_env".to_string()],
-            env_file: Some(hook_env_file),
+            common: HookCommon {
+                environment: vec!["VAR3=hook_env".to_string()],
+                env_file: Some(hook_env_file),
+                ..Default::default()
+            },
         }),
         ..Default::default()
     };
@@ -724,17 +674,10 @@ async fn test_log_output_disabled() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
-            run: format!(
-                "echo 'HOOK_SECRET_OUTPUT' && touch {}",
-                marker.marker_path("hook_done").display()
-            ),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_start: Some(HookCommand::script(format!(
+            "echo 'HOOK_SECRET_OUTPUT' && touch {}",
+            marker.marker_path("hook_done").display()
+        ))),
         ..Default::default()
     };
 
@@ -788,17 +731,10 @@ async fn test_log_output_enabled() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
-            run: format!(
-                "echo 'HOOK_VISIBLE_OUTPUT' && touch {}",
-                marker.marker_path("hook_done").display()
-            ),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_start: Some(HookCommand::script(format!(
+            "echo 'HOOK_VISIBLE_OUTPUT' && touch {}",
+            marker.marker_path("hook_done").display()
+        ))),
         ..Default::default()
     };
 

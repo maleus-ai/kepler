@@ -149,26 +149,26 @@ impl ReverseLineReader {
 
 /// Entry in the max-heap (newest timestamp first)
 #[derive(Debug)]
-struct MaxHeapEntry {
+struct HeapEntry {
     log_line: LogLine,
     source_idx: usize,
 }
 
-impl PartialEq for MaxHeapEntry {
+impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
         self.log_line.timestamp == other.log_line.timestamp
     }
 }
 
-impl Eq for MaxHeapEntry {}
+impl Eq for HeapEntry {}
 
-impl PartialOrd for MaxHeapEntry {
+impl PartialOrd for HeapEntry {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for MaxHeapEntry {
+impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Normal ordering for max-heap (largest timestamp first)
         self.log_line.timestamp.cmp(&other.log_line.timestamp)
@@ -188,7 +188,7 @@ struct ReverseLogSource {
 /// Efficiently reads from the end of files, stopping after N entries.
 pub struct ReverseMergedLogIterator {
     sources: Vec<Option<ReverseLogSource>>,
-    heap: BinaryHeap<MaxHeapEntry>,
+    heap: BinaryHeap<HeapEntry>,
 }
 
 impl ReverseMergedLogIterator {
@@ -238,7 +238,7 @@ impl ReverseMergedLogIterator {
         Self { sources, heap }
     }
 
-    fn read_next_entry(source: &mut ReverseLogSource, source_idx: usize) -> Option<MaxHeapEntry> {
+    fn read_next_entry(source: &mut ReverseLogSource, source_idx: usize) -> Option<HeapEntry> {
         loop {
             // Try to read from current file
             match source.reader.next_line() {
@@ -248,7 +248,7 @@ impl ReverseMergedLogIterator {
                         &source.service,
                         source.stream,
                     ) {
-                        return Some(MaxHeapEntry {
+                        return Some(HeapEntry {
                             log_line,
                             source_idx,
                         });

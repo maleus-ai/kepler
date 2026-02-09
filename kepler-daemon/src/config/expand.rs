@@ -33,45 +33,13 @@ pub fn expand_with_context(
     .unwrap_or_else(|_| s.to_string())
 }
 
-/// Expand environment variables in a string using shell-style expansion.
-/// Supports ${VAR}, ${VAR:-default}, ${VAR:+value}, ~ (tilde), etc.
-/// Uses the provided context for variable lookup (context overrides sys_env).
-pub fn expand_value(
-    s: &str,
-    context: &HashMap<String, String>,
-    sys_env: &HashMap<String, String>,
-) -> String {
-    expand_with_context(s, context, sys_env)
-}
-
 /// Expand environment variables in global hooks
 pub fn expand_global_hooks(
     hooks: &mut GlobalHooks,
     context: &HashMap<String, String>,
     sys_env: &HashMap<String, String>,
 ) {
-    if let Some(ref mut hook) = hooks.on_init {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.pre_start {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.post_start {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.pre_stop {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.post_stop {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.pre_restart {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.post_restart {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.pre_cleanup {
+    for hook in hooks.all_hooks_mut().flatten() {
         expand_hook_command(hook, context, sys_env);
     }
 }
@@ -85,65 +53,22 @@ pub fn expand_hook_command(
     context: &HashMap<String, String>,
     sys_env: &HashMap<String, String>,
 ) {
-    match hook {
-        HookCommand::Script {
-            run: _, // Intentionally not expanded - shell expands at runtime
-            user,
-            group,
-            working_dir,
-            environment,
-            env_file,
-        } => {
-            // Expand user/group
-            if let Some(u) = user {
-                *u = expand_value(u, context, sys_env);
-            }
-            if let Some(g) = group {
-                *g = expand_value(g, context, sys_env);
-            }
+    let common = hook.common_mut();
 
-            // Expand paths
-            if let Some(wd) = working_dir {
-                *wd = PathBuf::from(expand_value(&wd.to_string_lossy(), context, sys_env));
-            }
-            if let Some(ef) = env_file {
-                *ef = PathBuf::from(expand_value(&ef.to_string_lossy(), context, sys_env));
-            }
-
-            // Expand environment entries
-            for entry in environment {
-                *entry = expand_value(entry, context, sys_env);
-            }
-        }
-        HookCommand::Command {
-            command: _, // Intentionally not expanded - shell expands at runtime
-            user,
-            group,
-            working_dir,
-            environment,
-            env_file,
-        } => {
-            // Expand user/group
-            if let Some(u) = user {
-                *u = expand_value(u, context, sys_env);
-            }
-            if let Some(g) = group {
-                *g = expand_value(g, context, sys_env);
-            }
-
-            // Expand paths
-            if let Some(wd) = working_dir {
-                *wd = PathBuf::from(expand_value(&wd.to_string_lossy(), context, sys_env));
-            }
-            if let Some(ef) = env_file {
-                *ef = PathBuf::from(expand_value(&ef.to_string_lossy(), context, sys_env));
-            }
-
-            // Expand environment entries
-            for entry in environment {
-                *entry = expand_value(entry, context, sys_env);
-            }
-        }
+    if let Some(u) = &mut common.user {
+        *u = expand_with_context(u, context, sys_env);
+    }
+    if let Some(g) = &mut common.group {
+        *g = expand_with_context(g, context, sys_env);
+    }
+    if let Some(wd) = &mut common.working_dir {
+        *wd = PathBuf::from(expand_with_context(&wd.to_string_lossy(), context, sys_env));
+    }
+    if let Some(ef) = &mut common.env_file {
+        *ef = PathBuf::from(expand_with_context(&ef.to_string_lossy(), context, sys_env));
+    }
+    for entry in &mut common.environment {
+        *entry = expand_with_context(entry, context, sys_env);
     }
 }
 
@@ -168,7 +93,7 @@ pub fn expand_service_config(
 
     // Expand working_dir (already partially expanded, but re-expand with full context)
     if let Some(ref mut wd) = service.working_dir {
-        *wd = PathBuf::from(expand_value(&wd.to_string_lossy(), &expanded_context, sys_env));
+        *wd = PathBuf::from(expand_with_context(&wd.to_string_lossy(), &expanded_context, sys_env));
     }
 
     // NOTE: env_file path is already expanded before this function is called
@@ -176,10 +101,10 @@ pub fn expand_service_config(
 
     // Expand user/group
     if let Some(ref mut u) = service.user {
-        *u = expand_value(u, &expanded_context, sys_env);
+        *u = expand_with_context(u, &expanded_context, sys_env);
     }
     if let Some(ref mut g) = service.group {
-        *g = expand_value(g, &expanded_context, sys_env);
+        *g = expand_with_context(g, &expanded_context, sys_env);
     }
 
     // Expand environment entries IN ORDER, adding each to context for subsequent entries
@@ -188,7 +113,7 @@ pub fn expand_service_config(
     //   - EXPANDED=${BASE_VAR}_suffix
     for entry in &mut service.environment {
         // Expand the value using current context
-        let expanded_entry = expand_value(entry, &expanded_context, sys_env);
+        let expanded_entry = expand_with_context(entry, &expanded_context, sys_env);
         *entry = expanded_entry.clone();
 
         // Add this entry to context for subsequent entries
@@ -200,7 +125,7 @@ pub fn expand_service_config(
     // Expand depends_on entries (only simple string entries need expansion)
     for entry in &mut service.depends_on.0 {
         if let DependencyEntry::Simple(name) = entry {
-            *name = expand_value(name, &expanded_context, sys_env);
+            *name = expand_with_context(name, &expanded_context, sys_env);
         }
         // Extended entries have map keys which shouldn't be expanded
     }
@@ -212,13 +137,13 @@ pub fn expand_service_config(
     // Expand resource limits
     if let Some(ref mut limits) = service.limits
         && let Some(ref mut mem) = limits.memory {
-            *mem = expand_value(mem, &expanded_context, sys_env);
+            *mem = expand_with_context(mem, &expanded_context, sys_env);
         }
 
     // Expand restart watch patterns
     if let RestartConfig::Extended { ref mut watch, .. } = service.restart {
         for pattern in watch {
-            *pattern = expand_value(pattern, &expanded_context, sys_env);
+            *pattern = expand_with_context(pattern, &expanded_context, sys_env);
         }
     }
 
@@ -234,34 +159,7 @@ pub fn expand_service_hooks(
     context: &HashMap<String, String>,
     sys_env: &HashMap<String, String>,
 ) {
-    if let Some(ref mut hook) = hooks.on_init {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.pre_start {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.post_start {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.pre_stop {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.post_stop {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.pre_restart {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.post_restart {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.post_exit {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.post_healthcheck_success {
-        expand_hook_command(hook, context, sys_env);
-    }
-    if let Some(ref mut hook) = hooks.post_healthcheck_fail {
+    for hook in hooks.all_hooks_mut().flatten() {
         expand_hook_command(hook, context, sys_env);
     }
 }

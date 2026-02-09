@@ -53,6 +53,15 @@ pub fn load_env_file(path: &Path) -> Result<HashMap<String, String>> {
     Ok(env)
 }
 
+/// Insert KEY=VALUE entries from a string slice into a HashMap.
+fn insert_env_entries(env: &mut HashMap<String, String>, entries: &[String]) {
+    for entry in entries {
+        if let Some((key, value)) = entry.split_once('=') {
+            env.insert(key.to_string(), value.to_string());
+        }
+    }
+}
+
 /// Build the full environment for a service
 ///
 /// The environment is fully baked at config load time:
@@ -84,10 +93,7 @@ pub fn build_service_env(
         let env_path = state_dir.join("env_files").join(env_file_name);
 
         if env_path.exists() {
-            let file_env = load_env_file(&env_path)?;
-            for (key, value) in file_env {
-                env.insert(key, value);
-            }
+            env.extend(load_env_file(&env_path)?);
         }
         // If file doesn't exist in state dir, silently ignore
         // (may not have been copied yet, or file didn't exist originally)
@@ -95,11 +101,7 @@ pub fn build_service_env(
 
     // Apply service-defined environment entries (already baked with sys_env if inherit policy)
     // Note: These are already expanded at config load time, so no need to expand again
-    for entry in &config.environment {
-        if let Some((key, value)) = entry.split_once('=') {
-            env.insert(key.to_string(), value.to_string());
-        }
-    }
+    insert_env_entries(&mut env, &config.environment);
 
     Ok(env)
 }
@@ -126,20 +128,8 @@ pub fn build_hook_env(
         };
 
         if resolved_path.exists() {
-            let iter = dotenvy::from_path_iter(&resolved_path).map_err(|e| {
-                DaemonError::EnvFileParse {
-                    path: resolved_path.clone(),
-                    source: e,
-                }
-            })?;
-
-            for item in iter {
-                let (key, value) = item.map_err(|e| DaemonError::EnvFileParse {
-                    path: resolved_path.clone(),
-                    source: e,
-                })?;
-                env.insert(key, value);
-            }
+            let file_env = load_env_file(&resolved_path)?;
+            env.extend(file_env);
         }
     }
 

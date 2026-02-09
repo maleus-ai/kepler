@@ -1,4 +1,3 @@
-use clap::Parser;
 use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
 use kepler_daemon::cursor::CursorManager;
 use kepler_daemon::errors::DaemonError;
@@ -37,16 +36,8 @@ fn canonicalize_config_path(path: PathBuf) -> std::result::Result<PathBuf, Daemo
     })
 }
 
-/// Kepler daemon - process orchestrator
-#[derive(Parser)]
-#[command(name = "kepler-daemon", about = "Kepler daemon for process orchestration")]
-struct Args {}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Parse CLI arguments
-    let _args = Args::parse();
-
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(

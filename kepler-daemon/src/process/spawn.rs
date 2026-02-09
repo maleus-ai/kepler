@@ -254,6 +254,55 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
     Ok((cmd, program.clone()))
 }
 
+/// Spawn a task that reads and discards all lines from a stream.
+/// Prevents the child process from blocking on a full pipe buffer.
+fn spawn_drain_task(
+    stream: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Some(stream) = stream {
+            let reader = BufReader::new(stream);
+            let mut lines = reader.lines();
+            while let Ok(Some(_)) = lines.next_line().await {}
+        }
+    })
+}
+
+/// Spawn a task that captures lines from a stream, optionally logging and writing to disk.
+///
+/// - `log_to_tracing`: if true, also emits `info!` for each line (used by hooks)
+fn spawn_capture_task(
+    stream: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
+    log_config: Option<LogWriterConfig>,
+    service_name: String,
+    log_stream: LogStream,
+    should_store: bool,
+    log_to_tracing: bool,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Some(stream) = stream {
+            let mut writer = if should_store {
+                log_config.map(|cfg| {
+                    BufferedLogWriter::from_config(&cfg, &service_name, log_stream)
+                })
+            } else {
+                None
+            };
+
+            let reader = BufReader::new(stream);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if log_to_tracing {
+                    info!(target: "hook", "[{}] {}", service_name, line);
+                }
+                if let Some(ref mut w) = writer {
+                    w.write(&line);
+                }
+            }
+        }
+    })
+}
+
 /// Spawn a command and wait for completion
 ///
 /// The `mode` parameter determines behavior:
@@ -272,33 +321,14 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
 
     match mode {
         BlockingMode::Silent => {
-            // Drain stdout (read and discard to avoid blocking the child)
-            let stdout = child.stdout.take();
-            let stdout_handle = tokio::spawn(async move {
-                if let Some(stdout) = stdout {
-                    let reader = BufReader::new(stdout);
-                    let mut lines = reader.lines();
-                    while let Ok(Some(_)) = lines.next_line().await {}
-                }
-            });
+            let stdout_handle = spawn_drain_task(child.stdout.take());
+            let stderr_handle = spawn_drain_task(child.stderr.take());
 
-            // Drain stderr (read and discard to avoid blocking the child)
-            let stderr = child.stderr.take();
-            let stderr_handle = tokio::spawn(async move {
-                if let Some(stderr) = stderr {
-                    let reader = BufReader::new(stderr);
-                    let mut lines = reader.lines();
-                    while let Ok(Some(_)) = lines.next_line().await {}
-                }
-            });
-
-            // Wait for process to complete
             let status = child.wait().await.map_err(|e| DaemonError::ProcessSpawn {
                 service: program.clone(),
                 source: e,
             })?;
 
-            // Wait for output capture to complete
             let _ = stdout_handle.await;
             let _ = stderr_handle.await;
 
@@ -312,69 +342,28 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
             store_stdout,
             store_stderr,
         } => {
-            // Capture stdout with conditional logging
-            let stdout = child.stdout.take();
-            let config_for_stdout = if store_stdout { log_config.clone() } else { None };
-            let service_name_stdout = log_service_name.clone();
-            let should_store_stdout = store_stdout;
-            let stdout_handle = tokio::spawn(async move {
-                if let Some(stdout) = stdout {
-                    // Create per-task BufferedLogWriter - no shared state
-                    let mut writer = config_for_stdout.map(|cfg| {
-                        BufferedLogWriter::from_config(&cfg, &service_name_stdout, LogStream::Stdout)
-                    });
+            let stdout_handle = spawn_capture_task(
+                child.stdout.take(),
+                if store_stdout { log_config.clone() } else { None },
+                log_service_name.clone(),
+                LogStream::Stdout,
+                store_stdout,
+                true,
+            );
+            let stderr_handle = spawn_capture_task(
+                child.stderr.take(),
+                if store_stderr { log_config } else { None },
+                log_service_name,
+                LogStream::Stderr,
+                store_stderr,
+                true,
+            );
 
-                    let reader = BufReader::new(stdout);
-                    let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        if should_store_stdout {
-                            // Log to daemon's log output
-                            info!(target: "hook", "[{}] {}", service_name_stdout, line);
-                            // Write to log file
-                            if let Some(ref mut w) = writer {
-                                w.write(&line);
-                            }
-                        }
-                    }
-                    // writer.flush() called by Drop
-                }
-            });
-
-            // Capture stderr with conditional logging
-            let stderr = child.stderr.take();
-            let config_for_stderr = if store_stderr { log_config.clone() } else { None };
-            let service_name_stderr = log_service_name.clone();
-            let should_store_stderr = store_stderr;
-            let stderr_handle = tokio::spawn(async move {
-                if let Some(stderr) = stderr {
-                    // Create per-task BufferedLogWriter - no shared state
-                    let mut writer = config_for_stderr.map(|cfg| {
-                        BufferedLogWriter::from_config(&cfg, &service_name_stderr, LogStream::Stderr)
-                    });
-
-                    let reader = BufReader::new(stderr);
-                    let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        if should_store_stderr {
-                            // Log to daemon's log output
-                            info!(target: "hook", "[{}] {}", service_name_stderr, line);
-                            // Write to log file
-                            if let Some(ref mut w) = writer {
-                                w.write(&line);
-                            }
-                        }
-                    }
-                    // writer.flush() called by Drop
-                }
-            });
-
-            // Wait for process to complete
             let status = child.wait().await.map_err(|e| DaemonError::ProcessSpawn {
                 service: program.clone(),
                 source: e,
             })?;
 
-            // Wait for output capture to complete
             let _ = stdout_handle.await;
             let _ = stderr_handle.await;
 
@@ -403,59 +392,27 @@ pub async fn spawn_detached(
     let pid = child.id();
     debug!("Command spawned with PID {:?}", pid);
 
-    // Capture stdout - each task gets its own BufferedLogWriter (no shared state)
-    let stdout = child.stdout.take();
-    let stdout_task = if let Some(stdout) = stdout {
-        let config_clone = log_config.clone();
-        let service_name_clone = log_service_name.clone();
-        let should_store = store_stdout;
-        Some(tokio::spawn(async move {
-            // Create per-task BufferedLogWriter - no locks, no contention
-            let mut writer = if should_store {
-                Some(BufferedLogWriter::from_config(&config_clone, &service_name_clone, LogStream::Stdout))
-            } else {
-                None
-            };
+    let stdout_task = child.stdout.take().map(|stdout| {
+        spawn_capture_task(
+            Some(stdout),
+            Some(log_config.clone()),
+            log_service_name.clone(),
+            LogStream::Stdout,
+            store_stdout,
+            false,
+        )
+    });
 
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Some(ref mut w) = writer {
-                    w.write(&line);
-                }
-            }
-            // writer.flush() called by Drop
-        }))
-    } else {
-        None
-    };
-
-    // Capture stderr - each task gets its own BufferedLogWriter (no shared state)
-    let stderr = child.stderr.take();
-    let stderr_task = if let Some(stderr) = stderr {
-        let config_clone = log_config.clone();
-        let service_name_clone = log_service_name.clone();
-        let should_store = store_stderr;
-        Some(tokio::spawn(async move {
-            // Create per-task BufferedLogWriter - no locks, no contention
-            let mut writer = if should_store {
-                Some(BufferedLogWriter::from_config(&config_clone, &service_name_clone, LogStream::Stderr))
-            } else {
-                None
-            };
-
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Some(ref mut w) = writer {
-                    w.write(&line);
-                }
-            }
-            // writer.flush() called by Drop
-        }))
-    } else {
-        None
-    };
+    let stderr_task = child.stderr.take().map(|stderr| {
+        spawn_capture_task(
+            Some(stderr),
+            Some(log_config),
+            log_service_name,
+            LogStream::Stderr,
+            store_stderr,
+            false,
+        )
+    });
 
     Ok(DetachedResult {
         child,

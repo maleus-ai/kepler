@@ -1,8 +1,8 @@
 //! Programmatic config creation with builder pattern
 
 use kepler_daemon::config::{
-    DependsOn, GlobalHooks, HealthCheck, HookCommand, KeplerConfig, KeplerGlobalConfig, LogConfig,
-    ResourceLimits, RestartConfig, RestartPolicy, ServiceConfig, ServiceHooks, SysEnvPolicy,
+    DependsOn, GlobalHooks, HealthCheck, HookCommand, HookCommon, KeplerConfig, KeplerGlobalConfig,
+    LogConfig, ResourceLimits, RestartConfig, RestartPolicy, ServiceConfig, ServiceHooks, SysEnvPolicy,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -383,61 +383,32 @@ pub struct TestHookBuilder;
 impl TestHookBuilder {
     /// Create a script hook using the `run:` format
     pub fn script(script: &str) -> HookCommand {
-        HookCommand::Script {
-            run: script.to_string(),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }
+        HookCommand::script(script)
     }
 
     /// Create a command hook using the `command:` format
     pub fn command(cmd: &[&str]) -> HookCommand {
         HookCommand::Command {
             command: cmd.iter().map(|s| s.to_string()).collect(),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
+            common: HookCommon::default(),
         }
     }
 
     /// Create a hook that touches a marker file
     pub fn touch_marker(path: &std::path::Path) -> HookCommand {
-        HookCommand::Script {
-            run: format!("touch {}", path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }
+        HookCommand::script(format!("touch {}", path.display()))
     }
 
     /// Create a hook that echoes to a file (appends)
     pub fn echo_to_file(message: &str, path: &std::path::Path) -> HookCommand {
-        HookCommand::Script {
-            run: format!("echo '{}' >> {}", message, path.display()),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }
+        HookCommand::script(format!("echo '{}' >> {}", message, path.display()))
     }
 
     /// Create a script hook with environment variables
     pub fn script_with_env(script: &str, environment: Vec<String>) -> HookCommand {
         HookCommand::Script {
             run: script.to_string(),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment,
-            env_file: None,
+            common: HookCommon { environment, ..Default::default() },
         }
     }
 
@@ -445,11 +416,7 @@ impl TestHookBuilder {
     pub fn script_with_env_file(script: &str, env_file: PathBuf) -> HookCommand {
         HookCommand::Script {
             run: script.to_string(),
-            user: None,
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: Some(env_file),
+            common: HookCommon { env_file: Some(env_file), ..Default::default() },
         }
     }
 
@@ -457,11 +424,7 @@ impl TestHookBuilder {
     pub fn script_with_working_dir(script: &str, working_dir: PathBuf) -> HookCommand {
         HookCommand::Script {
             run: script.to_string(),
-            user: None,
-            group: None,
-            working_dir: Some(working_dir),
-            environment: Vec::new(),
-            env_file: None,
+            common: HookCommon { working_dir: Some(working_dir), ..Default::default() },
         }
     }
 
@@ -469,11 +432,7 @@ impl TestHookBuilder {
     pub fn script_with_group(script: &str, group: &str) -> HookCommand {
         HookCommand::Script {
             run: script.to_string(),
-            user: None,
-            group: Some(group.to_string()),
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
+            common: HookCommon { group: Some(group.to_string()), ..Default::default() },
         }
     }
 
@@ -481,11 +440,7 @@ impl TestHookBuilder {
     pub fn script_with_user(script: &str, user: &str) -> HookCommand {
         HookCommand::Script {
             run: script.to_string(),
-            user: Some(user.to_string()),
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
+            common: HookCommon { user: Some(user.to_string()), ..Default::default() },
         }
     }
 
@@ -493,11 +448,11 @@ impl TestHookBuilder {
     pub fn script_with_user_and_group(script: &str, user: &str, group: &str) -> HookCommand {
         HookCommand::Script {
             run: script.to_string(),
-            user: Some(user.to_string()),
-            group: Some(group.to_string()),
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
+            common: HookCommon {
+                user: Some(user.to_string()),
+                group: Some(group.to_string()),
+                ..Default::default()
+            },
         }
     }
 }

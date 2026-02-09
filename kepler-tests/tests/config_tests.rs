@@ -633,22 +633,19 @@ services:
     let hooks = config.services["test"].hooks.as_ref().unwrap();
 
     // on_start has no user override (inherits from service)
-    match hooks.pre_start.as_ref().unwrap() {
-        HookCommand::Script { user, .. } => assert!(user.is_none()),
-        _ => panic!("Expected Script hook"),
-    }
+    let hook = hooks.pre_start.as_ref().unwrap();
+    assert!(matches!(hook, HookCommand::Script { .. }), "Expected Script hook");
+    assert!(hook.user().is_none());
 
     // on_stop has user: daemon
-    match hooks.pre_stop.as_ref().unwrap() {
-        HookCommand::Script { user, .. } => assert_eq!(user.as_deref(), Some("daemon")),
-        _ => panic!("Expected Script hook"),
-    }
+    let hook = hooks.pre_stop.as_ref().unwrap();
+    assert!(matches!(hook, HookCommand::Script { .. }), "Expected Script hook");
+    assert_eq!(hook.user(), Some("daemon"));
 
     // on_restart has user: root
-    match hooks.pre_restart.as_ref().unwrap() {
-        HookCommand::Command { user, .. } => assert_eq!(user.as_deref(), Some("root")),
-        _ => panic!("Expected Command hook"),
-    }
+    let hook = hooks.pre_restart.as_ref().unwrap();
+    assert!(matches!(hook, HookCommand::Command { .. }), "Expected Command hook");
+    assert_eq!(hook.user(), Some("root"));
 }
 
 /// Hook environment and env_file parse correctly from YAML
@@ -680,25 +677,19 @@ services:
     let hooks = config.services["test"].hooks.as_ref().unwrap();
 
     // on_start has environment and env_file
-    match hooks.pre_start.as_ref().unwrap() {
-        HookCommand::Script { environment, env_file, .. } => {
-            assert_eq!(environment.len(), 2);
-            assert_eq!(environment[0], "HOOK_VAR=hook_value");
-            assert_eq!(environment[1], "DEBUG=true");
-            assert_eq!(env_file.as_ref().unwrap().to_str().unwrap(), ".env.hooks");
-        }
-        _ => panic!("Expected Script hook"),
-    }
+    let hook = hooks.pre_start.as_ref().unwrap();
+    assert!(matches!(hook, HookCommand::Script { .. }), "Expected Script hook");
+    assert_eq!(hook.environment().len(), 2);
+    assert_eq!(hook.environment()[0], "HOOK_VAR=hook_value");
+    assert_eq!(hook.environment()[1], "DEBUG=true");
+    assert_eq!(hook.env_file().unwrap().to_str().unwrap(), ".env.hooks");
 
     // on_stop has environment but no env_file
-    match hooks.pre_stop.as_ref().unwrap() {
-        HookCommand::Command { environment, env_file, .. } => {
-            assert_eq!(environment.len(), 1);
-            assert_eq!(environment[0], "CLEANUP=deep");
-            assert!(env_file.is_none());
-        }
-        _ => panic!("Expected Command hook"),
-    }
+    let hook = hooks.pre_stop.as_ref().unwrap();
+    assert!(matches!(hook, HookCommand::Command { .. }), "Expected Command hook");
+    assert_eq!(hook.environment().len(), 1);
+    assert_eq!(hook.environment()[0], "CLEANUP=deep");
+    assert!(hook.env_file().is_none());
 }
 
 // ============================================================================

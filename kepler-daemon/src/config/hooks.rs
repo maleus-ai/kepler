@@ -31,71 +31,113 @@ pub struct ServiceHooks {
     pub post_healthcheck_fail: Option<HookCommand>,
 }
 
+/// Common fields shared by both hook command variants
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+pub struct HookCommon {
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub working_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub environment: Vec<String>,
+    #[serde(default)]
+    pub env_file: Option<PathBuf>,
+}
+
 /// Hook command - either a script or a command array
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(untagged)]
 pub enum HookCommand {
     Script {
         run: String,
-        #[serde(default)]
-        user: Option<String>,
-        #[serde(default)]
-        group: Option<String>,
-        #[serde(default)]
-        working_dir: Option<PathBuf>,
-        #[serde(default)]
-        environment: Vec<String>,
-        #[serde(default)]
-        env_file: Option<PathBuf>,
+        #[serde(flatten)]
+        common: HookCommon,
     },
     Command {
         command: Vec<String>,
-        #[serde(default)]
-        user: Option<String>,
-        #[serde(default)]
-        group: Option<String>,
-        #[serde(default)]
-        working_dir: Option<PathBuf>,
-        #[serde(default)]
-        environment: Vec<String>,
-        #[serde(default)]
-        env_file: Option<PathBuf>,
+        #[serde(flatten)]
+        common: HookCommon,
     },
 }
 
 impl HookCommand {
-    pub fn user(&self) -> Option<&str> {
-        match self {
-            HookCommand::Script { user, .. } => user.as_deref(),
-            HookCommand::Command { user, .. } => user.as_deref(),
+    /// Create a simple script hook with just a run command.
+    pub fn script(run: impl Into<String>) -> Self {
+        HookCommand::Script {
+            run: run.into(),
+            common: HookCommon::default(),
         }
+    }
+
+    pub fn common(&self) -> &HookCommon {
+        match self {
+            HookCommand::Script { common, .. } => common,
+            HookCommand::Command { common, .. } => common,
+        }
+    }
+
+    pub fn common_mut(&mut self) -> &mut HookCommon {
+        match self {
+            HookCommand::Script { common, .. } => common,
+            HookCommand::Command { common, .. } => common,
+        }
+    }
+
+    pub fn user(&self) -> Option<&str> {
+        self.common().user.as_deref()
     }
 
     pub fn group(&self) -> Option<&str> {
-        match self {
-            HookCommand::Script { group, .. } => group.as_deref(),
-            HookCommand::Command { group, .. } => group.as_deref(),
-        }
+        self.common().group.as_deref()
     }
 
     pub fn working_dir(&self) -> Option<&Path> {
-        match self {
-            HookCommand::Script { working_dir, .. } => working_dir.as_deref(),
-            HookCommand::Command { working_dir, .. } => working_dir.as_deref(),
-        }
+        self.common().working_dir.as_deref()
     }
 
     pub fn environment(&self) -> &[String] {
-        match self {
-            HookCommand::Script { environment, .. } => environment,
-            HookCommand::Command { environment, .. } => environment,
-        }
+        &self.common().environment
     }
 
     pub fn env_file(&self) -> Option<&Path> {
-        match self {
-            HookCommand::Script { env_file, .. } => env_file.as_deref(),
-            HookCommand::Command { env_file, .. } => env_file.as_deref(),
-        }
+        self.common().env_file.as_deref()
+    }
+}
+
+impl GlobalHooks {
+    /// Iterate over all hook slots mutably.
+    pub fn all_hooks_mut(&mut self) -> impl Iterator<Item = &mut Option<HookCommand>> {
+        [
+            &mut self.on_init,
+            &mut self.pre_start,
+            &mut self.post_start,
+            &mut self.pre_stop,
+            &mut self.post_stop,
+            &mut self.pre_restart,
+            &mut self.post_restart,
+            &mut self.pre_cleanup,
+        ]
+        .into_iter()
+    }
+}
+
+impl ServiceHooks {
+    /// Iterate over all hook slots mutably.
+    pub fn all_hooks_mut(&mut self) -> impl Iterator<Item = &mut Option<HookCommand>> {
+        [
+            &mut self.on_init,
+            &mut self.pre_start,
+            &mut self.post_start,
+            &mut self.pre_stop,
+            &mut self.post_stop,
+            &mut self.pre_restart,
+            &mut self.post_restart,
+            &mut self.post_exit,
+            &mut self.post_healthcheck_success,
+            &mut self.post_healthcheck_fail,
+        ]
+        .into_iter()
     }
 }

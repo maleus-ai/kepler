@@ -7,7 +7,7 @@
 //!
 //! Tests run inside Docker as root with kepler group and test users available.
 
-use kepler_daemon::config::{HookCommand, ServiceHooks};
+use kepler_daemon::config::{HookCommand, HookCommon, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::{TestDaemonHarness, UMASK_LOCK};
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -65,6 +65,9 @@ fn lookup_uid_by_name(username: &str) -> Option<u32> {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_privilege_dropping_applied() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     // Find a suitable unprivileged user (try "nobody" first, fallback to numeric UID)
     let (user_spec, expected_uid) = if let Some(uid) = lookup_uid_by_name("nobody") {
         ("nobody".to_string(), uid)
@@ -74,6 +77,8 @@ async fn test_privilege_dropping_applied() {
     };
 
     let temp_dir = TempDir::new().unwrap();
+    // Make temp dir world-accessible so the unprivileged user can chdir into it
+    std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
 
     let config = TestConfigBuilder::new()
         .add_service(
@@ -126,6 +131,9 @@ async fn test_privilege_dropping_applied() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_hook_inherits_service_user() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     // Find a suitable unprivileged user
     let (user_spec, expected_uid) = if let Some(uid) = lookup_uid_by_name("nobody") {
         ("nobody".to_string(), uid)
@@ -143,14 +151,7 @@ async fn test_hook_inherits_service_user() {
 
     // Hook writes its UID to a marker file
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
-            run: format!("id -u > {}", uid_marker_path.display()),
-            user: None, // Should inherit from service
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
-        }),
+        pre_start: Some(HookCommand::script(format!("id -u > {}", uid_marker_path.display()))),
         ..Default::default()
     };
 
@@ -200,6 +201,9 @@ async fn test_hook_inherits_service_user() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_hook_user_override() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     // Use two different numeric UIDs for service and hook
     // Service runs as UID 65534 (commonly "nobody")
     let service_user = "65534";
@@ -221,11 +225,10 @@ async fn test_hook_user_override() {
     let hooks = ServiceHooks {
         pre_start: Some(HookCommand::Script {
             run: format!("id -u > {}", uid_marker_path.display()),
-            user: Some(hook_user.to_string()), // Override service user with different UID
-            group: None,
-            working_dir: None,
-            environment: Vec::new(),
-            env_file: None,
+            common: HookCommon {
+                user: Some(hook_user.to_string()), // Override service user with different UID
+                ..Default::default()
+            },
         }),
         ..Default::default()
     };
@@ -279,6 +282,9 @@ async fn test_hook_user_override() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_invalid_user_rejected() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("kepler.yaml");
 
@@ -317,6 +323,9 @@ services:
 #[tokio::test]
 #[cfg(unix)]
 async fn test_invalid_group_rejected() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("kepler.yaml");
 
@@ -408,6 +417,9 @@ async fn test_state_directory_permissions() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_pid_file_permissions() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     let temp_dir = TempDir::new().unwrap();
     let state_dir = temp_dir.path().join(".kepler");
 
@@ -480,6 +492,9 @@ async fn test_daemon_creates_state_dir_securely() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_harness_state_directory_isolation() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     let temp_dir = TempDir::new().unwrap();
 
     let config = TestConfigBuilder::new()
@@ -508,7 +523,12 @@ async fn test_harness_state_directory_isolation() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_numeric_uid_privilege_dropping() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     let temp_dir = TempDir::new().unwrap();
+    // Make temp dir world-accessible so the unprivileged user can chdir into it
+    std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
 
     // Use numeric UID
     let config = TestConfigBuilder::new()
@@ -547,7 +567,12 @@ async fn test_numeric_uid_privilege_dropping() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_uid_gid_pair_privilege_dropping() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     let temp_dir = TempDir::new().unwrap();
+    // Make temp dir world-accessible so the unprivileged user can chdir into it
+    std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
 
     // Use uid:gid format
     let config = TestConfigBuilder::new()
@@ -589,7 +614,12 @@ async fn test_uid_gid_pair_privilege_dropping() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_user_with_group_override() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     let temp_dir = TempDir::new().unwrap();
+    // Make temp dir world-accessible so the unprivileged user can chdir into it
+    std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
 
     // User with separate group override
     let config = TestConfigBuilder::new()
@@ -797,6 +827,9 @@ fn test_lua_debug_library_blocked() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_socket_file_permissions() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
     use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
     use std::os::unix::fs::PermissionsExt;
@@ -843,6 +876,9 @@ async fn test_socket_file_permissions() {
 /// This documents that env_file is copied to state directory on first load.
 #[tokio::test]
 async fn test_env_file_baked_changes_ignored() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
     use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
     use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -921,6 +957,9 @@ async fn test_env_file_baked_changes_ignored() {
 /// This documents that the entire config is baked, not just env_file.
 #[tokio::test]
 async fn test_config_baked_changes_ignored() {
+    // Hold UMASK_LOCK to prevent umask-changing tests from racing
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
     use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
     use kepler_tests::helpers::marker_files::MarkerFileHelper;
