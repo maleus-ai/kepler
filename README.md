@@ -93,19 +93,41 @@ kepler daemon stop
 
 ### Running Tests
 
+Tests require root and a `kepler` group (for socket permissions and privilege dropping). Always run tests through Docker:
+
 ```bash
-cargo test --workspace
+# Run all tests (builds image on first run)
+docker compose run test
+
+# Run specific test package
+docker compose run test cargo test -p kepler-tests
+
+# Run E2E tests
+docker compose run test cargo test -p kepler-e2e -- --nocapture
+
+# Interactive shell inside the container
+docker compose run test bash
+
+# Build workspace only
+docker compose run test cargo build --workspace
 ```
 
 ### Production Setup
 
-**Run as a dedicated user (recommended):**
+**The daemon must run as root.** Access is controlled via the `kepler` group — users in the group can use the CLI.
+
 ```bash
-sudo useradd -r -s /bin/false kepler
-sudo -u kepler kepler daemon start -d
+# Create the kepler group
+sudo groupadd kepler
+
+# Add users who should have CLI access
+sudo usermod -aG kepler youruser
+
+# Start the daemon (as root)
+sudo kepler daemon start -d
 ```
 
-**Avoid running as root** - the daemon refuses to start as root by default. Use `kepler daemon start --allow-root` to override (not recommended). Instead, use the `user:` option in your config to run specific services with elevated privileges when needed.
+The `user:` option in your config controls which user each service runs as. The daemon drops privileges per-service.
 
 **Using systemd:**
 ```ini
@@ -116,7 +138,6 @@ After=network.target
 
 [Service]
 Type=simple
-User=kepler
 ExecStart=/usr/local/bin/kepler daemon start
 ExecStop=/usr/local/bin/kepler daemon stop
 Restart=on-failure
@@ -178,9 +199,9 @@ Commands that manage the global daemon (no config required):
 
 | Command | Description |
 |---------|-------------|
-| `kepler daemon start [-d] [--allow-root]` | Start daemon (`-d` for background) |
+| `kepler daemon start [-d]` | Start daemon (`-d` for background, requires root) |
 | `kepler daemon stop` | Stop daemon (stops all services first) |
-| `kepler daemon restart [-d] [--allow-root]` | Restart daemon |
+| `kepler daemon restart [-d]` | Restart daemon |
 | `kepler daemon status` | Show daemon info and loaded configs |
 
 ### Service Commands
@@ -619,11 +640,11 @@ services:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `KEPLER_DAEMON_PATH` | `~/.kepler` | Override state directory location |
+| `KEPLER_DAEMON_PATH` | `/var/lib/kepler` | Override state directory location |
 
 ```bash
-export KEPLER_DAEMON_PATH=/var/run/kepler
-kepler daemon start -d
+export KEPLER_DAEMON_PATH=/opt/kepler
+sudo kepler daemon start -d
 ```
 
 ### Environment Inheritance
@@ -684,8 +705,8 @@ Using `sys_env: clear` (the default) ensures sensitive variables from your shell
 Kepler uses a global daemon architecture with per-config isolation:
 
 ```
-~/.kepler/                    # Or $KEPLER_DAEMON_PATH
-├── kepler.sock               # Unix domain socket
+/var/lib/kepler/              # Or $KEPLER_DAEMON_PATH
+├── kepler.sock               # Unix domain socket (0o660 root:kepler)
 ├── kepler.pid                # Daemon PID file
 └── configs/                  # Per-config state directories
     └── <config-hash>/
@@ -698,11 +719,12 @@ Kepler uses a global daemon architecture with per-config isolation:
 ```
 
 **How it works:**
-1. Single daemon listens on `~/.kepler/kepler.sock`
-2. Configs are loaded on-demand when first referenced
-3. Each config gets its own isolated state directory
-4. Multiple configs can run simultaneously
-5. Logs persist to disk and survive daemon restarts
+1. Daemon runs as root, listens on `/var/lib/kepler/kepler.sock`
+2. CLI access is controlled via `kepler` group membership on the socket
+3. Configs are loaded on-demand when first referenced
+4. Each config gets its own isolated state directory
+5. Multiple configs can run simultaneously
+6. Logs persist to disk and survive daemon restarts
 
 For implementation details, security measures, and design decisions, see [ARCHITECTURE.md](ARCHITECTURE.md).
 

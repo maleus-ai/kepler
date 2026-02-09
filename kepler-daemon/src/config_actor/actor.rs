@@ -93,7 +93,7 @@ impl ConfigActor {
             use std::os::unix::fs::DirBuilderExt;
             std::fs::DirBuilder::new()
                 .recursive(true)
-                .mode(0o700)
+                .mode(0o770)
                 .create(&state_dir)
                 .map_err(DaemonError::ConfigCopy)?;
         }
@@ -496,10 +496,10 @@ impl ConfigActor {
                 reply,
             } => {
                 let result = self.update_health_check(&service_name, passed, retries);
-                if let Ok(ref update) = result {
-                    if update.previous_status != update.new_status {
-                        let _ = self.save_state();
-                    }
+                if let Ok(ref update) = result
+                    && update.previous_status != update.new_status
+                {
+                    let _ = self.save_state();
                 }
                 let _ = reply.send(result);
             }

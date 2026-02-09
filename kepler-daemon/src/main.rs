@@ -18,6 +18,14 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+/// Resolve the GID of the "kepler" group.
+#[cfg(unix)]
+fn resolve_kepler_group_gid() -> anyhow::Result<u32> {
+    nix::unistd::Group::from_name("kepler")?
+        .map(|g| g.gid.as_raw())
+        .ok_or_else(|| anyhow::anyhow!("kepler group does not exist. Create it with: groupadd kepler"))
+}
+
 /// Canonicalize a config path, returning an error if the path doesn't exist
 fn canonicalize_config_path(path: PathBuf) -> std::result::Result<PathBuf, DaemonError> {
     std::fs::canonicalize(&path).map_err(|e| {
@@ -32,16 +40,12 @@ fn canonicalize_config_path(path: PathBuf) -> std::result::Result<PathBuf, Daemo
 /// Kepler daemon - process orchestrator
 #[derive(Parser)]
 #[command(name = "kepler-daemon", about = "Kepler daemon for process orchestration")]
-struct Args {
-    /// Allow running as root (not recommended for security reasons)
-    #[arg(long)]
-    allow_root: bool,
-}
+struct Args {}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Parse CLI arguments
-    let args = Args::parse();
+    let _args = Args::parse();
 
     // Initialize tracing
     tracing_subscriber::fmt()
@@ -53,23 +57,20 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting Kepler daemon");
 
-    // Block root execution by default (security measure)
+    // Require root (the kepler group controls CLI access)
     #[cfg(unix)]
     {
-        if nix::unistd::getuid().is_root() {
-            if !args.allow_root {
-                eprintln!("Error: Running as root is not allowed for security reasons.");
-                eprintln!("Use --allow-root to override (not recommended).");
-                std::process::exit(1);
-            }
-            tracing::warn!(
-                "WARNING: Running as root with --allow-root flag. \
-                This is not recommended for security reasons."
-            );
+        if !nix::unistd::getuid().is_root() {
+            eprintln!("Error: kepler-daemon must run as root.");
+            eprintln!("The kepler group controls which users can access the CLI.");
+            std::process::exit(1);
         }
+
+        // Set umask to allow group access (kepler group model)
+        nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o007));
     }
 
-    // Ensure state directory exists with secure permissions (0o700)
+    // Ensure state directory exists with group-accessible permissions (0o770)
     let state_dir = match Daemon::global_state_dir() {
         Ok(dir) => dir,
         Err(e) => {
@@ -83,15 +84,25 @@ async fn main() -> anyhow::Result<()> {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
             .recursive(true)
-            .mode(0o700)
+            .mode(0o770)
             .create(&state_dir)?;
+
+        // chown state dir to root:kepler (skip in test mode)
+        if std::env::var("KEPLER_DAEMON_PATH").is_err() {
+            let kepler_gid = resolve_kepler_group_gid()?;
+            nix::unistd::chown(
+                &state_dir,
+                Some(nix::unistd::Uid::from_raw(0)),
+                Some(nix::unistd::Gid::from_raw(kepler_gid)),
+            )?;
+        }
     }
     #[cfg(not(unix))]
     {
         fs::create_dir_all(&state_dir)?;
     }
 
-    // Write PID file with secure permissions (0o600)
+    // Write PID file with group-readable permissions (0o660)
     let pid_file = Daemon::get_pid_file().unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
@@ -104,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
             .write(true)
             .create(true)
             .truncate(true)
-            .mode(0o600)
+            .mode(0o660)
             .open(&pid_file)?;
         file.write_all(std::process::id().to_string().as_bytes())?;
     }

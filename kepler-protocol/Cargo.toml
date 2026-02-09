@@ -20,4 +20,4 @@ dashmap = "6.1.0"
 # Unix-specific functionality
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-nix = { version = "0.31.1", features = ["user"] }
+nix = { version = "0.31.1", features = ["user", "fs"] }

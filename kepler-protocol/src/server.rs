@@ -18,6 +18,37 @@ use crate::{
     },
 };
 
+/// Environment variable that overrides the default state directory.
+/// When set, the server uses legacy UID-based auth (for tests without kepler group).
+const KEPLER_DAEMON_PATH_ENV: &str = "KEPLER_DAEMON_PATH";
+
+/// Resolve the GID of the "kepler" group.
+fn resolve_kepler_group_gid() -> std::result::Result<u32, ServerError> {
+    nix::unistd::Group::from_name("kepler")
+        .map_err(|e| ServerError::GroupResolution(format!("failed to look up kepler group: {}", e)))?
+        .map(|g| g.gid.as_raw())
+        .ok_or_else(|| ServerError::GroupResolution("kepler group does not exist".into()))
+}
+
+/// Check if a process (by PID) has a given GID in its supplementary groups.
+/// Reads /proc/<pid>/status to get the full group list.
+fn pid_has_supplementary_gid(pid: u32, target_gid: u32) -> bool {
+    let status_path = format!("/proc/{}/status", pid);
+    let content = match std::fs::read_to_string(&status_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    for line in content.lines() {
+        if let Some(groups_str) = line.strip_prefix("Groups:") {
+            return groups_str
+                .split_whitespace()
+                .filter_map(|s| s.parse::<u32>().ok())
+                .any(|gid| gid == target_gid);
+        }
+    }
+    false
+}
+
 pub type Result<T> = std::result::Result<T, ServerError>;
 pub type ShutdownTx = mpsc::Sender<()>;
 
@@ -71,18 +102,32 @@ where
             source: e,
         })?;
 
-        // Set socket permissions to owner-only (0o600) for security
+        // Set socket permissions to owner+group (0o660) for kepler group access
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(
                 &self.socket_path,
-                std::fs::Permissions::from_mode(0o600),
+                std::fs::Permissions::from_mode(0o660),
             )
             .map_err(|e| ServerError::SocketPermissions {
                 socket_path: self.socket_path.clone(),
                 source: e,
             })?;
+
+            // chown socket to root:kepler (skip in test mode when KEPLER_DAEMON_PATH is set)
+            if std::env::var(KEPLER_DAEMON_PATH_ENV).is_err() {
+                let kepler_gid = resolve_kepler_group_gid()?;
+                nix::unistd::chown(
+                    &self.socket_path,
+                    Some(nix::unistd::Uid::from_raw(0)),
+                    Some(nix::unistd::Gid::from_raw(kepler_gid)),
+                )
+                .map_err(|e| ServerError::SocketOwnership {
+                    socket_path: self.socket_path.clone(),
+                    source: e.into(),
+                })?;
+            }
         }
 
         loop {
@@ -126,24 +171,49 @@ where
 {
     debug!("Client connected");
 
-    // Verify peer credentials - only allow connections from the same user
+    // Verify peer credentials
     #[cfg(unix)]
     {
         let cred = stream.peer_cred().map_err(ServerError::PeerCredentials)?;
-        let daemon_uid = nix::unistd::getuid().as_raw();
 
-        if cred.uid() != daemon_uid {
-            debug!(
-                "Unauthorized connection attempt: client UID {} != daemon UID {}",
-                cred.uid(),
-                daemon_uid
-            );
-            return Err(ServerError::Unauthorized {
-                client_uid: cred.uid(),
-                daemon_uid,
-            });
+        if std::env::var(KEPLER_DAEMON_PATH_ENV).is_ok() {
+            // Test mode: use legacy same-UID auth (no kepler group required)
+            let daemon_uid = nix::unistd::getuid().as_raw();
+            if cred.uid() != daemon_uid {
+                debug!(
+                    "Unauthorized connection attempt (test mode): client UID {} != daemon UID {}",
+                    cred.uid(),
+                    daemon_uid
+                );
+                return Err(ServerError::Unauthorized {
+                    client_uid: cred.uid(),
+                    kepler_gid: 0,
+                });
+            }
+            debug!("Peer credentials verified (test mode): UID {}", cred.uid());
+        } else {
+            // Production mode: root always allowed, otherwise check kepler group membership
+            if cred.uid() == 0 {
+                debug!("Peer credentials verified: root (UID 0)");
+            } else {
+                let kepler_gid = resolve_kepler_group_gid()?;
+                let in_group = cred.gid() == kepler_gid
+                    || cred.pid().is_some_and(|pid| pid_has_supplementary_gid(pid as u32, kepler_gid));
+
+                if !in_group {
+                    debug!(
+                        "Unauthorized connection attempt: UID {} not in kepler group (GID {})",
+                        cred.uid(),
+                        kepler_gid
+                    );
+                    return Err(ServerError::Unauthorized {
+                        client_uid: cred.uid(),
+                        kepler_gid,
+                    });
+                }
+                debug!("Peer credentials verified: UID {} in kepler group", cred.uid());
+            }
         }
-        debug!("Peer credentials verified: UID {}", cred.uid());
     }
 
     // Split stream into read/write halves

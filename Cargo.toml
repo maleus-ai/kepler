@@ -3,6 +3,7 @@ members = [
     "kepler-cli",
     "kepler-protocol",
     "kepler-daemon",
+    "kepler-exec",
     "kepler-tests",
     "kepler-e2e",
 ]

@@ -5,8 +5,7 @@
 //! - Resource limits enforcement
 //! - File permission hardening
 //!
-//! Some tests require root privileges and are marked with #[ignore].
-//! Run with: `sudo -E cargo test --test security_tests -- --include-ignored`
+//! Tests run inside Docker as root with kepler group and test users available.
 
 use kepler_daemon::config::{HookCommand, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
@@ -19,11 +18,6 @@ use tempfile::TempDir;
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-/// Check if the current process is running as root
-fn is_root() -> bool {
-    nix::unistd::getuid().is_root()
-}
 
 /// Get the UID of a running process
 #[cfg(unix)]
@@ -70,13 +64,7 @@ fn lookup_uid_by_name(username: &str) -> Option<u32> {
 /// Requires root to drop privileges to another user
 #[tokio::test]
 #[cfg(unix)]
-#[ignore] // Requires root - run with: sudo -E cargo test -- --include-ignored
 async fn test_privilege_dropping_applied() {
-    if !is_root() {
-        eprintln!("Skipping test_privilege_dropping_applied: requires root to test privilege dropping");
-        return;
-    }
-
     // Find a suitable unprivileged user (try "nobody" first, fallback to numeric UID)
     let (user_spec, expected_uid) = if let Some(uid) = lookup_uid_by_name("nobody") {
         ("nobody".to_string(), uid)
@@ -137,13 +125,7 @@ async fn test_privilege_dropping_applied() {
 /// Requires root to drop privileges to another user
 #[tokio::test]
 #[cfg(unix)]
-#[ignore] // Requires root - run with: sudo -E cargo test -- --include-ignored
 async fn test_hook_inherits_service_user() {
-    if !is_root() {
-        eprintln!("Skipping test_hook_inherits_service_user: requires root");
-        return;
-    }
-
     // Find a suitable unprivileged user
     let (user_spec, expected_uid) = if let Some(uid) = lookup_uid_by_name("nobody") {
         ("nobody".to_string(), uid)
@@ -217,13 +199,7 @@ async fn test_hook_inherits_service_user() {
 /// so we use numeric UIDs to test actual user overrides.
 #[tokio::test]
 #[cfg(unix)]
-#[ignore] // Requires root - run with: sudo -E cargo test -- --include-ignored
 async fn test_hook_user_override() {
-    if !is_root() {
-        eprintln!("Skipping test_hook_user_override: requires root");
-        return;
-    }
-
     // Use two different numeric UIDs for service and hook
     // Service runs as UID 65534 (commonly "nobody")
     let service_user = "65534";
@@ -379,7 +355,7 @@ services:
 // File Permission Tests
 // ============================================================================
 
-/// Verify that the state directory has secure permissions (0o700)
+/// Verify that the state directory has group-accessible permissions (0o770)
 #[tokio::test]
 #[cfg(unix)]
 async fn test_state_directory_permissions() {
@@ -393,15 +369,21 @@ async fn test_state_directory_permissions() {
         std::env::set_var("KEPLER_DAEMON_PATH", &state_dir);
     }
 
+    // Set umask to 0007 to match daemon behavior (allows group access)
+    let old_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o007));
+
     // Create the state directory with proper permissions (simulating daemon startup)
     {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
             .recursive(true)
-            .mode(0o700)
+            .mode(0o770)
             .create(&state_dir)
             .unwrap();
     }
+
+    // Restore umask
+    nix::sys::stat::umask(old_umask);
 
     // Verify the directory exists and has correct permissions
     let metadata = std::fs::metadata(&state_dir).unwrap();
@@ -409,8 +391,8 @@ async fn test_state_directory_permissions() {
     let mode = permissions.mode() & 0o777; // Mask to get only permission bits
 
     assert_eq!(
-        mode, 0o700,
-        "State directory should have mode 0o700, got 0o{:o}",
+        mode, 0o770,
+        "State directory should have mode 0o770, got 0o{:o}",
         mode
     );
 
@@ -466,22 +448,28 @@ async fn test_daemon_creates_state_dir_securely() {
     let temp_dir = TempDir::new().unwrap();
     let state_dir = temp_dir.path().join("new_state_dir");
 
-    // Simulate daemon behavior - create directory with secure permissions
+    // Set umask to 0007 to match daemon behavior (allows group access)
+    let old_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o007));
+
+    // Simulate daemon behavior - create directory with group-accessible permissions
     {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
             .recursive(true)
-            .mode(0o700)
+            .mode(0o770)
             .create(&state_dir)
             .unwrap();
     }
+
+    // Restore umask
+    nix::sys::stat::umask(old_umask);
 
     // Verify
     let metadata = std::fs::metadata(&state_dir).unwrap();
     assert!(metadata.is_dir(), "Should be a directory");
 
     let mode = metadata.permissions().mode() & 0o777;
-    assert_eq!(mode, 0o700, "Directory should have mode 0o700");
+    assert_eq!(mode, 0o770, "Directory should have mode 0o770");
 }
 
 /// Verify that test harness state directory has appropriate permissions
@@ -515,13 +503,7 @@ async fn test_harness_state_directory_isolation() {
 /// Verify numeric UID resolution works correctly
 #[tokio::test]
 #[cfg(unix)]
-#[ignore] // Requires root
 async fn test_numeric_uid_privilege_dropping() {
-    if !is_root() {
-        eprintln!("Skipping: requires root");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
 
     // Use numeric UID
@@ -560,13 +542,7 @@ async fn test_numeric_uid_privilege_dropping() {
 /// Verify uid:gid format resolution works correctly
 #[tokio::test]
 #[cfg(unix)]
-#[ignore] // Requires root
 async fn test_uid_gid_pair_privilege_dropping() {
-    if !is_root() {
-        eprintln!("Skipping: requires root");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
 
     // Use uid:gid format
@@ -608,13 +584,7 @@ async fn test_uid_gid_pair_privilege_dropping() {
 /// Verify that group override works with user specification
 #[tokio::test]
 #[cfg(unix)]
-#[ignore] // Requires root
 async fn test_user_with_group_override() {
-    if !is_root() {
-        eprintln!("Skipping: requires root");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
 
     // User with separate group override
@@ -819,7 +789,7 @@ fn test_lua_debug_library_blocked() {
 // Socket Security Tests
 // ============================================================================
 
-/// Verify that socket file has secure permissions (0o600) when created
+/// Verify that socket file has group-accessible permissions (0o660) when created
 #[tokio::test]
 #[cfg(unix)]
 async fn test_socket_file_permissions() {
@@ -848,8 +818,8 @@ async fn test_socket_file_permissions() {
         let mode = metadata.permissions().mode() & 0o777;
 
         assert_eq!(
-            mode, 0o600,
-            "Socket file should have mode 0o600, got 0o{:o}",
+            mode, 0o660,
+            "Socket file should have mode 0o660, got 0o{:o}",
             mode
         );
     }
@@ -863,7 +833,7 @@ async fn test_socket_file_permissions() {
 // These tests document the security model: configs are "baked" on first start.
 // After baking, modifications to original files have no effect until explicit
 // recreate. This is primarily a defense against accidental misconfiguration,
-// not privilege escalation (since CLI requires same-user socket access).
+// not privilege escalation (since CLI requires kepler group membership for socket access).
 
 /// Verify that env_file changes after baking have no effect
 /// This documents that env_file is copied to state directory on first load.

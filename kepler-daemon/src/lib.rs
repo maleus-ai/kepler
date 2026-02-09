@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::errors::{DaemonError, Result};
+use crate::errors::Result;
 
 pub mod config;
 pub mod config_actor;
@@ -25,22 +25,14 @@ pub mod watcher;
 // Re-export commonly used types
 pub use config_registry::LoadedConfigInfo;
 
-const GLOBAL_STATE_DIR: &str = ".kepler";
+const DEFAULT_STATE_DIR: &str = "/var/lib/kepler";
 const KEPLER_DAEMON_PATH_ENV: &str = "KEPLER_DAEMON_PATH";
 
 pub fn global_state_dir() -> Result<PathBuf> {
     if let Ok(path) = std::env::var(KEPLER_DAEMON_PATH_ENV) {
         return Ok(PathBuf::from(path));
     }
-    dirs::home_dir()
-        .map(|home| home.join(GLOBAL_STATE_DIR))
-        .ok_or_else(|| {
-            DaemonError::Internal(
-                "Could not determine home directory. \
-                 Set KEPLER_DAEMON_PATH environment variable to specify state directory."
-                    .into(),
-            )
-        })
+    Ok(PathBuf::from(DEFAULT_STATE_DIR))
 }
 
 pub struct Daemon {}

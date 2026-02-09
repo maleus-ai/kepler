@@ -168,8 +168,18 @@ async fn test_user_expansion() {
     let marker = MarkerFileHelper::new(temp_dir.path());
     let marker_path = marker.marker_path("user_expansion");
 
-    // Get current user
-    let current_user = std::env::var("USER").unwrap_or_else(|_| "nobody".to_string());
+    // Get current user (USER env var may not be set in Docker)
+    let current_user = std::env::var("USER").unwrap_or_else(|_| {
+        String::from_utf8(
+            std::process::Command::new("whoami")
+                .output()
+                .expect("whoami failed")
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string()
+    });
 
     // Set the user via env var
     unsafe {

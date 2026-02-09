@@ -1,0 +1,17 @@
+services:
+  test:
+    build: .
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/app/target
+    user: root
+    command: sh -c "cargo build --workspace && cargo test --workspace"
+    environment:
+      - RUST_BACKTRACE=1
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target-cache:

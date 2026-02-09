@@ -1,0 +1,12 @@
+[package]
+name = "kepler-exec"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "kepler-exec"
+path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.1", features = ["resource", "user", "process"] }
+libc = "0.2"

@@ -202,10 +202,10 @@ impl TestDaemonHarness {
             .await;
 
         // Track PID for cleanup on drop (handles panic unwind)
-        if let Some(state) = self.handle.get_service_state(service_name).await {
-            if let Some(pid) = state.pid {
-                self.tracked_pids.lock().unwrap().push(pid);
-            }
+        if let Some(state) = self.handle.get_service_state(service_name).await
+            && let Some(pid) = state.pid
+        {
+            self.tracked_pids.lock().unwrap().push(pid);
         }
 
         // Update status to Running (PID is already set by spawn_service)
@@ -435,10 +435,10 @@ impl TestDaemonHarness {
                         .await;
 
                     // Track new PID for cleanup on drop
-                    if let Some(state) = handle.get_service_state(&event.service_name).await {
-                        if let Some(pid) = state.pid {
-                            tracked_pids.lock().unwrap().push(pid);
-                        }
+                    if let Some(state) = handle.get_service_state(&event.service_name).await
+                        && let Some(pid) = state.pid
+                    {
+                        tracked_pids.lock().unwrap().push(pid);
                     }
 
                     let _ = handle
@@ -562,10 +562,10 @@ impl TestDaemonHarness {
                             .await;
 
                         // Track new PID for cleanup on drop
-                        if let Some(state) = handle.get_service_state(&event.service_name).await {
-                            if let Some(pid) = state.pid {
-                                tracked_pids.lock().unwrap().push(pid);
-                            }
+                        if let Some(state) = handle.get_service_state(&event.service_name).await
+                            && let Some(pid) = state.pid
+                        {
+                            tracked_pids.lock().unwrap().push(pid);
                         }
 
                         let _ = handle

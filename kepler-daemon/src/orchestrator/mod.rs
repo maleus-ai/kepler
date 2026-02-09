@@ -164,18 +164,18 @@ impl ServiceOrchestrator {
 
                 tokio::spawn(async move {
                     // Run global on_init hook if first time (inside background task)
-                    if !initialized {
-                        if let Err(e) = run_global_hook(
+                    if !initialized
+                        && let Err(e) = run_global_hook(
                             &ctx.global_hooks,
                             GlobalHookType::OnInit,
                             &ctx.config_dir,
                             &ctx.stored_env,
                             Some(&ctx.log_config),
                             ctx.global_log_config.as_ref(),
-                        ).await {
-                            error!("Global on_init hook failed: {}", e);
-                            return;
-                        }
+                        ).await
+                    {
+                        error!("Global on_init hook failed: {}", e);
+                        return;
                     }
 
                     // Run global pre_start hook (inside background task)
@@ -256,11 +256,11 @@ impl ServiceOrchestrator {
                 } else {
                     // Use wait field to partition services (always resolved after config load)
                     let startup_services: Vec<String> = services_to_start.iter()
-                        .filter(|s| config.services.get(*s).map_or(true, |c| c.wait.expect("wait should have been resolved by resolve_effective_wait")))
+                        .filter(|s| config.services.get(*s).is_none_or(|c| c.wait.expect("wait should have been resolved by resolve_effective_wait")))
                         .cloned()
                         .collect();
                     let deferred_services: Vec<String> = services_to_start.iter()
-                        .filter(|s| config.services.get(*s).map_or(false, |c| !c.wait.expect("wait should have been resolved by resolve_effective_wait")))
+                        .filter(|s| config.services.get(*s).is_some_and(|c| !c.wait.expect("wait should have been resolved by resolve_effective_wait")))
                         .cloned()
                         .collect();
 
@@ -325,6 +325,7 @@ impl ServiceOrchestrator {
 
     /// Internal method to start services and run post-startup work.
     /// Used by both Detached and WaitStartup modes for the common case.
+    #[allow(clippy::too_many_arguments)]
     async fn start_services_inner(
         &self,
         config_path: &Path,
@@ -384,6 +385,7 @@ impl ServiceOrchestrator {
     }
 
     /// Run post-startup work: snapshot, event handler, global post_start hook, mark initialized
+    #[allow(clippy::too_many_arguments)]
     async fn post_startup_work(
         &self,
         config_path: &Path,
@@ -539,29 +541,28 @@ impl ServiceOrchestrator {
                 }
 
                 // Check if dependency is permanently unsatisfied
-                if let Some(ref cfg) = config {
-                    if let Some(dep_svc_config) = cfg.services.get(&dep_name) {
-                        if is_dependency_permanently_unsatisfied(
-                            &dep_name,
-                            &dep_config,
-                            handle,
-                            dep_svc_config,
-                        ).await {
-                            let state = handle.get_service_state(&dep_name).await;
-                            let reason = format!(
-                                "dependency {} with exit code {:?}, won't restart (policy: {:?})",
-                                state.as_ref().map(|s| s.status.as_str()).unwrap_or("unknown"),
-                                state.as_ref().and_then(|s| s.exit_code),
-                                dep_svc_config.restart.policy(),
-                            );
-                            return Err(OrchestratorError::DependencyUnsatisfied {
-                                service: service_name.to_string(),
-                                dependency: dep_name.clone(),
-                                condition: dep_config.condition.clone(),
-                                reason,
-                            });
-                        }
-                    }
+                if let Some(ref cfg) = config
+                    && let Some(dep_svc_config) = cfg.services.get(&dep_name)
+                    && is_dependency_permanently_unsatisfied(
+                        &dep_name,
+                        &dep_config,
+                        handle,
+                        dep_svc_config,
+                    ).await
+                {
+                    let state = handle.get_service_state(&dep_name).await;
+                    let reason = format!(
+                        "dependency {} with exit code {:?}, won't restart (policy: {:?})",
+                        state.as_ref().map(|s| s.status.as_str()).unwrap_or("unknown"),
+                        state.as_ref().and_then(|s| s.exit_code),
+                        dep_svc_config.restart.policy(),
+                    );
+                    return Err(OrchestratorError::DependencyUnsatisfied {
+                        service: service_name.to_string(),
+                        dependency: dep_name.clone(),
+                        condition: dep_config.condition.clone(),
+                        reason,
+                    });
                 }
 
                 // Check timeout
@@ -638,20 +639,19 @@ impl ServiceOrchestrator {
 
         // Run global pre_stop hook if stopping all services
         if service_filter.is_none()
-            && let Some(ref log_cfg) = log_config {
-                if let Err(e) = run_global_hook(
-                    &global_hooks,
-                    GlobalHookType::PreStop,
-                    &config_dir,
-                    &stored_env,
-                    Some(log_cfg),
-                    global_log_config.as_ref(),
-                )
-                .await
-                {
-                    warn!("Global pre_stop hook failed: {}", e);
-                }
-            }
+            && let Some(ref log_cfg) = log_config
+            && let Err(e) = run_global_hook(
+                &global_hooks,
+                GlobalHookType::PreStop,
+                &config_dir,
+                &stored_env,
+                Some(log_cfg),
+                global_log_config.as_ref(),
+            )
+            .await
+        {
+            warn!("Global pre_stop hook failed: {}", e);
+        }
 
         let mut stopped = Vec::new();
 
@@ -699,20 +699,19 @@ impl ServiceOrchestrator {
 
         // Run global post_stop hook if stopping all and services were stopped
         if service_filter.is_none() && !stopped.is_empty()
-            && let Some(ref log_cfg) = log_config {
-                if let Err(e) = run_global_hook(
-                    &global_hooks,
-                    GlobalHookType::PostStop,
-                    &config_dir,
-                    &stored_env,
-                    Some(log_cfg),
-                    global_log_config.as_ref(),
-                )
-                .await
-                {
-                    warn!("Global post_stop hook failed: {}", e);
-                }
-            }
+            && let Some(ref log_cfg) = log_config
+            && let Err(e) = run_global_hook(
+                &global_hooks,
+                GlobalHookType::PostStop,
+                &config_dir,
+                &stored_env,
+                Some(log_cfg),
+                global_log_config.as_ref(),
+            )
+            .await
+        {
+            warn!("Global post_stop hook failed: {}", e);
+        }
 
         // Run pre_cleanup if requested
         if service_filter.is_none() && clean {
@@ -723,8 +722,8 @@ impl ServiceOrchestrator {
                 handle.emit_event(service_name, ServiceEvent::Cleanup).await;
             }
 
-            if let Some(ref log_cfg) = log_config {
-                if let Err(e) = run_global_hook(
+            if let Some(ref log_cfg) = log_config
+                && let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PreCleanup,
                     &config_dir,
@@ -733,9 +732,8 @@ impl ServiceOrchestrator {
                     global_log_config.as_ref(),
                 )
                 .await
-                {
-                    error!("pre_cleanup hook failed: {}", e);
-                }
+            {
+                error!("pre_cleanup hook failed: {}", e);
             }
         }
 
@@ -916,20 +914,19 @@ impl ServiceOrchestrator {
 
         // Run global pre_restart hook for full restart
         if is_full_restart
-            && let Some(ref log_cfg) = log_config {
-                if let Err(e) = run_global_hook(
-                    &global_hooks,
-                    GlobalHookType::PreRestart,
-                    &config_dir,
-                    &stored_env,
-                    Some(log_cfg),
-                    global_log_config.as_ref(),
-                )
-                .await
-                {
-                    warn!("Global pre_restart hook failed: {}", e);
-                }
-            }
+            && let Some(ref log_cfg) = log_config
+            && let Err(e) = run_global_hook(
+                &global_hooks,
+                GlobalHookType::PreRestart,
+                &config_dir,
+                &stored_env,
+                Some(log_cfg),
+                global_log_config.as_ref(),
+            )
+            .await
+        {
+            warn!("Global pre_restart hook failed: {}", e);
+        }
 
         // Phase 1: Run pre_restart hooks and stop (reverse dependency order)
         for service_name in &stop_order {
@@ -1034,20 +1031,19 @@ impl ServiceOrchestrator {
 
         // Run global post_restart hook for full restart
         if is_full_restart
-            && let Some(ref log_cfg) = log_config {
-                if let Err(e) = run_global_hook(
-                    &global_hooks,
-                    GlobalHookType::PostRestart,
-                    &config_dir,
-                    &stored_env,
-                    Some(log_cfg),
-                    global_log_config.as_ref(),
-                )
-                .await
-                {
-                    warn!("Global post_restart hook failed: {}", e);
-                }
-            }
+            && let Some(ref log_cfg) = log_config
+            && let Err(e) = run_global_hook(
+                &global_hooks,
+                GlobalHookType::PostRestart,
+                &config_dir,
+                &stored_env,
+                Some(log_cfg),
+                global_log_config.as_ref(),
+            )
+            .await
+        {
+            warn!("Global post_restart hook failed: {}", e);
+        }
 
         if restarted.is_empty() {
             Ok("No services were restarted".to_string())

@@ -199,13 +199,13 @@ impl ConfigPersistence {
     ) -> Result<()> {
         let env_files_dir = self.env_files_dir();
 
-        // Create env_files directory with secure permissions
+        // Create env_files directory with group-accessible permissions
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
             std::fs::DirBuilder::new()
                 .recursive(true)
-                .mode(0o700)
+                .mode(0o770)
                 .create(&env_files_dir)
                 .map_err(|e| DaemonError::Internal(format!("Failed to create directory '{}': {}", env_files_dir.display(), e)))?;
         }

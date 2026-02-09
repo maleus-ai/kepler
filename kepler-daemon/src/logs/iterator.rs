@@ -101,17 +101,17 @@ impl MergedLogIterator {
             let mut seek_pos = positions.get(&path).copied().unwrap_or(0);
 
             // Handle truncation: if saved position > current file size, reset to 0
-            if let Ok(metadata) = file.metadata() {
-                if seek_pos > metadata.len() {
-                    seek_pos = 0;
-                }
+            if let Ok(metadata) = file.metadata()
+                && seek_pos > metadata.len()
+            {
+                seek_pos = 0;
             }
 
             let mut reader = BufReader::new(file);
-            if seek_pos > 0 {
-                if reader.seek(SeekFrom::Start(seek_pos)).is_err() {
-                    continue;
-                }
+            if seek_pos > 0
+                && reader.seek(SeekFrom::Start(seek_pos)).is_err()
+            {
+                continue;
             }
 
             readers.push(reader);
@@ -171,8 +171,8 @@ impl MergedLogIterator {
         for entry in self.heap.iter() {
             in_heap[entry.source_idx] = true;
         }
-        for i in 0..self.readers.len() {
-            if !in_heap[i] {
+        for (i, is_in_heap) in in_heap.iter().enumerate() {
+            if !is_in_heap {
                 self.read_next_into_heap(i);
             }
         }

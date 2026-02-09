@@ -21,15 +21,16 @@ This document describes Kepler's internal implementation, security measures, and
 
 ### Global Daemon Pattern
 
-Kepler uses a single global daemon architecture. One daemon process manages all configurations and services for a user:
+Kepler uses a single global daemon architecture. The daemon runs as root and manages all configurations and services:
 
-- **Single socket**: `~/.kepler/kepler.sock` handles all CLI communication
+- **Single socket**: `/var/lib/kepler/kepler.sock` handles all CLI communication
+- **Group-based access**: CLI access is controlled via `kepler` group membership on the socket
 - **Per-config isolation**: Each config gets its own state directory (hashed path)
 - **Persistent state**: Daemon survives CLI disconnections, services continue running
 
 ### Key Design Principles
 
-1. **Security by default**: Restrictive file permissions, same-user enforcement, environment isolation
+1. **Security by default**: Root-only daemon, kepler group access control, environment isolation
 2. **Configuration immutability**: Configs are "baked" on first service start
 3. **Single evaluation**: Lua scripts and env vars expanded once, results persisted
 4. **Graceful recovery**: State persisted to disk, restorable after daemon restart
@@ -40,12 +41,12 @@ Kepler uses a single global daemon architecture. One daemon process manages all 
 
 ### Location
 
-The daemon stores all state in `~/.kepler/` (or `$KEPLER_DAEMON_PATH` if set):
+The daemon stores all state in `/var/lib/kepler/` (or `$KEPLER_DAEMON_PATH` if set):
 
 ```
-~/.kepler/
-├── kepler.sock           # Unix domain socket (0o600)
-├── kepler.pid            # Daemon PID file (0o600)
+/var/lib/kepler/
+├── kepler.sock           # Unix domain socket (0o660 root:kepler)
+├── kepler.pid            # Daemon PID file (0o660)
 └── configs/              # Per-config state directories
     └── <config-hash>/
         ├── config.yaml         # Copied config (immutable after snapshot)
@@ -58,36 +59,41 @@ The daemon stores all state in `~/.kepler/` (or `$KEPLER_DAEMON_PATH` if set):
 
 ### Security
 
-- **State directory**: `0o700` (owner-only access)
-- **All files**: `0o600` (owner read/write only)
-- **Purpose**: Prevents other users from reading sensitive config data
+- **State directory**: `0o770` (root + kepler group access)
+- **Socket**: `0o660 root:kepler` (root + kepler group access)
+- **PID file**: `0o660` (root + kepler group access)
+- **Daemon umask**: `0o007` ensures all created files/dirs are group-accessible
+- **Purpose**: Root owns all state; kepler group members can access the CLI
 
 ### Relevant Files
 
 | File | Description |
 |------|-------------|
 | `kepler-daemon/src/lib.rs` | Directory structure constants and path helpers |
-| `kepler-daemon/src/main.rs` | Secure directory creation with `0o700` mode |
-| `kepler-daemon/src/persistence.rs` | Secure file writing with `0o600` mode |
+| `kepler-daemon/src/main.rs` | Root enforcement, umask, secure directory creation with `0o770` mode |
+| `kepler-daemon/src/persistence.rs` | Secure file writing |
 
 ---
 
 ## Socket Security
 
-### Same-User Protection
+### Kepler Group Access Control
 
-The daemon uses Unix peer credentials to enforce same-user access:
+The daemon uses Unix peer credentials to enforce group-based access:
 
-1. Socket file permissions set to `0o600`
+1. Socket file permissions set to `0o660 root:kepler`
 2. Each connection verified via `peer_cred()`
-3. Client UID compared against daemon UID
-4. Connections from different users rejected
+3. Root clients (UID 0) are always allowed
+4. Other clients must be in the `kepler` group (checked via primary GID and supplementary groups from `/proc/<pid>/status`)
+5. Connections from users not in the kepler group are rejected
+
+**Test mode**: When `KEPLER_DAEMON_PATH` is set, the daemon uses legacy UID-based auth (same-user check) so tests work without root/kepler group.
 
 ### Relevant Files
 
 | File | Description |
 |------|-------------|
-| `kepler-protocol/src/server.rs` | Socket permissions and UID verification |
+| `kepler-protocol/src/server.rs` | Socket permissions, group resolution, and peer credential verification |
 
 ---
 
@@ -755,9 +761,13 @@ This ordering ensures that each stage has access to the variables it needs while
 
 ## Process Security
 
-### Root Execution Prevention
+### Root Requirement
 
-Running the daemon as root is blocked by default for security. The `--allow-root` flag can override this (not recommended). This flag is available both via the CLI (`kepler daemon start --allow-root`) and when running the daemon binary directly (`kepler-daemon --allow-root`).
+The daemon must run as root. This is enforced unconditionally on startup — the daemon exits with an error if not running as root. Root is required to:
+
+- Drop privileges per-service (setuid/setgid to the configured `user`/`group`)
+- Create and chown the state directory and socket to `root:kepler`
+- Set resource limits on spawned processes
 
 ### Privilege Dropping
 
@@ -765,6 +775,7 @@ Services can run as specific user/group:
 
 - User formats: `"username"`, `"1000"`, `"1000:1000"`
 - Hooks inherit service user by default (can override)
+- The daemon drops privileges per-service at spawn time via `setuid()`/`setgid()`
 
 ### Environment Isolation
 
@@ -784,7 +795,7 @@ Applied via `pre_exec` before process execution:
 
 | File | Description |
 |------|-------------|
-| `kepler-daemon/src/main.rs` | Root execution prevention |
+| `kepler-daemon/src/main.rs` | Root enforcement, umask, state directory setup |
 | `kepler-daemon/src/process.rs` | Process spawning, privilege dropping, resource limits |
 | `kepler-daemon/src/user.rs` | User/group resolution |
 
@@ -797,7 +808,7 @@ Applied via `pre_exec` before process execution:
 Logs are stored in the config's state directory under `logs/`:
 
 ```
-~/.kepler/configs/<config-hash>/logs/
+/var/lib/kepler/configs/<config-hash>/logs/
 ├── service-name.stdout.log    # Standard output
 └── service-name.stderr.log    # Standard error
 ```
@@ -873,7 +884,7 @@ CLI                              Daemon
 |-----------|------|-------------|
 | Directory structure | `kepler-daemon/src/lib.rs` | State directory paths |
 | Secure file writing | `kepler-daemon/src/persistence.rs` | File permissions |
-| Socket security | `kepler-protocol/src/server.rs` | UID verification |
+| Socket security | `kepler-protocol/src/server.rs` | Group-based access control |
 | Config loading | `kepler-daemon/src/config_actor.rs` | Lifecycle management, event channels |
 | Env expansion | `kepler-daemon/src/config.rs` | Shell-style expansion, dependency types |
 | Env building | `kepler-daemon/src/env.rs` | Priority merging |

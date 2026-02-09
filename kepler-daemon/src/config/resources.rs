@@ -44,7 +44,8 @@ pub fn parse_memory_limit(s: &str) -> std::result::Result<u64, String> {
         _ => return Err(format!("Unknown memory unit: {}", unit)),
     };
 
-    Ok(num * multiplier)
+    num.checked_mul(multiplier)
+        .ok_or_else(|| format!("Memory limit overflows u64: {}*{}", num, multiplier))
 }
 
 /// System environment inheritance policy

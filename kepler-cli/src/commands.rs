@@ -95,9 +95,6 @@ pub enum DaemonCommands {
         /// Detach and run in background
         #[arg(short, long)]
         detach: bool,
-        /// Allow running as root (not recommended)
-        #[arg(long)]
-        allow_root: bool,
     },
 
     /// Stop the global daemon (stops all services first)
@@ -108,9 +105,6 @@ pub enum DaemonCommands {
         /// Detach and run in background after restart
         #[arg(short, long)]
         detach: bool,
-        /// Allow running as root (not recommended)
-        #[arg(long)]
-        allow_root: bool,
     },
 
     /// Show global daemon status and loaded configs

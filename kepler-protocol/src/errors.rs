@@ -71,8 +71,18 @@ pub enum ServerError {
     #[error("failed to verify peer credentials: {0}")]
     PeerCredentials(#[source] std::io::Error),
 
-    #[error("unauthorized connection: UID {client_uid} does not match daemon UID {daemon_uid}")]
-    Unauthorized { client_uid: u32, daemon_uid: u32 },
+    #[error("unauthorized connection: UID {client_uid} is not in kepler group (GID {kepler_gid})")]
+    Unauthorized { client_uid: u32, kepler_gid: u32 },
+
+    #[error("failed to resolve kepler group: {0}")]
+    GroupResolution(String),
+
+    #[error("failed to set socket ownership at {socket_path}: {source}")]
+    SocketOwnership {
+        socket_path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("failed to send response: {0}")]
     Send(#[source] std::io::Error),

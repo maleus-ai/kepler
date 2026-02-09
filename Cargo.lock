@@ -687,7 +687,6 @@ dependencies = [
  "chrono",
  "clap",
  "dashmap 5.5.3",
- "dirs",
  "dotenvy",
  "futures",
  "globset",
@@ -725,6 +724,14 @@ dependencies = [
  "thiserror",
  "tokio",
  "which",
+]
+
+[[package]]
+name = "kepler-exec"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nix",
 ]
 
 [[package]]

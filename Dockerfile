@@ -1,19 +1,17 @@
-# Dockerfile for running Kepler E2E tests in an isolated environment
+FROM rust:1.93-slim-bookworm
 
-FROM rust:1.87-slim-bookworm
-
-# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
-    libssl-dev \
-    sudo \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
+    pkg-config libssl-dev sudo g++ linux-perf && rm -rf /var/lib/apt/lists/*
+
+# Install clippy and cargo-flamegraph (inferno-based)
+RUN rustup component add clippy \
+    && cargo install inferno
 
 # Create kepler group and test users
 RUN groupadd kepler \
     && useradd -m -s /bin/bash testuser1 \
     && useradd -m -s /bin/bash testuser2 \
+    && useradd -m -s /bin/bash noaccess \
     && usermod -aG kepler testuser1 \
     && usermod -aG kepler testuser2
 
@@ -24,13 +22,6 @@ RUN mkdir -p /var/lib/kepler \
 
 WORKDIR /app
 
-# Copy source code
-COPY . .
-
-# Build release binaries
-RUN cargo build --release --workspace
-
 ENV RUST_BACKTRACE=1
 
-ENTRYPOINT ["cargo", "test", "-p", "kepler-e2e", "--"]
-CMD ["--nocapture"]
+CMD ["cargo", "build", "--workspace"]

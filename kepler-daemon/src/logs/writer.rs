@@ -63,13 +63,13 @@ impl BufferedLogWriter {
         let safe_name = service_name.replace(['/', '\\', ':', '[', ']'], "_");
         let log_file = logs_dir.join(format!("{}.{}", safe_name, stream.extension()));
 
-        // Create logs directory if it doesn't exist with secure permissions (0o700)
+        // Create logs directory if it doesn't exist with group-accessible permissions (0o770)
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
             let _ = std::fs::DirBuilder::new()
                 .recursive(true)
-                .mode(0o700)
+                .mode(0o770)
                 .create(logs_dir);
         }
         #[cfg(not(unix))]
