@@ -69,15 +69,18 @@ impl Client {
                 if let Err(e) = reader.read_exact(&mut len_buf).await {
                     if e.kind() == std::io::ErrorKind::UnexpectedEof {
                         debug!("Server disconnected (EOF)");
-                        return;
+                    } else {
+                        debug!("Client reader error: {}", e);
                     }
-                    debug!("Client reader error: {}", e);
+                    // Drop all pending senders so waiters get RecvError → Disconnected
+                    reader_pending.clear();
                     return;
                 }
                 let msg_len = u32::from_be_bytes(len_buf) as usize;
 
                 if msg_len > MAX_MESSAGE_SIZE {
                     debug!("Server message exceeds maximum size");
+                    reader_pending.clear();
                     return;
                 }
 
@@ -85,6 +88,7 @@ impl Client {
                 let mut payload = vec![0u8; msg_len];
                 if let Err(e) = reader.read_exact(&mut payload).await {
                     debug!("Client reader error: {}", e);
+                    reader_pending.clear();
                     return;
                 }
 

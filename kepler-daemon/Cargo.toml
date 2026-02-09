@@ -24,7 +24,6 @@ chrono = "0.4"
 notify = "6.1"
 notify-debouncer-mini = "0.4"
 globset = "0.4"
-regex = "1.10"
 shellexpand = "3.1"
 dotenvy = "0.15"
 mlua = { version = "0.10", features = ["luau", "serialize"] }

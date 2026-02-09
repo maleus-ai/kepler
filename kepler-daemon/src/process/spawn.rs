@@ -17,30 +17,16 @@ use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
 /// `Some(path)` = found, `None` = not found (will fall back to fork).
 static KEPLER_EXEC_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// Locate the `kepler-exec` binary: first as a sibling of the current executable,
-/// then via PATH lookup. Validates ownership and permissions before trusting.
+/// Locate the `kepler-exec` binary as a sibling of the current executable.
+/// Validates ownership and permissions before trusting.
 fn find_kepler_exec() -> Option<PathBuf> {
     KEPLER_EXEC_PATH
         .get_or_init(|| {
-            // Try sibling of current executable
             if let Ok(exe) = std::env::current_exe() {
                 let sibling = exe.with_file_name("kepler-exec");
                 if sibling.is_file() && verify_binary_permissions(&sibling) {
                     debug!("Found kepler-exec at {:?}", sibling);
                     return Some(sibling);
-                }
-            }
-
-            // Try PATH
-            if let Ok(output) = std::process::Command::new("which")
-                .arg("kepler-exec")
-                .output()
-                && output.status.success()
-            {
-                let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-                if path.is_file() && verify_binary_permissions(&path) {
-                    debug!("Found kepler-exec in PATH at {:?}", path);
-                    return Some(path);
                 }
             }
 
@@ -173,7 +159,8 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
     if use_wrapper {
         #[cfg(unix)]
         {
-            let exec_path = find_kepler_exec().unwrap();
+            // SAFETY: use_wrapper is true only when find_kepler_exec().is_some()
+            let exec_path = find_kepler_exec().expect("kepler-exec verified present above");
             let mut wrapper_args: Vec<String> = Vec::new();
 
             // Resolve uid/gid to numeric values
@@ -285,32 +272,24 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
 
     match mode {
         BlockingMode::Silent => {
-            // Capture stdout
+            // Drain stdout (read and discard to avoid blocking the child)
             let stdout = child.stdout.take();
             let stdout_handle = tokio::spawn(async move {
-                let mut output = Vec::new();
                 if let Some(stdout) = stdout {
                     let reader = BufReader::new(stdout);
                     let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        output.push(line);
-                    }
+                    while let Ok(Some(_)) = lines.next_line().await {}
                 }
-                output
             });
 
-            // Capture stderr
+            // Drain stderr (read and discard to avoid blocking the child)
             let stderr = child.stderr.take();
             let stderr_handle = tokio::spawn(async move {
-                let mut output = Vec::new();
                 if let Some(stderr) = stderr {
                     let reader = BufReader::new(stderr);
                     let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        output.push(line);
-                    }
+                    while let Ok(Some(_)) = lines.next_line().await {}
                 }
-                output
             });
 
             // Wait for process to complete
