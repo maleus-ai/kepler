@@ -66,27 +66,43 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
 
-### Building from Source
+### Installing
 
 ```bash
-# Clone and build
 git clone https://github.com/your-org/kepler.git
 cd kepler
-cargo build --release
+sudo ./install.sh
+```
 
-# Install kepler CLI to ~/.cargo/bin (ensure it's in your PATH)
-cargo install --path kepler-cli  # Installs as 'kepler'
+The install script builds the project, installs binaries, and sets up the system:
 
-# Or copy binaries manually
-sudo cp target/release/kepler /usr/local/bin/
-sudo cp target/release/kepler-daemon /usr/local/bin/
+1. Builds release binaries (`cargo build --release`)
+2. Installs `kepler`, `kepler-daemon`, `kepler-exec` to `<prefix>/bin/`
+3. Creates the `kepler` group (if it doesn't exist)
+4. Creates `/var/lib/kepler/` with `root:kepler` ownership and `0770` permissions
+5. Optionally installs a systemd service file and enables it
+
+| Binary | Description |
+|--------|-------------|
+| `kepler` | CLI client (used by all users in the `kepler` group) |
+| `kepler-daemon` | Daemon process (must run as root) |
+| `kepler-exec` | Privilege-dropping wrapper (used internally by the daemon to setuid/setgid/rlimits) |
+
+**Options:**
+```bash
+sudo ./install.sh --systemd      # Install with systemd service (non-interactive)
+sudo ./install.sh --no-systemd   # Install without systemd (non-interactive)
+sudo ./install.sh --no-build     # Skip build, use existing target/release binaries
+sudo ./install.sh --uninstall    # Remove binaries and systemd service
 ```
 
 ### Verifying Installation
 
 ```bash
 kepler --version
-kepler daemon start -d
+
+# Start daemon (requires root)
+sudo kepler daemon start -d
 kepler daemon status
 kepler daemon stop
 ```
@@ -112,44 +128,25 @@ docker compose run test bash
 docker compose run test cargo build --workspace
 ```
 
-### Production Setup
+### Post-Install
 
-**The daemon must run as root.** Access is controlled via the `kepler` group — users in the group can use the CLI.
+The install script will offer to add your user to the `kepler` group. **You must log out and log back in** for group changes to take effect.
 
+To add other users later:
 ```bash
-# Create the kepler group
-sudo groupadd kepler
+sudo usermod -aG kepler otheruser  # then log out/in
+```
 
-# Add users who should have CLI access
-sudo usermod -aG kepler youruser
+Start the daemon:
+```bash
+# With systemd (if installed with --systemd)
+sudo systemctl start kepler
 
-# Start the daemon (as root)
+# Or manually
 sudo kepler daemon start -d
 ```
 
 The `user:` option in your config controls which user each service runs as. The daemon drops privileges per-service.
-
-**Using systemd:**
-```ini
-# /etc/systemd/system/kepler.service
-[Unit]
-Description=Kepler Process Orchestrator
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/kepler daemon start
-ExecStop=/usr/local/bin/kepler daemon stop
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable kepler
-sudo systemctl start kepler
-```
 
 ---
 
