@@ -508,14 +508,8 @@ async fn handle_request(
             };
 
             // Read entries from cursor
-            let t_read = std::time::Instant::now();
             match cursor_manager.read_entries(&cursor_id, &config_path) {
                 Ok((entries, has_more)) => {
-                    let read_ms = t_read.elapsed().as_secs_f64() * 1000.0;
-                    let entry_count = entries.len();
-
-                    let t_convert = std::time::Instant::now();
-
                     // Build service table and compact entries with u16 service_id
                     use kepler_protocol::protocol::CursorLogEntry;
                     let mut service_table: Vec<Arc<str>> = Vec::new();
@@ -541,15 +535,6 @@ async fn handle_request(
                                 kepler_daemon::logs::LogStream::Stderr => kepler_protocol::protocol::StreamType::Stderr,
                             },
                         });
-                    }
-
-                    let convert_ms = t_convert.elapsed().as_secs_f64() * 1000.0;
-
-                    if entry_count > 0 {
-                        eprintln!(
-                            "[daemon-perf] {} entries | read {:.1}ms | convert {:.1}ms | has_more={}",
-                            entry_count, read_ms, convert_ms, has_more,
-                        );
                     }
 
                     Response::ok_with_data(ResponseData::LogCursor(LogCursorData {

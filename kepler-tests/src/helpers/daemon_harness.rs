@@ -18,6 +18,11 @@ use tokio::sync::mpsc;
 /// can acquire the lock externally and use `new_with_env_lock_held`.
 pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Mutex to synchronize umask changes across parallel tests.
+/// umask is process-wide, so tests that temporarily change it must hold this
+/// lock to prevent other tests from creating files with unexpected permissions.
+pub static UMASK_LOCK: Mutex<()> = Mutex::new(());
+
 /// Test harness for managing daemon state
 pub struct TestDaemonHarness {
     pub handle: ConfigActorHandle,

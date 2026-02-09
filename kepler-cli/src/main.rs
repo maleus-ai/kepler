@@ -1018,10 +1018,6 @@ async fn handle_logs(
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
 
-    let mut total_entries: usize = 0;
-    let mut total_batches: usize = 0;
-    let wall_start = std::time::Instant::now();
-
     stream_cursor_logs(
         client,
         &config_path,
@@ -1030,20 +1026,10 @@ async fn handle_logs(
         stream_mode,
         std::future::pending(),
         |service_table, entries| {
-            total_batches += 1;
-            total_entries += entries.len();
             write_cursor_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
         },
     )
     .await?;
-
-    if !follow {
-        let wall = wall_start.elapsed();
-        eprintln!(
-            "[perf] {} entries in {} batches | wall {:.2}s",
-            total_entries, total_batches, wall.as_secs_f64(),
-        );
-    }
 
     Ok(())
 }

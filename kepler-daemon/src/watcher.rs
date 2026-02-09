@@ -54,33 +54,6 @@ pub struct FileChangeEvent {
     pub service_name: String,
 }
 
-/// Commands that can be sent to the file watcher actor
-#[derive(Debug)]
-pub enum WatcherCommand {
-    /// Update the glob patterns to watch
-    UpdatePatterns(Vec<String>),
-    /// Shutdown the watcher
-    Shutdown,
-}
-
-/// Handle for sending commands to a file watcher actor
-#[derive(Clone)]
-pub struct FileWatcherHandle {
-    cmd_tx: mpsc::Sender<WatcherCommand>,
-}
-
-impl FileWatcherHandle {
-    /// Update the patterns being watched
-    pub async fn update_patterns(&self, patterns: Vec<String>) -> Result<(), mpsc::error::SendError<WatcherCommand>> {
-        self.cmd_tx.send(WatcherCommand::UpdatePatterns(patterns)).await
-    }
-
-    /// Shutdown the watcher
-    pub async fn shutdown(&self) -> Result<(), mpsc::error::SendError<WatcherCommand>> {
-        self.cmd_tx.send(WatcherCommand::Shutdown).await
-    }
-}
-
 /// File watcher actor that watches for file changes and sends restart events
 pub struct FileWatcherActor {
     config_path: PathBuf,
@@ -88,7 +61,6 @@ pub struct FileWatcherActor {
     patterns: Vec<String>,
     working_dir: PathBuf,
     restart_tx: mpsc::Sender<FileChangeEvent>,
-    cmd_rx: mpsc::Receiver<WatcherCommand>,
 }
 
 impl FileWatcherActor {
@@ -99,7 +71,6 @@ impl FileWatcherActor {
         patterns: Vec<String>,
         working_dir: PathBuf,
         restart_tx: mpsc::Sender<FileChangeEvent>,
-        cmd_rx: mpsc::Receiver<WatcherCommand>,
     ) -> Self {
         Self {
             config_path,
@@ -107,7 +78,6 @@ impl FileWatcherActor {
             patterns,
             working_dir,
             restart_tx,
-            cmd_rx,
         }
     }
 
@@ -160,8 +130,8 @@ impl FileWatcherActor {
     }
 
     /// Run the actor event loop
-    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let Some(mut glob_set) = Self::build_glob_set(&self.patterns) else {
+    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let Some(glob_set) = Self::build_glob_set(&self.patterns) else {
             debug!("No valid patterns for file watcher, exiting");
             return Ok(());
         };
@@ -253,30 +223,7 @@ impl FileWatcherActor {
                     }
                 }
 
-                // Handle commands
-                Some(cmd) = self.cmd_rx.recv() => {
-                    match cmd {
-                        WatcherCommand::UpdatePatterns(new_patterns) => {
-                            info!(
-                                "Updating file watcher patterns for {}: {:?}",
-                                self.service_name, new_patterns
-                            );
-                            self.patterns = new_patterns;
-                            if let Some(new_glob_set) = Self::build_glob_set(&self.patterns) {
-                                glob_set = new_glob_set;
-                            } else {
-                                debug!("No valid patterns after update, stopping watcher");
-                                break;
-                            }
-                        }
-                        WatcherCommand::Shutdown => {
-                            info!("File watcher shutdown requested for {}", self.service_name);
-                            break;
-                        }
-                    }
-                }
-
-                // Both channels closed
+                // Channel closed
                 else => {
                     debug!("All channels closed, stopping file watcher");
                     break;
@@ -332,16 +279,12 @@ pub fn spawn_file_watcher(
     working_dir: PathBuf,
     restart_tx: mpsc::Sender<FileChangeEvent>,
 ) -> tokio::task::JoinHandle<()> {
-    // Create command channel (currently unused but available for future control)
-    let (_cmd_tx, cmd_rx) = mpsc::channel::<WatcherCommand>(8);
-
     let actor = FileWatcherActor::new(
         config_path,
         service_name,
         patterns,
         working_dir,
         restart_tx,
-        cmd_rx,
     );
 
     tokio::spawn(async move {
@@ -349,37 +292,4 @@ pub fn spawn_file_watcher(
             error!("File watcher error: {}", e);
         }
     })
-}
-
-/// Spawn a file watcher actor and return both a handle and task handle
-///
-/// This variant returns a FileWatcherHandle that can be used to send commands
-/// to the watcher (like updating patterns or requesting shutdown).
-pub fn spawn_file_watcher_with_handle(
-    config_path: PathBuf,
-    service_name: String,
-    patterns: Vec<String>,
-    working_dir: PathBuf,
-    restart_tx: mpsc::Sender<FileChangeEvent>,
-) -> (FileWatcherHandle, tokio::task::JoinHandle<()>) {
-    let (cmd_tx, cmd_rx) = mpsc::channel::<WatcherCommand>(8);
-
-    let actor = FileWatcherActor::new(
-        config_path,
-        service_name,
-        patterns,
-        working_dir,
-        restart_tx,
-        cmd_rx,
-    );
-
-    let handle = FileWatcherHandle { cmd_tx };
-
-    let task_handle = tokio::spawn(async move {
-        if let Err(e) = actor.run().await {
-            error!("File watcher error: {}", e);
-        }
-    });
-
-    (handle, task_handle)
 }

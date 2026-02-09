@@ -225,19 +225,9 @@ where
     // Spawn writer task: receives encoded bytes and writes to stream
     let writer_task = tokio::spawn(async move {
         while let Some(bytes) = write_rx.recv().await {
-            let len = bytes.len();
-            let t_write = std::time::Instant::now();
             if let Err(e) = write_half.write_all(&bytes).await {
                 warn!("Failed to write to client: {}", e);
                 break;
-            }
-            let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
-            if len > 100_000 {
-                eprintln!(
-                    "[writer-perf] socket_write {:.1}ms ({:.2} MB)",
-                    write_ms,
-                    len as f64 / (1024.0 * 1024.0),
-                );
             }
         }
         // Flush before exiting
@@ -314,24 +304,10 @@ where
                 id: request_id,
                 response,
             };
-            let t_encode = std::time::Instant::now();
             match encode_server_message(&msg) {
                 Ok(bytes) => {
-                    let encode_ms = t_encode.elapsed().as_secs_f64() * 1000.0;
-                    let byte_len = bytes.len();
-                    let t_send = std::time::Instant::now();
                     if let Err(e) = write_tx.send(bytes).await {
                         debug!("Failed to send response for request {}: {}", request_id, e);
-                    }
-                    let send_ms = t_send.elapsed().as_secs_f64() * 1000.0;
-                    if byte_len > 100_000 {
-                        eprintln!(
-                            "[server-perf] id={} | encode {:.1}ms ({:.2} MB) | chan_send {:.1}ms",
-                            request_id,
-                            encode_ms,
-                            byte_len as f64 / (1024.0 * 1024.0),
-                            send_ms,
-                        );
                     }
                 }
                 Err(e) => {

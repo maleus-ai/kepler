@@ -89,18 +89,8 @@ impl Client {
                 }
 
                 // Decode server message
-                let t_decode = std::time::Instant::now();
                 match decode_server_message(&payload) {
                     Ok(ServerMessage::Response { id, response }) => {
-                        let decode_ms = t_decode.elapsed().as_secs_f64() * 1000.0;
-                        if msg_len > 100_000 {
-                            eprintln!(
-                                "[client-perf] id={} | decode {:.1}ms ({:.2} MB)",
-                                id,
-                                decode_ms,
-                                msg_len as f64 / (1024.0 * 1024.0),
-                            );
-                        }
                         if let Some((_, tx)) = reader_pending.remove(&id) {
                             let _ = tx.send(response);
                         } else {

@@ -9,7 +9,7 @@
 
 use kepler_daemon::config::{HookCommand, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
-use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
+use kepler_tests::helpers::daemon_harness::{TestDaemonHarness, UMASK_LOCK};
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
@@ -359,12 +359,14 @@ services:
 #[tokio::test]
 #[cfg(unix)]
 async fn test_state_directory_permissions() {
+    // Hold UMASK_LOCK to prevent umask change from racing with parallel tests
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     // Use KEPLER_DAEMON_PATH environment variable to create an isolated test state directory
     let temp_dir = TempDir::new().unwrap();
     let state_dir = temp_dir.path().join(".kepler");
 
-    // Set the environment variable for the test
-    // SAFETY: This test is single-threaded and we clean up the env var before the test ends
+    // SAFETY: ENV_LOCK is held, preventing races with parallel tests
     unsafe {
         std::env::set_var("KEPLER_DAEMON_PATH", &state_dir);
     }
@@ -396,7 +398,6 @@ async fn test_state_directory_permissions() {
         mode
     );
 
-    // Clean up
     // SAFETY: Cleaning up the environment variable we set earlier
     unsafe {
         std::env::remove_var("KEPLER_DAEMON_PATH");
@@ -445,6 +446,9 @@ async fn test_pid_file_permissions() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_daemon_creates_state_dir_securely() {
+    // Hold UMASK_LOCK to prevent umask change from racing with parallel tests
+    let _guard = UMASK_LOCK.lock().unwrap();
+
     let temp_dir = TempDir::new().unwrap();
     let state_dir = temp_dir.path().join("new_state_dir");
 

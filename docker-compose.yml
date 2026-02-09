@@ -10,6 +10,7 @@ services:
     command: sh -c "cargo build --workspace && cargo test --workspace"
     environment:
       - RUST_BACKTRACE=1
+      - PATH=/app/target/debug:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 volumes:
   cargo-registry:
