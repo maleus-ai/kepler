@@ -161,7 +161,7 @@ impl CursorManager {
             .ok_or_else(|| CursorError::CursorExpired(cursor_id.to_string()))?
             .clone();
 
-        let mut cursor = arc.lock().unwrap();
+        let mut cursor = arc.lock().unwrap_or_else(|e| e.into_inner());
 
         // Validate config path
         if cursor.config_path != config_path {
@@ -181,11 +181,17 @@ impl CursorManager {
 
         for log_line in cursor.iterator.by_ref() {
             // Estimate bincode size: ~20 bytes overhead + service name + line content
-            estimated_size += 20 + log_line.service.len() + log_line.line.len();
-            entries.push(log_line);
-            if entries.len() >= MAX_CURSOR_BATCH_SIZE || estimated_size >= CURSOR_RESPONSE_BUDGET {
+            let entry_size = 20 + log_line.service.len() + log_line.line.len();
+            if !entries.is_empty()
+                && (estimated_size + entry_size >= CURSOR_RESPONSE_BUDGET
+                    || entries.len() >= MAX_CURSOR_BATCH_SIZE)
+            {
+                // Push back: put this line into the iterator's pending slot
+                cursor.iterator.push_back(log_line);
                 break;
             }
+            estimated_size += entry_size;
+            entries.push(log_line);
         }
 
         let has_more = cursor.iterator.has_more();
@@ -197,7 +203,7 @@ impl CursorManager {
     pub fn cleanup_stale(&self) {
         let now = Instant::now();
         self.cursors.retain(|_id, arc| {
-            let cursor = arc.lock().unwrap();
+            let cursor = arc.lock().unwrap_or_else(|e| e.into_inner());
             now.duration_since(cursor.last_polled) < self.ttl
         });
     }

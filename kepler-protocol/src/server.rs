@@ -277,11 +277,11 @@ where
         let envelope = match decode_envelope(&payload) {
             Ok(env) => env,
             Err(e) => {
-                debug!("Failed to parse request envelope: {}", e);
+                warn!("Failed to parse request envelope: {}", e);
                 // We don't know the ID, use 0
                 let msg = ServerMessage::Response {
                     id: 0,
-                    response: Response::error(format!("Invalid request: {}", e)),
+                    response: Response::error("Invalid request format"),
                 };
                 if let Ok(bytes) = encode_server_message(&msg) {
                     let _ = write_tx.send(bytes).await;

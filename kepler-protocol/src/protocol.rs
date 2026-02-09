@@ -415,11 +415,14 @@ pub type Result<T> = std::result::Result<T, ProtocolError>;
 
 /// Encode a request envelope to length-prefixed bincode bytes
 pub fn encode_envelope(envelope: &RequestEnvelope) -> Result<Vec<u8>> {
-    let payload = bincode::serialize(envelope).map_err(ProtocolError::Encode)?;
-    let len = payload.len() as u32;
-    let mut frame = Vec::with_capacity(4 + payload.len());
+    let size = bincode::serialized_size(envelope).map_err(ProtocolError::Encode)?;
+    if size > MAX_MESSAGE_SIZE as u64 {
+        return Err(ProtocolError::MessageTooLarge);
+    }
+    let len = size as u32;
+    let mut frame = Vec::with_capacity(4 + size as usize);
     frame.extend_from_slice(&len.to_be_bytes());
-    frame.extend(payload);
+    bincode::serialize_into(&mut frame, envelope).map_err(ProtocolError::Encode)?;
     Ok(frame)
 }
 
@@ -430,11 +433,14 @@ pub fn decode_envelope(bytes: &[u8]) -> Result<RequestEnvelope> {
 
 /// Encode a server message to length-prefixed bincode bytes
 pub fn encode_server_message(msg: &ServerMessage) -> Result<Vec<u8>> {
-    let payload = bincode::serialize(msg).map_err(ProtocolError::Encode)?;
-    let len = payload.len() as u32;
-    let mut frame = Vec::with_capacity(4 + payload.len());
+    let size = bincode::serialized_size(msg).map_err(ProtocolError::Encode)?;
+    if size > MAX_MESSAGE_SIZE as u64 {
+        return Err(ProtocolError::MessageTooLarge);
+    }
+    let len = size as u32;
+    let mut frame = Vec::with_capacity(4 + size as usize);
     frame.extend_from_slice(&len.to_be_bytes());
-    frame.extend(payload);
+    bincode::serialize_into(&mut frame, msg).map_err(ProtocolError::Encode)?;
     Ok(frame)
 }
 

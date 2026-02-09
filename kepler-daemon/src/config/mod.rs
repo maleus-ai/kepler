@@ -224,7 +224,27 @@ impl KeplerConfig {
     /// 3. If `sys_env: inherit` policy, these vars are baked into the service's environment
     ///
     /// After loading, the config is fully "baked" - no further sys_env access is needed.
+    /// Maximum config file size (10MB) to prevent OOM from accidentally large files
+    const MAX_CONFIG_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
     pub fn load(path: &std::path::Path, sys_env: &HashMap<String, String>) -> Result<Self> {
+        // Check file size before reading to prevent OOM
+        let metadata = std::fs::metadata(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                DaemonError::ConfigNotFound(path.to_path_buf())
+            } else {
+                DaemonError::Internal(format!("Failed to stat config '{}': {}", path.display(), e))
+            }
+        })?;
+        if metadata.len() > Self::MAX_CONFIG_FILE_SIZE {
+            return Err(DaemonError::Internal(format!(
+                "Config file '{}' is too large ({} bytes, max {} bytes)",
+                path.display(),
+                metadata.len(),
+                Self::MAX_CONFIG_FILE_SIZE,
+            )));
+        }
+
         let contents = std::fs::read_to_string(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 DaemonError::ConfigNotFound(path.to_path_buf())

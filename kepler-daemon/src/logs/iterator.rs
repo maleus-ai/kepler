@@ -43,6 +43,9 @@ pub struct MergedLogIterator {
     services: Vec<Arc<str>>,
     streams: Vec<LogStream>,
     heap: BinaryHeap<HeapEntry>,
+    /// Stashed entry from a previous `next()` call that the caller didn't consume.
+    /// Drained first by `next()` before touching the heap.
+    pending: Option<LogLine>,
 }
 
 impl MergedLogIterator {
@@ -69,6 +72,7 @@ impl MergedLogIterator {
             services,
             streams,
             heap,
+            pending: None,
         };
 
         for i in 0..iter.readers.len() {
@@ -124,6 +128,7 @@ impl MergedLogIterator {
             services,
             streams,
             heap,
+            pending: None,
         };
 
         for i in 0..iter.readers.len() {
@@ -157,9 +162,22 @@ impl MergedLogIterator {
         }
     }
 
-    /// Returns true if there are un-yielded entries remaining in the heap.
+    /// Returns true if there are un-yielded entries remaining.
     pub fn has_more(&self) -> bool {
-        !self.heap.is_empty()
+        self.pending.is_some() || !self.heap.is_empty()
+    }
+
+    /// Stash a log line so it becomes the next entry returned by `next()`.
+    ///
+    /// Used by cursor batching to avoid overshooting the byte budget:
+    /// when the next entry would exceed the budget, push it back here
+    /// instead of discarding it.
+    ///
+    /// Only one entry can be pending at a time. Calling this when `pending`
+    /// is already `Some` will overwrite the previous entry (caller's
+    /// responsibility to avoid that).
+    pub fn push_back(&mut self, log_line: LogLine) {
+        self.pending = Some(log_line);
     }
 
     /// Retry reading from all sources that previously hit EOF.
@@ -184,12 +202,13 @@ impl Iterator for MergedLogIterator {
     type Item = LogLine;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Drain the pending slot first (pushed-back entry from budget check)
+        if let Some(line) = self.pending.take() {
+            return Some(line);
+        }
+
         let entry = self.heap.pop()?;
-        let source_idx = entry.source_idx;
-
-        // Read next line from this source
-        self.read_next_into_heap(source_idx);
-
+        self.read_next_into_heap(entry.source_idx);
         Some(entry.log_line)
     }
 }
