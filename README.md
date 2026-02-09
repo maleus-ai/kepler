@@ -71,7 +71,7 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 ```bash
 git clone https://github.com/your-org/kepler.git
 cd kepler
-sudo ./install.sh
+./install.sh
 ```
 
 The install script builds the project, installs binaries, and sets up the system:
@@ -90,10 +90,9 @@ The install script builds the project, installs binaries, and sets up the system
 
 **Options:**
 ```bash
-sudo ./install.sh --systemd      # Install with systemd service (non-interactive)
-sudo ./install.sh --no-systemd   # Install without systemd (non-interactive)
-sudo ./install.sh --no-build     # Skip build, use existing target/release binaries
-sudo ./install.sh --uninstall    # Remove binaries and systemd service
+./install.sh --no-systemd   # Skip systemd service installation
+./install.sh --no-build     # Skip build, use existing target/release binaries
+./install.sh --uninstall    # Remove binaries and systemd service
 ```
 
 ### Verifying Installation
