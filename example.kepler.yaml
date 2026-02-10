@@ -11,7 +11,7 @@
 
 kepler:
   logs:
-    buffer_size: 0     # Flush logs immediately (good for demos)
+    buffer_size: 0 # Flush logs immediately (good for demos)
 
   hooks:
     on_init:
@@ -26,7 +26,12 @@ kepler:
 services:
   # A one-shot migration task that runs first then exits
   migration:
-    command: ["sh", "-c", "echo 'Running migrations...'; sleep 2; echo 'Migrations complete!'"]
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Running migrations...'; sleep 2; echo 'Migrations complete!'",
+      ]
 
   # A simple HTTP server using Python's built-in module
   # Waits for migration to finish before starting
@@ -36,7 +41,8 @@ services:
       migration:
         condition: service_completed_successfully
     healthcheck:
-      test: ["sh", "-c", "curl -sf http://localhost:8089/ > /dev/null || exit 1"]
+      test:
+        ["sh", "-c", "curl -sf http://localhost:8089/ > /dev/null || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -55,14 +61,17 @@ services:
   # A background worker that runs periodic tasks
   # Waits for the web server to be healthy before starting
   worker:
-    command: ["sh", "-c", "echo 'Worker started'; while true; do echo \"[$(date +%T)] Tick\"; sleep 5; done"]
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''Worker started''; while true; do echo "[$(date +%T)] Tick"; sleep 5; done',
+      ]
     depends_on:
       web:
         condition: service_healthy
-        restart: true              # Restart worker if web restarts
+        restart: true # Restart worker if web restarts
     restart: always
-    logs:
-      timestamp: true
     hooks:
       pre_start:
         run: echo "Worker waiting for web to be healthy..."

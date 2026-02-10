@@ -43,13 +43,23 @@ fn find_kepler_exec() -> Option<PathBuf> {
 fn verify_binary_permissions(path: &std::path::Path) -> bool {
     use std::os::unix::fs::MetadataExt;
 
-    let meta = match std::fs::metadata(path) {
+    // Use symlink_metadata to avoid following symlinks
+    let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) => {
             warn!("Cannot stat kepler-exec at {:?}: {}", path, e);
             return false;
         }
     };
+
+    // Reject symlinks — binary must be a regular file
+    if meta.file_type().is_symlink() {
+        warn!(
+            "Rejecting kepler-exec at {:?}: is a symlink",
+            path
+        );
+        return false;
+    }
 
     let file_uid = meta.uid();
     let my_euid = nix::unistd::geteuid().as_raw();
@@ -63,8 +73,18 @@ fn verify_binary_permissions(path: &std::path::Path) -> bool {
         return false;
     }
 
-    // Must not be world-writable (mode & 0o002)
     let mode = meta.mode();
+
+    // Must not be group-writable (mode & 0o020)
+    if mode & 0o020 != 0 {
+        warn!(
+            "Rejecting kepler-exec at {:?}: group-writable (mode {:o})",
+            path, mode
+        );
+        return false;
+    }
+
+    // Must not be world-writable (mode & 0o002)
     if mode & 0o002 != 0 {
         warn!(
             "Rejecting kepler-exec at {:?}: world-writable (mode {:o})",

@@ -41,6 +41,9 @@ pub enum OrchestratorError {
         reason: String,
     },
 
+    #[error("Startup cancelled for service {0}")]
+    StartupCancelled(String),
+
     #[error("Cannot recreate while services are running for {0}. Stop all services first.")]
     RecreateWhileRunning(String),
 

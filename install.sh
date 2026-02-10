@@ -150,7 +150,9 @@ for bin in "${BINARIES[@]}"; do
 done
 
 # Step 2: Stop running daemon before replacing binaries
+WAS_RUNNING=false
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    WAS_RUNNING=true
     info "Stopping running kepler daemon"
     as_root systemctl stop "$SERVICE_NAME"
 fi
@@ -238,11 +240,19 @@ else
     echo "  Then log out and log back in for group changes to take effect."
 fi
 
+# Step 8: Restart daemon if it was running before install
+if $WAS_RUNNING; then
+    info "Restarting kepler daemon"
+    as_root systemctl start "$SERVICE_NAME"
+fi
+
 # Done
 echo ""
 info "Installation complete!"
-echo ""
-echo "  Start the daemon:"
-echo "    sudo systemctl start kepler   (if systemd service was installed)"
-echo "    sudo kepler daemon start -d   (manual)"
+if ! $WAS_RUNNING; then
+    echo ""
+    echo "  Start the daemon:"
+    echo "    sudo systemctl start kepler   (if systemd service was installed)"
+    echo "    sudo kepler daemon start -d   (manual)"
+fi
 echo ""

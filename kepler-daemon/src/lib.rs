@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
 
@@ -33,6 +33,40 @@ pub fn global_state_dir() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
     Ok(PathBuf::from(DEFAULT_STATE_DIR))
+}
+
+/// Validate that a directory path is not a symlink and has no world-accessible permission bits.
+///
+/// Returns `Ok(())` if the directory passes all checks, or an error describing the violation.
+#[cfg(unix)]
+pub fn validate_directory_not_world_accessible(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let meta = std::fs::symlink_metadata(path).map_err(|e| {
+        crate::errors::DaemonError::Internal(format!(
+            "Failed to read metadata for '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    if meta.file_type().is_symlink() {
+        return Err(crate::errors::DaemonError::Internal(format!(
+            "State directory '{}' is a symlink — refusing to use it",
+            path.display()
+        )));
+    }
+
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o007 != 0 {
+        return Err(crate::errors::DaemonError::Internal(format!(
+            "State directory '{}' has world-accessible permissions (0o{:o}) — refusing to use it",
+            path.display(),
+            mode
+        )));
+    }
+
+    Ok(())
 }
 
 pub struct Daemon {}

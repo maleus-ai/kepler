@@ -47,6 +47,9 @@ pub enum ClientError {
 
 #[derive(Debug, Error)]
 pub enum ServerError {
+    #[error("socket path {socket_path} is a symlink — refusing to bind")]
+    SocketSymlink { socket_path: PathBuf },
+
     #[error("stale socket found at {socket_path} cannot be deleted: {source}")]
     StaleSocket {
         socket_path: PathBuf,

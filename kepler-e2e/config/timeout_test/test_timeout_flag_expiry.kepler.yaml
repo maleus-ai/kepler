@@ -1,0 +1,17 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  never-ready:
+    command: ["sh", "-c", "echo Starting; sleep 300"]
+    healthcheck:
+      test: ["sh", "-c", "exit 1"]
+      interval: 1s
+      retries: 999
+
+  slow-service:
+    command: ["sh", "-c", "echo Starting; sleep 300"]
+    depends_on:
+      never-ready:
+        condition: service_healthy

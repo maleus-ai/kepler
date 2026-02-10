@@ -183,6 +183,23 @@ impl MergedLogIterator {
         self.pending = Some(log_line);
     }
 
+    /// Add new source files discovered after the iterator was created.
+    ///
+    /// Used for follow/quiescent modes where new services start producing
+    /// log files after the cursor is created.
+    pub fn add_sources(&mut self, files: Vec<(PathBuf, String, LogStream)>) {
+        for (path, service, stream) in files {
+            if let Ok(file) = File::open(&path) {
+                let reader = BufReader::new(file);
+                let source_idx = self.readers.len();
+                self.readers.push(reader);
+                self.services.push(Arc::from(service.as_str()));
+                self.streams.push(stream);
+                self.read_next_into_heap(source_idx);
+            }
+        }
+    }
+
     /// Retry reading from all sources that previously hit EOF.
     ///
     /// Useful for follow mode where files may grow after the iterator

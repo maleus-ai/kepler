@@ -1,15 +1,16 @@
 //! Tests for progress event emission during start/stop/restart lifecycle operations.
 
-use kepler_daemon::config::RestartPolicy;
+use kepler_daemon::config::{DependencyCondition, DependencyConfig, DependencyEntry, DependsOn, RestartPolicy};
 use kepler_daemon::config_registry::ConfigRegistry;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::process::ProcessExitEvent;
+use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_protocol::protocol::{
-    ServerMessage, ServicePhase, StartMode, decode_server_message,
+    ServerMessage, ServicePhase, ServiceTarget, StartMode, decode_server_message,
 };
 use kepler_protocol::server::ProgressSender;
-use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
+use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestHealthCheckBuilder, TestServiceBuilder};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -53,12 +54,99 @@ async fn setup_orchestrator(
     (orchestrator, config_path, exit_tx, restart_tx)
 }
 
+/// Helper to set up an orchestrator with exit event handling (needed for dependency chains).
+/// Returns the orchestrator and a JoinHandle for the exit handler task.
+async fn setup_orchestrator_with_exit_handler(
+    temp_dir: &TempDir,
+) -> (
+    Arc<ServiceOrchestrator>,
+    std::path::PathBuf,
+    mpsc::Sender<ProcessExitEvent>,
+    mpsc::Sender<FileChangeEvent>,
+    tokio::task::JoinHandle<()>,
+) {
+    let config_dir = temp_dir.path().to_path_buf();
+    let config_path = config_dir.join("kepler.yaml");
+
+    // Set KEPLER_DAEMON_PATH to isolate state
+    let kepler_state_dir = config_dir.join(".kepler");
+    {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
+        }
+    }
+
+    let registry = Arc::new(ConfigRegistry::new());
+    let (exit_tx, mut exit_rx) = mpsc::channel::<ProcessExitEvent>(32);
+    let (restart_tx, _restart_rx) = mpsc::channel::<FileChangeEvent>(32);
+
+    let orchestrator = Arc::new(ServiceOrchestrator::new(
+        registry,
+        exit_tx.clone(),
+        restart_tx.clone(),
+    ));
+
+    // Spawn exit event handler (mirrors the one in main.rs)
+    let exit_orch = orchestrator.clone();
+    let exit_handler = tokio::spawn(async move {
+        while let Some(event) = exit_rx.recv().await {
+            let _ = exit_orch
+                .handle_exit(
+                    &event.config_path,
+                    &event.service_name,
+                    event.exit_code,
+                    event.signal,
+                )
+                .await;
+        }
+    });
+
+    (orchestrator, config_path, exit_tx, restart_tx, exit_handler)
+}
+
 /// Create a ProgressSender backed by a test channel, returning (sender, receiver).
 /// The receiver yields raw encoded ServerMessage bytes (with 4-byte length prefix).
 fn create_test_progress() -> (ProgressSender, mpsc::Receiver<Vec<u8>>) {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(256);
     let sender = ProgressSender::new(tx, 1);
     (sender, rx)
+}
+
+/// Collect progress events from the channel, waiting for `expected_count` events or `timeout`.
+/// Used for healthcheck tests where events arrive asynchronously after spawn.
+async fn collect_progress_events_async(
+    rx: &mut mpsc::Receiver<Vec<u8>>,
+    expected_count: usize,
+    timeout: Duration,
+) -> Vec<(String, ServicePhase)> {
+    let mut events = Vec::new();
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    while events.len() < expected_count {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(bytes)) => {
+                if bytes.len() < 4 {
+                    continue;
+                }
+                let payload = &bytes[4..];
+                if let Ok(ServerMessage::Event { event }) = decode_server_message(payload) {
+                    match event {
+                        kepler_protocol::protocol::ServerEvent::Progress { event: progress, .. } => {
+                            events.push((progress.service, progress.phase));
+                        }
+                    }
+                }
+            }
+            Ok(None) => break, // Channel closed
+            Err(_) => break,   // Timeout
+        }
+    }
+    events
 }
 
 /// Collect all progress events from the channel (non-blocking drain).
@@ -468,4 +556,347 @@ async fn test_start_with_no_progress_works() {
         .stop_services(&config_path, None, false, None, None)
         .await
         .unwrap();
+}
+
+// ============================================================================
+// Healthcheck Progress Tests
+// ============================================================================
+
+/// Pending target is Healthy for services with healthcheck
+#[tokio::test]
+async fn test_start_healthcheck_pending_target_is_healthy() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "web",
+            TestServiceBuilder::long_running()
+                .with_restart(RestartPolicy::No)
+                .with_healthcheck(TestHealthCheckBuilder::always_healthy().build())
+                .build(),
+        )
+        .build();
+
+    let config_yaml = serde_yaml::to_string(&config).unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, config_yaml).unwrap();
+
+    let (orchestrator, _, _, _) = setup_orchestrator(&temp_dir).await;
+    let (progress, mut rx) = create_test_progress();
+
+    let sys_env: HashMap<String, String> = std::env::vars().collect();
+    orchestrator
+        .start_services(&config_path, None, Some(sys_env), StartMode::WaitStartup, Some(progress))
+        .await
+        .unwrap();
+
+    // Collect events (at least Pending + Starting + Started + Healthy)
+    let events = collect_progress_events_async(&mut rx, 4, Duration::from_secs(5)).await;
+
+    let web_events: Vec<_> = events.iter().filter(|(name, _)| name == "web").collect();
+    assert!(!web_events.is_empty(), "Expected at least 1 event for web, got none");
+
+    // First event should be Pending with target Healthy
+    match &web_events[0].1 {
+        ServicePhase::Pending { target } => {
+            assert_eq!(*target, ServiceTarget::Healthy, "Pending target should be Healthy for HC service");
+        }
+        other => panic!("First event should be Pending, got {:?}", other),
+    }
+
+    // Cleanup
+    orchestrator
+        .stop_services(&config_path, None, false, None, None)
+        .await
+        .unwrap();
+}
+
+/// start_services with healthcheck emits Started then Healthy
+#[tokio::test]
+async fn test_start_healthcheck_emits_started_then_healthy() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "web",
+            TestServiceBuilder::long_running()
+                .with_restart(RestartPolicy::No)
+                .with_healthcheck(
+                    TestHealthCheckBuilder::always_healthy()
+                        .with_interval(Duration::from_millis(100))
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+
+    let config_yaml = serde_yaml::to_string(&config).unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, config_yaml).unwrap();
+
+    let (orchestrator, _, _, _) = setup_orchestrator(&temp_dir).await;
+    let (progress, mut rx) = create_test_progress();
+
+    let sys_env: HashMap<String, String> = std::env::vars().collect();
+    orchestrator
+        .start_services(&config_path, None, Some(sys_env), StartMode::WaitStartup, Some(progress))
+        .await
+        .unwrap();
+
+    // Collect events with enough time for healthcheck to fire
+    let events = collect_progress_events_async(&mut rx, 4, Duration::from_secs(5)).await;
+
+    let web_events: Vec<_> = events.iter().filter(|(name, _)| name == "web").collect();
+    assert!(
+        web_events.len() >= 4,
+        "Expected at least 4 events (Pending, Starting, Started, Healthy), got {}: {:?}",
+        web_events.len(),
+        web_events
+    );
+
+    assert!(matches!(web_events[0].1, ServicePhase::Pending { .. }), "Expected Pending, got {:?}", web_events[0].1);
+    assert!(matches!(web_events[1].1, ServicePhase::Starting), "Expected Starting, got {:?}", web_events[1].1);
+    assert!(matches!(web_events[2].1, ServicePhase::Started), "Expected Started, got {:?}", web_events[2].1);
+    assert!(matches!(web_events[3].1, ServicePhase::Healthy), "Expected Healthy, got {:?}", web_events[3].1);
+
+    // Cleanup
+    orchestrator
+        .stop_services(&config_path, None, false, None, None)
+        .await
+        .unwrap();
+}
+
+/// start_services blocks until healthcheck passes (Healthy event is in channel before return)
+#[tokio::test]
+async fn test_start_healthcheck_blocks_until_healthy() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "web",
+            TestServiceBuilder::long_running()
+                .with_restart(RestartPolicy::No)
+                .with_healthcheck(
+                    TestHealthCheckBuilder::always_healthy()
+                        .with_interval(Duration::from_millis(100))
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+
+    let config_yaml = serde_yaml::to_string(&config).unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, config_yaml).unwrap();
+
+    let (orchestrator, _, _, _) = setup_orchestrator(&temp_dir).await;
+    let (progress, mut rx) = create_test_progress();
+
+    let sys_env: HashMap<String, String> = std::env::vars().collect();
+    orchestrator
+        .start_services(&config_path, None, Some(sys_env), StartMode::WaitStartup, Some(progress))
+        .await
+        .unwrap();
+
+    // After start_services returns, drain all events immediately (non-blocking).
+    // If the daemon properly waited for healthchecks, Healthy should already be in the channel.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let events = collect_progress_events(&mut rx).await;
+
+    let web_events: Vec<_> = events.iter().filter(|(name, _)| name == "web").collect();
+    let has_healthy = web_events.iter().any(|(_, phase)| matches!(phase, ServicePhase::Healthy));
+
+    assert!(
+        has_healthy,
+        "Expected Healthy event to be present after start_services returns, got: {:?}",
+        web_events
+    );
+
+    // Cleanup
+    orchestrator
+        .stop_services(&config_path, None, false, None, None)
+        .await
+        .unwrap();
+}
+
+/// Mixed services: service without HC gets Started, service with HC gets Started then Healthy
+#[tokio::test]
+async fn test_start_mixed_services_both_show_progress() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "migration",
+            TestServiceBuilder::long_running()
+                .with_restart(RestartPolicy::No)
+                .build(),
+        )
+        .add_service(
+            "web",
+            TestServiceBuilder::long_running()
+                .with_restart(RestartPolicy::No)
+                .with_healthcheck(
+                    TestHealthCheckBuilder::always_healthy()
+                        .with_interval(Duration::from_millis(100))
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+
+    let config_yaml = serde_yaml::to_string(&config).unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, config_yaml).unwrap();
+
+    let (orchestrator, _, _, _) = setup_orchestrator(&temp_dir).await;
+    let (progress, mut rx) = create_test_progress();
+
+    let sys_env: HashMap<String, String> = std::env::vars().collect();
+    orchestrator
+        .start_services(&config_path, None, Some(sys_env), StartMode::WaitStartup, Some(progress))
+        .await
+        .unwrap();
+
+    // Collect events (7 total: 3 for migration + 4 for web)
+    let events = collect_progress_events_async(&mut rx, 7, Duration::from_secs(5)).await;
+
+    // migration: Pending{Started} → Starting → Started
+    let migration_events: Vec<_> = events.iter().filter(|(name, _)| name == "migration").collect();
+    assert!(
+        migration_events.len() >= 3,
+        "Expected at least 3 events for migration, got {}: {:?}",
+        migration_events.len(),
+        migration_events
+    );
+    match &migration_events[0].1 {
+        ServicePhase::Pending { target } => {
+            assert_eq!(*target, ServiceTarget::Started, "migration target should be Started");
+        }
+        other => panic!("Expected Pending for migration, got {:?}", other),
+    }
+    assert!(matches!(migration_events[1].1, ServicePhase::Starting));
+    assert!(matches!(migration_events[2].1, ServicePhase::Started));
+
+    // web: Pending{Healthy} → Starting → Started → Healthy
+    let web_events: Vec<_> = events.iter().filter(|(name, _)| name == "web").collect();
+    assert!(
+        web_events.len() >= 4,
+        "Expected at least 4 events for web, got {}: {:?}",
+        web_events.len(),
+        web_events
+    );
+    match &web_events[0].1 {
+        ServicePhase::Pending { target } => {
+            assert_eq!(*target, ServiceTarget::Healthy, "web target should be Healthy");
+        }
+        other => panic!("Expected Pending for web, got {:?}", other),
+    }
+    assert!(matches!(web_events[1].1, ServicePhase::Starting));
+    assert!(matches!(web_events[2].1, ServicePhase::Started));
+    assert!(matches!(web_events[3].1, ServicePhase::Healthy));
+
+    // Cleanup
+    orchestrator
+        .stop_services(&config_path, None, false, None, None)
+        .await
+        .unwrap();
+}
+
+// ============================================================================
+// False Quiescence Tests (Bug: services default to Stopped = terminal)
+// ============================================================================
+
+/// During startup with a dependency chain, dependent services should be marked
+/// Starting (not Stopped) before their dependency level is processed.
+/// Without this, the CLI's quiescence check sees all services as terminal and exits.
+#[tokio::test]
+async fn test_start_deps_no_false_quiescence() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // migration: exits quickly (one-shot)
+    // web: depends on migration:service_completed_successfully, long-running
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "migration",
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "sleep 1".to_string(),
+            ])
+            .with_restart(RestartPolicy::No)
+            .build(),
+        )
+        .add_service(
+            "web",
+            TestServiceBuilder::long_running()
+                .with_restart(RestartPolicy::No)
+                .with_depends_on_extended(DependsOn(vec![DependencyEntry::Extended(
+                    HashMap::from([(
+                        "migration".to_string(),
+                        DependencyConfig {
+                            condition: DependencyCondition::ServiceCompletedSuccessfully,
+                            ..Default::default()
+                        },
+                    )]),
+                )]))
+                .build(),
+        )
+        .build();
+
+    let config_yaml = serde_yaml::to_string(&config).unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, config_yaml).unwrap();
+
+    let (orchestrator, _, _, _, exit_handler) =
+        setup_orchestrator_with_exit_handler(&temp_dir).await;
+    let sys_env: HashMap<String, String> = std::env::vars().collect();
+
+    // Start in background
+    let orch_clone = orchestrator.clone();
+    let config_path_clone = config_path.clone();
+    let start_handle = tokio::spawn(async move {
+        orch_clone
+            .start_services(
+                &config_path_clone,
+                None,
+                Some(sys_env),
+                StartMode::WaitStartup,
+                None,
+            )
+            .await
+    });
+
+    // Wait for config to be loaded and start processing to begin
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Check web's status via the registry - it should be Starting, not Stopped.
+    // If it's Stopped, the CLI's is_all_terminal() would return true (false quiescence).
+    let config_path_canonical = std::fs::canonicalize(&config_path).unwrap();
+    let handle = orchestrator.registry().get(&config_path_canonical);
+
+    if let Some(handle) = handle {
+        let state = handle.get_service_state("web").await;
+        if let Some(state) = state {
+            assert_ne!(
+                state.status,
+                ServiceStatus::Stopped,
+                "web should be Starting (not Stopped) while waiting for dependency. \
+                 The CLI would see web as terminal and exit the log following loop prematurely."
+            );
+        } else {
+            panic!("web service state should exist after config load");
+        }
+    } else {
+        panic!("Config should be loaded by now");
+    }
+
+    // Wait for start to complete
+    start_handle.await.unwrap().unwrap();
+
+    // Cleanup
+    orchestrator
+        .stop_services(&config_path, None, false, None, None)
+        .await
+        .unwrap();
+    exit_handler.abort();
 }

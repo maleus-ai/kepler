@@ -246,11 +246,23 @@ impl BufferedLogWriter {
         // Close current file handle
         self.file = None;
 
-        // Truncate the file
-        if let Ok(file) = fs::OpenOptions::new()
+        // Truncate the file (O_NOFOLLOW prevents symlink race between validate and open)
+        #[cfg(unix)]
+        let result = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&self.log_file)
+        };
+        #[cfg(not(unix))]
+        let result = fs::OpenOptions::new()
             .write(true)
             .truncate(true)
-            .open(&self.log_file)
+            .open(&self.log_file);
+
+        if let Ok(file) = result
         {
             self.file = Some(file);
             self.bytes_written = 0;

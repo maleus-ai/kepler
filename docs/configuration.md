@@ -234,7 +234,7 @@ See [File Watching](file-watching.md) for details on watch patterns.
 ## Service Name Validation
 
 Service names must:
-- Contain only alphanumeric characters, hyphens (`-`), and underscores (`_`)
+- Contain only lowercase alphanumeric characters, hyphens (`-`), and underscores (`_`)
 - Not be empty
 
 ---

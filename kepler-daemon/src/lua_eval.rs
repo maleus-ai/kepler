@@ -105,16 +105,16 @@ impl LuaEvaluator {
         // Create the `ctx` table with granular access
         let ctx_table = self.lua.create_table()?;
 
-        // Add ctx.sys_env (read-only system environment variables)
-        let sys_env = self.create_frozen_env(&ctx.sys_env, "ctx.sys_env")?;
+        // Add ctx.sys_env (read-only)
+        let sys_env = self.create_frozen_env(&ctx.sys_env)?;
         ctx_table.raw_set("sys_env", sys_env)?;
 
-        // Add ctx.env_file (read-only env_file variables)
-        let env_file = self.create_frozen_env(&ctx.env_file, "ctx.env_file")?;
+        // Add ctx.env_file (read-only)
+        let env_file = self.create_frozen_env(&ctx.env_file)?;
         ctx_table.raw_set("env_file", env_file)?;
 
         // Add ctx.env (read-only full accumulated environment)
-        let env = self.create_frozen_env(&ctx.env, "ctx.env")?;
+        let env = self.create_frozen_env(&ctx.env)?;
         ctx_table.raw_set("env", env)?;
 
         // Add ctx.service_name (nil if global)
@@ -127,10 +127,10 @@ impl LuaEvaluator {
             ctx_table.raw_set("hook_name", hook_name.as_str())?;
         }
 
-        // Freeze the ctx table to make it read-only (returns a proxy)
-        let frozen_ctx = self.freeze_table(&ctx_table, "ctx")?;
+        // Freeze ctx table using Luau's native table.freeze
+        ctx_table.set_readonly(true);
 
-        env_table.set("ctx", frozen_ctx)?;
+        env_table.set("ctx", ctx_table)?;
 
         // Add `global` (shared mutable table)
         let global: Table = self.lua.globals().get("global")?;
@@ -146,58 +146,18 @@ impl LuaEvaluator {
         Ok(env_table)
     }
 
-    /// Freeze a table to make it read-only using proxy pattern.
-    /// This creates a proxy table that forwards reads to the original table
-    /// but blocks all writes.
-    fn freeze_table(&self, table: &Table, name: &str) -> LuaResult<Table> {
-        let name_for_newindex = name.to_string();
-        let name_for_metatable = name.to_string();
-
-        // Create an empty proxy table
-        let proxy = self.lua.create_table()?;
-
-        // Create metatable with __index pointing to original table and __newindex blocking writes
-        let meta = self.lua.create_table()?;
-        meta.set("__index", table.clone())?;
-        meta.set(
-            "__newindex",
-            self.lua
-                .create_function(move |_, _: (Value, Value, Value)| -> LuaResult<()> {
-                    Err(mlua::Error::RuntimeError(format!("{} is read-only", name_for_newindex)))
-                })?,
-        )?;
-        meta.set("__metatable", format!("{} is read-only", name_for_metatable))?;
-
-        proxy.set_metatable(Some(meta));
-        Ok(proxy)
-    }
-
     /// Create a read-only table of environment variables.
-    fn create_frozen_env(&self, vars: &HashMap<String, String>, name: &str) -> LuaResult<Table> {
-        // Create a regular table with all env values
-        // We'll use metatables to prevent writes, but allow direct iteration
-        let env_table = self.lua.create_table()?;
+    ///
+    /// Uses Luau's native `table.freeze` (set_readonly) which makes the table
+    /// truly immutable — blocks writes, rawset, and any mutation — while
+    /// `pairs()` still works naturally since data is in the table itself.
+    fn create_frozen_env(&self, vars: &HashMap<String, String>) -> LuaResult<Table> {
+        let table = self.lua.create_table()?;
         for (k, v) in vars {
-            env_table.raw_set(k.as_str(), v.as_str())?;
+            table.raw_set(k.as_str(), v.as_str())?;
         }
-
-        // Create metatable that prevents modifications
-        let name_for_closure = name.to_string();
-        let name_for_metatable = name.to_string();
-        let meta = self.lua.create_table()?;
-        meta.set(
-            "__newindex",
-            self.lua
-                .create_function(move |_, _: (Value, Value, Value)| -> LuaResult<()> {
-                    Err(mlua::Error::RuntimeError(format!("{} is read-only", name_for_closure)))
-                })?,
-        )?;
-
-        // Prevent removing the metatable
-        meta.set("__metatable", format!("{} is read-only", name_for_metatable))?;
-
-        env_table.set_metatable(Some(meta));
-        Ok(env_table)
+        table.set_readonly(true);
+        Ok(table)
     }
 }
 
@@ -436,7 +396,12 @@ mod tests {
 
         let result = eval.eval::<Value>(r#"ctx.env.NEW = "value""#, &ctx);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("read-only"));
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("readonly") || err.contains("read-only"),
+            "Error should mention readonly: {}",
+            err
+        );
     }
 
     #[test]

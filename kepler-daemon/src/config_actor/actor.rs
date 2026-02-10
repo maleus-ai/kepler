@@ -451,6 +451,16 @@ impl ConfigActor {
             }
 
             // === Mutation Commands ===
+            ConfigCommand::ClaimServiceStart { service_name, reply } => {
+                let claimed = self.services.get(&service_name)
+                    .map(|s| !s.status.is_active())
+                    .unwrap_or(false);
+                if claimed {
+                    let _ = self.set_service_status(&service_name, ServiceStatus::Starting);
+                    let _ = self.save_state();
+                }
+                let _ = reply.send(claimed);
+            }
             ConfigCommand::ReloadConfig { reply } => {
                 let result = self.reload_config();
                 let _ = reply.send(result);

@@ -216,6 +216,7 @@ The Lua environment provides a **restricted subset** of the standard library:
 - **Writes to `ctx.*` raise runtime errors**
 - **Metatables are protected** from removal
 - **`require()` path includes config directory** -- safe because Lua evaluates once during baking, and users must have access to run configs
+- **`!lua_file` can load any file readable by the daemon process** (typically root). This is trusted behavior since only users with kepler group access can submit configs
 
 ---
 

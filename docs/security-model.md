@@ -81,15 +81,31 @@ This ensures that only authorized users can issue commands to the daemon.
 The daemon state directory is secured:
 
 - **Path**: `/var/lib/kepler/` (or `$KEPLER_DAEMON_PATH`)
-- **Permissions**: `0o770` (`rwxrwx---`)
+- **Permissions**: `0o770` (`rwxrwx---`) -- **enforced at every startup**
 - **Ownership**: `root:kepler`
 - **Daemon umask**: `0o007` on startup
 
-The umask ensures all files and directories created by the daemon are group-accessible (`root:kepler`) but not world-readable.
+### Startup Hardening
 
-Contents:
+At every daemon startup, the state directory undergoes validation:
+
+1. **Symlink rejection** -- The daemon refuses to start if the state directory is a symlink. This prevents an attacker from redirecting state to an arbitrary location.
+2. **Permission enforcement** -- Permissions are unconditionally set to `0o770`, correcting any pre-existing weak permissions (e.g., a directory previously set to `0o777`).
+3. **World-access validation** -- After permission enforcement, the daemon verifies no world-accessible bits remain (`mode & 0o007 == 0`).
+
+### Symlink Protection
+
+Symlinks are rejected for critical paths:
+
+- **State directory** -- Checked before any directory operations
+- **Socket path** -- Checked before binding; the daemon refuses to bind if `kepler.sock` is a symlink
+- **PID file** -- Opened with `O_NOFOLLOW`, so symlinked PID files cause the open to fail with `ELOOP`
+- **Log files** -- Opened with `O_NOFOLLOW` to prevent symlink-based write redirection
+
+### Contents
+
 - `kepler.sock` -- Unix domain socket (`0o660`)
-- `kepler.pid` -- Daemon PID file (`0o660`)
+- `kepler.pid` -- Daemon PID file (`0o660`, opened with `O_NOFOLLOW`)
 - `configs/` -- Per-config state directories
 
 ---

@@ -104,6 +104,10 @@ pub enum ConfigCommand {
     },
 
     // === Mutation Commands ===
+    ClaimServiceStart {
+        service_name: String,
+        reply: oneshot::Sender<bool>,
+    },
     ReloadConfig {
         reply: oneshot::Sender<Result<()>>,
     },

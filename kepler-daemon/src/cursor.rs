@@ -4,7 +4,7 @@
 //! cursor-based log streaming. Each cursor tracks where the client left off
 //! reading, allowing efficient incremental reads without re-scanning files.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,6 +27,14 @@ pub struct CursorState {
     last_polled: Instant,
     /// Config this cursor belongs to (for validation)
     config_path: PathBuf,
+    /// Logs directory for discovering new files
+    logs_dir: PathBuf,
+    /// Service filter (None = all services)
+    service_filter: Option<String>,
+    /// Whether to exclude hook log files
+    no_hooks: bool,
+    /// Set of file paths known to the iterator (to detect new files)
+    known_files: HashSet<PathBuf>,
 }
 
 /// Error types for cursor operations
@@ -114,8 +122,11 @@ impl CursorManager {
     ) -> String {
         let cursor_id = generate_cursor_id();
 
-        let reader = LogReader::new(logs_dir);
+        let reader = LogReader::new(logs_dir.clone());
         let files = reader.collect_log_files(service.as_deref(), no_hooks);
+
+        // Track known files for later new-file discovery
+        let known_files: HashSet<PathBuf> = files.iter().map(|(path, _, _)| path.clone()).collect();
 
         let iterator = if from_start {
             MergedLogIterator::new(files)
@@ -134,6 +145,10 @@ impl CursorManager {
             iterator,
             last_polled: Instant::now(),
             config_path,
+            logs_dir,
+            service_filter: service,
+            no_hooks,
+            known_files,
         }));
 
         self.cursors.insert(cursor_id.clone(), state);
@@ -172,6 +187,22 @@ impl CursorManager {
         }
 
         cursor.last_polled = Instant::now();
+
+        // Discover new log files created since the cursor was created
+        // (e.g., services that started after the cursor was opened)
+        let reader = LogReader::new(cursor.logs_dir.clone());
+        let current_files = reader.collect_log_files(cursor.service_filter.as_deref(), cursor.no_hooks);
+        let new_files: Vec<_> = current_files
+            .into_iter()
+            .filter(|(path, _, _)| !cursor.known_files.contains(path))
+            .collect();
+
+        if !new_files.is_empty() {
+            for (path, _, _) in &new_files {
+                cursor.known_files.insert(path.clone());
+            }
+            cursor.iterator.add_sources(new_files);
+        }
 
         // Retry sources that previously hit EOF (picks up appended data in follow mode)
         cursor.iterator.retry_eof_sources();
@@ -640,6 +671,46 @@ mod tests {
         let (entries, _) = manager.read_entries(&cursor_id, &config_path).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].line, "new-line");
+    }
+
+    /// Cursor discovers new log files created after cursor creation.
+    /// Simulates services that start producing logs after the cursor is opened.
+    #[test]
+    fn test_cursor_discovers_new_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().to_path_buf();
+        let config_path = PathBuf::from("/fake/config.yaml");
+
+        // Only "migration" log exists at cursor creation
+        write_log_file(dir.path(), "migration", "stdout", &[
+            (1000, "migrating"),
+            (2000, "done"),
+        ]);
+
+        let manager = CursorManager::new(300);
+        let cursor_id = manager.create_cursor(
+            config_path.clone(),
+            logs_dir.clone(),
+            None,
+            true,
+            false,
+        );
+
+        // First read: only migration logs
+        let (entries, _) = manager.read_entries(&cursor_id, &config_path).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| &*e.service == "migration"));
+
+        // New service starts producing logs
+        write_log_file(dir.path(), "web", "stdout", &[
+            (3000, "web-started"),
+            (4000, "web-running"),
+        ]);
+
+        // Second read: discovers and returns new web logs
+        let (entries, _) = manager.read_entries(&cursor_id, &config_path).unwrap();
+        assert_eq!(entries.len(), 2, "Should discover new web log file: {:?}", entries);
+        assert!(entries.iter().all(|e| &*e.service == "web"));
     }
 
     // ========================================================================

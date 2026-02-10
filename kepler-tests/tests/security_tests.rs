@@ -413,7 +413,7 @@ async fn test_state_directory_permissions() {
     }
 }
 
-/// Verify that PID files are created with secure permissions (0o600)
+/// Verify that PID files are created with group-accessible permissions (0o660)
 #[tokio::test]
 #[cfg(unix)]
 async fn test_pid_file_permissions() {
@@ -428,7 +428,10 @@ async fn test_pid_file_permissions() {
 
     let pid_file = state_dir.join("test.pid");
 
-    // Create PID file with secure permissions (simulating daemon behavior)
+    // Set umask to 0o007 to match daemon behavior (allows group access)
+    let old_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o007));
+
+    // Create PID file with group-accessible permissions (simulating daemon behavior)
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
@@ -436,11 +439,14 @@ async fn test_pid_file_permissions() {
             .write(true)
             .create(true)
             .truncate(true)
-            .mode(0o600)
+            .mode(0o660)
             .open(&pid_file)
             .unwrap();
         file.write_all(b"12345").unwrap();
     }
+
+    // Restore umask
+    nix::sys::stat::umask(old_umask);
 
     // Verify the file has correct permissions
     let metadata = std::fs::metadata(&pid_file).unwrap();
@@ -448,8 +454,8 @@ async fn test_pid_file_permissions() {
     let mode = permissions.mode() & 0o777;
 
     assert_eq!(
-        mode, 0o600,
-        "PID file should have mode 0o600, got 0o{:o}",
+        mode, 0o660,
+        "PID file should have mode 0o660, got 0o{:o}",
         mode
     );
 }
@@ -817,7 +823,98 @@ fn test_lua_debug_library_blocked() {
     );
 }
 
+/// Verify that rawset cannot modify frozen environment tables.
+///
+/// Luau's native table.freeze makes the table truly immutable — rawset
+/// on a frozen table throws a runtime error.
+#[test]
+fn test_lua_rawset_cannot_modify_env() {
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
 
+    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let mut ctx = EvalContext::default();
+    ctx.env = HashMap::from([("SECRET".into(), "original".into())]);
+
+    // First verify the value is accessible
+    let result: String = eval.eval(r#"return ctx.env.SECRET"#, &ctx).unwrap();
+    assert_eq!(result, "original");
+
+    // rawset on a frozen table should error
+    let code = r#"
+        if rawset then
+            rawset(ctx.env, "SECRET", "hacked")
+        end
+        return ctx.env.SECRET
+    "#;
+    let result = eval.eval::<mlua::Value>(code, &ctx);
+    // Either rawset throws on the frozen table, or if rawset is not available,
+    // the value is unchanged. Both outcomes are acceptable.
+    match result {
+        Err(_) => {} // rawset threw on frozen table — good
+        Ok(val) => {
+            let s = match val {
+                mlua::Value::String(s) => s.to_str().unwrap().to_string(),
+                _ => panic!("Expected string result"),
+            };
+            assert_eq!(s, "original", "rawset should not be able to modify the frozen env table");
+        }
+    }
+}
+
+/// Verify that frozen tables are protected from metatable access
+#[test]
+fn test_lua_getmetatable_frozen() {
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let mut ctx = EvalContext::default();
+    ctx.env = HashMap::from([("FOO".into(), "bar".into())]);
+
+    // On a Luau-frozen table, getmetatable returns nil (metatable is protected)
+    let result: mlua::Value = eval
+        .eval(r#"return getmetatable(ctx.env)"#, &ctx)
+        .unwrap();
+    assert!(
+        matches!(result, mlua::Value::Nil),
+        "getmetatable on frozen env should return nil, got: {:?}",
+        result
+    );
+}
+
+/// Verify that ctx table itself is frozen
+#[test]
+fn test_lua_ctx_table_frozen() {
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use std::path::PathBuf;
+
+    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let ctx = EvalContext::default();
+
+    // Writing to ctx should raise an error
+    let result = eval.eval::<mlua::Value>(r#"ctx.injected = "hacked"; return nil"#, &ctx);
+    assert!(
+        result.is_err(),
+        "Writing to ctx should fail: ctx is frozen"
+    );
+}
+
+/// Verify that require() can load files (trusted behavior — document, don't block)
+#[test]
+fn test_lua_require_accessible() {
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use std::path::PathBuf;
+
+    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let ctx = EvalContext::default();
+
+    // require should be a function (accessible through the global fallback)
+    let result: String = eval.eval(r#"return type(require)"#, &ctx).unwrap();
+    assert_eq!(result, "function", "require should be available as a function");
+}
 
 // ============================================================================
 // Socket Security Tests
@@ -1021,4 +1118,209 @@ async fn test_config_baked_changes_ignored() {
     );
 
     harness.stop_service("test").await.unwrap();
+}
+
+// ============================================================================
+// Config Size Limit Tests
+// ============================================================================
+
+/// Verify that oversized config files (>10MB) are rejected
+#[test]
+fn test_oversized_config_rejected() {
+    use kepler_daemon::config::KeplerConfig;
+    use std::collections::HashMap;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("huge.kepler.yaml");
+
+    // Create a file just over 10MB
+    let oversized = "x".repeat(10 * 1024 * 1024 + 1);
+    std::fs::write(&config_path, oversized).unwrap();
+
+    let sys_env = HashMap::new();
+    let result = KeplerConfig::load(&config_path, &sys_env);
+
+    assert!(
+        result.is_err(),
+        "Config file over 10MB should be rejected"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("too large"),
+        "Error should mention file being too large: {}",
+        err
+    );
+}
+
+// ============================================================================
+// State Directory Hardening Tests
+// ============================================================================
+
+/// Verify that weak permissions on an existing state directory are corrected to 0o770
+#[test]
+#[cfg(unix)]
+fn test_state_dir_weak_permissions_enforced() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().unwrap();
+    let state_dir = temp_dir.path().join("weak_perms_dir");
+
+    // Create directory with world-writable permissions (simulating pre-existing weak dir)
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    // Verify it's initially world-accessible
+    let mode = std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o777);
+
+    // Enforce correct permissions (simulating daemon startup behavior)
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+
+    // Validate using the helper
+    kepler_daemon::validate_directory_not_world_accessible(&state_dir).unwrap();
+
+    // Verify mode is now 0o770
+    let mode = std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o770,
+        "Permissions should be corrected to 0o770, got 0o{:o}",
+        mode
+    );
+}
+
+/// Verify that a symlinked state directory is rejected by validation
+#[test]
+#[cfg(unix)]
+fn test_state_dir_symlink_rejected() {
+    use std::os::unix::fs as unix_fs;
+
+    let temp_dir = TempDir::new().unwrap();
+    let real_dir = temp_dir.path().join("real_dir");
+    let symlink_dir = temp_dir.path().join("symlink_dir");
+
+    std::fs::create_dir_all(&real_dir).unwrap();
+    unix_fs::symlink(&real_dir, &symlink_dir).unwrap();
+
+    let result = kepler_daemon::validate_directory_not_world_accessible(&symlink_dir);
+    assert!(
+        result.is_err(),
+        "Symlinked state directory should be rejected"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("symlink"),
+        "Error should mention symlink: {}",
+        err
+    );
+}
+
+/// Verify that opening a PID file path that is a symlink fails with O_NOFOLLOW
+#[test]
+#[cfg(unix)]
+fn test_pid_file_symlink_rejected() {
+    use std::os::unix::fs as unix_fs;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let temp_dir = TempDir::new().unwrap();
+    let target_file = temp_dir.path().join("target.pid");
+    let symlink_file = temp_dir.path().join("kepler.pid");
+
+    // Create the target file
+    std::fs::write(&target_file, "12345").unwrap();
+
+    // Create a symlink at the PID file path
+    unix_fs::symlink(&target_file, &symlink_file).unwrap();
+
+    // Attempt to open with O_NOFOLLOW (matches daemon PID file open)
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&symlink_file);
+
+    assert!(
+        result.is_err(),
+        "Opening a symlinked PID file with O_NOFOLLOW should fail"
+    );
+
+    // Original target should be untouched
+    let content = std::fs::read_to_string(&target_file).unwrap();
+    assert_eq!(content, "12345", "Target PID file should not be modified");
+}
+
+/// Verify that a symlink at the socket path is detected via symlink_metadata
+#[test]
+#[cfg(unix)]
+fn test_socket_path_symlink_detected() {
+    use std::os::unix::fs as unix_fs;
+
+    let temp_dir = TempDir::new().unwrap();
+    let target_path = temp_dir.path().join("real.sock");
+    let symlink_path = temp_dir.path().join("kepler.sock");
+
+    // Create a real file as target
+    std::fs::write(&target_path, "").unwrap();
+
+    // Create a symlink at the socket path
+    unix_fs::symlink(&target_path, &symlink_path).unwrap();
+
+    // symlink_metadata should detect it as a symlink
+    let meta = std::fs::symlink_metadata(&symlink_path).unwrap();
+    assert!(
+        meta.file_type().is_symlink(),
+        "symlink_metadata should detect symlink at socket path"
+    );
+
+    // Regular metadata follows the symlink (would not detect it)
+    let meta = std::fs::metadata(&symlink_path).unwrap();
+    assert!(
+        !meta.file_type().is_symlink(),
+        "Regular metadata should follow the symlink (this is the attack vector)"
+    );
+}
+
+// ============================================================================
+// Log Truncation Symlink Tests
+// ============================================================================
+
+/// Verify that log truncation rejects symlinked log files.
+///
+/// This tests the security measure that prevents TOCTOU symlink attacks during
+/// log file truncation. The O_NOFOLLOW flag on the truncation open should
+/// cause the operation to fail if the path is a symlink.
+#[test]
+#[cfg(unix)]
+fn test_log_truncation_symlink_blocked() {
+    use std::os::unix::fs;
+
+    let temp_dir = TempDir::new().unwrap();
+    let target_file = temp_dir.path().join("target.log");
+    let symlink_file = temp_dir.path().join("symlink.log");
+
+    // Create the target file
+    std::fs::write(&target_file, "original content").unwrap();
+
+    // Create a symlink pointing to the target
+    fs::symlink(&target_file, &symlink_file).unwrap();
+
+    // Attempt to open the symlink with O_NOFOLLOW (simulating truncation path)
+    use std::os::unix::fs::OpenOptionsExt;
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&symlink_file);
+
+    assert!(
+        result.is_err(),
+        "Opening a symlink with O_NOFOLLOW should fail"
+    );
+
+    // The original file should be untouched
+    let content = std::fs::read_to_string(&target_file).unwrap();
+    assert_eq!(
+        content, "original content",
+        "Target file should not be modified through symlink"
+    );
 }

@@ -77,7 +77,7 @@ async fn run() -> Result<()> {
         Err(kepler_protocol::errors::ClientError::Connect(_)) => {
             eprintln!("Daemon is not running. Start it with: kepler daemon start");
             eprintln!("Or use: kepler daemon start -d (to run in background)");
-            std::process::exit(1);
+            std::process::exit(2);
         }
         Err(e) => return Err(e.into()),
     };
@@ -340,13 +340,17 @@ async fn execute_lifecycle_with_progress(
         // Foreground mode: start services and stream logs concurrently.
         // Uses WaitStartup so the daemon processes the start synchronously
         // (logs are produced immediately), while cursor polling picks them up.
+        //
+        // foreground_select drives both futures but exits when follow_logs finishes.
+        // This prevents Ctrl+C hangs: follow_logs sends stop and detects quiescence,
+        // but the daemon's WaitStartup response may still be blocked in dependency
+        // waits or health check polling. We don't wait for it.
         let (_progress_rx, response_future) = wait_action;
         drop(detach_action);
-        let (_, log_result) = tokio::join!(
+        foreground_select(
             response_future,
             follow_logs_until_quiescent(client, config_path, follow_service),
-        );
-        log_result?;
+        ).await?;
     }
     Ok(())
 }
@@ -896,14 +900,27 @@ async fn stream_cursor_logs(
     let mut cursor_id: Option<String> = None;
     tokio::pin!(shutdown);
     let mut stopping = false;
+    // Track whether we've seen evidence the daemon is processing our request.
+    // Without this, a status poll before the daemon claims any service would
+    // see stale terminal states and exit prematurely.
+    let mut seen_activity = false;
 
     loop {
         if stopping {
-            // After shutdown signal: skip log reads, only poll for quiescence
-            if let Ok(status_response) = client.status(Some(config_path.to_path_buf())).await
-                && is_all_terminal(&status_response)
-            {
-                break;
+            // After shutdown signal: skip log reads, only poll for quiescence.
+            // A second Ctrl+C force-quits immediately.
+            tokio::select! {
+                biased;
+                _ = tokio::signal::ctrl_c() => {
+                    std::process::exit(130); // 128 + SIGINT
+                }
+                result = client.status(Some(config_path.to_path_buf())) => {
+                    if let Ok(ref status_response) = result
+                        && is_all_terminal(status_response)
+                    {
+                        break;
+                    }
+                }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
@@ -928,6 +945,7 @@ async fn stream_cursor_logs(
                     cursor_id = Some(new_cursor_id);
                     has_more_data = has_more;
                     if !entries.is_empty() {
+                        seen_activity = true;
                         on_batch(&service_table, &entries);
                     }
                 }
@@ -970,11 +988,17 @@ async fn stream_cursor_logs(
             StreamMode::UntilQuiescent => {
                 // When caught up, check quiescence: exit when all services are
                 // in a terminal state (stopped, exited, killed, or failed).
+                // Wait until we've seen evidence the daemon is active (non-terminal
+                // status or log entries received) before trusting terminal status.
                 if !has_more_data
-                    && let Ok(status_response) = client.status(Some(config_path.to_path_buf())).await
-                    && is_all_terminal(&status_response)
+                    && let Ok(ref status_response) = client.status(Some(config_path.to_path_buf())).await
                 {
-                    break;
+                    if !is_all_terminal(status_response) {
+                        seen_activity = true;
+                    }
+                    if seen_activity && is_all_terminal(status_response) {
+                        break;
+                    }
                 }
 
                 let delay = if has_more_data {
@@ -1056,6 +1080,35 @@ fn write_cursor_batch(
     }
 }
 
+/// Run a foreground start/restart: drives both the daemon response future and the
+/// log-following future concurrently, but exits as soon as follow_logs finishes.
+///
+/// This prevents hangs when follow_logs detects quiescence (e.g., after Ctrl+C sends
+/// stop) but the daemon's WaitStartup response is still blocked in dependency waits
+/// or health check polling. With `tokio::join!`, the CLI would wait forever; with
+/// this helper, follow_logs is authoritative — once it says "done", we exit.
+async fn foreground_select<R, L>(
+    response_future: R,
+    log_future: L,
+) -> Result<()>
+where
+    R: Future<Output = std::result::Result<Response, ClientError>>,
+    L: Future<Output = Result<()>>,
+{
+    tokio::pin!(response_future);
+    tokio::pin!(log_future);
+    let mut response_done = false;
+    loop {
+        tokio::select! {
+            result = &mut log_future => return result,
+            _ = &mut response_future, if !response_done => {
+                response_done = true;
+                // Response arrived; keep running log_future until quiescence
+            }
+        }
+    }
+}
+
 /// Follow logs until all services reach a terminal state (quiescent) or Ctrl+C.
 ///
 /// On Ctrl+C: sends stop, then continues polling until all services actually stopped.
@@ -1128,7 +1181,7 @@ async fn handle_logs(
     }
 
     // For 'all' mode (default) and 'follow' mode, use cursor-based streaming
-    let stream_mode = if follow { StreamMode::Follow } else { StreamMode::All };
+    let stream_mode = if follow { StreamMode::UntilQuiescent } else { StreamMode::All };
     let use_color = std::io::stdout().is_terminal();
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
@@ -1460,6 +1513,7 @@ mod tests {
     // ========================================================================
 
     /// Reads all cursor batches and exits when services are naturally terminal.
+    /// Receiving log entries sets seen_activity, so terminal status exits immediately.
     #[tokio::test(start_paused = true)]
     async fn test_follow_reads_cursor_and_exits_on_quiescence() {
         let mock = MockClient::new();
@@ -1482,6 +1536,7 @@ mod tests {
     }
 
     /// Quiescence is only checked when the cursor is caught up (has_more=false).
+    /// Log entries set seen_activity, so terminal status on first check exits.
     #[tokio::test(start_paused = true)]
     async fn test_follow_quiescence_only_checked_when_caught_up() {
         let mock = MockClient::new();
@@ -1628,6 +1683,7 @@ mod tests {
     }
 
     /// Cursor expired error resets cursor_id and retries.
+    /// Log entries set seen_activity, so terminal status exits.
     #[tokio::test(start_paused = true)]
     async fn test_follow_cursor_expired_resets_and_retries() {
         let mock = MockClient::new();
@@ -1677,6 +1733,9 @@ mod tests {
     async fn test_follow_empty_cursor_checks_quiescence() {
         let mock = MockClient::new();
         mock.push_cursor(cursor_response(&[], false));
+        // First status: non-terminal (sets seen_non_terminal), then terminal
+        mock.push_status(status_response(&[("svc", "starting")]));
+        mock.push_cursor(cursor_response(&[], false));
         mock.push_status(status_response(&[("svc", "exited")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
@@ -1689,7 +1748,7 @@ mod tests {
         ).await.unwrap();
 
         assert!(collected.is_empty());
-        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 2);
     }
 
     /// Services that take multiple polls to reach natural terminal state.
@@ -1977,7 +2036,210 @@ mod tests {
         assert!(!is_all_terminal(&response));
     }
 
+    // ========================================================================
+    // Starting state handling (Ctrl+C hang, restart-after-stop fixes)
+    // ========================================================================
+
+    /// Services in "starting" state are NOT terminal — is_all_terminal returns false.
+    #[test]
+    fn test_is_all_terminal_starting_not_terminal() {
+        let response = status_response(&[("svc", "starting")]).unwrap();
+        assert!(!is_all_terminal(&response));
+    }
+
+    /// Services in "stopping" state are NOT terminal.
+    #[test]
+    fn test_is_all_terminal_stopping_not_terminal() {
+        let response = status_response(&[("svc", "stopping")]).unwrap();
+        assert!(!is_all_terminal(&response));
+    }
+
+    /// Services in "starting" state when shutdown triggers.
+    /// Status transitions: starting → stopping → stopped. Verifies CLI exits normally.
+    #[tokio::test(start_paused = true)]
+    async fn test_follow_shutdown_handles_starting_services() {
+        let mock = MockClient::new();
+        // One cursor batch then shutdown fires
+        mock.push_cursor(cursor_response(&[("svc", "init")], true));
+        // Status: starting (not yet running), then stopping, then stopped
+        mock.push_status(status_response(&[("svc", "starting")]));
+        mock.push_status(status_response(&[("svc", "stopping")]));
+        mock.push_status(status_response(&[("svc", "stopped")]));
+
+        let config_path = PathBuf::from("/fake/config.yaml");
+        let mut collected = Vec::new();
+
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, async {},
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
+
+        assert_eq!(collected, vec!["init"]);
+        assert!(mock.stop_called.load(Ordering::SeqCst));
+        // 3 status checks: starting, stopping, stopped
+        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 3);
+    }
+
+    /// First status returns "starting" (simulating pre-marked services from early pre-marking),
+    /// then services eventually exit. CLI should NOT exit prematurely.
+    #[tokio::test(start_paused = true)]
+    async fn test_follow_does_not_exit_on_stale_terminal_status() {
+        let mock = MockClient::new();
+        // First cursor read: empty, caught up
+        mock.push_cursor(cursor_response(&[], false));
+        // First status: starting (pre-marked) — not terminal, loop continues
+        mock.push_status(status_response(&[("svc", "starting")]));
+        // Second cursor read: some logs arrive
+        mock.push_cursor(cursor_response(&[("svc", "hello")], false));
+        // Second status: running — not terminal
+        mock.push_status(status_response(&[("svc", "running")]));
+        // Third cursor read: empty
+        mock.push_cursor(cursor_response(&[], false));
+        // Third status: exited — terminal, exits
+        mock.push_status(status_response(&[("svc", "exited")]));
+
+        let config_path = PathBuf::from("/fake/config.yaml");
+        let mut collected = Vec::new();
+
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
+
+        assert_eq!(collected, vec!["hello"]);
+        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 3);
+    }
+
+    // ========================================================================
+    // Foreground mode: Ctrl+C hang prevention
+    // ========================================================================
+
+    /// Foreground mode must exit promptly when follow_logs finishes (quiescence
+    /// detected), even if the daemon's start response hasn't arrived yet.
+    /// This prevents the Ctrl+C hang where follow_logs sends stop and detects
+    /// quiescence but tokio::join! blocks waiting for the start response.
+    #[tokio::test(start_paused = true)]
+    async fn test_foreground_exits_when_response_pending() {
+        let mock = MockClient::new();
+        mock.push_cursor(cursor_response(&[("svc", "hello")], false));
+        mock.push_status(status_response(&[("svc", "exited")]));
+
+        let config_path = PathBuf::from("/fake/config.yaml");
+
+        // response_future that NEVER completes (simulates daemon stuck in WaitStartup)
+        let response_never = std::future::pending::<ClientResult>();
+
+        let result = foreground_select(
+            response_never,
+            stream_cursor_logs(
+                &mock, &config_path, None, false,
+                StreamMode::UntilQuiescent, never_shutdown(),
+                |_, _| {},
+            ),
+        ).await;
+
+        result.unwrap();
+        // If we reach here, the test passed — no hang.
+    }
+
+    /// After Ctrl+C in foreground mode, follow_logs sends stop and polls until
+    /// quiescent. Once quiescent, the CLI must exit — even if the WaitStartup
+    /// response is still blocked.
+    #[tokio::test(start_paused = true)]
+    async fn test_foreground_ctrlc_exits_when_response_pending() {
+        let mock = MockClient::new();
+        // One cursor batch, then shutdown fires
+        mock.push_cursor(cursor_response(&[("svc", "x")], true));
+        // Status: running then stopped
+        mock.push_status(status_response(&[("svc", "running")]));
+        mock.push_status(status_response(&[("svc", "stopped")]));
+
+        let config_path = PathBuf::from("/fake/config.yaml");
+
+        // response_future that NEVER completes
+        let response_never = std::future::pending::<ClientResult>();
+
+        let result = foreground_select(
+            response_never,
+            stream_cursor_logs(
+                &mock, &config_path, None, false,
+                StreamMode::UntilQuiescent,
+                async {}, // immediate shutdown
+                |_, _| {},
+            ),
+        ).await;
+
+        result.unwrap();
+        assert!(mock.stop_called.load(Ordering::SeqCst), "Stop must be sent");
+    }
+
+    /// When the response arrives before follow_logs finishes, we keep running
+    /// follow_logs until quiescence — no premature exit.
+    #[tokio::test(start_paused = true)]
+    async fn test_foreground_response_first_keeps_following_logs() {
+        let mock = MockClient::new();
+        // First batch: log entries (sets seen_activity)
+        mock.push_cursor(cursor_response(&[("svc", "a")], false));
+        // Status: still running (not terminal yet)
+        mock.push_status(status_response(&[("svc", "running")]));
+        // Second batch: more logs
+        mock.push_cursor(cursor_response(&[("svc", "b")], false));
+        // Now terminal
+        mock.push_status(status_response(&[("svc", "exited")]));
+
+        let config_path = PathBuf::from("/fake/config.yaml");
+        let mut collected = Vec::new();
+
+        // response_future that completes immediately
+        let response_immediate = async { Ok(Response::ok_with_message("Started".to_string())) };
+
+        let result = foreground_select(
+            response_immediate,
+            stream_cursor_logs(
+                &mock, &config_path, None, false,
+                StreamMode::UntilQuiescent, never_shutdown(),
+                |st, entries| collect_batch(&mut collected, st, entries),
+            ),
+        ).await;
+
+        result.unwrap();
+        assert_eq!(collected, vec!["a", "b"], "All logs must be collected");
+        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// First cursor returns "Config not loaded", then services appear as "starting",
+    /// eventually exit. Verify full lifecycle with retry.
+    #[tokio::test(start_paused = true)]
+    async fn test_follow_config_not_loaded_retries_then_starts() {
+        let mock = MockClient::new();
+        // First two cursor calls: config not loaded yet (start request being processed)
+        mock.push_cursor(Ok(Response::error("Config not loaded")));
+        mock.push_cursor(Ok(Response::error("Config not loaded")));
+        // Third: config available, logs arrive
+        mock.push_cursor(cursor_response(&[("svc", "started")], false));
+        // Status: starting initially, then exited
+        mock.push_status(status_response(&[("svc", "starting")]));
+        mock.push_cursor(cursor_response(&[], false));
+        mock.push_status(status_response(&[("svc", "exited")]));
+
+        let config_path = PathBuf::from("/fake/config.yaml");
+        let mut collected = Vec::new();
+
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
+
+        assert_eq!(collected, vec!["started"]);
+        // At least 4 cursor calls (2 config not loaded retries + 2 successful reads)
+        assert!(mock.cursor_call_count.load(Ordering::SeqCst) >= 4);
+    }
+
     /// Exited services are quiescent — UntilQuiescent mode exits.
+    /// Log entry sets seen_activity, so terminal status exits immediately.
     #[tokio::test(start_paused = true)]
     async fn test_follow_exits_on_exited_quiescence() {
         let mock = MockClient::new();

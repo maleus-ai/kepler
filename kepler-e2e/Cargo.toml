@@ -62,6 +62,10 @@ path = "tests/multi_config_test.rs"
 name = "integration_test"
 path = "tests/integration_test.rs"
 
+[[test]]
+name = "timeout_test"
+path = "tests/timeout_test.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.49.0", features = ["full", "process", "time"] }

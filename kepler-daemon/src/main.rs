@@ -72,11 +72,33 @@ async fn main() -> anyhow::Result<()> {
     };
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        // Reject symlinked state directory before any operations
+        if state_dir.exists() {
+            let meta = std::fs::symlink_metadata(&state_dir)?;
+            if meta.file_type().is_symlink() {
+                eprintln!("Error: state directory '{}' is a symlink — refusing to start", state_dir.display());
+                std::process::exit(1);
+            }
+        }
+
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o770)
             .create(&state_dir)?;
+
+        // Enforce permissions on both new and pre-existing directories
+        let meta = std::fs::metadata(&state_dir)?;
+        let current_mode = meta.permissions().mode() & 0o777;
+        if current_mode != 0o770 {
+            warn!(
+                "State directory '{}' had permissions 0o{:o}, correcting to 0o770",
+                state_dir.display(),
+                current_mode
+            );
+            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o770))?;
+        }
 
         // chown state dir to root:kepler
         let kepler_gid = resolve_kepler_group_gid()?;
@@ -85,6 +107,9 @@ async fn main() -> anyhow::Result<()> {
             Some(nix::unistd::Uid::from_raw(0)),
             Some(nix::unistd::Gid::from_raw(kepler_gid)),
         )?;
+
+        // Belt-and-suspenders: validate no world-accessible bits
+        kepler_daemon::validate_directory_not_world_accessible(&state_dir)?;
     }
     #[cfg(not(unix))]
     {
@@ -105,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
             .create(true)
             .truncate(true)
             .mode(0o660)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&pid_file)?;
         file.write_all(std::process::id().to_string().as_bytes())?;
     }

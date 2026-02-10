@@ -34,6 +34,12 @@ fn pid_has_supplementary_gid(pid: u32, target_gid: u32) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
+    parse_groups_from_status(&content, target_gid)
+}
+
+/// Parse the Groups line from /proc/<pid>/status content.
+/// Returns true if `target_gid` appears in the supplementary groups.
+fn parse_groups_from_status(content: &str, target_gid: u32) -> bool {
     for line in content.lines() {
         if let Some(groups_str) = line.strip_prefix("Groups:") {
             return groups_str
@@ -111,6 +117,21 @@ where
     }
 
     pub async fn run(mut self) -> Result<()> {
+        // Reject symlinked socket path before any operations
+        if self.socket_path.exists() {
+            let meta = std::fs::symlink_metadata(&self.socket_path).map_err(|e| {
+                ServerError::StaleSocket {
+                    socket_path: self.socket_path.clone(),
+                    source: e,
+                }
+            })?;
+            if meta.file_type().is_symlink() {
+                return Err(ServerError::SocketSymlink {
+                    socket_path: self.socket_path.clone(),
+                });
+            }
+        }
+
         // Remove stale socket file (atomic - avoid TOCTOU race)
         match std::fs::remove_file(&self.socket_path) {
             Ok(()) => {}
@@ -323,5 +344,125 @@ where
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{ServicePhase, decode_server_message};
+
+    // ========================================================================
+    // parse_groups_from_status tests
+    // ========================================================================
+
+    #[test]
+    fn parse_groups_single_matching_gid() {
+        let content = "\
+Name:\tcat
+Pid:\t1234
+Groups:\t1000
+";
+        assert!(parse_groups_from_status(content, 1000));
+    }
+
+    #[test]
+    fn parse_groups_multiple_gids_match() {
+        let content = "\
+Name:\tbash
+Pid:\t5678
+Groups:\t1000 27 44 100
+";
+        assert!(parse_groups_from_status(content, 44));
+        assert!(parse_groups_from_status(content, 1000));
+        assert!(parse_groups_from_status(content, 100));
+    }
+
+    #[test]
+    fn parse_groups_no_match() {
+        let content = "\
+Name:\tbash
+Pid:\t5678
+Groups:\t1000 27 44
+";
+        assert!(!parse_groups_from_status(content, 9999));
+    }
+
+    #[test]
+    fn parse_groups_missing_groups_line() {
+        let content = "\
+Name:\tbash
+Pid:\t5678
+Uid:\t1000\t1000\t1000\t1000
+Gid:\t1000\t1000\t1000\t1000
+";
+        assert!(!parse_groups_from_status(content, 1000));
+    }
+
+    #[test]
+    fn parse_groups_empty_groups_line() {
+        let content = "\
+Name:\tbash
+Groups:\t
+Pid:\t5678
+";
+        assert!(!parse_groups_from_status(content, 1000));
+    }
+
+    #[test]
+    fn parse_groups_empty_content() {
+        assert!(!parse_groups_from_status("", 1000));
+    }
+
+    #[test]
+    fn parse_groups_with_tabs_and_spaces() {
+        // Real /proc/status uses tabs after the field name
+        let content = "Groups:\t1000  27\t44\t\t100\n";
+        assert!(parse_groups_from_status(content, 27));
+        assert!(parse_groups_from_status(content, 100));
+    }
+
+    // ========================================================================
+    // ProgressSender tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn progress_sender_encodes_event() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let sender = ProgressSender::new(tx, 42);
+
+        sender.send(ProgressEvent {
+            service: "web".into(),
+            phase: ServicePhase::Starting,
+        }).await;
+
+        let bytes = rx.recv().await.unwrap();
+        // Should be a valid length-prefixed server message
+        assert!(bytes.len() > 4);
+        let len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        assert_eq!(len, bytes.len() - 4);
+
+        let decoded = decode_server_message(&bytes[4..]).unwrap();
+        match decoded {
+            ServerMessage::Event { event: ServerEvent::Progress { request_id, event } } => {
+                assert_eq!(request_id, 42);
+                assert_eq!(event.service, "web");
+                assert!(matches!(event.phase, ServicePhase::Starting));
+            }
+            _ => panic!("Expected Progress event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_sender_ignores_closed_channel() {
+        let (tx, rx) = mpsc::channel(1);
+        let sender = ProgressSender::new(tx, 1);
+        drop(rx); // Close receiver
+
+        // Should not panic
+        sender.send(ProgressEvent {
+            service: "web".into(),
+            phase: ServicePhase::Starting,
+        }).await;
     }
 }

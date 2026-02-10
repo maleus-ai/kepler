@@ -793,6 +793,7 @@ dependencies = [
  "libc",
  "nix",
  "serde",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

@@ -387,6 +387,23 @@ impl ConfigActorHandle {
 
     // === Mutation Methods ===
 
+    /// Atomically claim a service for starting.
+    ///
+    /// If the service is in a terminal state (Stopped/Failed/Exited/Killed),
+    /// transitions it to Starting and returns true. If already non-terminal
+    /// (Starting/Running/Stopping/Healthy/Unhealthy), returns false.
+    /// Only the first concurrent caller wins.
+    pub async fn claim_service_start(&self, service_name: &str) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.tx.send(ConfigCommand::ClaimServiceStart {
+            service_name: service_name.to_string(),
+            reply: reply_tx,
+        }).await.is_err() {
+            warn!("Config actor closed, cannot send ClaimServiceStart");
+        }
+        reply_rx.await.unwrap_or(false)
+    }
+
     /// Reload the config file
     pub async fn reload_config(&self) -> Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();

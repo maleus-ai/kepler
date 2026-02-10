@@ -40,6 +40,18 @@ impl ServiceStatus {
             ServiceStatus::Running | ServiceStatus::Healthy | ServiceStatus::Unhealthy
         )
     }
+
+    /// Returns true for any non-terminal state (service is actively doing something).
+    /// Terminal states: Stopped, Failed, Exited, Killed
+    pub fn is_active(&self) -> bool {
+        !matches!(
+            self,
+            ServiceStatus::Stopped
+                | ServiceStatus::Failed
+                | ServiceStatus::Exited
+                | ServiceStatus::Killed
+        )
+    }
 }
 
 impl std::fmt::Display for ServiceStatus {
@@ -493,6 +505,23 @@ mod tests {
         assert_eq!(info.signal, Some(15));
         assert_eq!(info.stopped_at, Some(now.timestamp()));
         assert!(info.exit_code.is_none());
+    }
+
+    #[test]
+    fn test_is_active_terminal_states() {
+        assert!(!ServiceStatus::Stopped.is_active());
+        assert!(!ServiceStatus::Failed.is_active());
+        assert!(!ServiceStatus::Exited.is_active());
+        assert!(!ServiceStatus::Killed.is_active());
+    }
+
+    #[test]
+    fn test_is_active_non_terminal_states() {
+        assert!(ServiceStatus::Starting.is_active());
+        assert!(ServiceStatus::Running.is_active());
+        assert!(ServiceStatus::Stopping.is_active());
+        assert!(ServiceStatus::Healthy.is_active());
+        assert!(ServiceStatus::Unhealthy.is_active());
     }
 
     #[test]
