@@ -1413,11 +1413,11 @@ impl ServiceOrchestrator {
                 }
             }
         } else {
-            // Mark as exited (clean exit) or failed
-            let status = if exit_code == Some(0) {
-                ServiceStatus::Exited
+            // Mark as killed (signal) or exited (any exit code)
+            let status = if signal.is_some() {
+                ServiceStatus::Killed
             } else {
-                ServiceStatus::Failed
+                ServiceStatus::Exited
             };
             let _ = handle.set_service_status(service_name, status).await;
         }

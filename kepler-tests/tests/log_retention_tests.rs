@@ -158,7 +158,6 @@ async fn test_all_log_retention_events() {
     let temp_dir = TempDir::new().unwrap();
 
     let log_config = LogConfig {
-        timestamp: Some(true),
         store: None,
         retention: Some(LogRetentionConfig {
             on_stop: Some(LogRetention::Retain),
@@ -190,7 +189,6 @@ async fn test_all_log_retention_events() {
         .unwrap();
     let service_logs = config.services["test"].logs.as_ref().unwrap();
 
-    assert_eq!(service_logs.timestamp, Some(true));
     assert_eq!(service_logs.get_on_stop(), Some(LogRetention::Retain));
     assert_eq!(service_logs.get_on_start(), Some(LogRetention::Clear));
     assert_eq!(service_logs.get_on_restart(), Some(LogRetention::Retain));
@@ -472,7 +470,6 @@ fn test_log_retention_yaml_parsing() {
     let yaml = r#"
 kepler:
   logs:
-    timestamp: true
     retention:
       on_stop: retain
       on_start: clear
@@ -493,7 +490,6 @@ services:
 
     // Check global config
     let global_logs = config.global_logs().unwrap();
-    assert_eq!(global_logs.timestamp, Some(true));
     assert_eq!(global_logs.get_on_stop(), Some(LogRetention::Retain));
     assert_eq!(global_logs.get_on_start(), Some(LogRetention::Clear));
     assert_eq!(global_logs.get_on_restart(), Some(LogRetention::Retain));
@@ -515,7 +511,6 @@ fn test_default_log_config_is_none() {
     assert_eq!(log_config.get_on_start(), None);
     assert_eq!(log_config.get_on_restart(), None);
     assert_eq!(log_config.get_on_exit(), None);
-    assert_eq!(log_config.timestamp, None);
     assert!(log_config.retention.is_none());
 }
 

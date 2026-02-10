@@ -683,7 +683,6 @@ async fn test_log_output_disabled() {
 
     let config = TestConfigBuilder::new()
         .with_logs(LogConfig {
-            timestamp: None,
             store: Some(LogStoreConfig::Simple(false)),
             retention: None,
             max_size: None,
@@ -740,7 +739,6 @@ async fn test_log_output_enabled() {
 
     let config = TestConfigBuilder::new()
         .with_logs(LogConfig {
-            timestamp: None,
             store: Some(LogStoreConfig::Simple(true)),
             retention: None,
             max_size: None,

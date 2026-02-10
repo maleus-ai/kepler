@@ -17,15 +17,11 @@ kepler:
 services:
   database:
     command: ["sh", "-c", "echo DATABASE_STARTED; sleep 300"]
-    logs:
-      timestamp: true
 
   app:
     command: ["sh", "-c", "echo APP_STARTED; sleep 300"]
     depends_on:
       - database
-    logs:
-      timestamp: true
 
   monitor:
     command: ["sh", "-c", "echo MONITOR_STARTED; sleep 300"]
@@ -34,5 +30,3 @@ services:
       database:
         condition: service_failed
         timeout: 3s
-    logs:
-      timestamp: true

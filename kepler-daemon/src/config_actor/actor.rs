@@ -889,7 +889,7 @@ impl ConfigActor {
             service_state.signal = None;
             service_state.exit_code = None;
         }
-        if matches!(status, ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed) {
+        if matches!(status, ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed | ServiceStatus::Killed) {
             service_state.pid = None;
             service_state.started_at = None;
             service_state.stopped_at = Some(Utc::now());

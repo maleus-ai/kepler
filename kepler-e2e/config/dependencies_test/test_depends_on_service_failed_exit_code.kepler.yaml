@@ -9,8 +9,6 @@ services:
   worker:
     command: ["sh", "-c", "echo WORKER_STARTED; sleep 0.5; echo WORKER_FAILING; exit 5"]
     restart: no
-    logs:
-      timestamp: true
 
   handler:
     command: ["sh", "-c", "echo HANDLER_STARTED; sleep 300"]
@@ -19,5 +17,3 @@ services:
         condition: service_failed
         exit_code:
           - '1:10'
-    logs:
-      timestamp: true

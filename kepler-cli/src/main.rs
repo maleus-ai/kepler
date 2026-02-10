@@ -711,13 +711,21 @@ fn format_status(info: &ServiceInfo) -> String {
             }
         }
         "failed" => {
+            let ago = info.stopped_at.map(format_duration_since).unwrap_or_default();
+            if ago.is_empty() {
+                "Failed".to_string()
+            } else {
+                format!("Failed {}", ago)
+            }
+        }
+        "killed" => {
             let exit_info = format_exit_info(info);
             let ago = info.stopped_at.map(format_duration_since).unwrap_or_default();
             match (exit_info.is_empty(), ago.is_empty()) {
-                (true, true) => "Failed".to_string(),
-                (false, true) => format!("Failed {}", exit_info),
-                (true, false) => format!("Failed {}", ago),
-                (false, false) => format!("Failed {} {}", exit_info, ago),
+                (true, true) => "Killed".to_string(),
+                (false, true) => format!("Killed {}", exit_info),
+                (true, false) => format!("Killed {}", ago),
+                (false, false) => format!("Killed {} {}", exit_info, ago),
             }
         }
         other => other.to_string(),
@@ -960,12 +968,11 @@ async fn stream_cursor_logs(
                 }
             }
             StreamMode::UntilQuiescent => {
-                // When caught up, check quiescence. Only "exited" and "failed"
-                // are considered naturally terminal — "stopped" is excluded because
-                // it can be a transient state during restart (stop → start).
+                // When caught up, check quiescence: exit when all services are
+                // in a terminal state (stopped, exited, killed, or failed).
                 if !has_more_data
                     && let Ok(status_response) = client.status(Some(config_path.to_path_buf())).await
-                    && is_all_naturally_terminal(&status_response)
+                    && is_all_terminal(&status_response)
                 {
                     break;
                 }
@@ -991,8 +998,8 @@ async fn stream_cursor_logs(
     Ok(())
 }
 
-/// Check if all services are in a terminal state (stopped, exited, or failed).
-/// Used after Ctrl+C shutdown when we've explicitly sent a stop command.
+/// Check if all services are in a terminal state (stopped, exited, killed, or failed).
+/// Used for quiescence detection and after Ctrl+C shutdown.
 fn is_all_terminal(response: &Response) -> bool {
     if let Response::Ok {
         data: Some(ResponseData::ServiceStatus(services)),
@@ -1002,29 +1009,12 @@ fn is_all_terminal(response: &Response) -> bool {
         !services.is_empty()
             && services
                 .values()
-                .all(|info| matches!(info.status.as_str(), "stopped" | "failed" | "exited"))
+                .all(|info| matches!(info.status.as_str(), "stopped" | "failed" | "exited" | "killed"))
     } else {
         false
     }
 }
 
-/// Check if all services have naturally reached a terminal state (exited or failed).
-/// Excludes "stopped" because it can be a transient state during restart (stop → start).
-/// Used for UntilQuiescent mode where we only want to exit on definitive outcomes.
-fn is_all_naturally_terminal(response: &Response) -> bool {
-    if let Response::Ok {
-        data: Some(ResponseData::ServiceStatus(services)),
-        ..
-    } = response
-    {
-        !services.is_empty()
-            && services
-                .values()
-                .all(|info| matches!(info.status.as_str(), "failed" | "exited"))
-    } else {
-        false
-    }
-}
 
 /// Write a batch of cursor log entries to stdout using BufWriter.
 fn write_cursor_batch(
@@ -1875,38 +1865,52 @@ mod tests {
     }
 
     #[test]
-    fn test_format_status_failed_with_code() {
-        let mut info = make_info("failed");
-        info.exit_code = Some(1);
-        info.stopped_at = Some(chrono::Utc::now().timestamp() - 5);
-        let status = format_status(&info);
-        assert_eq!(status, "Failed (1) 5s ago");
-    }
-
-    #[test]
-    fn test_format_status_failed_with_sigkill() {
-        let mut info = make_info("failed");
-        info.signal = Some(9);
-        info.stopped_at = Some(chrono::Utc::now().timestamp() - 5);
-        let status = format_status(&info);
-        assert_eq!(status, "Failed (SIGKILL) 5s ago");
-    }
-
-    #[test]
     fn test_format_status_failed_no_info() {
         let info = make_info("failed");
         assert_eq!(format_status(&info), "Failed");
     }
 
     #[test]
-    fn test_format_status_signal_takes_priority_over_exit_code() {
-        // When both signal and exit_code are present, signal should be displayed
+    fn test_format_status_failed_with_ago() {
         let mut info = make_info("failed");
+        info.stopped_at = Some(chrono::Utc::now().timestamp() - 5);
+        let status = format_status(&info);
+        assert_eq!(status, "Failed 5s ago");
+    }
+
+    #[test]
+    fn test_format_status_killed_with_sigkill() {
+        let mut info = make_info("killed");
+        info.signal = Some(9);
+        info.stopped_at = Some(chrono::Utc::now().timestamp() - 5);
+        let status = format_status(&info);
+        assert_eq!(status, "Killed (SIGKILL) 5s ago");
+    }
+
+    #[test]
+    fn test_format_status_killed_no_info() {
+        let info = make_info("killed");
+        assert_eq!(format_status(&info), "Killed");
+    }
+
+    #[test]
+    fn test_format_status_killed_signal_takes_priority_over_exit_code() {
+        // When both signal and exit_code are present, signal should be displayed
+        let mut info = make_info("killed");
         info.exit_code = Some(137);
         info.signal = Some(9);
         info.stopped_at = Some(chrono::Utc::now().timestamp() - 5);
         let status = format_status(&info);
-        assert_eq!(status, "Failed (SIGKILL) 5s ago");
+        assert_eq!(status, "Killed (SIGKILL) 5s ago");
+    }
+
+    #[test]
+    fn test_format_status_exited_with_nonzero_code() {
+        let mut info = make_info("exited");
+        info.exit_code = Some(1);
+        info.stopped_at = Some(chrono::Utc::now().timestamp() - 5);
+        let status = format_status(&info);
+        assert_eq!(status, "Exited (1) 5s ago");
     }
 
     // ========================================================================
@@ -1938,7 +1942,7 @@ mod tests {
     }
 
     // ========================================================================
-    // is_all_terminal / is_all_naturally_terminal
+    // is_all_terminal
     // ========================================================================
 
     #[test]
@@ -1948,11 +1952,18 @@ mod tests {
     }
 
     #[test]
-    fn test_is_all_terminal_mixed_stopped_exited_failed() {
+    fn test_is_all_terminal_includes_killed() {
+        let response = status_response(&[("svc", "killed")]).unwrap();
+        assert!(is_all_terminal(&response));
+    }
+
+    #[test]
+    fn test_is_all_terminal_mixed_stopped_exited_failed_killed() {
         let response = status_response(&[
             ("a", "stopped"),
             ("b", "exited"),
             ("c", "failed"),
+            ("d", "killed"),
         ]).unwrap();
         assert!(is_all_terminal(&response));
     }
@@ -1964,36 +1975,6 @@ mod tests {
             ("b", "running"),
         ]).unwrap();
         assert!(!is_all_terminal(&response));
-    }
-
-    #[test]
-    fn test_naturally_terminal_excludes_stopped() {
-        // "stopped" is NOT naturally terminal (could be mid-restart)
-        let response = status_response(&[("svc", "stopped")]).unwrap();
-        assert!(!is_all_naturally_terminal(&response));
-        // But it IS terminal for the Ctrl+C shutdown flow
-        assert!(is_all_terminal(&response));
-    }
-
-    #[test]
-    fn test_naturally_terminal_exited_and_failed() {
-        let response = status_response(&[
-            ("a", "exited"),
-            ("b", "failed"),
-        ]).unwrap();
-        assert!(is_all_naturally_terminal(&response));
-        assert!(is_all_terminal(&response));
-    }
-
-    #[test]
-    fn test_naturally_terminal_mixed_stopped_and_exited() {
-        // One stopped + one exited: NOT naturally terminal (stopped blocks it)
-        let response = status_response(&[
-            ("a", "stopped"),
-            ("b", "exited"),
-        ]).unwrap();
-        assert!(!is_all_naturally_terminal(&response));
-        assert!(is_all_terminal(&response));
     }
 
     /// Exited services are quiescent — UntilQuiescent mode exits.

@@ -70,8 +70,6 @@ pub struct LogRetentionConfig {
 /// Log configuration
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct LogConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<bool>,
     /// Whether to store logs (default: true for both streams)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<LogStoreConfig>,

@@ -363,21 +363,27 @@ pub async fn check_dependency_satisfied(
             state.status == ServiceStatus::Unhealthy && state.was_healthy
         }
         DependencyCondition::ServiceFailed => {
-            // Service must have failed, optionally matching exit code filter.
+            // Service must have failed: Failed (spawn failure), Killed (signal),
+            // or Exited with non-zero exit code. Optionally matching exit code filter.
             // exit_code is None when the process was killed by a signal (no exit status),
             // mapped to -1 so signal-killed processes can be matched with exit_code: [-1].
-            state.status == ServiceStatus::Failed
+            let is_failure = match state.status {
+                ServiceStatus::Failed | ServiceStatus::Killed => true,
+                ServiceStatus::Exited => state.exit_code != Some(0),
+                _ => false,
+            };
+            is_failure
                 && dep_config
                     .exit_code
                     .matches(state.exit_code.unwrap_or(-1))
         }
         DependencyCondition::ServiceStopped => {
-            // Service must have stopped/exited or failed, optionally matching exit code filter.
+            // Service must have stopped/exited/killed or failed, optionally matching exit code filter.
             // exit_code is None when the process was killed by a signal (no exit status),
             // mapped to -1 so signal-killed processes can be matched with exit_code: [-1].
             matches!(
                 state.status,
-                ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed
+                ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed | ServiceStatus::Killed
             ) && dep_config
                 .exit_code
                 .matches(state.exit_code.unwrap_or(-1))
@@ -403,7 +409,7 @@ pub async fn is_dependency_permanently_unsatisfied(
     };
 
     // Only check terminal states
-    if !matches!(state.status, ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed) {
+    if !matches!(state.status, ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed | ServiceStatus::Killed) {
         return false;
     }
 

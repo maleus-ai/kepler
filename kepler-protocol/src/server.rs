@@ -18,10 +18,6 @@ use crate::{
     },
 };
 
-/// Environment variable that overrides the default state directory.
-/// When set, the server uses legacy UID-based auth (for tests without kepler group).
-const KEPLER_DAEMON_PATH_ENV: &str = "KEPLER_DAEMON_PATH";
-
 /// Resolve the GID of the "kepler" group.
 fn resolve_kepler_group_gid() -> std::result::Result<u32, ServerError> {
     nix::unistd::Group::from_name("kepler")
@@ -145,19 +141,17 @@ where
                 source: e,
             })?;
 
-            // chown socket to root:kepler (skip in test mode when KEPLER_DAEMON_PATH is set)
-            if std::env::var(KEPLER_DAEMON_PATH_ENV).is_err() {
-                let kepler_gid = resolve_kepler_group_gid()?;
-                nix::unistd::chown(
-                    &self.socket_path,
-                    Some(nix::unistd::Uid::from_raw(0)),
-                    Some(nix::unistd::Gid::from_raw(kepler_gid)),
-                )
-                .map_err(|e| ServerError::SocketOwnership {
-                    socket_path: self.socket_path.clone(),
-                    source: e.into(),
-                })?;
-            }
+            // chown socket to root:kepler
+            let kepler_gid = resolve_kepler_group_gid()?;
+            nix::unistd::chown(
+                &self.socket_path,
+                Some(nix::unistd::Uid::from_raw(0)),
+                Some(nix::unistd::Gid::from_raw(kepler_gid)),
+            )
+            .map_err(|e| ServerError::SocketOwnership {
+                socket_path: self.socket_path.clone(),
+                source: e.into(),
+            })?;
         }
 
         loop {
@@ -206,43 +200,26 @@ where
     {
         let cred = stream.peer_cred().map_err(ServerError::PeerCredentials)?;
 
-        if std::env::var(KEPLER_DAEMON_PATH_ENV).is_ok() {
-            // Test mode: use legacy same-UID auth (no kepler group required)
-            let daemon_uid = nix::unistd::getuid().as_raw();
-            if cred.uid() != daemon_uid {
+        // Root always allowed, otherwise check kepler group membership
+        if cred.uid() == 0 {
+            debug!("Peer credentials verified: root (UID 0)");
+        } else {
+            let kepler_gid = resolve_kepler_group_gid()?;
+            let in_group = cred.gid() == kepler_gid
+                || cred.pid().is_some_and(|pid| pid_has_supplementary_gid(pid as u32, kepler_gid));
+
+            if !in_group {
                 debug!(
-                    "Unauthorized connection attempt (test mode): client UID {} != daemon UID {}",
+                    "Unauthorized connection attempt: UID {} not in kepler group (GID {})",
                     cred.uid(),
-                    daemon_uid
+                    kepler_gid
                 );
                 return Err(ServerError::Unauthorized {
                     client_uid: cred.uid(),
-                    kepler_gid: 0,
+                    kepler_gid,
                 });
             }
-            debug!("Peer credentials verified (test mode): UID {}", cred.uid());
-        } else {
-            // Production mode: root always allowed, otherwise check kepler group membership
-            if cred.uid() == 0 {
-                debug!("Peer credentials verified: root (UID 0)");
-            } else {
-                let kepler_gid = resolve_kepler_group_gid()?;
-                let in_group = cred.gid() == kepler_gid
-                    || cred.pid().is_some_and(|pid| pid_has_supplementary_gid(pid as u32, kepler_gid));
-
-                if !in_group {
-                    debug!(
-                        "Unauthorized connection attempt: UID {} not in kepler group (GID {})",
-                        cred.uid(),
-                        kepler_gid
-                    );
-                    return Err(ServerError::Unauthorized {
-                        client_uid: cred.uid(),
-                        kepler_gid,
-                    });
-                }
-                debug!("Peer credentials verified: UID {} in kepler group", cred.uid());
-            }
+            debug!("Peer credentials verified: UID {} in kepler group", cred.uid());
         }
     }
 

@@ -19,13 +19,9 @@ services:
     hooks:
       post_healthcheck_success:
         run: "sleep 1; touch {{MARKER_PATH}}"
-    logs:
-      timestamp: true
 
   alert:
     command: ["sh", "-c", "echo ALERT_STARTED; sleep 300"]
     depends_on:
       monitor:
         condition: service_unhealthy
-    logs:
-      timestamp: true

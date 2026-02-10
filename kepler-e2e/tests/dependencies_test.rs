@@ -474,12 +474,12 @@ async fn test_depends_on_service_failed() -> E2eResult<()> {
     let output = harness.start_services(&config_path).await?;
     output.assert_success();
 
-    // Wait for worker to fail
+    // Wait for worker to exit with non-zero code (Exited status, not Failed)
     harness
-        .wait_for_service_status(&config_path, "worker", "failed", Duration::from_secs(10))
+        .wait_for_service_status(&config_path, "worker", "exited", Duration::from_secs(10))
         .await?;
 
-    // Handler should start after worker fails
+    // Handler should start after worker fails (service_failed matches Exited with non-zero code)
     harness
         .wait_for_service_status(&config_path, "handler", "running", Duration::from_secs(10))
         .await?;
@@ -644,12 +644,12 @@ async fn test_depends_on_service_failed_exit_code() -> E2eResult<()> {
     let output = harness.start_services(&config_path).await?;
     output.assert_success();
 
-    // Wait for worker to fail (exits with code 5)
+    // Wait for worker to exit with code 5 (Exited status, not Failed)
     harness
-        .wait_for_service_status(&config_path, "worker", "failed", Duration::from_secs(10))
+        .wait_for_service_status(&config_path, "worker", "exited", Duration::from_secs(10))
         .await?;
 
-    // Handler should start because exit code 5 is in range 1:10
+    // Handler should start because exit code 5 is in range 1:10 (service_failed matches Exited with non-zero)
     harness
         .wait_for_service_status(&config_path, "handler", "running", Duration::from_secs(10))
         .await?;

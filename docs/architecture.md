@@ -1,5 +1,7 @@
 # Kepler Architecture
 
+> For user-facing documentation, see the [documentation index](README.md).
+
 This document describes Kepler's internal implementation, security measures, and design decisions. It is intended for contributors and developers who want to understand or modify the codebase.
 
 ## Table of Contents
@@ -27,6 +29,8 @@ Kepler uses a single global daemon architecture. The daemon runs as root and man
 - **Group-based access**: CLI access is controlled via `kepler` group membership on the socket
 - **Per-config isolation**: Each config gets its own state directory (hashed path)
 - **Persistent state**: Daemon survives CLI disconnections, services continue running
+
+For details on the security model, see [Security Model](security-model.md).
 
 ### Key Design Principles
 
@@ -65,6 +69,8 @@ The daemon stores all state in `/var/lib/kepler/` (or `$KEPLER_DAEMON_PATH` if s
 - **Daemon umask**: `0o007` ensures all created files/dirs are group-accessible
 - **Purpose**: Root owns all state; kepler group members can access the CLI
 
+See [Security Model](security-model.md) for the full access control design.
+
 ### Relevant Files
 
 | File | Description |
@@ -87,7 +93,7 @@ The daemon uses Unix peer credentials to enforce group-based access:
 4. Other clients must be in the `kepler` group (checked via primary GID and supplementary groups from `/proc/<pid>/status`)
 5. Connections from users not in the kepler group are rejected
 
-**Test mode**: When `KEPLER_DAEMON_PATH` is set, the daemon uses legacy UID-based auth (same-user check) so tests work without root/kepler group.
+See [Security Model](security-model.md) for the full security design.
 
 ### Relevant Files
 
@@ -132,6 +138,8 @@ flowchart TD
     D --> J[Run services with baked config]
 ```
 
+See [Configuration](configuration.md) for the user-facing config reference, and [Variable Expansion](variable-expansion.md) / [Lua Scripting](lua-scripting.md) for details on the expansion stages.
+
 ### CLI Recreate Command
 
 The `recreate` command forces a full re-bake, discarding the existing snapshot. It only rebakes the config — it does **not** start or stop any services. All services must be stopped (or the config must not be loaded) before running `recreate`.
@@ -165,7 +173,9 @@ The `ps` command lists services and their states, including exit codes for stopp
 - `kepler ps` - Show services for the current config
 - `kepler ps --all` - Show services across all loaded configs
 
-Exit codes are displayed inline with the status (e.g., `failed (1)`, `stopped (0)`).
+Exit codes are displayed inline with the status (e.g., `Exited (0)`, `Exited (1)`, `Killed (SIGKILL)`).
+
+See [CLI Reference](cli-reference.md) for all commands.
 
 ### CLI Prune Command
 
@@ -180,8 +190,8 @@ The `prune` command removes state directories for stopped or orphaned configs:
 When no snapshot exists (or after `recreate`), the config goes through a baking process:
 
 1. **Copy files**: Config and env_files copied to state directory
-2. **Shell expansion**: Environment variables expanded (see [Environment Variable Handling](#environment-variable-handling))
-3. **Lua evaluation**: `!lua` and `!lua_file` tags executed, return values substituted
+2. **Shell expansion**: Environment variables expanded (see [Environment Variables](environment-variables.md))
+3. **Lua evaluation**: `!lua` and `!lua_file` tags executed, return values substituted (see [Lua Scripting](lua-scripting.md))
 4. **Snapshot creation**: Final expanded config saved as `expanded_config.yaml`
 
 Once baked, the snapshot is immutable. Services always run using the baked snapshot, never the original config file.
@@ -215,6 +225,8 @@ Services emit events at the following lifecycle points:
 | `Healthy` | When service transitions to healthy |
 | `Unhealthy` | When service transitions to unhealthy |
 
+See [Service Lifecycle](service-lifecycle.md) for state transitions, and [Hooks](hooks.md) for lifecycle hooks.
+
 ### Restart Reasons
 
 When a service restarts, the event includes the reason:
@@ -230,18 +242,11 @@ When a service restarts, the event includes the reason:
 
 Each service has a dedicated SPSC (Single Producer, Single Consumer) event channel:
 
-```
-┌─────────────┐                            ┌──────────────────────┐
-│  Service A  │ ──► [SPSC A (cap: 100)] ──►│                      │
-└─────────────┘                            │                      │
-                                           │    Orchestrator      │
-┌─────────────┐                            │                      │
-│  Service B  │ ──► [SPSC B (cap: 100)] ──►│   - Event handling   │
-└─────────────┘                            │   - Restart prop.    │
-                                           │                      │
-┌─────────────┐                            │                      │
-│  Service C  │ ──► [SPSC C (cap: 100)] ──►│                      │
-└─────────────┘                            └──────────────────────┘
+```mermaid
+flowchart LR
+    A[Service A] -- "SPSC A (cap: 100)" --> O[Orchestrator]
+    B[Service B] -- "SPSC B (cap: 100)" --> O
+    C[Service C] -- "SPSC C (cap: 100)" --> O
 ```
 
 **Benefits:**
@@ -263,6 +268,8 @@ Each service has a dedicated SPSC (Single Producer, Single Consumer) event chann
 
 Kepler supports Docker Compose-compatible dependency configuration with conditions, timeouts, and restart propagation.
 
+For user-facing documentation, see [Dependencies](dependencies.md).
+
 ### Dependency Conditions
 
 Services can specify conditions that must be met before starting:
@@ -273,8 +280,8 @@ Services can specify conditions that must be met before starting:
 | `service_healthy` | Dependency status is Healthy (requires healthcheck) |
 | `service_completed_successfully` | Dependency exited with code 0 |
 | `service_unhealthy` | Dependency was Healthy then became Unhealthy (requires healthcheck) |
-| `service_failed` | Dependency exited with non-zero code. Optional `exit_code` filter |
-| `service_stopped` | Dependency is Stopped or Failed. Optional `exit_code` filter |
+| `service_failed` | Dependency failed: Exited with non-zero code, Killed by signal, or Failed (spawn error). Optional `exit_code` filter |
+| `service_stopped` | Dependency is Stopped, Exited, Killed, or Failed. Optional `exit_code` filter |
 
 ### Dependency Waiting
 
@@ -299,7 +306,7 @@ flowchart TD
 ```
 
 A dependency is **permanently unsatisfied** when:
-1. The dependency service is in a terminal state (Stopped or Failed)
+1. The dependency service is in a terminal state (Stopped, Exited, Killed, or Failed)
 2. Its restart policy won't restart it (e.g., `restart: no` or `restart: on-failure` with exit code 0)
 3. The condition is not currently satisfied
 
@@ -350,6 +357,8 @@ When the database restarts:
 2. System waits for database to become healthy
 3. Backend is restarted
 
+See [Dependencies](dependencies.md) for the full user-facing reference.
+
 ### Configuration Format
 
 Kepler supports both simple and extended dependency formats:
@@ -378,6 +387,8 @@ When starting a configuration, Kepler needs to decide which services to wait for
 
 - **Startup cluster** (`effective_wait = true`): Services started level-by-level, blocking the CLI until ready
 - **Deferred cluster** (`effective_wait = false`): Services spawned in background, CLI returns immediately
+
+See [Service Lifecycle](service-lifecycle.md) for how startup/deferred clusters affect start modes.
 
 #### Topological Sort
 
@@ -579,7 +590,8 @@ flowchart TD
     in background"]
     FGDeferred --> FGLogs["Follow logs until quiescent"]
     FGLogs --> FGExit["Exit when all services
-    are terminal (stopped/failed)"]
+    are terminal
+    (stopped/exited/killed/failed)"]
 
     style Detached fill:#69b,color:#fff
     style StartupCluster fill:#4a9,color:#fff
@@ -619,6 +631,8 @@ Kepler supports shell-style variable expansion:
 | `${VAR:+value}` | Conditional value (use if VAR is set) |
 | `~` | Home directory expansion |
 
+See [Variable Expansion](variable-expansion.md) for the user-facing reference.
+
 ### Three-Stage Expansion
 
 Shell expansion happens in three stages, each building on the previous context:
@@ -644,6 +658,8 @@ flowchart TD
 | 1 | `env_file` path | System environment only |
 | 2 | `environment` array entries | System env + env_file variables |
 | 3 | `working_dir`, `user`, `group`, `limits.memory`, `restart.watch` | System env + env_file + environment array |
+
+See [Environment Variables](environment-variables.md) for the full reference.
 
 ### What is NOT Expanded
 
@@ -679,6 +695,8 @@ Higher priority values override lower priority ones when keys conflict.
 ### Luau Sandbox
 
 Kepler uses the `mlua` crate with Luau for config templating. Luau is a sandboxed Lua 5.1 derivative designed for secure embedded scripting.
+
+For user-facing documentation, see [Lua Scripting](lua-scripting.md).
 
 ### Sandboxed Standard Library
 
@@ -769,6 +787,8 @@ The daemon must run as root. This is enforced unconditionally on startup — the
 - Create and chown the state directory and socket to `root:kepler`
 - Set resource limits on spawned processes
 
+For user-facing documentation, see [Privilege Dropping](privilege-dropping.md) and [Security Model](security-model.md).
+
 ### Privilege Dropping
 
 Services can run as specific user/group:
@@ -780,6 +800,8 @@ Services can run as specific user/group:
 ### Environment Isolation
 
 Services receive a controlled environment built from: (1) system environment, (2) env_file variables, (3) service-defined environment - with later sources overriding earlier ones.
+
+See [Environment Variables](environment-variables.md) for the full reference.
 
 ### Resource Limits
 
@@ -813,7 +835,9 @@ Logs are stored in the config's state directory under `logs/`:
 └── service-name.stderr.log    # Standard error
 ```
 
-Each service has two log files: one for stdout and one for stderr. Log files are timestamped line-by-line with microsecond precision.
+Each service has two log files: one for stdout and one for stderr. Log files are timestamped line-by-line with millisecond precision.
+
+For user-facing documentation, see [Log Management](log-management.md).
 
 ### Log Size Management
 
@@ -843,15 +867,12 @@ Trade-offs:
 
 Log retrieval uses server-side cursors for efficient streaming:
 
-```
-CLI                              Daemon
- |                                  |
- |-- LogsCursor(cursor_id: None) -->|  Create cursor
- |<-- (entries, cursor_id, more) ---|
- |                                  |
- |-- LogsCursor(cursor_id: X) ----->|  Continue reading
- |<-- (entries, cursor_id, more) ---|
- |                                  |
+```mermaid
+sequenceDiagram
+    CLI->>Daemon: LogsCursor(cursor_id: None)
+    Daemon-->>CLI: (entries, cursor_id, more)
+    CLI->>Daemon: LogsCursor(cursor_id: X)
+    Daemon-->>CLI: (entries, cursor_id, more)
 ```
 
 **Cursor features:**
@@ -897,3 +918,14 @@ CLI                              Daemon
 | Log writing | `kepler-daemon/src/logs/writer.rs` | Buffered log writer with truncation |
 | Log reading | `kepler-daemon/src/logs/reader.rs` | Log file reader with merged iterators |
 | Log cursors | `kepler-daemon/src/cursor.rs` | Server-side cursor management for streaming |
+
+---
+
+## See Also
+
+- [Documentation Index](README.md) -- All documentation pages
+- [Configuration](configuration.md) -- YAML config reference
+- [Service Lifecycle](service-lifecycle.md) -- Status states and start modes
+- [Dependencies](dependencies.md) -- Dependency conditions and ordering
+- [Security Model](security-model.md) -- Root, kepler group, and auth
+- [Protocol](protocol.md) -- Multiplexed IPC reference

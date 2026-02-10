@@ -9,13 +9,9 @@ services:
   init-container:
     command: ["sh", "-c", "echo INIT_STARTED; sleep 0.5; echo INIT_COMPLETED; exit 0"]
     restart: no
-    logs:
-      timestamp: true
 
   app:
     command: ["sh", "-c", "echo APP_STARTED; sleep 300"]
     depends_on:
       init-container:
         condition: service_completed_successfully
-    logs:
-      timestamp: true

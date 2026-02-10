@@ -353,7 +353,6 @@ fn test_log_config_parsing() {
     let yaml = r#"
 kepler:
   logs:
-    timestamp: true
     retention:
       on_stop: retain
       on_start: clear
@@ -361,7 +360,6 @@ services:
   test:
     command: ["sleep", "3600"]
     logs:
-      timestamp: false
       retention:
         on_restart: retain
 "#;
@@ -372,12 +370,10 @@ services:
     use kepler_daemon::config::LogRetention;
 
     let global_logs = config.global_logs().unwrap();
-    assert_eq!(global_logs.timestamp, Some(true));
     assert_eq!(global_logs.get_on_stop(), Some(LogRetention::Retain));
     assert_eq!(global_logs.get_on_start(), Some(LogRetention::Clear));
 
     let service_logs = config.services["test"].logs.as_ref().unwrap();
-    assert_eq!(service_logs.timestamp, Some(false)); // Explicitly set to false
     assert_eq!(service_logs.get_on_restart(), Some(LogRetention::Retain));
 }
 

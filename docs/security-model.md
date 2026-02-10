@@ -1,0 +1,154 @@
+# Security Model
+
+Kepler's security design: root requirement, group-based access, environment isolation, and sandboxing.
+
+## Table of Contents
+
+- [Root Requirement](#root-requirement)
+- [The kepler Group](#the-kepler-group)
+- [Socket Security](#socket-security)
+- [State Directory Security](#state-directory-security)
+- [Environment Isolation](#environment-isolation)
+- [Lua Sandbox](#lua-sandbox)
+- [Privilege Dropping](#privilege-dropping)
+
+---
+
+## Root Requirement
+
+The daemon must run as root. This is enforced unconditionally on startup -- the daemon exits with an error if not running as root.
+
+Root is required to:
+- **Drop privileges** per-service (`setuid`/`setgid` to configured `user`/`group`)
+- **Create and chown** the state directory and socket to `root:kepler`
+- **Set resource limits** on spawned processes (`setrlimit`)
+
+```bash
+sudo kepler daemon start -d    # Must be root
+```
+
+---
+
+## The `kepler` Group
+
+CLI access to the daemon is controlled via the `kepler` group:
+
+- The install script creates the `kepler` group if it doesn't exist
+- Users must be members of the `kepler` group to communicate with the daemon
+- Root users always have access regardless of group membership
+
+### Adding Users
+
+```bash
+sudo usermod -aG kepler username    # Add to kepler group
+# User must log out and back in for changes to take effect
+```
+
+### Verifying Membership
+
+```bash
+groups    # Should include "kepler"
+```
+
+---
+
+## Socket Security
+
+The daemon creates a Unix domain socket with strict permissions:
+
+- **Path**: `/var/lib/kepler/kepler.sock`
+- **Permissions**: `0o660` (`rw-rw----`)
+- **Ownership**: `root:kepler`
+
+### Peer Credential Verification
+
+Every connection is verified using Unix peer credentials:
+
+1. Client connects to the socket
+2. Daemon reads peer credentials via `peer_cred()`
+3. **Root clients** (UID 0) are always allowed
+4. **Other clients** are checked for `kepler` group membership:
+   - Primary GID is checked
+   - Supplementary groups are read from `/proc/<pid>/status`
+5. Clients not in the kepler group are rejected
+
+This ensures that only authorized users can issue commands to the daemon.
+
+---
+
+## State Directory Security
+
+The daemon state directory is secured:
+
+- **Path**: `/var/lib/kepler/` (or `$KEPLER_DAEMON_PATH`)
+- **Permissions**: `0o770` (`rwxrwx---`)
+- **Ownership**: `root:kepler`
+- **Daemon umask**: `0o007` on startup
+
+The umask ensures all files and directories created by the daemon are group-accessible (`root:kepler`) but not world-readable.
+
+Contents:
+- `kepler.sock` -- Unix domain socket (`0o660`)
+- `kepler.pid` -- Daemon PID file (`0o660`)
+- `configs/` -- Per-config state directories
+
+---
+
+## Environment Isolation
+
+By default, Kepler clears the environment before starting services (`sys_env: clear`). This prevents unintended leakage of sensitive environment variables:
+
+- `AWS_SECRET_KEY`, `API_TOKENS`, etc. from your shell are NOT passed to services
+- Only explicitly configured `environment` entries and `env_file` variables are available
+- System env vars captured at config load time are available for variable expansion but not passed to processes
+
+Use `sys_env: inherit` only for apps that require the full system environment.
+
+See [Environment Variables](environment-variables.md) for details.
+
+---
+
+## Lua Sandbox
+
+Kepler's Lua scripting uses a sandboxed Luau runtime with restricted capabilities:
+
+**Restricted:**
+- No filesystem access (`io` library removed)
+- No command execution (`os.execute` removed)
+- No network access
+- No debug library
+- No native library loading
+
+**Protected:**
+- Environment tables (`ctx.env`, `ctx.sys_env`, `ctx.env_file`) are frozen via metatable proxies
+- Writes to frozen tables raise runtime errors
+- Metatables are protected from removal
+
+Lua scripts are evaluated once during config baking -- they do not run at service runtime.
+
+See [Lua Scripting](lua-scripting.md) for details.
+
+---
+
+## Privilege Dropping
+
+Services can run as specific users/groups:
+
+- Daemon spawns `kepler-exec` wrapper (still as root)
+- `kepler-exec` drops privileges via `setgid()` + `setuid()`
+- Resource limits applied via `setrlimit()`
+- Service process runs as the target user
+
+Hooks inherit the service's user by default, with per-hook override capability.
+
+See [Privilege Dropping](privilege-dropping.md) for details.
+
+---
+
+## See Also
+
+- [Privilege Dropping](privilege-dropping.md) -- User/group and resource limits
+- [Environment Variables](environment-variables.md) -- Environment isolation
+- [Lua Scripting](lua-scripting.md) -- Sandbox restrictions
+- [Architecture](architecture.md#socket-security) -- Internal implementation
+- [Testing](testing.md) -- Test environment setup

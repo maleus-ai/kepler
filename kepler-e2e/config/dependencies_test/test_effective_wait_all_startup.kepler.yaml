@@ -14,21 +14,15 @@ services:
       timeout: 1s
       retries: 1
       start_period: 0s
-    logs:
-      timestamp: true
 
   backend:
     command: ["sh", "-c", "echo BACKEND_STARTED; sleep 300"]
     depends_on:
       database:
         condition: service_healthy
-    logs:
-      timestamp: true
 
   frontend:
     command: ["sh", "-c", "echo FRONTEND_STARTED; sleep 300"]
     depends_on:
       backend:
         condition: service_started
-    logs:
-      timestamp: true

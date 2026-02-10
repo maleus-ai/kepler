@@ -129,7 +129,6 @@ fn test_kepler_namespace_full_config() {
 kepler:
   sys_env: inherit
   logs:
-    timestamp: true
     retention:
       pre_stop: retain
       pre_start: retain
@@ -162,7 +161,6 @@ services:
     // Verify logs
     assert!(kepler.logs.is_some(), "kepler.logs should exist");
     let logs = kepler.logs.as_ref().unwrap();
-    assert_eq!(logs.timestamp, Some(true));
     assert!(logs.max_size.is_some(), "max_size config should exist");
     assert_eq!(logs.max_size, Some("10M".to_string()));
 

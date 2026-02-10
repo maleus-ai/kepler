@@ -9,13 +9,9 @@ services:
   worker:
     command: ["sh", "-c", "echo WORKER_STARTED; sleep 0.5; echo WORKER_DONE; exit 0"]
     restart: no
-    logs:
-      timestamp: true
 
   cleanup:
     command: ["sh", "-c", "echo CLEANUP_STARTED; sleep 300"]
     depends_on:
       worker:
         condition: service_stopped
-    logs:
-      timestamp: true

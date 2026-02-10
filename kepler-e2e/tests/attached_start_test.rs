@@ -148,9 +148,12 @@ async fn test_recreate_returns_immediately() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that `kepler restart` (no -d) blocks following logs
+/// Test that `kepler restart` (no -d) exits once the restart completes.
+/// During restart, services pass through "stopped" which is terminal — the log
+/// follower exits, and `tokio::join!` waits for the restart command to finish.
+/// This matches Docker Compose behavior (`docker compose up` exits on restart).
 #[tokio::test]
-async fn test_restart_attached_blocks() -> E2eResult<()> {
+async fn test_restart_attached_completes() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_start_attached")?;
 
@@ -162,23 +165,24 @@ async fn test_restart_attached_blocks() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
         .await?;
 
-    // Restart in attached mode with a 3s timeout — should time out because it follows logs
-    let result = harness
+    // Restart in attached mode — should return once services pass through "stopped"
+    let output = harness
         .run_cli_with_timeout(
             &[
                 "-f",
                 config_path.to_str().unwrap(),
                 "restart",
             ],
-            Duration::from_secs(3),
+            Duration::from_secs(10),
         )
-        .await;
+        .await?;
 
-    assert!(
-        result.is_err(),
-        "Attached restart should block and time out, but it returned: {:?}",
-        result
-    );
+    output.assert_success();
+
+    // Service should be running again after restart
+    harness
+        .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
+        .await?;
 
     // Cleanup
     let _ = harness.stop_services(&config_path).await;

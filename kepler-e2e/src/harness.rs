@@ -947,6 +947,7 @@ fn status_to_display_pattern(status: &str) -> &str {
         "stopped" => "Stopped",
         "exited" => "Exited",
         "failed" => "Failed",
+        "killed" => "Killed",
         "starting" => "Starting",
         "stopping" => "Stopping",
         // Fallback: use the status as-is (for forward compatibility)

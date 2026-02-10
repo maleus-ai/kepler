@@ -478,8 +478,6 @@ mod tests {
         let yaml = r#"
 kepler:
   sys_env: inherit
-  logs:
-    timestamp: true
   hooks:
     on_init:
       run: echo "init"
@@ -497,17 +495,12 @@ services:
         // Check sys_env
         assert_eq!(kepler.sys_env, Some(SysEnvPolicy::Inherit));
 
-        // Check logs
-        assert!(kepler.logs.is_some());
-        assert_eq!(kepler.logs.as_ref().unwrap().timestamp, Some(true));
-
         // Check hooks
         assert!(kepler.hooks.is_some());
         assert!(kepler.hooks.as_ref().unwrap().on_init.is_some());
 
         // Check accessor methods
         assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));
-        assert!(config.global_logs().is_some());
         assert!(config.global_hooks().is_some());
     }
 

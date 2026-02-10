@@ -12,10 +12,11 @@ pub enum ServiceStatus {
     Starting,
     Running,
     Stopping,
-    Failed,
+    Failed,    // Spawn failure or dependency permanently unsatisfied
     Healthy,   // Running + health checks passing
     Unhealthy, // Running but health checks failing
-    Exited,    // Process exited naturally (exit code 0)
+    Exited,    // Process exited naturally (any exit code)
+    Killed,    // Process killed by signal
 }
 
 impl ServiceStatus {
@@ -29,6 +30,7 @@ impl ServiceStatus {
             ServiceStatus::Healthy => "healthy",
             ServiceStatus::Unhealthy => "unhealthy",
             ServiceStatus::Exited => "exited",
+            ServiceStatus::Killed => "killed",
         }
     }
 
@@ -141,6 +143,7 @@ pub enum PersistedServiceStatus {
     Healthy,
     Unhealthy,
     Exited,
+    Killed,
 }
 
 impl From<ServiceStatus> for PersistedServiceStatus {
@@ -154,6 +157,7 @@ impl From<ServiceStatus> for PersistedServiceStatus {
             ServiceStatus::Healthy => PersistedServiceStatus::Healthy,
             ServiceStatus::Unhealthy => PersistedServiceStatus::Unhealthy,
             ServiceStatus::Exited => PersistedServiceStatus::Exited,
+            ServiceStatus::Killed => PersistedServiceStatus::Killed,
         }
     }
 }
@@ -169,6 +173,7 @@ impl From<PersistedServiceStatus> for ServiceStatus {
             PersistedServiceStatus::Healthy => ServiceStatus::Healthy,
             PersistedServiceStatus::Unhealthy => ServiceStatus::Unhealthy,
             PersistedServiceStatus::Exited => ServiceStatus::Exited,
+            PersistedServiceStatus::Killed => ServiceStatus::Killed,
         }
     }
 }
@@ -269,6 +274,29 @@ mod tests {
     }
 
     #[test]
+    fn test_killed_status_as_str() {
+        assert_eq!(ServiceStatus::Killed.as_str(), "killed");
+    }
+
+    #[test]
+    fn test_killed_is_not_running() {
+        assert!(!ServiceStatus::Killed.is_running());
+    }
+
+    #[test]
+    fn test_killed_display() {
+        assert_eq!(format!("{}", ServiceStatus::Killed), "killed");
+    }
+
+    #[test]
+    fn test_persisted_status_roundtrip_killed() {
+        let persisted: PersistedServiceStatus = ServiceStatus::Killed.into();
+        assert_eq!(persisted, PersistedServiceStatus::Killed);
+        let back: ServiceStatus = persisted.into();
+        assert_eq!(back, ServiceStatus::Killed);
+    }
+
+    #[test]
     fn test_persisted_status_roundtrip_exited() {
         let persisted: PersistedServiceStatus = ServiceStatus::Exited.into();
         assert_eq!(persisted, PersistedServiceStatus::Exited);
@@ -287,6 +315,7 @@ mod tests {
             ServiceStatus::Healthy,
             ServiceStatus::Unhealthy,
             ServiceStatus::Exited,
+            ServiceStatus::Killed,
         ];
         for status in variants {
             let persisted: PersistedServiceStatus = status.into();
@@ -330,7 +359,7 @@ mod tests {
     fn test_persisted_state_signal_roundtrip() {
         let now = Utc::now();
         let state = ServiceState {
-            status: ServiceStatus::Failed,
+            status: ServiceStatus::Killed,
             pid: None,
             started_at: None,
             stopped_at: Some(now),
@@ -351,7 +380,7 @@ mod tests {
         let restored = persisted.to_service_state(HashMap::new(), PathBuf::new());
         assert_eq!(restored.signal, Some(9));
         assert!(restored.exit_code.is_none());
-        assert_eq!(restored.status, ServiceStatus::Failed);
+        assert_eq!(restored.status, ServiceStatus::Killed);
     }
 
     #[test]
@@ -395,9 +424,9 @@ mod tests {
     }
 
     #[test]
-    fn test_persisted_state_json_failed_with_signal() {
+    fn test_persisted_state_json_killed_with_signal() {
         let json = r#"{
-            "status": "failed",
+            "status": "killed",
             "pid": null,
             "started_at": null,
             "stopped_at": 1700000000,
@@ -409,7 +438,7 @@ mod tests {
             "was_healthy": true
         }"#;
         let persisted: PersistedServiceState = serde_json::from_str(json).unwrap();
-        assert_eq!(persisted.status, PersistedServiceStatus::Failed);
+        assert_eq!(persisted.status, PersistedServiceStatus::Killed);
         assert_eq!(persisted.signal, Some(9));
         assert!(persisted.exit_code.is_none());
         assert!(persisted.was_healthy);
@@ -445,7 +474,7 @@ mod tests {
     fn test_service_info_from_signal_killed_state() {
         let now = Utc::now();
         let state = ServiceState {
-            status: ServiceStatus::Failed,
+            status: ServiceStatus::Killed,
             pid: None,
             started_at: None,
             stopped_at: Some(now),
@@ -460,7 +489,7 @@ mod tests {
         };
 
         let info = state.to_service_info();
-        assert_eq!(info.status, "failed");
+        assert_eq!(info.status, "killed");
         assert_eq!(info.signal, Some(15));
         assert_eq!(info.stopped_at, Some(now.timestamp()));
         assert!(info.exit_code.is_none());

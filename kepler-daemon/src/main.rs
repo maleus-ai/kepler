@@ -78,15 +78,13 @@ async fn main() -> anyhow::Result<()> {
             .mode(0o770)
             .create(&state_dir)?;
 
-        // chown state dir to root:kepler (skip in test mode)
-        if std::env::var("KEPLER_DAEMON_PATH").is_err() {
-            let kepler_gid = resolve_kepler_group_gid()?;
-            nix::unistd::chown(
-                &state_dir,
-                Some(nix::unistd::Uid::from_raw(0)),
-                Some(nix::unistd::Gid::from_raw(kepler_gid)),
-            )?;
-        }
+        // chown state dir to root:kepler
+        let kepler_gid = resolve_kepler_group_gid()?;
+        nix::unistd::chown(
+            &state_dir,
+            Some(nix::unistd::Uid::from_raw(0)),
+            Some(nix::unistd::Gid::from_raw(kepler_gid)),
+        )?;
     }
     #[cfg(not(unix))]
     {

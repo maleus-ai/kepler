@@ -5,5 +5,3 @@ kepler:
 services:
   log-timestamp-service:
     command: ["sh", "-c", "echo TIMESTAMP_LOG_MESSAGE; sleep 300"]
-    logs:
-      timestamp: true

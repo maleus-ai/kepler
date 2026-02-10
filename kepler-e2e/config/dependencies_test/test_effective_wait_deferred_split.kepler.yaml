@@ -18,21 +18,15 @@ services:
       timeout: 1s
       retries: 1
       start_period: 0s
-    logs:
-      timestamp: true
 
   app:
     command: ["sh", "-c", "echo APP_STARTED; sleep 300"]
     depends_on:
       database:
         condition: service_healthy
-    logs:
-      timestamp: true
 
   monitor:
     command: ["sh", "-c", "echo MONITOR_STARTED; sleep 300"]
     depends_on:
       database:
         condition: service_failed
-    logs:
-      timestamp: true
