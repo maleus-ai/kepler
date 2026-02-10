@@ -148,12 +148,11 @@ async fn test_recreate_returns_immediately() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that `kepler restart` (no -d) exits once the restart completes.
-/// During restart, services pass through "stopped" which is terminal — the log
-/// follower exits, and `tokio::join!` waits for the restart command to finish.
-/// This matches Docker Compose behavior (`docker compose up` exits on restart).
+/// Test that `kepler restart` (no -d) blocks following logs after restart.
+/// Progress bars show the stop+start lifecycle, then log following begins
+/// and blocks until quiescence or Ctrl+C — same behavior as `kepler start`.
 #[tokio::test]
-async fn test_restart_attached_completes() -> E2eResult<()> {
+async fn test_restart_attached_blocks() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_start_attached")?;
 
@@ -165,21 +164,27 @@ async fn test_restart_attached_completes() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
         .await?;
 
-    // Restart in attached mode — should return once services pass through "stopped"
-    let output = harness
+    // Restart in attached mode with a short timeout — should time out because it
+    // follows logs after the restart completes (same as attached start)
+    let result = harness
         .run_cli_with_timeout(
             &[
                 "-f",
                 config_path.to_str().unwrap(),
                 "restart",
             ],
-            Duration::from_secs(10),
+            Duration::from_secs(5),
         )
-        .await?;
+        .await;
 
-    output.assert_success();
+    // The command should have timed out (proving it blocks/follows logs)
+    assert!(
+        result.is_err(),
+        "Attached restart should block and time out, but it returned: {:?}",
+        result
+    );
 
-    // Service should be running again after restart
+    // Service should still be running after restart
     harness
         .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
         .await?;

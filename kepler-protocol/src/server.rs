@@ -85,6 +85,11 @@ impl ProgressSender {
             let _ = self.write_tx.send(bytes).await;
         }
     }
+
+    /// Wait until the client disconnects (the write channel is closed).
+    pub async fn closed(&self) {
+        self.write_tx.closed().await
+    }
 }
 
 pub struct Server<F, Fut>

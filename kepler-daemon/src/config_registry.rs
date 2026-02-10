@@ -68,9 +68,8 @@ impl ConfigRegistry {
             .or_insert_with(|| Arc::new(OnceCell::new()))
             .clone();
 
-        // If already initialized, reload config and return
+        // If already initialized, return existing handle (config is immutable once baked)
         if let Some(handle) = cell.get() {
-            let _ = handle.reload_config().await;
             return Ok(handle.clone());
         }
 

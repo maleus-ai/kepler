@@ -7,7 +7,7 @@ use kepler_daemon::process::{kill_process_by_pid, parse_signal_name, validate_ru
 use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_daemon::Daemon;
-use kepler_protocol::protocol::{Request, Response, ResponseData};
+use kepler_protocol::protocol::{ProgressEvent, Request, Response, ResponseData, ServicePhase, ServiceTarget};
 use kepler_protocol::server::{ProgressSender, Server};
 use std::collections::HashMap;
 use std::fs;
@@ -235,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
             // Stop all services
             let config_paths = registry.list_paths();
             for config_path in config_paths {
-                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None, None).await {
+                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
                     error!("Error stopping services during shutdown: {}", e);
                 }
             }
@@ -269,7 +269,7 @@ async fn handle_request(
             let config_paths = registry.list_paths();
 
             for config_path in config_paths {
-                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None, None).await {
+                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
                     error!("Error stopping services during shutdown: {}", e);
                 }
             }
@@ -286,14 +286,13 @@ async fn handle_request(
             config_path,
             service,
             sys_env,
-            mode,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
             match orchestrator
-                .start_services(&config_path, service.as_deref(), sys_env, mode, Some(progress))
+                .start_services(&config_path, service.as_deref(), sys_env)
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -322,10 +321,117 @@ async fn handle_request(
                 }
                 None => None,
             };
-            match orchestrator
-                .stop_services(&config_path, service.as_deref(), clean, signal_num, Some(progress))
-                .await
-            {
+
+            // Get handle + config for progress tracking
+            let progress_handle = registry.get(&config_path);
+            let (tracked_services, state_rx) = match &progress_handle {
+                Some(handle) => {
+                    let config = handle.get_config().await;
+                    let rx = handle.subscribe_state_changes();
+                    match config {
+                        Some(cfg) => {
+                            // Determine which services to track
+                            let all_services: Vec<String> = match &service {
+                                Some(name) => {
+                                    if cfg.services.contains_key(name) {
+                                        vec![name.clone()]
+                                    } else {
+                                        vec![]
+                                    }
+                                }
+                                None => cfg.services.keys().cloned().collect(),
+                            };
+                            // Filter to only active services
+                            let mut active = Vec::new();
+                            for svc in &all_services {
+                                let is_active = handle
+                                    .get_service_state(svc)
+                                    .await
+                                    .map(|s| s.status.is_active())
+                                    .unwrap_or(false);
+                                if is_active {
+                                    active.push(svc.clone());
+                                }
+                            }
+                            (active, Some(rx))
+                        }
+                        None => (Vec::new(), Some(rx)),
+                    }
+                }
+                None => (Vec::new(), None),
+            };
+
+            // Send initial Stopping phase for each active service (creates all bars upfront)
+            for svc in &tracked_services {
+                progress.send(ProgressEvent {
+                    service: svc.clone(),
+                    phase: ServicePhase::Stopping,
+                }).await;
+            }
+
+            // Spawn forwarding task to relay broadcast state changes as ProgressEvents
+            let fwd_task = if let Some(mut state_rx) = state_rx {
+                let fwd_progress = progress.clone();
+                let fwd_services = tracked_services.clone();
+                let fwd_clean = clean;
+                Some(tokio::spawn(async move {
+                    loop {
+                        match state_rx.recv().await {
+                            Ok(change) => {
+                                if !fwd_services.contains(&change.service) {
+                                    continue;
+                                }
+                                // When clean=true, skip Stopped events to keep bar active for Cleaning
+                                if fwd_clean && change.status == ServiceStatus::Stopped {
+                                    continue;
+                                }
+                                let phase = match change.status {
+                                    ServiceStatus::Stopping => ServicePhase::Stopping,
+                                    ServiceStatus::Stopped => ServicePhase::Stopped,
+                                    _ => continue,
+                                };
+                                fwd_progress.send(ProgressEvent {
+                                    service: change.service,
+                                    phase,
+                                }).await;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }))
+            } else {
+                None
+            };
+
+            // Run stop_services (blocks until done including cleanup)
+            let result = orchestrator
+                .stop_services(&config_path, service.as_deref(), clean, signal_num)
+                .await;
+
+            // Brief sleep to drain remaining broadcast events, then abort forwarding task
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Some(task) = fwd_task {
+                task.abort();
+            }
+
+            // If clean, send Cleaning → Cleaned for each tracked service
+            if clean {
+                for svc in &tracked_services {
+                    progress.send(ProgressEvent {
+                        service: svc.clone(),
+                        phase: ServicePhase::Cleaning,
+                    }).await;
+                }
+                for svc in &tracked_services {
+                    progress.send(ProgressEvent {
+                        service: svc.clone(),
+                        phase: ServicePhase::Cleaned,
+                    }).await;
+                }
+            }
+
+            match result {
                 Ok(msg) => Response::ok_with_message(msg),
                 Err(e) => Response::error(e.to_string()),
             }
@@ -335,33 +441,105 @@ async fn handle_request(
             config_path,
             services,
             sys_env,
-            detach,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
 
-            if detach {
-                let orchestrator = orchestrator.clone();
-                let config_path_clone = config_path.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = orchestrator
-                        .restart_services(&config_path_clone, &services, sys_env, None)
-                        .await
-                    {
-                        tracing::error!("Background restart failed: {}", e);
+            // Get handle + config for progress tracking
+            let progress_handle = registry.get(&config_path);
+            let (tracked_services, state_rx) = match &progress_handle {
+                Some(handle) => {
+                    let config = handle.get_config().await;
+                    let rx = handle.subscribe_state_changes();
+                    match config {
+                        Some(cfg) => {
+                            // Determine which services to track
+                            let all_services: Vec<String> = if services.is_empty() {
+                                cfg.services.keys().cloned().collect()
+                            } else {
+                                services.iter()
+                                    .filter(|s| cfg.services.contains_key(*s))
+                                    .cloned()
+                                    .collect()
+                            };
+                            // Filter to only active services (those that will be restarted)
+                            let mut active = Vec::new();
+                            for svc in &all_services {
+                                let is_active = handle
+                                    .get_service_state(svc)
+                                    .await
+                                    .map(|s| s.status.is_active())
+                                    .unwrap_or(false);
+                                if is_active {
+                                    active.push(svc.clone());
+                                }
+                            }
+                            (active, Some(rx))
+                        }
+                        None => (Vec::new(), Some(rx)),
                     }
-                });
-                Response::ok_with_message("Restarting services in background".to_string())
-            } else {
-                match orchestrator
-                    .restart_services(&config_path, &services, sys_env, Some(progress))
-                    .await
-                {
-                    Ok(msg) => Response::ok_with_message(msg),
-                    Err(e) => Response::error(e.to_string()),
                 }
+                None => (Vec::new(), None),
+            };
+
+            // Send initial Stopping phase for each active service
+            for svc in &tracked_services {
+                progress.send(ProgressEvent {
+                    service: svc.clone(),
+                    phase: ServicePhase::Stopping,
+                }).await;
+            }
+
+            // Spawn forwarding task to relay broadcast state changes as ProgressEvents
+            let fwd_task = if let Some(mut state_rx) = state_rx {
+                let fwd_progress = progress.clone();
+                let fwd_services = tracked_services.clone();
+                Some(tokio::spawn(async move {
+                    loop {
+                        match state_rx.recv().await {
+                            Ok(change) => {
+                                if !fwd_services.contains(&change.service) {
+                                    continue;
+                                }
+                                let phase = match change.status {
+                                    ServiceStatus::Stopping => ServicePhase::Stopping,
+                                    ServiceStatus::Stopped => ServicePhase::Stopped,
+                                    ServiceStatus::Starting => ServicePhase::Starting,
+                                    ServiceStatus::Running => ServicePhase::Started,
+                                    ServiceStatus::Healthy => ServicePhase::Healthy,
+                                    ServiceStatus::Failed => ServicePhase::Failed { message: "failed".to_string() },
+                                    _ => continue,
+                                };
+                                fwd_progress.send(ProgressEvent {
+                                    service: change.service,
+                                    phase,
+                                }).await;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }))
+            } else {
+                None
+            };
+
+            // Run restart_services (blocks until done)
+            let result = orchestrator
+                .restart_services(&config_path, &services, sys_env)
+                .await;
+
+            // Brief sleep to drain remaining broadcast events, then abort forwarding task
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Some(task) = fwd_task {
+                task.abort();
+            }
+
+            match result {
+                Ok(msg) => Response::ok_with_message(msg),
+                Err(e) => Response::error(e.to_string()),
             }
         }
 
@@ -442,7 +620,7 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
             // Stop all services first
-            if let Err(e) = orchestrator.stop_services(&config_path, None, false, None, None).await {
+            if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
                 return Response::error(format!("Failed to stop services: {}", e));
             }
 
@@ -563,6 +741,98 @@ async fn handle_request(
                 Err(e) => Response::error(e.to_string()),
             }
         }
+
+        Request::Subscribe {
+            config_path,
+            services,
+        } => {
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+
+            // Wait for config to be loaded (may be loading concurrently from a Start request)
+            let handle = {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                loop {
+                    if let Some(h) = registry.get(&config_path) {
+                        break h;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Response::error("Config not loaded");
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                        _ = progress.closed() => return Response::error("Client disconnected"),
+                    }
+                }
+            };
+
+            let config = match handle.get_config().await {
+                Some(c) => c,
+                None => return Response::error("Config not loaded"),
+            };
+
+            // Send initial snapshot as ProgressEvents
+            for (name, svc_config) in &config.services {
+                if services.as_ref().is_none_or(|s| s.contains(name)) {
+                    let state = handle.get_service_state(name).await;
+                    let has_hc = svc_config.healthcheck.is_some();
+                    let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
+                    let phase = status_to_phase(state.as_ref().map(|s| s.status), target);
+                    // During initial snapshot, services not yet reached by the start
+                    // operation are still in their previous terminal state — show as
+                    // Waiting (they'll transition to Starting once deps are met).
+                    let phase = match phase {
+                        ServicePhase::Stopped | ServicePhase::Failed { .. } => ServicePhase::Waiting,
+                        other => other,
+                    };
+                    progress.send(ProgressEvent {
+                        service: name.clone(),
+                        phase,
+                    }).await;
+                }
+            }
+
+            // Stream state changes until client disconnects
+            let mut rx = handle.subscribe_state_changes();
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        match event {
+                            Ok(change) if services.as_ref().is_none_or(|s| s.contains(&change.service)) => {
+                                let has_hc = config.services.get(&change.service)
+                                    .is_some_and(|s| s.healthcheck.is_some());
+                                let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
+                                progress.send(ProgressEvent {
+                                    service: change.service,
+                                    phase: status_to_phase(Some(change.status), target),
+                                }).await;
+                            }
+                            Ok(_) => {} // filtered out
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                    _ = progress.closed() => break, // Client disconnected
+                }
+            }
+            Response::ok_with_message("Subscription ended")
+        }
+    }
+}
+
+/// Map ServiceStatus to ServicePhase for Subscribe events
+fn status_to_phase(status: Option<ServiceStatus>, target: ServiceTarget) -> ServicePhase {
+    match status {
+        None => ServicePhase::Pending { target },
+        Some(ServiceStatus::Starting) => ServicePhase::Starting,
+        Some(ServiceStatus::Running) => ServicePhase::Started,
+        Some(ServiceStatus::Healthy) => ServicePhase::Healthy,
+        Some(ServiceStatus::Stopping) => ServicePhase::Stopping,
+        Some(ServiceStatus::Stopped) | Some(ServiceStatus::Exited) | Some(ServiceStatus::Killed) => ServicePhase::Stopped,
+        Some(ServiceStatus::Failed) => ServicePhase::Failed { message: "failed".to_string() },
+        Some(ServiceStatus::Unhealthy) => ServicePhase::Failed { message: "unhealthy".to_string() },
     }
 }
 
@@ -667,7 +937,7 @@ async fn discover_existing_configs(
 
                     for service_name in &services_to_respawn {
                         match orchestrator
-                            .start_services(&source_path, Some(service_name), None, kepler_protocol::protocol::StartMode::WaitStartup, None)
+                            .start_services(&source_path, Some(service_name), None)
                             .await
                         {
                             Ok(_) => {

@@ -96,7 +96,7 @@ async fn test_restart_calls_restart_hooks() {
     // Start the service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env.clone()))
         .await
         .unwrap();
 
@@ -114,7 +114,7 @@ async fn test_restart_calls_restart_hooks() {
 
     // Restart the service
     orchestrator
-        .restart_services(&config_path, &[], None, None)
+        .restart_services(&config_path, &[], None)
         .await
         .unwrap();
 
@@ -148,7 +148,7 @@ async fn test_restart_calls_restart_hooks() {
     );
 
     // Stop services
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
 }
 
 /// restart preserves baked config (doesn't re-expand environment variables)
@@ -196,7 +196,7 @@ async fn test_restart_preserves_baked_config() {
     let mut sys_env: HashMap<String, String> = std::env::vars().collect();
     sys_env.insert(env_var_name.clone(), "original_value".to_string());
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env))
         .await
         .unwrap();
 
@@ -225,7 +225,7 @@ async fn test_restart_preserves_baked_config() {
     let mut new_sys_env: HashMap<String, String> = std::env::vars().collect();
     new_sys_env.insert(env_var_name.clone(), "changed_value".to_string());
     orchestrator
-        .restart_services(&config_path, &[], Some(new_sys_env), None)
+        .restart_services(&config_path, &[], Some(new_sys_env))
         .await
         .unwrap();
 
@@ -244,7 +244,7 @@ async fn test_restart_preserves_baked_config() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
     {
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
@@ -303,7 +303,7 @@ async fn test_recreate_rebakes_config() {
     let mut sys_env: HashMap<String, String> = std::env::vars().collect();
     sys_env.insert(env_var_name.clone(), "original_value".to_string());
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env))
         .await
         .unwrap();
 
@@ -318,7 +318,7 @@ async fn test_recreate_rebakes_config() {
     );
 
     // Stop services before recreate
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Change the environment variable
@@ -342,7 +342,7 @@ async fn test_recreate_rebakes_config() {
 
     // Start services again with new baked config
     orchestrator
-        .start_services(&config_path, None, Some(new_sys_env), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(new_sys_env))
         .await
         .unwrap();
 
@@ -361,7 +361,7 @@ async fn test_recreate_rebakes_config() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
     {
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
@@ -408,7 +408,7 @@ async fn test_recreate_runs_init_hooks() {
     // Start the service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env.clone()))
         .await
         .unwrap();
 
@@ -422,7 +422,7 @@ async fn test_recreate_runs_init_hooks() {
     assert_eq!(init_count_1, 1, "on_init should fire once on first start");
 
     // Stop services before recreate
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Recreate config (only rebakes, clears state)
@@ -436,7 +436,7 @@ async fn test_recreate_runs_init_hooks() {
 
     // Start services again — on_init should fire because state was cleared by recreate
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env))
         .await
         .unwrap();
 
@@ -453,7 +453,7 @@ async fn test_recreate_runs_init_hooks() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
 }
 
 // ============================================================================
@@ -503,7 +503,7 @@ async fn test_restart_specific_service_hooks() {
     // Start both services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env.clone()))
         .await
         .unwrap();
 
@@ -512,7 +512,7 @@ async fn test_restart_specific_service_hooks() {
 
     // Restart only svc1
     orchestrator
-        .restart_services(&config_path, &["svc1".to_string()], None, None)
+        .restart_services(&config_path, &["svc1".to_string()], None)
         .await
         .unwrap();
 
@@ -535,7 +535,7 @@ async fn test_restart_specific_service_hooks() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
 }
 
 /// restart respects dependency order (stop dependents first, start dependencies first)
@@ -584,7 +584,7 @@ async fn test_restart_respects_dependency_order() {
     // Start both services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env.clone()))
         .await
         .unwrap();
 
@@ -596,7 +596,7 @@ async fn test_restart_respects_dependency_order() {
 
     // Restart all services
     orchestrator
-        .restart_services(&config_path, &[], None, None)
+        .restart_services(&config_path, &[], None)
         .await
         .unwrap();
 
@@ -645,7 +645,7 @@ async fn test_restart_respects_dependency_order() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
 }
 
 // ============================================================================
@@ -707,7 +707,7 @@ async fn test_stop_respects_reverse_dependency_order() {
     // Start all services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env))
         .await
         .unwrap();
 
@@ -716,7 +716,7 @@ async fn test_stop_respects_reverse_dependency_order() {
 
     // Stop all services
     orchestrator
-        .stop_services(&config_path, None, false, None, None)
+        .stop_services(&config_path, None, false, None)
         .await
         .unwrap();
 
@@ -786,7 +786,7 @@ async fn test_recreate_respects_dependency_order() {
     // Start both services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env.clone()))
         .await
         .unwrap();
 
@@ -806,7 +806,7 @@ async fn test_recreate_respects_dependency_order() {
     );
 
     // Stop all services
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Recreate should succeed after stop
@@ -850,7 +850,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     // Start service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env.clone()))
         .await
         .unwrap();
 
@@ -864,7 +864,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     assert!(content.contains("POST_START"), "First start should call POST_START");
 
     // Stop services
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Clear the hooks file before recreate
@@ -886,7 +886,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
 
     // Start services again — on_init should fire because state was cleared
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env))
         .await
         .unwrap();
 
@@ -915,7 +915,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
 }
 
 /// recreate fails while services are running
@@ -940,7 +940,7 @@ async fn test_recreate_fails_while_services_running() {
     // Start service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env.clone()))
         .await
         .unwrap();
 
@@ -960,7 +960,7 @@ async fn test_recreate_fails_while_services_running() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
 }
 
 /// restart calls all restart-related hooks in correct order
@@ -998,7 +998,7 @@ async fn test_restart_calls_all_restart_hooks_in_order() {
     // Start service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), kepler_protocol::protocol::StartMode::WaitStartup, None)
+        .start_services(&config_path, None, Some(sys_env))
         .await
         .unwrap();
 
@@ -1010,7 +1010,7 @@ async fn test_restart_calls_all_restart_hooks_in_order() {
 
     // Restart service
     orchestrator
-        .restart_services(&config_path, &[], None, None)
+        .restart_services(&config_path, &[], None)
         .await
         .unwrap();
 
@@ -1071,5 +1071,5 @@ async fn test_restart_calls_all_restart_hooks_in_order() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None, None).await.unwrap();
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
 }

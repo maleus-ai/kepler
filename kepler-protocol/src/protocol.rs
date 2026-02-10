@@ -51,20 +51,10 @@ pub enum LogMode {
     Head,
 }
 
-/// Start mode for service startup behavior
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub enum StartMode {
-    /// Wait for startup cluster to be ready (default for foreground and --wait)
-    #[default]
-    WaitStartup,
-    /// Return immediately, startup runs in background (-d)
-    Detached,
-}
-
 /// Request sent from CLI to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
-    /// Start service(s)
+    /// Start service(s) - runs full pipeline synchronously, responds when complete
     Start {
         /// Path to the config file
         config_path: PathBuf,
@@ -73,9 +63,6 @@ pub enum Request {
         /// System environment variables captured from CLI
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
-        /// Start mode (detached or wait for startup cluster)
-        #[serde(default)]
-        mode: StartMode,
     },
     /// Stop service(s)
     Stop {
@@ -89,7 +76,7 @@ pub enum Request {
         #[serde(default)]
         signal: Option<String>,
     },
-    /// Restart service(s) - preserves baked config, runs restart hooks
+    /// Restart service(s) - runs full pipeline synchronously, responds when complete
     Restart {
         /// Path to the config file
         config_path: PathBuf,
@@ -99,9 +86,6 @@ pub enum Request {
         /// System environment variables (unused, kept for API compatibility)
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
-        /// If true, run restart in background and return immediately
-        #[serde(default)]
-        detach: bool,
     },
     /// Recreate config - re-bake config snapshot (no start/stop)
     Recreate {
@@ -183,6 +167,13 @@ pub enum Request {
         #[serde(default)]
         no_hooks: bool,
     },
+    /// Subscribe to service state change events
+    Subscribe {
+        /// Path to the config file
+        config_path: PathBuf,
+        /// Services to watch (None = all)
+        services: Option<Vec<String>>,
+    },
 }
 
 impl Request {
@@ -202,6 +193,7 @@ impl Request {
             Request::UnloadConfig { .. } => "UnloadConfig",
             Request::Prune { .. } => "Prune",
             Request::LogsCursor { .. } => "LogsCursor",
+            Request::Subscribe { .. } => "Subscribe",
         }
     }
 }
@@ -524,19 +516,17 @@ mod tests {
                 config_path: PathBuf::from("/tmp/test.yaml"),
                 service: Some("web".into()),
                 sys_env: Some(HashMap::from([("PATH".into(), "/usr/bin".into())])),
-                mode: StartMode::WaitStartup,
             },
         };
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes[4..]).unwrap();
         assert_eq!(decoded.id, 7);
         match decoded.request {
-            Request::Start { config_path, service, sys_env, mode } => {
+            Request::Start { config_path, service, sys_env } => {
                 assert_eq!(config_path, PathBuf::from("/tmp/test.yaml"));
                 assert_eq!(service, Some("web".into()));
                 assert!(sys_env.is_some());
                 assert_eq!(sys_env.unwrap().get("PATH").unwrap(), "/usr/bin");
-                assert_eq!(mode, StartMode::WaitStartup);
             }
             _ => panic!("Expected Start request"),
         }
@@ -575,15 +565,13 @@ mod tests {
                 config_path: PathBuf::from("/app/kepler.yaml"),
                 services: vec!["api".into(), "web".into()],
                 sys_env: None,
-                detach: true,
             },
         };
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes[4..]).unwrap();
         match decoded.request {
-            Request::Restart { services, detach, .. } => {
+            Request::Restart { services, .. } => {
                 assert_eq!(services, vec!["api".to_string(), "web".to_string()]);
-                assert!(detach);
             }
             _ => panic!("Expected Restart request"),
         }
@@ -946,7 +934,6 @@ mod tests {
                 config_path: PathBuf::new(),
                 service: None,
                 sys_env: None,
-                mode: StartMode::default(),
             }.variant_name(),
             "Start"
         );

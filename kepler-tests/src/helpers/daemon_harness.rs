@@ -251,7 +251,6 @@ impl TestDaemonHarness {
                 service_name.to_string(),
                 health_config,
                 self.handle.clone(),
-                None,
             );
 
             // Store the health check handle
@@ -594,11 +593,6 @@ impl TestDaemonHarness {
         });
     }
 
-    /// Reload the config from disk
-    pub async fn reload_config(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.handle.reload_config().await?;
-        Ok(())
-    }
 }
 
 impl Drop for TestDaemonHarness {

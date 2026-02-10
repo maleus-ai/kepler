@@ -108,9 +108,6 @@ pub enum ConfigCommand {
         service_name: String,
         reply: oneshot::Sender<bool>,
     },
-    ReloadConfig {
-        reply: oneshot::Sender<Result<()>>,
-    },
     SetServiceStatus {
         service_name: String,
         status: ServiceStatus,

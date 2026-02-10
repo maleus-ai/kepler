@@ -35,3 +35,11 @@ pub struct HealthCheckUpdate {
     pub new_status: ServiceStatus,
     pub failures: u32,
 }
+
+/// Event emitted when a service status changes.
+/// Broadcast via the config actor's broadcast channel.
+#[derive(Debug, Clone)]
+pub struct ServiceStatusChange {
+    pub service: String,
+    pub status: ServiceStatus,
+}

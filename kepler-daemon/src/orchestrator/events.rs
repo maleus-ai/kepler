@@ -140,8 +140,11 @@ impl ServiceEventHandler {
             // Use per-dependency timeout, falling back to global timeout from config
             let global_timeout = config.kepler.as_ref().and_then(|k| k.timeout);
             let effective_timeout = dep_config.timeout.or(global_timeout);
+            let deadline = effective_timeout.map(|t| Instant::now() + t);
 
-            let start = Instant::now();
+            // Subscribe to broadcast channel for instant notification of state changes
+            let mut status_rx = self.handle.subscribe_state_changes();
+
             loop {
                 if check_dependency_satisfied(restarted_service, &dep_config, &self.handle)
                     .await
@@ -149,17 +152,35 @@ impl ServiceEventHandler {
                     break;
                 }
 
-                // Check timeout
-                if let Some(timeout) = effective_timeout
-                    && start.elapsed() > timeout {
+                // Wait for next status change, with optional deadline
+                let recv_result = if let Some(dl) = deadline {
+                    let remaining = dl.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
                         warn!(
                             "Timeout waiting for {} to satisfy condition for {} restart propagation",
                             restarted_service, service_name
                         );
                         break;
                     }
+                    match tokio::time::timeout(remaining, status_rx.recv()).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!(
+                                "Timeout waiting for {} to satisfy condition for {} restart propagation",
+                                restarted_service, service_name
+                            );
+                            break;
+                        }
+                    }
+                } else {
+                    // No timeout — wait indefinitely for next status change
+                    status_rx.recv().await
+                };
 
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                match recv_result {
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
 
             // Restart the dependent service

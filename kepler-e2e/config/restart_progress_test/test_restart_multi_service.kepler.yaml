@@ -1,0 +1,20 @@
+# Multiple services with dependency for testing restart progress ordering
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  db:
+    command: ["sh", "-c", "echo DB_STARTED; sleep 300"]
+    healthcheck:
+      test: ["true"]
+      interval: 500ms
+      timeout: 2s
+      retries: 1
+      start_period: 0s
+
+  web:
+    command: ["sh", "-c", "echo WEB_STARTED; sleep 300"]
+    depends_on:
+      db:
+        condition: service_healthy

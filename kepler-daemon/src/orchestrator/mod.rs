@@ -24,35 +24,35 @@ const RESTART_DELAY: Duration = Duration::from_millis(500);
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{resolve_log_retention, KeplerConfig, LogRetention, ServiceConfig};
+use crate::config::{resolve_log_retention, GlobalHooks, KeplerConfig, LogConfig, LogRetention, ServiceConfig};
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
-use crate::deps::{check_dependency_satisfied, get_service_with_deps, get_start_levels, get_start_order, get_stop_order, is_dependency_permanently_unsatisfied};
+use crate::deps::{check_dependency_satisfied, get_start_levels, get_start_order, get_stop_order, is_dependency_permanently_unsatisfied};
 use crate::events::{RestartReason, ServiceEvent};
 use crate::health::spawn_health_checker;
 use crate::hooks::{
     run_global_hook, run_service_hook, GlobalHookType, ServiceHookParams, ServiceHookType,
     GLOBAL_HOOK_PREFIX,
 };
+use crate::logs::LogWriterConfig;
 use crate::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
 use crate::state::ServiceStatus;
 use crate::watcher::{spawn_file_watcher, FileChangeEvent};
-use kepler_protocol::protocol::{ProgressEvent, PrunedConfigInfo, ServicePhase, ServiceTarget, StartMode};
-use kepler_protocol::server::ProgressSender;
+use kepler_protocol::protocol::PrunedConfigInfo;
 
-/// Context for detached mode background task.
-/// Groups all cloned values needed by the spawned async task.
-struct DetachedContext {
-    orchestrator: ServiceOrchestrator,
-    config_path: PathBuf,
-    services_to_start: Vec<String>,
-    config: KeplerConfig,
-    handle: ConfigActorHandle,
-    global_hooks: Option<crate::config::GlobalHooks>,
-    global_log_config: Option<crate::config::LogConfig>,
-    config_dir: PathBuf,
-    stored_env: HashMap<String, String>,
-    log_config: crate::logs::LogWriterConfig,
+/// Context for post-startup work, bundling all parameters into a single struct.
+struct StartupContext<'a> {
+    config_path: &'a Path,
+    config: &'a KeplerConfig,
+    handle: &'a ConfigActorHandle,
+    started: &'a [String],
+    initialized: bool,
+    global_hooks: &'a Option<GlobalHooks>,
+    global_log_config: Option<&'a LogConfig>,
+    config_dir: &'a Path,
+    stored_env: &'a HashMap<String, String>,
+    log_config: &'a LogWriterConfig,
+    run_global_hooks: bool,
 }
 
 /// Coordinator for service lifecycle operations.
@@ -89,42 +89,18 @@ impl ServiceOrchestrator {
         &self.registry
     }
 
-    /// Emit a progress event if a progress sender is available
-    async fn emit_progress(progress: &Option<ProgressSender>, service: &str, phase: ServicePhase) {
-        if let Some(sender) = progress {
-            sender.send(ProgressEvent {
-                service: service.to_string(),
-                phase,
-            }).await;
-        }
-    }
-
     /// Start services for a config
     ///
     /// If `service_filter` is provided, only starts that service and its dependencies.
     /// Otherwise starts all services in dependency order.
     ///
-    /// The `mode` parameter controls blocking behavior:
-    /// - `Detached`: Run global hooks, then spawn all startup work in background. Return immediately.
-    /// - `WaitStartup`: Block for startup cluster, spawn deferred services in background.
-    ///
-    /// This method handles:
-    /// - Loading/reloading the config (via registry)
-    /// - Running global on_init hook (if first time)
-    /// - Running global on_start hook
-    /// - For each service:
-    ///   - Running on_init hook (if first time)
-    ///   - Running on_start hook
-    ///   - Applying on_start log retention
-    ///   - Spawning the process
-    ///   - Spawning health check and file watcher tasks
+    /// Runs the full pipeline synchronously and responds when complete.
+    /// The CLI decides whether to await the response or fire-and-forget.
     pub async fn start_services(
         &self,
         config_path: &Path,
         service_filter: Option<&str>,
         sys_env: Option<HashMap<String, String>>,
-        mode: StartMode,
-        progress: Option<ProgressSender>,
     ) -> Result<String, OrchestratorError> {
         // Get or create the config actor
         let handle = self
@@ -141,17 +117,14 @@ impl ServiceOrchestrator {
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
         let services_to_start = match service_filter {
-            Some(name) => get_service_with_deps(name, &config.services)?,
+            Some(name) => {
+                if !config.services.contains_key(name) {
+                    return Err(OrchestratorError::ServiceNotFound(name.to_string()));
+                }
+                vec![name.to_string()]
+            }
             None => get_start_order(&config.services)?,
         };
-
-        // Emit Pending progress for all services with their expected final state
-        for service_name in &services_to_start {
-            let has_healthcheck = config.services.get(service_name)
-                .is_some_and(|s| s.healthcheck.is_some());
-            let target = if has_healthcheck { ServiceTarget::Healthy } else { ServiceTarget::Started };
-            Self::emit_progress(&progress, service_name, ServicePhase::Pending { target }).await;
-        }
 
         // Check if any services need starting (are in a terminal state).
         // If all are already active, skip global hooks and return early.
@@ -187,258 +160,142 @@ impl ServiceOrchestrator {
         // Fetch stored sys_env once for all global hooks in this method
         let stored_env = handle.get_sys_env().await;
 
-        match mode {
-            StartMode::Detached => {
-                // Detached mode: spawn all startup work (including global hooks) in background
-                let is_specific_service = service_filter.is_some();
-                let ctx = DetachedContext {
-                    orchestrator: self.clone(),
-                    config_path: config_path.to_path_buf(),
-                    services_to_start: services_to_start.clone(),
-                    config: config.clone(),
-                    handle: handle.clone(),
-                    global_hooks: global_hooks.clone(),
-                    global_log_config: global_log_config.clone(),
-                    config_dir: config_dir.clone(),
-                    stored_env: stored_env.clone(),
-                    log_config: log_config.clone(),
-                };
+        let is_specific_service = service_filter.is_some();
 
-                tokio::spawn(async move {
-                    // Only run global hooks for full start (not specific service)
-                    if !is_specific_service {
-                        // Run global on_init hook if first time (inside background task)
-                        if !initialized
-                            && let Err(e) = run_global_hook(
-                                &ctx.global_hooks,
-                                GlobalHookType::OnInit,
-                                &ctx.config_dir,
-                                &ctx.stored_env,
-                                Some(&ctx.log_config),
-                                ctx.global_log_config.as_ref(),
-                            ).await
-                        {
-                            error!("Global on_init hook failed: {}", e);
-                            return;
-                        }
-
-                        // Run global pre_start hook (inside background task)
-                        if let Err(e) = run_global_hook(
-                            &ctx.global_hooks,
-                            GlobalHookType::PreStart,
-                            &ctx.config_dir,
-                            &ctx.stored_env,
-                            Some(&ctx.log_config),
-                            ctx.global_log_config.as_ref(),
-                        ).await {
-                            error!("Global pre_start hook failed: {}", e);
-                            return;
-                        }
-                    }
-
-                    let result = ctx.orchestrator.start_services_inner(
-                        &ctx.config_path,
-                        is_specific_service,
-                        &ctx.services_to_start,
-                        &ctx.config,
-                        &ctx.handle,
-                        initialized,
-                        &ctx.global_hooks,
-                        ctx.global_log_config.as_ref(),
-                        &ctx.config_dir,
-                        &ctx.stored_env,
-                        &ctx.log_config,
-                        &None,
-                    ).await;
-                    if let Err(e) = result {
-                        error!("Background service startup failed: {}", e);
-                    }
-                });
-
-                Ok(format!("Starting services in background: {}", services_to_start.join(", ")))
+        // Only run global hooks for full start (not specific service)
+        if !is_specific_service {
+            // Run global on_init hook if first time
+            if !initialized {
+                run_global_hook(
+                    &global_hooks,
+                    GlobalHookType::OnInit,
+                    &config_dir,
+                    &stored_env,
+                    Some(&log_config),
+                    global_log_config.as_ref(),
+                )
+                .await?;
             }
-            StartMode::WaitStartup => {
-                // Only run global hooks for full start (not specific service)
-                if service_filter.is_none() {
-                    // Run global on_init hook if first time (synchronous)
-                    if !initialized {
-                        run_global_hook(
-                            &global_hooks,
-                            GlobalHookType::OnInit,
-                            &config_dir,
-                            &stored_env,
-                            Some(&log_config),
-                            global_log_config.as_ref(),
-                        )
-                        .await?;
-                    }
 
-                    // Run global pre_start hook (synchronous)
-                    run_global_hook(
-                        &global_hooks,
-                        GlobalHookType::PreStart,
-                        &config_dir,
-                        &stored_env,
-                        Some(&log_config),
-                        global_log_config.as_ref(),
-                    )
-                    .await?;
-                }
-
-                // WaitStartup mode: block for startup cluster, spawn deferred in background
-                if service_filter.is_some() {
-                    // For specific service + deps, start all sequentially (no deferred split)
-                    let result = self.start_services_inner(
-                        config_path,
-                        true,
-                        &services_to_start,
-                        &config,
-                        &handle,
-                        initialized,
-                        &global_hooks,
-                        global_log_config.as_ref(),
-                        &config_dir,
-                        &stored_env,
-                        &log_config,
-                        &progress,
-                    ).await?;
-                    Ok(result)
-                } else {
-                    // Use wait field to partition services (always resolved after config load)
-                    let startup_services: Vec<String> = services_to_start.iter()
-                        .filter(|s| config.services.get(*s).is_none_or(|c| c.wait.unwrap_or(true)))
-                        .cloned()
-                        .collect();
-                    let deferred_services: Vec<String> = services_to_start.iter()
-                        .filter(|s| config.services.get(*s).is_some_and(|c| !c.wait.unwrap_or(true)))
-                        .cloned()
-                        .collect();
-
-                    // Start startup cluster services (blocking)
-                    let started = if !startup_services.is_empty() {
-                        self.start_services_by_level(&startup_services, &config, &handle, true, &progress).await?
-                    } else {
-                        Vec::new()
-                    };
-
-                    // Wait for healthchecked services to reach resolved state
-                    self.wait_for_healthchecks(&handle, &config, &started).await;
-
-                    // Post-startup work for startup cluster (full start → run global hooks)
-                    self.post_startup_work(
-                        config_path,
-                        &config,
-                        &handle,
-                        &started,
-                        initialized,
-                        &global_hooks,
-                        global_log_config.as_ref(),
-                        &config_dir,
-                        &stored_env,
-                        &log_config,
-                        true,
-                    ).await?;
-
-                    // Spawn deferred services in background
-                    let deferred_count = deferred_services.len();
-                    if !deferred_services.is_empty() {
-                        let self_clone = self.clone();
-                        let handle_clone = handle.clone();
-                        let deferred_services_clone = deferred_services.clone();
-                        let config_clone = config.clone();
-
-                        tokio::spawn(async move {
-                            if let Err(e) = self_clone.start_services_by_level(
-                                &deferred_services_clone,
-                                &config_clone,
-                                &handle_clone,
-                                false,
-                                &None,
-                            ).await {
-                                error!("Failed to compute deferred start levels: {}", e);
-                            }
-                        });
-                    }
-
-                    if started.is_empty() && deferred_count == 0 {
-                        Ok("All services already running".to_string())
-                    } else if deferred_count > 0 {
-                        Ok(format!("Started {} services ({} deferred)", started.len(), deferred_count))
-                    } else {
-                        Ok(format!("Started services: {}", started.join(", ")))
-                    }
-                }
-            }
+            // Run global pre_start hook
+            run_global_hook(
+                &global_hooks,
+                GlobalHookType::PreStart,
+                &config_dir,
+                &stored_env,
+                Some(&log_config),
+                global_log_config.as_ref(),
+            )
+            .await?;
         }
-    }
 
-    /// Internal method to start services and run post-startup work.
-    /// Used by both Detached and WaitStartup modes for the common case.
-    #[allow(clippy::too_many_arguments)]
-    async fn start_services_inner(
-        &self,
-        config_path: &Path,
-        is_specific_service: bool,
-        services_to_start: &[String],
-        config: &crate::config::KeplerConfig,
-        handle: &ConfigActorHandle,
-        initialized: bool,
-        global_hooks: &Option<crate::config::GlobalHooks>,
-        global_log_config: Option<&crate::config::LogConfig>,
-        config_dir: &Path,
-        stored_env: &HashMap<String, String>,
-        log_config: &crate::logs::LogWriterConfig,
-        progress: &Option<ProgressSender>,
-    ) -> Result<String, OrchestratorError> {
-        let mut started = Vec::new();
-
-        if is_specific_service {
-            // Sequential start for specific service + deps
-            for service_name in services_to_start {
+        // Start services
+        let (started, deferred_services) = if is_specific_service {
+            // Start only the named service (no transitive deps)
+            let mut started = Vec::new();
+            for service_name in &services_to_start {
                 if handle.is_service_running(service_name).await {
                     debug!("Service {} is already running", service_name);
                     continue;
                 }
 
-                match self.start_single_service(handle, service_name, progress).await {
+                match self.start_single_service(&handle, service_name).await {
                     Ok(()) => started.push(service_name.clone()),
                     Err(OrchestratorError::StartupCancelled(_)) => {
                         debug!("Service {} startup was cancelled, skipping", service_name);
                     }
                     Err(e) => {
-                        Self::emit_progress(progress, service_name, ServicePhase::Failed { message: e.to_string() }).await;
                         error!("Failed to start service {}: {}", service_name, e);
                         return Err(e);
                     }
                 }
             }
+            (started, Vec::new())
         } else {
-            // Parallel start: group services by dependency level
-            started = self.start_services_by_level(services_to_start, config, handle, true, progress).await?;
+            // Use wait field to partition services (always resolved after config load)
+            let startup_services: Vec<String> = services_to_start.iter()
+                .filter(|s| config.services.get(*s).is_none_or(|c| c.wait.unwrap_or(true)))
+                .cloned()
+                .collect();
+            let deferred_services: Vec<String> = services_to_start.iter()
+                .filter(|s| config.services.get(*s).is_some_and(|c| !c.wait.unwrap_or(true)))
+                .cloned()
+                .collect();
+
+            // Start startup cluster services
+            let started = if !startup_services.is_empty() {
+                self.start_services_by_level(&startup_services, &config, &handle, true).await?
+            } else {
+                Vec::new()
+            };
+
+            // Post-startup work (snapshot, event handler, global post_start)
+            self.post_startup_work(StartupContext {
+                config_path,
+                config: &config,
+                handle: &handle,
+                started: &started,
+                initialized,
+                global_hooks: &global_hooks,
+                global_log_config: global_log_config.as_ref(),
+                config_dir: &config_dir,
+                stored_env: &stored_env,
+                log_config: &log_config,
+                run_global_hooks: true,
+            }).await?;
+
+            // Spawn deferred services in background (don't block the response)
+            if !deferred_services.is_empty() {
+                let self_clone = self.clone();
+                let config_clone = config.clone();
+                let handle_clone = handle.clone();
+                let deferred = deferred_services.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = self_clone.start_services_by_level(
+                        &deferred,
+                        &config_clone,
+                        &handle_clone,
+                        false,
+                    ).await {
+                        warn!("Error starting deferred services: {}", e);
+                    }
+                });
+            }
+
+            (started, deferred_services)
+        };
+
+        // Run post-startup work for specific service start
+        if is_specific_service {
+            self.post_startup_work(StartupContext {
+                config_path,
+                config: &config,
+                handle: &handle,
+                started: &started,
+                initialized,
+                global_hooks: &global_hooks,
+                global_log_config: global_log_config.as_ref(),
+                config_dir: &config_dir,
+                stored_env: &stored_env,
+                log_config: &log_config,
+                run_global_hooks: false, // no global hooks for specific service
+            }).await?;
         }
 
-        // Wait for healthchecked services to reach resolved state
-        self.wait_for_healthchecks(handle, config, &started).await;
-
-        // Run post-startup work
-        self.post_startup_work(
-            config_path,
-            config,
-            handle,
-            &started,
-            initialized,
-            global_hooks,
-            global_log_config,
-            config_dir,
-            stored_env,
-            log_config,
-            !is_specific_service, // run_global_hooks
-        ).await?;
-
-        if started.is_empty() {
+        if started.is_empty() && deferred_services.is_empty() {
             Ok("All services already running".to_string())
         } else {
-            Ok(format!("Started services: {}", started.join(", ")))
+            let mut msg = String::new();
+            if !started.is_empty() {
+                msg.push_str(&format!("Started services: {}", started.join(", ")));
+            }
+            if !deferred_services.is_empty() {
+                if !msg.is_empty() {
+                    msg.push_str(" | ");
+                }
+                msg.push_str(&format!("deferred: {}", deferred_services.join(", ")));
+            }
+            Ok(msg)
         }
     }
 
@@ -447,60 +304,48 @@ impl ServiceOrchestrator {
     /// When `run_global_hooks` is false (specific service start), the global post_start
     /// hook is skipped — consistent with stop/restart which also skip global hooks
     /// for single-service operations.
-    #[allow(clippy::too_many_arguments)]
     async fn post_startup_work(
         &self,
-        config_path: &Path,
-        config: &crate::config::KeplerConfig,
-        handle: &ConfigActorHandle,
-        started: &[String],
-        initialized: bool,
-        global_hooks: &Option<crate::config::GlobalHooks>,
-        global_log_config: Option<&crate::config::LogConfig>,
-        config_dir: &Path,
-        stored_env: &HashMap<String, String>,
-        log_config: &crate::logs::LogWriterConfig,
-        run_global_hooks: bool,
+        ctx: StartupContext<'_>,
     ) -> Result<(), OrchestratorError> {
-        if !started.is_empty() {
-            if let Err(e) = handle.take_snapshot_if_needed().await {
+        if !ctx.started.is_empty() {
+            if let Err(e) = ctx.handle.take_snapshot_if_needed().await {
                 warn!("Failed to take config snapshot: {}", e);
             }
 
             // Check if any service has restart propagation enabled
-            let needs_event_handler = config.services.values().any(|svc| {
+            let needs_event_handler = ctx.config.services.values().any(|svc| {
                 !svc.depends_on.dependencies_with_restart().is_empty()
             });
 
             // Spawn event handler for restart propagation if needed and not already running
-            if needs_event_handler && !handle.has_event_handler().await {
+            if needs_event_handler && !ctx.handle.has_event_handler().await {
                 let self_arc = Arc::new(self.clone());
-                let config_path_owned = config_path.to_path_buf();
-                let handle_clone = handle.clone();
+                let config_path_owned = ctx.config_path.to_path_buf();
+                let handle_clone = ctx.handle.clone();
                 self_arc.spawn_event_handler(config_path_owned, handle_clone).await;
-                handle.set_event_handler_spawned().await;
+                ctx.handle.set_event_handler_spawned().await;
             }
 
             // Run global post_start hook (after all services started)
             // Skipped for specific service start (consistent with stop/restart)
-            if run_global_hooks {
-                if let Err(e) = run_global_hook(
-                    global_hooks,
+            if ctx.run_global_hooks
+                && let Err(e) = run_global_hook(
+                    ctx.global_hooks,
                     GlobalHookType::PostStart,
-                    config_dir,
-                    stored_env,
-                    Some(log_config),
-                    global_log_config,
+                    ctx.config_dir,
+                    ctx.stored_env,
+                    Some(ctx.log_config),
+                    ctx.global_log_config,
                 )
                 .await
-                {
-                    warn!("Global post_start hook failed: {}", e);
-                }
+            {
+                warn!("Global post_start hook failed: {}", e);
             }
 
             // Mark config initialized after first start
-            if !initialized {
-                handle.mark_config_initialized().await?;
+            if !ctx.initialized {
+                ctx.handle.mark_config_initialized().await?;
             }
         }
 
@@ -512,7 +357,6 @@ impl ServiceOrchestrator {
         &self,
         handle: &ConfigActorHandle,
         service_name: &str,
-        progress: &Option<ProgressSender>,
     ) -> Result<(), OrchestratorError> {
         // Atomically claim this service for starting. If another concurrent
         // request already claimed it (or it's already running), skip.
@@ -527,17 +371,9 @@ impl ServiceOrchestrator {
             .await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
-        // Emit Waiting progress (before blocking on dependencies)
-        if !ctx.service_config.depends_on.is_empty() {
-            Self::emit_progress(progress, service_name, ServicePhase::Waiting).await;
-        }
-
         // Wait for dependencies to satisfy their conditions
         self.wait_for_dependencies(handle, service_name, &ctx.service_config)
             .await?;
-
-        // Emit Starting progress
-        Self::emit_progress(progress, service_name, ServicePhase::Starting).await;
 
         // Status already set to Starting by claim_service_start()
 
@@ -588,10 +424,7 @@ impl ServiceOrchestrator {
         }
 
         // Spawn auxiliary tasks
-        self.spawn_auxiliary_tasks(handle, service_name, &ctx, progress).await;
-
-        // Emit Started progress
-        Self::emit_progress(progress, service_name, ServicePhase::Started).await;
+        self.spawn_auxiliary_tasks(handle, service_name, &ctx).await;
 
         Ok(())
     }
@@ -621,6 +454,10 @@ impl ServiceOrchestrator {
 
             // Use per-dependency timeout, falling back to global timeout
             let effective_timeout = dep_config.timeout.or(global_timeout);
+            let deadline = effective_timeout.map(|t| start + t);
+
+            // Subscribe to broadcast channel for instant notification of state changes
+            let mut status_rx = handle.subscribe_state_changes();
 
             loop {
                 if check_dependency_satisfied(&dep_name, &dep_config, handle).await {
@@ -666,18 +503,40 @@ impl ServiceOrchestrator {
                     ));
                 }
 
-                // Check timeout
-                if let Some(timeout) = effective_timeout
-                    && start.elapsed() > timeout {
+                // Wait for next status change, with optional deadline
+                let recv_result = if let Some(dl) = deadline {
+                    let remaining = dl.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
                         return Err(OrchestratorError::DependencyTimeout {
                             service: service_name.to_string(),
                             dependency: dep_name.clone(),
                             condition: dep_config.condition.clone(),
                         });
                     }
+                    match tokio::time::timeout(remaining, status_rx.recv()).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            return Err(OrchestratorError::DependencyTimeout {
+                                service: service_name.to_string(),
+                                dependency: dep_name.clone(),
+                                condition: dep_config.condition.clone(),
+                            });
+                        }
+                    }
+                } else {
+                    // No timeout — wait indefinitely for next status change
+                    status_rx.recv().await
+                };
 
-                // Wait before checking again
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                match recv_result {
+                    Ok(_) => continue, // status changed somewhere, re-check all conditions
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(OrchestratorError::StartupCancelled(
+                            service_name.to_string(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -697,7 +556,6 @@ impl ServiceOrchestrator {
         service_filter: Option<&str>,
         clean: bool,
         signal: Option<i32>,
-        progress: Option<ProgressSender>,
     ) -> Result<String, OrchestratorError> {
         let config_dir = config_path
             .parent()
@@ -763,9 +621,6 @@ impl ServiceOrchestrator {
                 continue;
             }
 
-            // Emit Stopping progress
-            Self::emit_progress(&progress, service_name, ServicePhase::Stopping).await;
-
             // Emit Stop event
             handle.emit_event(service_name, ServiceEvent::Stop).await;
 
@@ -795,9 +650,6 @@ impl ServiceOrchestrator {
                 {
                     warn!("Hook post_stop failed for {}: {}", service_name, e);
                 }
-
-            // Emit Stopped progress
-            Self::emit_progress(&progress, service_name, ServicePhase::Stopped).await;
 
             stopped.push(service_name.clone());
         }
@@ -911,7 +763,7 @@ impl ServiceOrchestrator {
             };
 
             // Remove entire state directory (logs, config snapshots, env_files, etc.)
-            let cleaned = if state_dir.exists() {
+            let _cleaned = if state_dir.exists() {
                 if let Err(e) = std::fs::remove_dir_all(&state_dir) {
                     warn!("Failed to remove state directory {:?}: {}", state_dir, e);
                     false
@@ -926,12 +778,6 @@ impl ServiceOrchestrator {
             // Unload config from registry
             self.registry.unload(&config_path.to_path_buf()).await;
 
-            // Emit Cleaned progress only when state was actually removed
-            if cleaned {
-                for service_name in &services_to_stop {
-                    Self::emit_progress(&progress, service_name, ServicePhase::Cleaned).await;
-                }
-            }
         }
 
         if stopped.is_empty() && !clean {
@@ -969,7 +815,6 @@ impl ServiceOrchestrator {
         config_path: &Path,
         services: &[String],
         _sys_env: Option<HashMap<String, String>>,
-        progress: Option<ProgressSender>,
     ) -> Result<String, OrchestratorError> {
         info!("Restarting services for {:?} (preserving state)", config_path);
 
@@ -1060,9 +905,6 @@ impl ServiceOrchestrator {
                 }
             };
 
-            // Emit Stopping progress
-            Self::emit_progress(&progress, service_name, ServicePhase::Stopping).await;
-
             // Emit Restart event
             handle
                 .emit_event(
@@ -1096,8 +938,6 @@ impl ServiceOrchestrator {
                 warn!("Hook post_stop failed for {}: {}", service_name, e);
             }
 
-            // Emit Stopped progress
-            Self::emit_progress(&progress, service_name, ServicePhase::Stopped).await;
         }
 
         // Small delay between stop and start phases
@@ -1107,9 +947,6 @@ impl ServiceOrchestrator {
 
         // Phase 2: Start services (forward dependency order)
         for service_name in &start_order {
-            // Emit Starting progress
-            Self::emit_progress(&progress, service_name, ServicePhase::Starting).await;
-
             // Refresh context after stop (state may have changed)
             let ctx = match handle.get_service_context(service_name).await {
                 Some(ctx) => ctx,
@@ -1125,7 +962,6 @@ impl ServiceOrchestrator {
             // Run pre_start hook
             if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart).await {
                 warn!("Hook pre_start failed for {}: {}", service_name, e);
-                Self::emit_progress(&progress, service_name, ServicePhase::Failed { message: e.to_string() }).await;
                 continue;
             }
 
@@ -1148,18 +984,14 @@ impl ServiceOrchestrator {
                     }
 
                     // Spawn auxiliary tasks
-                    self.spawn_auxiliary_tasks(&handle, service_name, &ctx, &progress).await;
+                    self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
 
                     // Increment restart count
                     let _ = handle.increment_restart_count(service_name).await;
-
-                    // Emit Started progress
-                    Self::emit_progress(&progress, service_name, ServicePhase::Started).await;
                 }
                 Err(e) => {
                     error!("Failed to spawn service {}: {}", service_name, e);
                     let _ = handle.set_service_status(service_name, ServiceStatus::Failed).await;
-                    Self::emit_progress(&progress, service_name, ServicePhase::Failed { message: e.to_string() }).await;
                 }
             }
         }
@@ -1348,7 +1180,7 @@ impl ServiceOrchestrator {
         }
 
         // Spawn auxiliary tasks (health checker, file watcher)
-        self.spawn_auxiliary_tasks(&handle, service_name, &ctx, &None).await;
+        self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
 
         let _ = handle.increment_restart_count(service_name).await;
 
@@ -1469,6 +1301,9 @@ impl ServiceOrchestrator {
                         warn!("Hook post_restart failed for {}: {}", service_name, e);
                     }
 
+                    // Spawn auxiliary tasks (health checker, file watcher)
+                    self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
+
                     let _ = handle
                         .set_service_status(service_name, ServiceStatus::Running)
                         .await;
@@ -1535,7 +1370,6 @@ impl ServiceOrchestrator {
         config: &KeplerConfig,
         handle: &ConfigActorHandle,
         fail_fast: bool,
-        progress: &Option<ProgressSender>,
     ) -> Result<Vec<String>, OrchestratorError> {
         let levels = get_start_levels(&config.services)?;
         let mut started = Vec::new();
@@ -1561,7 +1395,7 @@ impl ServiceOrchestrator {
                 let service_name_clone = service_name.clone();
                 let self_ref = self;
                 tasks.push(async move {
-                    let result = self_ref.start_single_service(&handle_clone, &service_name_clone, progress).await;
+                    let result = self_ref.start_single_service(&handle_clone, &service_name_clone).await;
                     (service_name_clone, result)
                 });
             }
@@ -1575,7 +1409,6 @@ impl ServiceOrchestrator {
                         debug!("Service {} startup was cancelled, skipping", service_name);
                     }
                     Err(e) => {
-                        Self::emit_progress(progress, &service_name, ServicePhase::Failed { message: e.to_string() }).await;
                         if fail_fast {
                             error!("Failed to start service {}: {}", service_name, e);
                             return Err(e);
@@ -1597,53 +1430,6 @@ impl ServiceOrchestrator {
     }
 
     // --- Internal helpers ---
-
-    /// Wait for all healthchecked services to reach a resolved state.
-    /// Polls service states until all are Healthy, Unhealthy, or terminal.
-    async fn wait_for_healthchecks(
-        &self,
-        handle: &ConfigActorHandle,
-        config: &KeplerConfig,
-        started: &[String],
-    ) {
-        let healthchecked: Vec<_> = started
-            .iter()
-            .filter(|s| {
-                config
-                    .services
-                    .get(*s)
-                    .is_some_and(|c| c.healthcheck.is_some())
-            })
-            .collect();
-
-        if healthchecked.is_empty() {
-            return;
-        }
-
-        loop {
-            let mut all_resolved = true;
-            for svc in &healthchecked {
-                if let Some(state) = handle.get_service_state(svc).await {
-                    match state.status {
-                        ServiceStatus::Healthy
-                        | ServiceStatus::Unhealthy
-                        | ServiceStatus::Failed
-                        | ServiceStatus::Exited
-                        | ServiceStatus::Killed
-                        | ServiceStatus::Stopped => {}
-                        _ => {
-                            all_resolved = false;
-                            break;
-                        }
-                    }
-                }
-            }
-            if all_resolved {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
 
     /// Run a service hook
     async fn run_service_hook(
@@ -1752,7 +1538,6 @@ impl ServiceOrchestrator {
         handle: &ConfigActorHandle,
         service_name: &str,
         ctx: &ServiceContext,
-        progress: &Option<ProgressSender>,
     ) {
         // Start health check if configured
         if let Some(health_config) = &ctx.service_config.healthcheck {
@@ -1760,7 +1545,6 @@ impl ServiceOrchestrator {
                 service_name.to_string(),
                 health_config.clone(),
                 handle.clone(),
-                progress.clone(),
             );
             handle
                 .store_task_handle(service_name, TaskHandleType::HealthCheck, task_handle)

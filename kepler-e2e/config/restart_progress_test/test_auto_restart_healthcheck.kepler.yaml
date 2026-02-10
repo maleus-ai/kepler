@@ -1,0 +1,16 @@
+# Service with healthcheck and restart:always for testing that
+# health checker is re-spawned after auto-restart (handle_exit bug fix)
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  worker:
+    command: ["sh", "-c", "echo WORKER_STARTED; sleep 1; exit 1"]
+    restart: always
+    healthcheck:
+      test: ["true"]
+      interval: 500ms
+      timeout: 2s
+      retries: 1
+      start_period: 0s

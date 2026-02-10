@@ -4,11 +4,13 @@
 //! cursor-based log streaming. Each cursor tracks where the client left off
 //! reading, allowing efficient incremental reads without re-scanning files.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use dashmap::DashMap;
 
@@ -33,8 +35,8 @@ pub struct CursorState {
     service_filter: Option<String>,
     /// Whether to exclude hook log files
     no_hooks: bool,
-    /// Set of file paths known to the iterator (to detect new files)
-    known_files: HashSet<PathBuf>,
+    /// Map of file paths → inode numbers known to the iterator (to detect new/replaced files)
+    known_files: HashMap<PathBuf, u64>,
 }
 
 /// Error types for cursor operations
@@ -125,8 +127,18 @@ impl CursorManager {
         let reader = LogReader::new(logs_dir.clone());
         let files = reader.collect_log_files(service.as_deref(), no_hooks);
 
-        // Track known files for later new-file discovery
-        let known_files: HashSet<PathBuf> = files.iter().map(|(path, _, _)| path.clone()).collect();
+        // Track known files with inodes for later new-file/replaced-file discovery
+        let known_files: HashMap<PathBuf, u64> = files
+            .iter()
+            .filter_map(|(path, _, _)| {
+                std::fs::metadata(path).ok().map(|m| {
+                    #[cfg(unix)]
+                    { (path.clone(), m.ino()) }
+                    #[cfg(not(unix))]
+                    { (path.clone(), 0u64) }
+                })
+            })
+            .collect();
 
         let iterator = if from_start {
             MergedLogIterator::new(files)
@@ -194,12 +206,29 @@ impl CursorManager {
         let current_files = reader.collect_log_files(cursor.service_filter.as_deref(), cursor.no_hooks);
         let new_files: Vec<_> = current_files
             .into_iter()
-            .filter(|(path, _, _)| !cursor.known_files.contains(path))
+            .filter(|(path, _, _)| {
+                #[cfg(unix)]
+                {
+                    let current_ino = std::fs::metadata(path).ok().map(|m| m.ino());
+                    match (cursor.known_files.get(path), current_ino) {
+                        (None, _) => true,                         // brand new file
+                        (Some(&known), Some(cur)) => known != cur, // replaced (different inode)
+                        _ => false,
+                    }
+                }
+                #[cfg(not(unix))]
+                { !cursor.known_files.contains_key(path) }
+            })
             .collect();
 
         if !new_files.is_empty() {
             for (path, _, _) in &new_files {
-                cursor.known_files.insert(path.clone());
+                if let Ok(meta) = std::fs::metadata(path) {
+                    #[cfg(unix)]
+                    cursor.known_files.insert(path.clone(), meta.ino());
+                    #[cfg(not(unix))]
+                    cursor.known_files.insert(path.clone(), 0);
+                }
             }
             cursor.iterator.add_sources(new_files);
         }
@@ -711,6 +740,51 @@ mod tests {
         let (entries, _) = manager.read_entries(&cursor_id, &config_path).unwrap();
         assert_eq!(entries.len(), 2, "Should discover new web log file: {:?}", entries);
         assert!(entries.iter().all(|e| &*e.service == "web"));
+    }
+
+    /// Cursor detects a replaced log file (deleted + recreated with new inode)
+    /// and picks up the new content.
+    #[cfg(unix)]
+    #[test]
+    fn test_cursor_detects_replaced_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().to_path_buf();
+        let config_path = PathBuf::from("/fake/config.yaml");
+
+        // Create initial log file
+        write_log_file(dir.path(), "worker", "stdout", &[
+            (1000, "old-line-1"),
+            (2000, "old-line-2"),
+        ]);
+
+        let manager = CursorManager::new(300);
+        let cursor_id = manager.create_cursor(
+            config_path.clone(),
+            logs_dir.clone(),
+            None,
+            true,
+            false,
+        );
+
+        // First read: get the initial lines
+        let (entries, _) = manager.read_entries(&cursor_id, &config_path).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // Delete and recreate the file (new inode, simulates stop + restart)
+        let log_path = logs_dir.join("worker.stdout.log");
+        fs::remove_file(&log_path).unwrap();
+        write_log_file(dir.path(), "worker", "stdout", &[
+            (3000, "new-line-1"),
+            (4000, "new-line-2"),
+            (5000, "new-line-3"),
+        ]);
+
+        // Second read: cursor should detect the inode change and pick up new content
+        let (entries, _) = manager.read_entries(&cursor_id, &config_path).unwrap();
+        assert_eq!(entries.len(), 3, "Should detect replaced file and read new content: {:?}", entries);
+        assert_eq!(entries[0].line, "new-line-1");
+        assert_eq!(entries[1].line, "new-line-2");
+        assert_eq!(entries[2].line, "new-line-3");
     }
 
     // ========================================================================

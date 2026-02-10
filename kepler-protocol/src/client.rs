@@ -17,7 +17,7 @@ use crate::{
     errors::ClientError,
     protocol::{
         LogMode, MAX_MESSAGE_SIZE, ProgressEvent, Request, RequestEnvelope, Response,
-        ServerEvent, ServerMessage, StartMode, decode_server_message, encode_envelope,
+        ServerEvent, ServerMessage, decode_server_message, encode_envelope,
     },
 };
 
@@ -137,43 +137,22 @@ impl Client {
         }
 
         match Self::connect(socket_path).await {
-            Ok(client) => matches!(
-                client.send_request(Request::Ping).await,
-                Ok(Response::Ok { .. })
-            ),
+            Ok(client) => {
+                let Ok((_rx, fut)) = client.send_request(Request::Ping) else {
+                    return false;
+                };
+                matches!(fut.await, Ok(Response::Ok { .. }))
+            }
             Err(_) => false,
         }
     }
 
-    /// Send a request and receive a response.
-    /// Takes `&self` - multiple requests can be in-flight concurrently.
-    pub async fn send_request(&self, request: Request) -> Result<Response> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-
-        // Create oneshot for this request
-        let (tx, rx) = oneshot::channel();
-        self.pending.insert(id, PendingRequest {
-            response_tx: tx,
-            progress_tx: None,
-        });
-
-        // Encode and send
-        let envelope = RequestEnvelope { id, request };
-        let bytes = encode_envelope(&envelope)?;
-        self.writer_tx
-            .send(bytes)
-            .await
-            .map_err(|_| ClientError::Disconnected)?;
-
-        // Wait for response
-        rx.await.map_err(|_| ClientError::Disconnected)
-    }
-
     /// Send a request and receive both progress events and a response.
+    /// Takes `&self` - multiple requests can be in-flight concurrently.
     ///
     /// Returns a progress receiver and a future that resolves to the final response.
     /// Progress events are emitted as the server processes each service.
-    pub fn send_request_with_progress(
+    pub fn send_request(
         &self,
         request: Request,
     ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
@@ -203,135 +182,86 @@ impl Client {
     }
 
     /// Start services for a config
-    pub async fn start(
+    pub fn start(
         &self,
         config_path: PathBuf,
         service: Option<String>,
         sys_env: Option<HashMap<String, String>>,
-        mode: StartMode,
-    ) -> Result<Response> {
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Start {
             config_path,
             service,
             sys_env,
-            mode,
         })
-        .await
     }
 
     /// Stop services for a config
-    pub async fn stop(
+    pub fn stop(
         &self,
         config_path: PathBuf,
         service: Option<String>,
         clean: bool,
         signal: Option<String>,
-    ) -> Result<Response> {
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Stop {
             config_path,
             service,
             clean,
             signal,
         })
-        .await
     }
 
     /// Restart services for a config (preserves baked config, runs restart hooks)
-    pub async fn restart(
+    pub fn restart(
         &self,
         config_path: PathBuf,
         services: Vec<String>,
         sys_env: Option<HashMap<String, String>>,
-        detach: bool,
-    ) -> Result<Response> {
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Restart {
             config_path,
             services,
             sys_env,
-            detach,
-        })
-        .await
-    }
-
-    /// Start services with progress events
-    pub fn start_with_progress(
-        &self,
-        config_path: PathBuf,
-        service: Option<String>,
-        sys_env: Option<HashMap<String, String>>,
-        mode: StartMode,
-    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
-        self.send_request_with_progress(Request::Start {
-            config_path,
-            service,
-            sys_env,
-            mode,
-        })
-    }
-
-    /// Stop services with progress events
-    pub fn stop_with_progress(
-        &self,
-        config_path: PathBuf,
-        service: Option<String>,
-        clean: bool,
-        signal: Option<String>,
-    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
-        self.send_request_with_progress(Request::Stop {
-            config_path,
-            service,
-            clean,
-            signal,
-        })
-    }
-
-    /// Restart services with progress events
-    pub fn restart_with_progress(
-        &self,
-        config_path: PathBuf,
-        services: Vec<String>,
-        sys_env: Option<HashMap<String, String>>,
-        detach: bool,
-    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
-        self.send_request_with_progress(Request::Restart {
-            config_path,
-            services,
-            sys_env,
-            detach,
         })
     }
 
     /// Recreate config for a config (re-bake config snapshot, no start/stop)
-    pub async fn recreate(
+    pub fn recreate(
         &self,
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
-    ) -> Result<Response> {
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Recreate {
             config_path,
             sys_env,
         })
-        .await
     }
 
     /// Get status (for a specific config or all configs)
-    pub async fn status(&self, config_path: Option<PathBuf>) -> Result<Response> {
-        self.send_request(Request::Status { config_path }).await
+    pub fn status(
+        &self,
+        config_path: Option<PathBuf>,
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::Status { config_path })
     }
 
     /// List all loaded configs
-    pub async fn list_configs(&self) -> Result<Response> {
-        self.send_request(Request::ListConfigs).await
+    pub fn list_configs(
+        &self,
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::ListConfigs)
     }
 
     /// Unload a config
-    pub async fn unload_config(&self, config_path: PathBuf) -> Result<Response> {
+    pub fn unload_config(
+        &self,
+        config_path: PathBuf,
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::UnloadConfig { config_path })
-            .await
     }
 
     /// Get logs for a config
-    pub async fn logs(
+    pub fn logs(
         &self,
         config_path: PathBuf,
         service: Option<String>,
@@ -339,7 +269,7 @@ impl Client {
         lines: usize,
         mode: LogMode,
         no_hooks: bool,
-    ) -> Result<Response> {
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Logs {
             config_path,
             service,
@@ -349,18 +279,17 @@ impl Client {
             mode,
             no_hooks,
         })
-        .await
     }
 
     /// Get logs with pagination (for large log responses)
-    pub async fn logs_chunk(
+    pub fn logs_chunk(
         &self,
         config_path: PathBuf,
         service: Option<String>,
         offset: usize,
         limit: usize,
         no_hooks: bool,
-    ) -> Result<Response> {
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::LogsChunk {
             config_path,
             service,
@@ -368,28 +297,33 @@ impl Client {
             limit,
             no_hooks,
         })
-        .await
     }
 
     /// Shutdown the daemon
-    pub async fn shutdown(&self) -> Result<Response> {
-        self.send_request(Request::Shutdown).await
+    pub fn shutdown(
+        &self,
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::Shutdown)
     }
 
     /// Prune all stopped/orphaned config state directories
-    pub async fn prune(&self, force: bool, dry_run: bool) -> Result<Response> {
-        self.send_request(Request::Prune { force, dry_run }).await
+    pub fn prune(
+        &self,
+        force: bool,
+        dry_run: bool,
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::Prune { force, dry_run })
     }
 
     /// Cursor-based log streaming (for 'all' and 'follow' modes)
-    pub async fn logs_cursor(
+    pub fn logs_cursor(
         &self,
         config_path: &Path,
         service: Option<&str>,
         cursor_id: Option<&str>,
         from_start: bool,
         no_hooks: bool,
-    ) -> Result<Response> {
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::LogsCursor {
             config_path: config_path.to_path_buf(),
             service: service.map(String::from),
@@ -397,7 +331,21 @@ impl Client {
             from_start,
             no_hooks,
         })
-        .await
+    }
+
+    /// Subscribe to service state change events.
+    ///
+    /// Returns a progress receiver and a future that resolves when the subscription ends.
+    /// Progress events are pushed as service statuses change.
+    pub fn subscribe(
+        &self,
+        config_path: PathBuf,
+        services: Option<Vec<String>>,
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::Subscribe {
+            config_path,
+            services,
+        })
     }
 }
 
@@ -469,9 +417,12 @@ mod tests {
         });
 
         let client = Client::connect(&sock).await.unwrap();
-        let _ = client.send_request(Request::Ping).await.unwrap();
-        let _ = client.send_request(Request::Ping).await.unwrap();
-        let _ = client.send_request(Request::Ping).await.unwrap();
+        let (_, fut) = client.send_request(Request::Ping).unwrap();
+        let _ = fut.await.unwrap();
+        let (_, fut) = client.send_request(Request::Ping).unwrap();
+        let _ = fut.await.unwrap();
+        let (_, fut) = client.send_request(Request::Ping).unwrap();
+        let _ = fut.await.unwrap();
     }
 
     #[tokio::test]
@@ -490,7 +441,8 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let client = Client::connect(&sock).await.unwrap();
-        let response = client.send_request(Request::Ping).await.unwrap();
+        let (_, fut) = client.send_request(Request::Ping).unwrap();
+        let response = fut.await.unwrap();
 
         match response {
             Response::Ok { message, .. } => {
@@ -528,9 +480,10 @@ mod tests {
         // The request is sent, the server reads it and disconnects
         // The client reader detects EOF, clears pending, dropping the oneshot sender
         // which causes the awaiting rx to return Err → Disconnected
+        let (_, fut) = client.send_request(Request::Ping).unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            client.send_request(Request::Ping),
+            fut,
         ).await;
 
         match result {

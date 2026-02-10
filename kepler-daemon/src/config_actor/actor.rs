@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -22,7 +22,7 @@ use crate::state::{
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
 
 use super::command::ConfigCommand;
-use super::context::{HealthCheckUpdate, ServiceContext, TaskHandleType};
+use super::context::{HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
 use super::handle::ConfigActorHandle;
 
 /// Per-config actor state
@@ -31,7 +31,6 @@ pub struct ConfigActor {
     config_hash: String,
     config: KeplerConfig,
     config_dir: PathBuf,
-    state_dir: PathBuf,
     services: HashMap<String, ServiceState>,
     log_config: LogWriterConfig,
     initialized: bool,
@@ -54,6 +53,9 @@ pub struct ConfigActor {
     event_handler_spawned: bool,
     /// System environment variables captured from the CLI
     sys_env: HashMap<String, String>,
+
+    /// Broadcast channel for service status changes (used by Subscribe handler)
+    status_tx: broadcast::Sender<ServiceStatusChange>,
 
     rx: mpsc::Receiver<ConfigCommand>,
 }
@@ -263,17 +265,17 @@ impl ConfigActor {
         let logs_dir = state_dir.join("logs");
         let log_config = Self::create_log_config(&logs_dir, &config);
 
-        // Create channel
+        // Create channels
         let (tx, rx) = mpsc::channel(256);
+        let (status_tx, _) = broadcast::channel::<ServiceStatusChange>(256);
 
-        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx);
+        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, status_tx.clone());
 
         let actor = ConfigActor {
             config_path: canonical_path,
             config_hash: hash,
             config,
             config_dir,
-            state_dir,
             services,
             log_config,
             initialized,
@@ -286,6 +288,7 @@ impl ConfigActor {
             restored_from_snapshot,
             event_handler_spawned: false,
             sys_env: resolved_sys_env,
+            status_tx,
             rx,
         };
 
@@ -460,10 +463,6 @@ impl ConfigActor {
                     let _ = self.save_state();
                 }
                 let _ = reply.send(claimed);
-            }
-            ConfigCommand::ReloadConfig { reply } => {
-                let result = self.reload_config();
-                let _ = reply.send(result);
             }
             ConfigCommand::SetServiceStatus {
                 service_name,
@@ -835,59 +834,6 @@ impl ConfigActor {
         (logs.into_iter().map(|l| l.into()).collect(), has_more)
     }
 
-    fn reload_config(&mut self) -> Result<()> {
-        // In the immutable snapshot model, once a config is baked, it should not
-        // be reloaded from source. The snapshot contains the fully baked config
-        // with sys_env already applied.
-        //
-        // To pick up config changes, use the restart command which:
-        // 1. Stops services
-        // 2. Clears the snapshot
-        // 3. Reloads with fresh sys_env from CLI
-        //
-        // This method now only rebuilds service states from the existing baked config,
-        // which is useful for picking up env_file changes that were copied to state dir.
-
-        // Preserve service initialized states
-        let old_services = std::mem::take(&mut self.services);
-
-        // Re-copy env_files to state directory (they may have changed on disk)
-        let _ = self
-            .persistence
-            .copy_env_files(&self.config.services, &self.config_dir);
-
-        // Rebuild service states from existing baked config
-        self.services = self
-            .config
-            .services
-            .iter()
-            .map(|(name, service_config)| {
-                let working_dir = service_config
-                    .working_dir
-                    .clone()
-                    .unwrap_or_else(|| self.config_dir.clone());
-
-                let computed_env =
-                    build_service_env(service_config, name, &self.state_dir).unwrap_or_default();
-
-                let mut state = ServiceState {
-                    computed_env,
-                    working_dir,
-                    ..Default::default()
-                };
-
-                // Preserve initialized state if service existed before
-                if let Some(old_state) = old_services.get(name) {
-                    state.initialized = old_state.initialized;
-                }
-
-                (name.clone(), state)
-            })
-            .collect();
-
-        Ok(())
-    }
-
     fn set_service_status(&mut self, service_name: &str, status: ServiceStatus) -> Result<()> {
         let service_state = self
             .services
@@ -905,6 +851,13 @@ impl ConfigActor {
             service_state.stopped_at = Some(Utc::now());
         }
         service_state.status = status;
+
+        // Broadcast status change to subscribers
+        let _ = self.status_tx.send(ServiceStatusChange {
+            service: service_name.to_string(),
+            status,
+        });
+
         Ok(())
     }
 
@@ -967,9 +920,19 @@ impl ConfigActor {
             }
         }
 
+        let new_status = service_state.status;
+
+        // Broadcast status change to subscribers (only if status actually changed)
+        if previous_status != new_status {
+            let _ = self.status_tx.send(ServiceStatusChange {
+                service: service_name.to_string(),
+                status: new_status,
+            });
+        }
+
         Ok(HealthCheckUpdate {
             previous_status,
-            new_status: service_state.status,
+            new_status,
             failures: service_state.health_check_failures,
         })
     }

@@ -19,8 +19,9 @@ use kepler_daemon::Daemon;
 use kepler_protocol::{
     client::Client,
     errors::ClientError,
-    protocol::{ConfigStatus, CursorLogEntry, LogCursorData, LogEntry, LogMode, ProgressEvent, Response, ResponseData, ServiceInfo, ServicePhase, ServiceTarget, StartMode},
+    protocol::{ConfigStatus, CursorLogEntry, LogCursorData, LogEntry, LogMode, ProgressEvent, Response, ResponseData, ServiceInfo, ServicePhase, ServiceTarget},
 };
+use tokio::sync::mpsc;
 use tabled::{Table, Tabled};
 use tabled::settings::Style;
 use tracing_subscriber::EnvFilter;
@@ -104,16 +105,64 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Commands::Start { service, detach, wait, timeout } => {
-            execute_lifecycle_with_progress(
-                &client, &canonical_path, detach, wait, &timeout,
-                client.start_with_progress(canonical_path.clone(), service.clone(), Some(sys_env.clone()), StartMode::WaitStartup)?,
-                client.start(canonical_path.clone(), service.clone(), Some(sys_env), StartMode::Detached),
-                service.as_deref(),
-            ).await?;
+            if detach && wait {
+                // -d --wait: Fire start, subscribe for progress, exit when all ready
+                let (progress_rx, sub_future) = client.subscribe(
+                    canonical_path.clone(),
+                    service.as_ref().map(|s| vec![s.clone()]),
+                )?;
+                // Fire off start (don't await — daemon runs to completion on its own).
+                // send_request_with_progress enqueues immediately; we drive the future
+                // alongside the subscription but don't care about its result.
+                let (_start_progress_rx, start_future) = client.send_request(
+                    kepler_protocol::protocol::Request::Start {
+                        config_path: canonical_path,
+                        service,
+                        sys_env: Some(sys_env),
+                    },
+                )?;
+                if let Some(timeout_str) = &timeout {
+                    let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
+                        .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
+                    let result = tokio::time::timeout(
+                        timeout_duration,
+                        wait_until_ready_with_start(progress_rx, sub_future, start_future),
+                    ).await;
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => {
+                            eprintln!("Timeout: operation did not complete within {}", timeout_str);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    wait_until_ready_with_start(progress_rx, sub_future, start_future).await?;
+                }
+            } else if detach {
+                // -d: Fire start, exit immediately
+                let (_progress_rx, response_future) = client.start(canonical_path, service, Some(sys_env))?;
+                let response = response_future.await?;
+                handle_response(response);
+            } else {
+                // Foreground: fire start (don't await response), follow logs until quiescent.
+                // send_request enqueues the request; we race the response against log following.
+                let (_start_progress_rx, start_future) = client.send_request(
+                    kepler_protocol::protocol::Request::Start {
+                        config_path: canonical_path.clone(),
+                        service: service.clone(),
+                        sys_env: Some(sys_env),
+                    },
+                )?;
+                foreground_with_logs(
+                    start_future,
+                    follow_logs_until_quiescent(&client, &canonical_path, service.as_deref()),
+                ).await?;
+            }
         }
 
         Commands::Stop { service, clean, signal } => {
-            let (progress_rx, response_future) = client.stop_with_progress(
+            let (progress_rx, response_future) = client.stop(
                 canonical_path, service, clean, signal,
             )?;
             let response = run_with_progress(progress_rx, response_future).await?;
@@ -121,16 +170,55 @@ async fn run() -> Result<()> {
         }
 
         Commands::Restart { services, detach, wait, timeout } => {
-            execute_lifecycle_with_progress(
-                &client, &canonical_path, detach, wait, &timeout,
-                client.restart_with_progress(canonical_path.clone(), services.clone(), Some(sys_env.clone()), false)?,
-                client.restart(canonical_path.clone(), services, Some(sys_env), true),
-                None,
-            ).await?;
+            if detach && wait {
+                // -d --wait: Fire restart with progress bars for full lifecycle
+                let (progress_rx, response_future) = client.restart(
+                    canonical_path,
+                    services,
+                    Some(sys_env),
+                )?;
+                if let Some(timeout_str) = &timeout {
+                    let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
+                        .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
+                    let result = tokio::time::timeout(
+                        timeout_duration,
+                        run_with_progress(progress_rx, response_future),
+                    ).await;
+                    match result {
+                        Ok(Ok(response)) => handle_response(response),
+                        Ok(Err(e)) => return Err(e.into()),
+                        Err(_) => {
+                            eprintln!("Timeout: operation did not complete within {}", timeout_str);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    let response = run_with_progress(progress_rx, response_future).await?;
+                    handle_response(response);
+                }
+            } else if detach {
+                // -d: Fire restart, exit when done
+                let (_progress_rx, response_future) = client.restart(canonical_path, services, Some(sys_env))?;
+                let response = response_future.await?;
+                handle_response(response);
+            } else {
+                // Foreground: progress bars for stop+start, then follow logs until quiescent
+                let (progress_rx, restart_future) = client.restart(
+                    canonical_path.clone(),
+                    services,
+                    Some(sys_env),
+                )?;
+                // Phase 1: Progress bars for Stopping → Stopped → Starting → Started/Healthy
+                let response = run_with_progress(progress_rx, restart_future).await?;
+                handle_response(response);
+                // Phase 2: Follow logs until quiescence or Ctrl+C
+                follow_logs_until_quiescent(&client, &canonical_path, None).await?;
+            }
         }
 
         Commands::Recreate => {
-            let response = client.recreate(canonical_path.clone(), Some(sys_env)).await?;
+            let (_progress_rx, response_future) = client.recreate(canonical_path.clone(), Some(sys_env))?;
+            let response = response_future.await?;
             handle_response(response);
         }
 
@@ -294,64 +382,148 @@ async fn run_with_progress(
     response.expect("response must arrive before progress channel closes")
 }
 
-/// Execute a lifecycle command (start/restart) with progress display.
-///
-/// - `wait_action`: (progress_rx, response_future) from `*_with_progress()` — used for wait/foreground modes
-/// - `detach_action`: async fn to call for detach mode (fire-and-forget, no progress)
-/// - `follow_service`: service filter to pass to follow_logs in foreground mode (None = all)
-#[allow(clippy::too_many_arguments)]
-async fn execute_lifecycle_with_progress(
-    client: &Client,
-    config_path: &Path,
-    detach: bool,
-    wait: bool,
-    timeout: &Option<String>,
-    wait_action: (tokio::sync::mpsc::Receiver<ProgressEvent>, impl Future<Output = std::result::Result<Response, kepler_protocol::errors::ClientError>>),
-    detach_action: impl Future<Output = std::result::Result<Response, kepler_protocol::errors::ClientError>>,
-    follow_service: Option<&str>,
+/// Drive a foreground start/restart: runs the daemon request concurrently with log following.
+/// Exits when log following finishes (quiescence or Ctrl+C), even if the request hasn't responded.
+async fn foreground_with_logs(
+    request_future: impl Future<Output = std::result::Result<Response, ClientError>>,
+    log_future: impl Future<Output = Result<()>>,
 ) -> Result<()> {
-    if detach && wait {
-        let (progress_rx, response_future) = wait_action;
-        if let Some(timeout_str) = timeout {
-            let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
-                .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
-            let result = tokio::time::timeout(
-                timeout_duration,
-                run_with_progress(progress_rx, response_future),
-            ).await;
-            match result {
-                Ok(Ok(response)) => handle_response(response),
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_) => {
-                    eprintln!("Timeout: operation did not complete within {}", timeout_str);
-                    std::process::exit(1);
+    tokio::pin!(request_future);
+    tokio::pin!(log_future);
+    let mut request_done = false;
+    loop {
+        tokio::select! {
+            result = &mut log_future => return result,
+            _ = &mut request_future, if !request_done => {
+                request_done = true;
+                // Request completed; keep following logs until quiescence
+            }
+        }
+    }
+}
+
+/// Wait for all services to reach their target state (Started or Healthy) using Subscribe events.
+///
+/// Shows progress bars for each service. Also drives the start/restart future concurrently
+/// so the daemon processes the request while we watch for status changes.
+/// Exits when all services have reached their target state or a terminal state (Failed/Stopped).
+async fn wait_until_ready_with_start(
+    mut progress_rx: mpsc::Receiver<ProgressEvent>,
+    sub_future: impl Future<Output = std::result::Result<Response, ClientError>>,
+    start_future: impl Future<Output = std::result::Result<Response, ClientError>>,
+) -> Result<()> {
+    let mp = MultiProgress::new();
+
+    let style_active = ProgressStyle::with_template("{spinner:.yellow} Service {prefix:.bold}  {msg}")
+        .unwrap()
+        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ");
+    let style_done = ProgressStyle::with_template("  Service {prefix:.bold}  {msg:.green}")
+        .unwrap();
+    let style_fail = ProgressStyle::with_template("  Service {prefix:.bold}  {msg:.red}")
+        .unwrap();
+
+    let mut bars: HashMap<String, ProgressBar> = HashMap::new();
+    let mut targets: HashMap<String, ServiceTarget> = HashMap::new();
+    let mut finished: HashMap<String, bool> = HashMap::new();
+
+    tokio::pin!(sub_future);
+    tokio::pin!(start_future);
+    let mut sub_done = false;
+
+    loop {
+        tokio::select! {
+            biased;
+            event = progress_rx.recv() => {
+                match event {
+                    Some(event) => {
+                        let pb = bars.entry(event.service.clone()).or_insert_with(|| {
+                            let pb = mp.add(ProgressBar::new_spinner());
+                            pb.set_style(style_active.clone());
+                            pb.set_prefix(event.service.clone());
+                            pb.enable_steady_tick(Duration::from_millis(80));
+                            pb
+                        });
+
+                        match &event.phase {
+                            ServicePhase::Pending { target } => {
+                                targets.insert(event.service.clone(), target.clone());
+                                pb.set_message("Pending...");
+                            }
+                            ServicePhase::Waiting => {
+                                pb.set_message("Waiting...");
+                            }
+                            ServicePhase::Starting => {
+                                pb.set_message("Starting...");
+                            }
+                            ServicePhase::Started => {
+                                let target = targets.get(&event.service);
+                                if target == Some(&ServiceTarget::Healthy) {
+                                    pb.set_message("Health check...");
+                                } else {
+                                    pb.set_style(style_done.clone());
+                                    pb.finish_with_message("Started");
+                                    finished.insert(event.service.clone(), true);
+                                }
+                            }
+                            ServicePhase::Healthy => {
+                                pb.set_style(style_done.clone());
+                                pb.finish_with_message("Healthy");
+                                finished.insert(event.service.clone(), true);
+                            }
+                            ServicePhase::Stopping => {
+                                pb.set_message("Stopping...");
+                            }
+                            ServicePhase::Stopped => {
+                                pb.set_style(style_done.clone());
+                                pb.finish_with_message("Stopped");
+                                finished.insert(event.service.clone(), true);
+                            }
+                            ServicePhase::Cleaning => {
+                                pb.set_message("Cleaning...");
+                            }
+                            ServicePhase::Cleaned => {
+                                pb.set_style(style_done.clone());
+                                pb.finish_with_message("Cleaned");
+                                finished.insert(event.service.clone(), true);
+                            }
+                            ServicePhase::Failed { message } => {
+                                pb.set_style(style_fail.clone());
+                                pb.finish_with_message(format!("Failed: {}", message));
+                                finished.insert(event.service.clone(), true);
+                            }
+                        }
+
+                        // Check if all known services have finished
+                        if !targets.is_empty() && targets.keys().all(|s| finished.contains_key(s)) {
+                            break;
+                        }
+                    }
+                    None => {
+                        // Subscribe channel closed (e.g. config not loaded yet).
+                        // Fall back to waiting for the start/restart response.
+                        let result = start_future.await;
+                        if let Ok(response) = result {
+                            handle_response(response);
+                        }
+                        break;
+                    }
                 }
             }
-        } else {
-            let response = run_with_progress(progress_rx, response_future).await?;
-            handle_response(response);
+            result = &mut start_future => {
+                // Start/restart completed — this is the authoritative "done" signal.
+                // Print the response and exit.
+                if let Ok(response) = result {
+                    handle_response(response);
+                }
+                break;
+            }
+            _ = &mut sub_future, if !sub_done => {
+                sub_done = true;
+                // Subscription ended; drain remaining events
+            }
         }
-    } else if detach {
-        // Drop the progress channel since we're not using it
-        drop(wait_action);
-        let response = detach_action.await?;
-        handle_response(response);
-    } else {
-        // Foreground mode: start services and stream logs concurrently.
-        // Uses WaitStartup so the daemon processes the start synchronously
-        // (logs are produced immediately), while cursor polling picks them up.
-        //
-        // foreground_select drives both futures but exits when follow_logs finishes.
-        // This prevents Ctrl+C hangs: follow_logs sends stop and detects quiescence,
-        // but the daemon's WaitStartup response may still be blocked in dependency
-        // waits or health check polling. We don't wait for it.
-        let (_progress_rx, response_future) = wait_action;
-        drop(detach_action);
-        foreground_select(
-            response_future,
-            follow_logs_until_quiescent(client, config_path, follow_service),
-        ).await?;
     }
+
     Ok(())
 }
 
@@ -427,7 +599,8 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
             }
 
             let client = Client::connect(&daemon_socket).await?;
-            let response = client.shutdown().await?;
+            let (_progress_rx, response_future) = client.shutdown()?;
+            let response = response_future.await?;
             handle_response(response);
         }
 
@@ -435,7 +608,9 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
             // Stop daemon if running
             if Client::is_daemon_running(&daemon_socket).await {
                 let client = Client::connect(&daemon_socket).await?;
-                let _ = client.shutdown().await;
+                if let Ok((_rx, fut)) = client.shutdown() {
+                    let _ = fut.await;
+                }
 
                 // Wait for daemon to stop
                 for _ in 0..50 {
@@ -461,7 +636,8 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
 
             // Create a new connection to get loaded configs
             let client = Client::connect(&daemon_socket).await?;
-            let response = client.list_configs().await?;
+            let (_progress_rx, response_future) = client.list_configs()?;
+            let response = response_future.await?;
             if let Response::Ok {
                 data: Some(ResponseData::ConfigList(configs)),
                 ..
@@ -550,7 +726,8 @@ fn start_daemon_detached(daemon_path: &Path) -> Result<()> {
 }
 
 async fn handle_ps(client: &Client, config_path: PathBuf) -> Result<()> {
-    let response = client.status(Some(config_path.clone())).await?;
+    let (_progress_rx, response_future) = client.status(Some(config_path.clone()))?;
+    let response = response_future.await?;
 
     match response {
         Response::Ok {
@@ -577,7 +754,8 @@ async fn handle_ps(client: &Client, config_path: PathBuf) -> Result<()> {
 }
 
 async fn handle_ps_all(client: &Client) -> Result<()> {
-    let response = client.status(None).await?;
+    let (_progress_rx, response_future) = client.status(None)?;
+    let response = response_future.await?;
 
     match response {
         Response::Ok {
@@ -831,14 +1009,6 @@ trait FollowClient {
         &self,
         config_path: Option<PathBuf>,
     ) -> std::result::Result<Response, ClientError>;
-
-    async fn stop(
-        &self,
-        config_path: PathBuf,
-        service: Option<String>,
-        clean: bool,
-        signal: Option<String>,
-    ) -> std::result::Result<Response, ClientError>;
 }
 
 impl FollowClient for Client {
@@ -850,24 +1020,16 @@ impl FollowClient for Client {
         from_start: bool,
         no_hooks: bool,
     ) -> std::result::Result<Response, ClientError> {
-        Client::logs_cursor(self, config_path, service, cursor_id, from_start, no_hooks).await
+        let (_rx, fut) = Client::logs_cursor(self, config_path, service, cursor_id, from_start, no_hooks)?;
+        fut.await
     }
 
     async fn status(
         &self,
         config_path: Option<PathBuf>,
     ) -> std::result::Result<Response, ClientError> {
-        Client::status(self, config_path).await
-    }
-
-    async fn stop(
-        &self,
-        config_path: PathBuf,
-        service: Option<String>,
-        clean: bool,
-        signal: Option<String>,
-    ) -> std::result::Result<Response, ClientError> {
-        Client::stop(self, config_path, service, clean, signal).await
+        let (_rx, fut) = Client::status(self, config_path)?;
+        fut.await
     }
 }
 
@@ -879,8 +1041,17 @@ enum StreamMode {
     /// Follow logs from end indefinitely.
     Follow,
     /// Follow logs from start, exit when all services reach terminal state.
-    /// On shutdown signal: sends stop, then polls until quiescent.
+    /// On shutdown signal: returns ShutdownRequested so the caller can stop with progress.
     UntilQuiescent,
+}
+
+/// Why `stream_cursor_logs` exited.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum StreamExitReason {
+    /// Natural exit (quiescence, all data read, error, or disconnect).
+    Done,
+    /// Shutdown signal received — caller should stop services.
+    ShutdownRequested,
 }
 
 /// Unified cursor-based log streaming loop.
@@ -895,37 +1066,16 @@ async fn stream_cursor_logs(
     mode: StreamMode,
     shutdown: impl Future<Output = ()>,
     mut on_batch: impl FnMut(&[Arc<str>], &[CursorLogEntry]),
-) -> Result<()> {
+) -> Result<StreamExitReason> {
     let from_start = mode != StreamMode::Follow;
     let mut cursor_id: Option<String> = None;
     tokio::pin!(shutdown);
-    let mut stopping = false;
     // Track whether we've seen evidence the daemon is processing our request.
     // Without this, a status poll before the daemon claims any service would
     // see stale terminal states and exit prematurely.
     let mut seen_activity = false;
 
     loop {
-        if stopping {
-            // After shutdown signal: skip log reads, only poll for quiescence.
-            // A second Ctrl+C force-quits immediately.
-            tokio::select! {
-                biased;
-                _ = tokio::signal::ctrl_c() => {
-                    std::process::exit(130); // 128 + SIGINT
-                }
-                result = client.status(Some(config_path.to_path_buf())) => {
-                    if let Ok(ref status_response) = result
-                        && is_all_terminal(status_response)
-                    {
-                        break;
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            continue;
-        }
-
         let log_response = client
             .logs_cursor(config_path, service, cursor_id.as_deref(), from_start, no_hooks)
             .await;
@@ -993,10 +1143,10 @@ async fn stream_cursor_logs(
                 if !has_more_data
                     && let Ok(ref status_response) = client.status(Some(config_path.to_path_buf())).await
                 {
-                    if !is_all_terminal(status_response) {
+                    if !is_all_terminal(status_response, service) {
                         seen_activity = true;
                     }
-                    if seen_activity && is_all_terminal(status_response) {
+                    if seen_activity && is_all_terminal(status_response, service) {
                         break;
                     }
                 }
@@ -1009,9 +1159,7 @@ async fn stream_cursor_logs(
                 tokio::select! {
                     biased;
                     _ = &mut shutdown => {
-                        stopping = true;
-                        eprintln!("\nGracefully stopping...");
-                        let _ = client.stop(config_path.to_path_buf(), service.map(String::from), false, None).await;
+                        return Ok(StreamExitReason::ShutdownRequested);
                     }
                     _ = tokio::time::sleep(delay) => {}
                 }
@@ -1019,21 +1167,28 @@ async fn stream_cursor_logs(
         }
     }
 
-    Ok(())
+    Ok(StreamExitReason::Done)
 }
 
-/// Check if all services are in a terminal state (stopped, exited, killed, or failed).
+/// Check if all (or filtered) services are in a terminal state (stopped, exited, killed, or failed).
 /// Used for quiescence detection and after Ctrl+C shutdown.
-fn is_all_terminal(response: &Response) -> bool {
+/// When `service_filter` is Some, only that service is checked; otherwise all services are checked.
+fn is_all_terminal(response: &Response, service_filter: Option<&str>) -> bool {
     if let Response::Ok {
         data: Some(ResponseData::ServiceStatus(services)),
         ..
     } = response
     {
-        !services.is_empty()
-            && services
-                .values()
-                .all(|info| matches!(info.status.as_str(), "stopped" | "failed" | "exited" | "killed"))
+        let iter: Box<dyn Iterator<Item = _>> = if let Some(name) = service_filter {
+            Box::new(services.iter().filter(move |(n, _)| n.as_str() == name))
+        } else {
+            Box::new(services.iter())
+        };
+        let relevant: Vec<_> = iter.collect();
+        !relevant.is_empty()
+            && relevant.iter().all(|(_, info)| {
+                matches!(info.status.as_str(), "stopped" | "failed" | "exited" | "killed")
+            })
     } else {
         false
     }
@@ -1080,38 +1235,9 @@ fn write_cursor_batch(
     }
 }
 
-/// Run a foreground start/restart: drives both the daemon response future and the
-/// log-following future concurrently, but exits as soon as follow_logs finishes.
-///
-/// This prevents hangs when follow_logs detects quiescence (e.g., after Ctrl+C sends
-/// stop) but the daemon's WaitStartup response is still blocked in dependency waits
-/// or health check polling. With `tokio::join!`, the CLI would wait forever; with
-/// this helper, follow_logs is authoritative — once it says "done", we exit.
-async fn foreground_select<R, L>(
-    response_future: R,
-    log_future: L,
-) -> Result<()>
-where
-    R: Future<Output = std::result::Result<Response, ClientError>>,
-    L: Future<Output = Result<()>>,
-{
-    tokio::pin!(response_future);
-    tokio::pin!(log_future);
-    let mut response_done = false;
-    loop {
-        tokio::select! {
-            result = &mut log_future => return result,
-            _ = &mut response_future, if !response_done => {
-                response_done = true;
-                // Response arrived; keep running log_future until quiescence
-            }
-        }
-    }
-}
-
 /// Follow logs until all services reach a terminal state (quiescent) or Ctrl+C.
 ///
-/// On Ctrl+C: sends stop, then continues polling until all services actually stopped.
+/// On Ctrl+C: sends stop with progress bars, then exits.
 /// On quiescence (all services stopped/failed): exits cleanly.
 async fn follow_logs_until_quiescent(
     client: &Client,
@@ -1123,7 +1249,7 @@ async fn follow_logs_until_quiescent(
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
 
-    stream_cursor_logs(
+    let exit_reason = stream_cursor_logs(
         client,
         config_path,
         service,
@@ -1134,7 +1260,37 @@ async fn follow_logs_until_quiescent(
             write_cursor_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
         },
     )
-    .await
+    .await?;
+
+    if exit_reason == StreamExitReason::ShutdownRequested {
+        eprintln!("\nGracefully stopping...");
+        match client.stop(
+            config_path.to_path_buf(),
+            service.map(String::from),
+            false,
+            None,
+        ) {
+            Ok((progress_rx, response_future)) => {
+                // Show progress bars; a second Ctrl+C force-quits
+                tokio::select! {
+                    biased;
+                    _ = tokio::signal::ctrl_c() => {
+                        std::process::exit(130);
+                    }
+                    result = run_with_progress(progress_rx, response_future) => {
+                        if let Ok(Response::Error { message }) = result {
+                            eprintln!("Error: {}", message);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Error stopping services: {}", e);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn handle_logs(
@@ -1150,9 +1306,9 @@ async fn handle_logs(
 
     // For head/tail modes, use one-shot request
     if mode == LogMode::Head || mode == LogMode::Tail {
-        let response = client
-            .logs(config_path.clone(), service.clone(), false, lines, mode, no_hooks)
-            .await?;
+        let (_progress_rx, response_future) = client
+            .logs(config_path.clone(), service.clone(), false, lines, mode, no_hooks)?;
+        let response = response_future.await?;
 
         let entries = match response {
             Response::Ok {
@@ -1275,7 +1431,8 @@ fn print_log_entry(entry: &LogEntry, color_map: &mut HashMap<String, Color>) {
 }
 
 async fn handle_prune(client: &Client, force: bool, dry_run: bool) -> Result<()> {
-    let response = client.prune(force, dry_run).await?;
+    let (_progress_rx, response_future) = client.prune(force, dry_run)?;
+    let response = response_future.await?;
 
     match response {
         Response::Ok {
@@ -1347,7 +1504,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use kepler_protocol::protocol::{CursorLogEntry, StreamType};
 
     type ClientResult = std::result::Result<Response, ClientError>;
@@ -1355,7 +1512,6 @@ mod tests {
     struct MockClient {
         cursor_responses: std::sync::Mutex<VecDeque<ClientResult>>,
         status_responses: std::sync::Mutex<VecDeque<ClientResult>>,
-        stop_called: AtomicBool,
         cursor_call_count: AtomicUsize,
         status_call_count: AtomicUsize,
     }
@@ -1365,7 +1521,6 @@ mod tests {
             Self {
                 cursor_responses: std::sync::Mutex::new(VecDeque::new()),
                 status_responses: std::sync::Mutex::new(VecDeque::new()),
-                stop_called: AtomicBool::new(false),
                 cursor_call_count: AtomicUsize::new(0),
                 status_call_count: AtomicUsize::new(0),
             }
@@ -1409,16 +1564,6 @@ mod tests {
                 .unwrap_or_else(|| Ok(all_stopped_response()))
         }
 
-        async fn stop(
-            &self,
-            _config_path: PathBuf,
-            _service: Option<String>,
-            _clean: bool,
-            _signal: Option<String>,
-        ) -> std::result::Result<Response, ClientError> {
-            self.stop_called.store(true, Ordering::SeqCst);
-            Ok(Response::ok_with_message("Stopping"))
-        }
     }
 
     // ========================================================================
@@ -1524,15 +1669,15 @@ mod tests {
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        stream_cursor_logs(
+        let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, never_shutdown(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
 
+        assert_eq!(exit_reason, StreamExitReason::Done);
         assert_eq!(collected, vec!["line-1", "line-2", "line-3"]);
         assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 2);
-        assert!(!mock.stop_called.load(Ordering::SeqCst));
     }
 
     /// Quiescence is only checked when the cursor is caught up (has_more=false).
@@ -1588,7 +1733,7 @@ mod tests {
     // Ctrl+C / shutdown signal
     // ========================================================================
 
-    /// Shutdown signal stops cursor reads and switches to quiescence-only polling.
+    /// Shutdown signal stops cursor reads and returns ShutdownRequested.
     #[tokio::test(start_paused = true)]
     async fn test_follow_shutdown_stops_cursor_reads() {
         let mock = MockClient::new();
@@ -1599,26 +1744,21 @@ mod tests {
                 true,
             ));
         }
-        // Status: running once, then stopped
-        mock.push_status(status_response(&[("svc", "running")]));
-        mock.push_status(status_response(&[("svc", "stopped")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
         // Shutdown resolves immediately — the biased select picks it up after first cursor read
-        stream_cursor_logs(
+        let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, async {},
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
 
+        assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
         assert_eq!(collected.len(), 1, "Only one cursor batch before shutdown");
         assert_eq!(collected[0], "line-0");
-        assert!(mock.stop_called.load(Ordering::SeqCst), "Stop must be sent");
         assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 1);
-        // Two status checks: "running" then "stopped"
-        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 2);
     }
 
     /// Shutdown triggered via Notify after N cursor reads.
@@ -1632,7 +1772,6 @@ mod tests {
                 true,
             ));
         }
-        mock.push_status(status_response(&[("svc", "stopped")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
@@ -1641,7 +1780,7 @@ mod tests {
         let notify_clone = notify.clone();
 
         // Trigger shutdown after 3 batches are collected
-        stream_cursor_logs(
+        let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent,
             async move { notify_clone.notified().await },
@@ -1653,9 +1792,8 @@ mod tests {
             },
         ).await.unwrap();
 
-        // 3 cursor reads consumed, then shutdown fires in select, then status poll
+        assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
         assert_eq!(collected.len(), 3);
-        assert!(mock.stop_called.load(Ordering::SeqCst));
         assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 3);
     }
 
@@ -1776,31 +1914,27 @@ mod tests {
         assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 2);
     }
 
-    /// After shutdown, status polling retries until quiescent (not just once).
+    /// Shutdown returns immediately — quiescence is now handled by the caller with progress bars.
     #[tokio::test(start_paused = true)]
-    async fn test_follow_shutdown_retries_status_until_quiescent() {
+    async fn test_follow_shutdown_returns_immediately() {
         let mock = MockClient::new();
         // One cursor batch then shutdown
         mock.push_cursor(cursor_response(&[("svc", "x")], true));
-        // Status: running 3 times, then stopped
-        mock.push_status(status_response(&[("svc", "running")]));
-        mock.push_status(status_response(&[("svc", "running")]));
-        mock.push_status(status_response(&[("svc", "running")]));
-        mock.push_status(status_response(&[("svc", "stopped")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        stream_cursor_logs(
+        let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, async {},
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
 
-        assert!(mock.stop_called.load(Ordering::SeqCst));
-        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 4);
+        assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
         // Only 1 cursor read before shutdown took effect
         assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 1);
+        // No status polling — caller handles stop with progress bars
+        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 0);
     }
 
     // ========================================================================
@@ -2007,13 +2141,13 @@ mod tests {
     #[test]
     fn test_is_all_terminal_includes_exited() {
         let response = status_response(&[("svc", "exited")]).unwrap();
-        assert!(is_all_terminal(&response));
+        assert!(is_all_terminal(&response, None));
     }
 
     #[test]
     fn test_is_all_terminal_includes_killed() {
         let response = status_response(&[("svc", "killed")]).unwrap();
-        assert!(is_all_terminal(&response));
+        assert!(is_all_terminal(&response, None));
     }
 
     #[test]
@@ -2024,7 +2158,7 @@ mod tests {
             ("c", "failed"),
             ("d", "killed"),
         ]).unwrap();
-        assert!(is_all_terminal(&response));
+        assert!(is_all_terminal(&response, None));
     }
 
     #[test]
@@ -2033,7 +2167,7 @@ mod tests {
             ("a", "exited"),
             ("b", "running"),
         ]).unwrap();
-        assert!(!is_all_terminal(&response));
+        assert!(!is_all_terminal(&response, None));
     }
 
     // ========================================================================
@@ -2044,41 +2178,51 @@ mod tests {
     #[test]
     fn test_is_all_terminal_starting_not_terminal() {
         let response = status_response(&[("svc", "starting")]).unwrap();
-        assert!(!is_all_terminal(&response));
+        assert!(!is_all_terminal(&response, None));
     }
 
     /// Services in "stopping" state are NOT terminal.
     #[test]
     fn test_is_all_terminal_stopping_not_terminal() {
         let response = status_response(&[("svc", "stopping")]).unwrap();
-        assert!(!is_all_terminal(&response));
+        assert!(!is_all_terminal(&response, None));
     }
 
-    /// Services in "starting" state when shutdown triggers.
-    /// Status transitions: starting → stopping → stopped. Verifies CLI exits normally.
+    /// Service filter: worker stopped while web is running → terminal for worker only.
+    #[test]
+    fn test_is_all_terminal_service_filter() {
+        let response = status_response(&[
+            ("worker", "stopped"),
+            ("web", "healthy"),
+        ]).unwrap();
+        // Unfiltered: web is healthy → not terminal
+        assert!(!is_all_terminal(&response, None));
+        // Filtered to worker: worker is stopped → terminal
+        assert!(is_all_terminal(&response, Some("worker")));
+        // Filtered to web: web is healthy → not terminal
+        assert!(!is_all_terminal(&response, Some("web")));
+        // Filtered to nonexistent service: no relevant services → not terminal
+        assert!(!is_all_terminal(&response, Some("nonexistent")));
+    }
+
+    /// Services in "starting" state when shutdown triggers — returns ShutdownRequested.
     #[tokio::test(start_paused = true)]
     async fn test_follow_shutdown_handles_starting_services() {
         let mock = MockClient::new();
         // One cursor batch then shutdown fires
         mock.push_cursor(cursor_response(&[("svc", "init")], true));
-        // Status: starting (not yet running), then stopping, then stopped
-        mock.push_status(status_response(&[("svc", "starting")]));
-        mock.push_status(status_response(&[("svc", "stopping")]));
-        mock.push_status(status_response(&[("svc", "stopped")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        stream_cursor_logs(
+        let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, async {},
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
 
+        assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
         assert_eq!(collected, vec!["init"]);
-        assert!(mock.stop_called.load(Ordering::SeqCst));
-        // 3 status checks: starting, stopping, stopped
-        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 3);
     }
 
     /// First status returns "starting" (simulating pre-marked services from early pre-marking),
@@ -2110,103 +2254,6 @@ mod tests {
 
         assert_eq!(collected, vec!["hello"]);
         assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 3);
-    }
-
-    // ========================================================================
-    // Foreground mode: Ctrl+C hang prevention
-    // ========================================================================
-
-    /// Foreground mode must exit promptly when follow_logs finishes (quiescence
-    /// detected), even if the daemon's start response hasn't arrived yet.
-    /// This prevents the Ctrl+C hang where follow_logs sends stop and detects
-    /// quiescence but tokio::join! blocks waiting for the start response.
-    #[tokio::test(start_paused = true)]
-    async fn test_foreground_exits_when_response_pending() {
-        let mock = MockClient::new();
-        mock.push_cursor(cursor_response(&[("svc", "hello")], false));
-        mock.push_status(status_response(&[("svc", "exited")]));
-
-        let config_path = PathBuf::from("/fake/config.yaml");
-
-        // response_future that NEVER completes (simulates daemon stuck in WaitStartup)
-        let response_never = std::future::pending::<ClientResult>();
-
-        let result = foreground_select(
-            response_never,
-            stream_cursor_logs(
-                &mock, &config_path, None, false,
-                StreamMode::UntilQuiescent, never_shutdown(),
-                |_, _| {},
-            ),
-        ).await;
-
-        result.unwrap();
-        // If we reach here, the test passed — no hang.
-    }
-
-    /// After Ctrl+C in foreground mode, follow_logs sends stop and polls until
-    /// quiescent. Once quiescent, the CLI must exit — even if the WaitStartup
-    /// response is still blocked.
-    #[tokio::test(start_paused = true)]
-    async fn test_foreground_ctrlc_exits_when_response_pending() {
-        let mock = MockClient::new();
-        // One cursor batch, then shutdown fires
-        mock.push_cursor(cursor_response(&[("svc", "x")], true));
-        // Status: running then stopped
-        mock.push_status(status_response(&[("svc", "running")]));
-        mock.push_status(status_response(&[("svc", "stopped")]));
-
-        let config_path = PathBuf::from("/fake/config.yaml");
-
-        // response_future that NEVER completes
-        let response_never = std::future::pending::<ClientResult>();
-
-        let result = foreground_select(
-            response_never,
-            stream_cursor_logs(
-                &mock, &config_path, None, false,
-                StreamMode::UntilQuiescent,
-                async {}, // immediate shutdown
-                |_, _| {},
-            ),
-        ).await;
-
-        result.unwrap();
-        assert!(mock.stop_called.load(Ordering::SeqCst), "Stop must be sent");
-    }
-
-    /// When the response arrives before follow_logs finishes, we keep running
-    /// follow_logs until quiescence — no premature exit.
-    #[tokio::test(start_paused = true)]
-    async fn test_foreground_response_first_keeps_following_logs() {
-        let mock = MockClient::new();
-        // First batch: log entries (sets seen_activity)
-        mock.push_cursor(cursor_response(&[("svc", "a")], false));
-        // Status: still running (not terminal yet)
-        mock.push_status(status_response(&[("svc", "running")]));
-        // Second batch: more logs
-        mock.push_cursor(cursor_response(&[("svc", "b")], false));
-        // Now terminal
-        mock.push_status(status_response(&[("svc", "exited")]));
-
-        let config_path = PathBuf::from("/fake/config.yaml");
-        let mut collected = Vec::new();
-
-        // response_future that completes immediately
-        let response_immediate = async { Ok(Response::ok_with_message("Started".to_string())) };
-
-        let result = foreground_select(
-            response_immediate,
-            stream_cursor_logs(
-                &mock, &config_path, None, false,
-                StreamMode::UntilQuiescent, never_shutdown(),
-                |st, entries| collect_batch(&mut collected, st, entries),
-            ),
-        ).await;
-
-        result.unwrap();
-        assert_eq!(collected, vec!["a", "b"], "All logs must be collected");
-        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 2);
     }
 
     /// First cursor returns "Config not loaded", then services appear as "starting",

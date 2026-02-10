@@ -11,18 +11,15 @@ use crate::config_actor::ConfigActorHandle;
 use crate::events::{HealthStatus, ServiceEvent};
 use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use crate::state::ServiceStatus;
-use kepler_protocol::protocol::{ProgressEvent, ServicePhase};
-use kepler_protocol::server::ProgressSender;
 
 /// Spawn a health check monitoring task for a service
 pub fn spawn_health_checker(
     service_name: String,
     health_config: HealthCheck,
     handle: ConfigActorHandle,
-    progress: Option<ProgressSender>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        health_check_loop(service_name, health_config, handle, progress).await;
+        health_check_loop(service_name, health_config, handle).await;
     })
 }
 
@@ -30,7 +27,6 @@ async fn health_check_loop(
     service_name: String,
     config: HealthCheck,
     handle: ConfigActorHandle,
-    mut progress: Option<ProgressSender>,
 ) {
     // Wait for start_period before beginning checks
     if !config.start_period.is_zero() {
@@ -113,13 +109,6 @@ async fn health_check_loop(
                     // Emit Healthy or Unhealthy event based on new status
                     match update.new_status {
                         ServiceStatus::Healthy => {
-                            // Emit progress event on first healthy (then drop sender)
-                            if let Some(sender) = progress.take() {
-                                sender.send(ProgressEvent {
-                                    service: service_name.clone(),
-                                    phase: ServicePhase::Healthy,
-                                }).await;
-                            }
                             handle.emit_event(&service_name, ServiceEvent::Healthy).await;
                         }
                         ServiceStatus::Unhealthy => {

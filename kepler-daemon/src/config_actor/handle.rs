@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::config::{KeplerConfig, LogConfig, ServiceConfig, SysEnvPolicy};
@@ -18,7 +18,7 @@ use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
 
 use super::command::ConfigCommand;
-use super::context::{HealthCheckUpdate, ServiceContext, TaskHandleType};
+use super::context::{HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
 
 /// Handle for sending commands to a config actor.
 /// This is cheap to clone (just clones the channel sender and path).
@@ -27,6 +27,7 @@ pub struct ConfigActorHandle {
     config_path: PathBuf,
     config_hash: String,
     tx: mpsc::Sender<ConfigCommand>,
+    status_tx: broadcast::Sender<ServiceStatusChange>,
 }
 
 impl ConfigActorHandle {
@@ -35,11 +36,13 @@ impl ConfigActorHandle {
         config_path: PathBuf,
         config_hash: String,
         tx: mpsc::Sender<ConfigCommand>,
+        status_tx: broadcast::Sender<ServiceStatusChange>,
     ) -> Self {
         Self {
             config_path,
             config_hash,
             tx,
+            status_tx,
         }
     }
 
@@ -51,6 +54,11 @@ impl ConfigActorHandle {
     /// Get the config hash
     pub fn config_hash(&self) -> &str {
         &self.config_hash
+    }
+
+    /// Subscribe to service status change events (broadcast channel).
+    pub fn subscribe_state_changes(&self) -> broadcast::Receiver<ServiceStatusChange> {
+        self.status_tx.subscribe()
     }
 
     // === Query Methods ===
@@ -402,18 +410,6 @@ impl ConfigActorHandle {
             warn!("Config actor closed, cannot send ClaimServiceStart");
         }
         reply_rx.await.unwrap_or(false)
-    }
-
-    /// Reload the config file
-    pub async fn reload_config(&self) -> Result<()> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(ConfigCommand::ReloadConfig { reply: reply_tx })
-            .await
-            .map_err(|_| DaemonError::Internal("Config actor closed".into()))?;
-        reply_rx
-            .await
-            .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
     }
 
     /// Set service status

@@ -18,5 +18,5 @@ mod handle;
 
 pub use actor::ConfigActor;
 pub use command::ConfigCommand;
-pub use context::{HealthCheckUpdate, ServiceContext, TaskHandleType};
+pub use context::{HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
 pub use handle::ConfigActorHandle;
