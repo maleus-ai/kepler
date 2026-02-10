@@ -355,8 +355,8 @@ pub async fn check_dependency_satisfied(
             state.status == ServiceStatus::Healthy
         }
         DependencyCondition::ServiceCompletedSuccessfully => {
-            // Service must have stopped with exit code 0
-            state.status == ServiceStatus::Stopped && state.exit_code == Some(0)
+            // Service must have exited/stopped with exit code 0
+            matches!(state.status, ServiceStatus::Stopped | ServiceStatus::Exited) && state.exit_code == Some(0)
         }
         DependencyCondition::ServiceUnhealthy => {
             // Service must be unhealthy and must have been healthy before
@@ -372,12 +372,12 @@ pub async fn check_dependency_satisfied(
                     .matches(state.exit_code.unwrap_or(-1))
         }
         DependencyCondition::ServiceStopped => {
-            // Service must have stopped or failed, optionally matching exit code filter.
+            // Service must have stopped/exited or failed, optionally matching exit code filter.
             // exit_code is None when the process was killed by a signal (no exit status),
             // mapped to -1 so signal-killed processes can be matched with exit_code: [-1].
             matches!(
                 state.status,
-                ServiceStatus::Stopped | ServiceStatus::Failed
+                ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed
             ) && dep_config
                 .exit_code
                 .matches(state.exit_code.unwrap_or(-1))
@@ -403,7 +403,7 @@ pub async fn is_dependency_permanently_unsatisfied(
     };
 
     // Only check terminal states
-    if !matches!(state.status, ServiceStatus::Stopped | ServiceStatus::Failed) {
+    if !matches!(state.status, ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed) {
         return false;
     }
 

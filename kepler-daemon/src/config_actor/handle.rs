@@ -446,12 +446,14 @@ impl ConfigActorHandle {
         &self,
         service_name: &str,
         exit_code: Option<i32>,
+        signal: Option<i32>,
     ) -> Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ConfigCommand::RecordProcessExit {
                 service_name: service_name.to_string(),
                 exit_code,
+                signal,
                 reply: reply_tx,
             })
             .await

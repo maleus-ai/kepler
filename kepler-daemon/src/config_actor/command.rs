@@ -121,6 +121,7 @@ pub enum ConfigCommand {
     RecordProcessExit {
         service_name: String,
         exit_code: Option<i32>,
+        signal: Option<i32>,
         reply: oneshot::Sender<Result<()>>,
     },
     UpdateHealthCheck {

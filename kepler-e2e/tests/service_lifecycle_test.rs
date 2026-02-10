@@ -28,7 +28,7 @@ async fn test_start_single_service() -> E2eResult<()> {
     let ps_output = harness.ps(&config_path).await?;
     ps_output.assert_success();
     assert!(
-        ps_output.stdout_contains("simple-service") && ps_output.stdout_contains("running"),
+        ps_output.stdout_contains("simple-service") && ps_output.stdout_contains("Up "),
         "Service should be listed as running. stdout: {}",
         ps_output.stdout
     );
@@ -223,7 +223,7 @@ async fn test_ps_shows_all_services() -> E2eResult<()> {
         ps_output.stdout
     );
     assert!(
-        ps_output.stdout_contains("running"),
+        ps_output.stdout_contains("Up "),
         "ps output should show running status. stdout: {}",
         ps_output.stdout
     );

@@ -8,7 +8,7 @@ use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_daemon::Daemon;
 use kepler_protocol::protocol::{Request, Response, ResponseData};
-use kepler_protocol::server::Server;
+use kepler_protocol::server::{ProgressSender, Server};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -157,11 +157,11 @@ async fn main() -> anyhow::Result<()> {
     let handler_cursor_manager = cursor_manager.clone();
 
     // Create the async request handler
-    let handler = move |request: Request, shutdown_tx: mpsc::Sender<()>| {
+    let handler = move |request: Request, shutdown_tx: mpsc::Sender<()>, progress: ProgressSender| {
         let orchestrator = handler_orchestrator.clone();
         let registry = handler_registry.clone();
         let cursor_manager = handler_cursor_manager.clone();
-        async move { handle_request(request, orchestrator, registry, cursor_manager, shutdown_tx).await }
+        async move { handle_request(request, orchestrator, registry, cursor_manager, shutdown_tx, progress).await }
     };
 
     // Create server
@@ -188,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
                 event.service_name, event.config_path
             );
             if let Err(e) = exit_orchestrator
-                .handle_exit(&event.config_path, &event.service_name, event.exit_code)
+                .handle_exit(&event.config_path, &event.service_name, event.exit_code, event.signal)
                 .await
             {
                 error!("Failed to handle exit for {}: {}", event.service_name, e);
@@ -211,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
             // Stop all services
             let config_paths = registry.list_paths();
             for config_path in config_paths {
-                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
+                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None, None).await {
                     error!("Error stopping services during shutdown: {}", e);
                 }
             }
@@ -234,6 +234,7 @@ async fn handle_request(
     registry: SharedConfigRegistry,
     cursor_manager: Arc<CursorManager>,
     shutdown_tx: mpsc::Sender<()>,
+    progress: ProgressSender,
 ) -> Response {
     match request {
         Request::Ping => Response::ok_with_message("pong".to_string()),
@@ -244,7 +245,7 @@ async fn handle_request(
             let config_paths = registry.list_paths();
 
             for config_path in config_paths {
-                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
+                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None, None).await {
                     error!("Error stopping services during shutdown: {}", e);
                 }
             }
@@ -268,7 +269,7 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
             match orchestrator
-                .start_services(&config_path, service.as_deref(), sys_env, mode)
+                .start_services(&config_path, service.as_deref(), sys_env, mode, Some(progress))
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -298,7 +299,7 @@ async fn handle_request(
                 None => None,
             };
             match orchestrator
-                .stop_services(&config_path, service.as_deref(), clean, signal_num)
+                .stop_services(&config_path, service.as_deref(), clean, signal_num, Some(progress))
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -322,7 +323,7 @@ async fn handle_request(
                 let config_path_clone = config_path.clone();
                 tokio::spawn(async move {
                     if let Err(e) = orchestrator
-                        .restart_services(&config_path_clone, &services, sys_env)
+                        .restart_services(&config_path_clone, &services, sys_env, None)
                         .await
                     {
                         tracing::error!("Background restart failed: {}", e);
@@ -331,7 +332,7 @@ async fn handle_request(
                 Response::ok_with_message("Restarting services in background".to_string())
             } else {
                 match orchestrator
-                    .restart_services(&config_path, &services, sys_env)
+                    .restart_services(&config_path, &services, sys_env, Some(progress))
                     .await
                 {
                     Ok(msg) => Response::ok_with_message(msg),
@@ -417,7 +418,7 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
             // Stop all services first
-            if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
+            if let Err(e) = orchestrator.stop_services(&config_path, None, false, None, None).await {
                 return Response::error(format!("Failed to stop services: {}", e));
             }
 
@@ -642,7 +643,7 @@ async fn discover_existing_configs(
 
                     for service_name in &services_to_respawn {
                         match orchestrator
-                            .start_services(&source_path, Some(service_name), None, kepler_protocol::protocol::StartMode::WaitStartup)
+                            .start_services(&source_path, Some(service_name), None, kepler_protocol::protocol::StartMode::WaitStartup, None)
                             .await
                         {
                             Ok(_) => {

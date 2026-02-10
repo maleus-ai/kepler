@@ -37,7 +37,8 @@ use crate::hooks::{
 use crate::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
 use crate::state::ServiceStatus;
 use crate::watcher::{spawn_file_watcher, FileChangeEvent};
-use kepler_protocol::protocol::{PrunedConfigInfo, StartMode};
+use kepler_protocol::protocol::{ProgressEvent, PrunedConfigInfo, ServicePhase, ServiceTarget, StartMode};
+use kepler_protocol::server::ProgressSender;
 
 /// Context for detached mode background task.
 /// Groups all cloned values needed by the spawned async task.
@@ -88,6 +89,16 @@ impl ServiceOrchestrator {
         &self.registry
     }
 
+    /// Emit a progress event if a progress sender is available
+    async fn emit_progress(progress: &Option<ProgressSender>, service: &str, phase: ServicePhase) {
+        if let Some(sender) = progress {
+            sender.send(ProgressEvent {
+                service: service.to_string(),
+                phase,
+            }).await;
+        }
+    }
+
     /// Start services for a config
     ///
     /// If `service_filter` is provided, only starts that service and its dependencies.
@@ -113,6 +124,7 @@ impl ServiceOrchestrator {
         service_filter: Option<&str>,
         sys_env: Option<HashMap<String, String>>,
         mode: StartMode,
+        progress: Option<ProgressSender>,
     ) -> Result<String, OrchestratorError> {
         // Get or create the config actor
         let handle = self
@@ -132,6 +144,14 @@ impl ServiceOrchestrator {
             Some(name) => get_service_with_deps(name, &config.services)?,
             None => get_start_order(&config.services)?,
         };
+
+        // Emit Pending progress for all services with their expected final state
+        for service_name in &services_to_start {
+            let has_healthcheck = config.services.get(service_name)
+                .is_some_and(|s| s.healthcheck.is_some());
+            let target = if has_healthcheck { ServiceTarget::Healthy } else { ServiceTarget::Started };
+            Self::emit_progress(&progress, service_name, ServicePhase::Pending { target }).await;
+        }
 
         let log_config = handle
             .get_log_config()
@@ -203,6 +223,7 @@ impl ServiceOrchestrator {
                         &ctx.config_dir,
                         &ctx.stored_env,
                         &ctx.log_config,
+                        &None,
                     ).await;
                     if let Err(e) = result {
                         error!("Background service startup failed: {}", e);
@@ -251,6 +272,7 @@ impl ServiceOrchestrator {
                         &config_dir,
                         &stored_env,
                         &log_config,
+                        &progress,
                     ).await?;
                     Ok(result)
                 } else {
@@ -266,7 +288,7 @@ impl ServiceOrchestrator {
 
                     // Start startup cluster services (blocking)
                     let started = if !startup_services.is_empty() {
-                        self.start_services_by_level(&startup_services, &config, &handle, true).await?
+                        self.start_services_by_level(&startup_services, &config, &handle, true, &progress).await?
                     } else {
                         Vec::new()
                     };
@@ -305,6 +327,7 @@ impl ServiceOrchestrator {
                                 &config_clone,
                                 &handle_clone,
                                 false,
+                                &None,
                             ).await {
                                 error!("Failed to compute deferred start levels: {}", e);
                             }
@@ -339,6 +362,7 @@ impl ServiceOrchestrator {
         config_dir: &Path,
         stored_env: &HashMap<String, String>,
         log_config: &crate::logs::LogWriterConfig,
+        progress: &Option<ProgressSender>,
     ) -> Result<String, OrchestratorError> {
         let mut started = Vec::new();
 
@@ -350,9 +374,10 @@ impl ServiceOrchestrator {
                     continue;
                 }
 
-                match self.start_single_service(handle, service_name).await {
+                match self.start_single_service(handle, service_name, progress).await {
                     Ok(()) => started.push(service_name.clone()),
                     Err(e) => {
+                        Self::emit_progress(progress, service_name, ServicePhase::Failed { message: e.to_string() }).await;
                         error!("Failed to start service {}: {}", service_name, e);
                         return Err(e);
                     }
@@ -360,7 +385,7 @@ impl ServiceOrchestrator {
             }
         } else {
             // Parallel start: group services by dependency level
-            started = self.start_services_by_level(services_to_start, config, handle, true).await?;
+            started = self.start_services_by_level(services_to_start, config, handle, true, progress).await?;
         }
 
         // Run post-startup work
@@ -446,6 +471,7 @@ impl ServiceOrchestrator {
         &self,
         handle: &ConfigActorHandle,
         service_name: &str,
+        progress: &Option<ProgressSender>,
     ) -> Result<(), OrchestratorError> {
         // Get service context (single round-trip)
         let ctx = handle
@@ -453,9 +479,17 @@ impl ServiceOrchestrator {
             .await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
+        // Emit Waiting progress (before blocking on dependencies)
+        if !ctx.service_config.depends_on.is_empty() {
+            Self::emit_progress(progress, service_name, ServicePhase::Waiting).await;
+        }
+
         // Wait for dependencies to satisfy their conditions
         self.wait_for_dependencies(handle, service_name, &ctx.service_config)
             .await?;
+
+        // Emit Starting progress
+        Self::emit_progress(progress, service_name, ServicePhase::Starting).await;
 
         // Update status to starting
         let _ = handle
@@ -498,7 +532,10 @@ impl ServiceOrchestrator {
         }
 
         // Spawn auxiliary tasks
-        self.spawn_auxiliary_tasks(handle, service_name, &ctx).await;
+        self.spawn_auxiliary_tasks(handle, service_name, &ctx, progress).await;
+
+        // Emit Started progress
+        Self::emit_progress(progress, service_name, ServicePhase::Started).await;
 
         Ok(())
     }
@@ -596,20 +633,14 @@ impl ServiceOrchestrator {
         service_filter: Option<&str>,
         clean: bool,
         signal: Option<i32>,
+        progress: Option<ProgressSender>,
     ) -> Result<String, OrchestratorError> {
         let config_dir = config_path
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-        // Get or create the actor (needed for cleanup hooks even if not started)
-        let handle = if clean {
-            Some(self.registry.get_or_create(config_path.to_path_buf(), None).await?)
-        } else {
-            self.registry.get(&config_path.to_path_buf())
-        };
-
-        let handle = match handle {
+        let handle = match self.registry.get(&config_path.to_path_buf()) {
             Some(h) => h,
             None => return Ok("Config not loaded".to_string()),
         };
@@ -664,6 +695,9 @@ impl ServiceOrchestrator {
                 continue;
             }
 
+            // Emit Stopping progress
+            Self::emit_progress(&progress, service_name, ServicePhase::Stopping).await;
+
             // Emit Stop event
             handle.emit_event(service_name, ServiceEvent::Stop).await;
 
@@ -693,6 +727,9 @@ impl ServiceOrchestrator {
                 {
                     warn!("Hook post_stop failed for {}: {}", service_name, e);
                 }
+
+            // Emit Stopped progress
+            Self::emit_progress(&progress, service_name, ServicePhase::Stopped).await;
 
             stopped.push(service_name.clone());
         }
@@ -806,20 +843,35 @@ impl ServiceOrchestrator {
             };
 
             // Remove entire state directory (logs, config snapshots, env_files, etc.)
-            if state_dir.exists() {
+            let cleaned = if state_dir.exists() {
                 if let Err(e) = std::fs::remove_dir_all(&state_dir) {
                     warn!("Failed to remove state directory {:?}: {}", state_dir, e);
+                    false
                 } else {
                     info!("Removed state directory: {:?}", state_dir);
+                    true
                 }
-            }
+            } else {
+                false
+            };
 
             // Unload config from registry
             self.registry.unload(&config_path.to_path_buf()).await;
+
+            // Emit Cleaned progress only when state was actually removed
+            if cleaned {
+                for service_name in &services_to_stop {
+                    Self::emit_progress(&progress, service_name, ServicePhase::Cleaned).await;
+                }
+            }
         }
 
-        if stopped.is_empty() {
+        if stopped.is_empty() && !clean {
             Ok("No services were running".to_string())
+        } else if clean && stopped.is_empty() {
+            Ok("Cleaned up (no services were running)".to_string())
+        } else if clean {
+            Ok(format!("Stopped and cleaned services: {}", stopped.join(", ")))
         } else {
             Ok(format!("Stopped services: {}", stopped.join(", ")))
         }
@@ -849,6 +901,7 @@ impl ServiceOrchestrator {
         config_path: &Path,
         services: &[String],
         _sys_env: Option<HashMap<String, String>>,
+        progress: Option<ProgressSender>,
     ) -> Result<String, OrchestratorError> {
         info!("Restarting services for {:?} (preserving state)", config_path);
 
@@ -939,6 +992,9 @@ impl ServiceOrchestrator {
                 }
             };
 
+            // Emit Stopping progress
+            Self::emit_progress(&progress, service_name, ServicePhase::Stopping).await;
+
             // Emit Restart event
             handle
                 .emit_event(
@@ -971,6 +1027,9 @@ impl ServiceOrchestrator {
             if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStop).await {
                 warn!("Hook post_stop failed for {}: {}", service_name, e);
             }
+
+            // Emit Stopped progress
+            Self::emit_progress(&progress, service_name, ServicePhase::Stopped).await;
         }
 
         // Small delay between stop and start phases
@@ -980,6 +1039,9 @@ impl ServiceOrchestrator {
 
         // Phase 2: Start services (forward dependency order)
         for service_name in &start_order {
+            // Emit Starting progress
+            Self::emit_progress(&progress, service_name, ServicePhase::Starting).await;
+
             // Refresh context after stop (state may have changed)
             let ctx = match handle.get_service_context(service_name).await {
                 Some(ctx) => ctx,
@@ -995,6 +1057,7 @@ impl ServiceOrchestrator {
             // Run pre_start hook
             if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart).await {
                 warn!("Hook pre_start failed for {}: {}", service_name, e);
+                Self::emit_progress(&progress, service_name, ServicePhase::Failed { message: e.to_string() }).await;
                 continue;
             }
 
@@ -1017,14 +1080,18 @@ impl ServiceOrchestrator {
                     }
 
                     // Spawn auxiliary tasks
-                    self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
+                    self.spawn_auxiliary_tasks(&handle, service_name, &ctx, &progress).await;
 
                     // Increment restart count
                     let _ = handle.increment_restart_count(service_name).await;
+
+                    // Emit Started progress
+                    Self::emit_progress(&progress, service_name, ServicePhase::Started).await;
                 }
                 Err(e) => {
                     error!("Failed to spawn service {}: {}", service_name, e);
                     let _ = handle.set_service_status(service_name, ServiceStatus::Failed).await;
+                    Self::emit_progress(&progress, service_name, ServicePhase::Failed { message: e.to_string() }).await;
                 }
             }
         }
@@ -1213,7 +1280,7 @@ impl ServiceOrchestrator {
         }
 
         // Spawn auxiliary tasks (health checker, file watcher)
-        self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
+        self.spawn_auxiliary_tasks(&handle, service_name, &ctx, &None).await;
 
         let _ = handle.increment_restart_count(service_name).await;
 
@@ -1233,6 +1300,7 @@ impl ServiceOrchestrator {
         config_path: &Path,
         service_name: &str,
         exit_code: Option<i32>,
+        signal: Option<i32>,
     ) -> Result<(), OrchestratorError> {
         let handle = match self.registry.get(&config_path.to_path_buf()) {
             Some(h) => h,
@@ -1251,7 +1319,7 @@ impl ServiceOrchestrator {
             .await;
 
         // Record process exit in state
-        let _ = handle.record_process_exit(service_name, exit_code).await;
+        let _ = handle.record_process_exit(service_name, exit_code, signal).await;
 
         // Run post_exit hook
         if let Err(e) = self
@@ -1345,9 +1413,9 @@ impl ServiceOrchestrator {
                 }
             }
         } else {
-            // Mark as stopped or failed
+            // Mark as exited (clean exit) or failed
             let status = if exit_code == Some(0) {
-                ServiceStatus::Stopped
+                ServiceStatus::Exited
             } else {
                 ServiceStatus::Failed
             };
@@ -1399,6 +1467,7 @@ impl ServiceOrchestrator {
         config: &KeplerConfig,
         handle: &ConfigActorHandle,
         fail_fast: bool,
+        progress: &Option<ProgressSender>,
     ) -> Result<Vec<String>, OrchestratorError> {
         let levels = get_start_levels(&config.services)?;
         let mut started = Vec::new();
@@ -1424,7 +1493,7 @@ impl ServiceOrchestrator {
                 let service_name_clone = service_name.clone();
                 let self_ref = self;
                 tasks.push(async move {
-                    let result = self_ref.start_single_service(&handle_clone, &service_name_clone).await;
+                    let result = self_ref.start_single_service(&handle_clone, &service_name_clone, progress).await;
                     (service_name_clone, result)
                 });
             }
@@ -1435,6 +1504,7 @@ impl ServiceOrchestrator {
                 match result {
                     Ok(()) => started.push(service_name),
                     Err(e) => {
+                        Self::emit_progress(progress, &service_name, ServicePhase::Failed { message: e.to_string() }).await;
                         if fail_fast {
                             error!("Failed to start service {}: {}", service_name, e);
                             return Err(e);
@@ -1564,6 +1634,7 @@ impl ServiceOrchestrator {
         handle: &ConfigActorHandle,
         service_name: &str,
         ctx: &ServiceContext,
+        progress: &Option<ProgressSender>,
     ) {
         // Start health check if configured
         if let Some(health_config) = &ctx.service_config.healthcheck {
@@ -1571,6 +1642,7 @@ impl ServiceOrchestrator {
                 service_name.to_string(),
                 health_config.clone(),
                 handle.clone(),
+                progress.clone(),
             );
             handle
                 .store_task_handle(service_name, TaskHandleType::HealthCheck, task_handle)

@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     errors::ServerError,
     protocol::{
-        MAX_MESSAGE_SIZE, Response, ServerMessage,
+        MAX_MESSAGE_SIZE, ProgressEvent, Response, ServerEvent, ServerMessage,
         decode_envelope, encode_server_message,
     },
 };
@@ -55,9 +55,39 @@ pub type ShutdownTx = mpsc::Sender<()>;
 /// Bounded channel capacity for the per-connection writer task.
 const WRITER_CHANNEL_CAPACITY: usize = 256;
 
+/// Sender for progress events from a request handler back to the client.
+///
+/// Wraps the shared write channel and the request ID so handlers can
+/// emit per-service progress updates without knowing about framing.
+#[derive(Clone)]
+pub struct ProgressSender {
+    write_tx: mpsc::Sender<Vec<u8>>,
+    request_id: u64,
+}
+
+impl ProgressSender {
+    /// Create a new progress sender.
+    pub fn new(write_tx: mpsc::Sender<Vec<u8>>, request_id: u64) -> Self {
+        Self { write_tx, request_id }
+    }
+
+    /// Send a progress event to the client. Fire-and-forget: errors are silently ignored.
+    pub async fn send(&self, event: ProgressEvent) {
+        let msg = ServerMessage::Event {
+            event: ServerEvent::Progress {
+                request_id: self.request_id,
+                event,
+            },
+        };
+        if let Ok(bytes) = encode_server_message(&msg) {
+            let _ = self.write_tx.send(bytes).await;
+        }
+    }
+}
+
 pub struct Server<F, Fut>
 where
-    F: Fn(Request, ShutdownTx) -> Fut + Send + Sync + 'static,
+    F: Fn(Request, ShutdownTx, ProgressSender) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response> + Send,
 {
     socket_path: PathBuf,
@@ -71,7 +101,7 @@ use crate::protocol::Request;
 
 impl<F, Fut> Server<F, Fut>
 where
-    F: Fn(Request, ShutdownTx) -> Fut + Send + Sync + 'static,
+    F: Fn(Request, ShutdownTx, ProgressSender) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response> + Send,
 {
     pub fn new(socket_path: PathBuf, handler: F) -> Result<Self> {
@@ -166,7 +196,7 @@ async fn handle_client<F, Fut>(
     shutdown_tx: mpsc::Sender<()>,
 ) -> Result<()>
 where
-    F: Fn(Request, ShutdownTx) -> Fut + Send + Sync + 'static,
+    F: Fn(Request, ShutdownTx, ProgressSender) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response> + Send,
 {
     debug!("Client connected");
@@ -299,7 +329,8 @@ where
         let shutdown_tx = shutdown_tx.clone();
         let write_tx = write_tx.clone();
         tokio::spawn(async move {
-            let response = handler(request, shutdown_tx).await;
+            let progress_sender = ProgressSender::new(write_tx.clone(), request_id);
+            let response = handler(request, shutdown_tx, progress_sender).await;
             let msg = ServerMessage::Response {
                 id: request_id,
                 response,

@@ -251,6 +251,7 @@ impl TestDaemonHarness {
                 service_name.to_string(),
                 health_config,
                 self.handle.clone(),
+                None,
             );
 
             // Store the health check handle
@@ -474,7 +475,7 @@ impl TestDaemonHarness {
                 };
 
                 // Record process exit in state
-                let _ = handle.record_process_exit(&event.service_name, event.exit_code).await;
+                let _ = handle.record_process_exit(&event.service_name, event.exit_code, event.signal).await;
 
                 // Run on_exit hook
                 let hook_params = ServiceHookParams::from_service_context(
@@ -581,9 +582,9 @@ impl TestDaemonHarness {
                             .await;
                     }
                 } else {
-                    // Mark as stopped or failed
+                    // Mark as exited (clean exit) or failed
                     let status = if event.exit_code == Some(0) {
-                        ServiceStatus::Stopped
+                        ServiceStatus::Exited
                     } else {
                         ServiceStatus::Failed
                     };

@@ -481,9 +481,10 @@ impl ConfigActor {
             ConfigCommand::RecordProcessExit {
                 service_name,
                 exit_code,
+                signal,
                 reply,
             } => {
-                let result = self.record_process_exit(&service_name, exit_code);
+                let result = self.record_process_exit(&service_name, exit_code, signal);
                 if result.is_ok() {
                     let _ = self.save_state();
                 }
@@ -882,8 +883,16 @@ impl ConfigActor {
             .services
             .get_mut(service_name)
             .ok_or_else(|| DaemonError::ServiceNotFound(service_name.to_string()))?;
-        if status == ServiceStatus::Starting {
+        if status == ServiceStatus::Starting || status == ServiceStatus::Running {
             service_state.was_healthy = false;
+            service_state.stopped_at = None;
+            service_state.signal = None;
+            service_state.exit_code = None;
+        }
+        if matches!(status, ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed) {
+            service_state.pid = None;
+            service_state.started_at = None;
+            service_state.stopped_at = Some(Utc::now());
         }
         service_state.status = status;
         Ok(())
@@ -904,7 +913,7 @@ impl ConfigActor {
         Ok(())
     }
 
-    fn record_process_exit(&mut self, service_name: &str, exit_code: Option<i32>) -> Result<()> {
+    fn record_process_exit(&mut self, service_name: &str, exit_code: Option<i32>, signal: Option<i32>) -> Result<()> {
         // Remove process handle
         self.processes.remove(service_name);
 
@@ -913,6 +922,7 @@ impl ConfigActor {
             .get_mut(service_name)
             .ok_or_else(|| DaemonError::ServiceNotFound(service_name.to_string()))?;
         service_state.exit_code = exit_code;
+        service_state.signal = signal;
         service_state.pid = None;
         Ok(())
     }

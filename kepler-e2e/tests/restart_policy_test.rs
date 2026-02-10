@@ -33,7 +33,7 @@ async fn test_restart_no_does_not_restart() -> E2eResult<()> {
     // Still should be stopped
     let ps_output = harness.ps(&config_path).await?;
     assert!(
-        !ps_output.stdout_contains("running"),
+        !ps_output.stdout_contains("Up "),
         "Service should not be restarted (restart: no). Status was: {}, stdout: {}",
         status, ps_output.stdout
     );

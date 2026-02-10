@@ -1309,8 +1309,10 @@ fn test_service_info_serialization_with_exit_code() {
         status: "failed".to_string(),
         pid: None,
         started_at: None,
+        stopped_at: None,
         health_check_failures: 0,
         exit_code: Some(42),
+        signal: None,
     };
 
     let yaml = serde_yaml::to_string(&info).unwrap();
@@ -1325,11 +1327,106 @@ fn test_service_info_serialization_none_exit_code_roundtrips() {
         status: "running".to_string(),
         pid: Some(1234),
         started_at: None,
+        stopped_at: None,
         health_check_failures: 0,
         exit_code: None,
+        signal: None,
     };
 
     let yaml = serde_yaml::to_string(&info).unwrap();
     let deserialized: ServiceInfo = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(deserialized.exit_code, None);
+}
+
+/// Test that Exited status converts to ServiceInfo correctly
+#[test]
+fn test_service_info_exited_status() {
+    let mut state = ServiceState::default();
+    state.status = ServiceStatus::Exited;
+    state.exit_code = Some(0);
+    state.stopped_at = Some(chrono::Utc::now());
+
+    let info: ServiceInfo = (&state).into();
+    assert_eq!(info.status, "exited");
+    assert_eq!(info.exit_code, Some(0));
+    assert!(info.stopped_at.is_some());
+    assert_eq!(info.signal, None);
+}
+
+/// Test that signal is propagated to ServiceInfo
+#[test]
+fn test_service_info_signal_propagation() {
+    let mut state = ServiceState::default();
+    state.status = ServiceStatus::Failed;
+    state.signal = Some(9);
+    state.stopped_at = Some(chrono::Utc::now());
+
+    let info: ServiceInfo = (&state).into();
+    assert_eq!(info.status, "failed");
+    assert_eq!(info.signal, Some(9));
+    assert!(info.stopped_at.is_some());
+    assert_eq!(info.exit_code, None);
+}
+
+/// Test that stopped_at is propagated to ServiceInfo
+#[test]
+fn test_service_info_stopped_at_propagation() {
+    let mut state = ServiceState::default();
+    state.status = ServiceStatus::Stopped;
+    state.stopped_at = Some(chrono::Utc::now());
+
+    let info: ServiceInfo = (&state).into();
+    assert_eq!(info.status, "stopped");
+    assert!(info.stopped_at.is_some());
+}
+
+/// Test that running services have no stopped_at or signal
+#[test]
+fn test_service_info_running_no_stopped_fields() {
+    let mut state = ServiceState::default();
+    state.status = ServiceStatus::Running;
+    state.pid = Some(1234);
+    state.started_at = Some(chrono::Utc::now());
+
+    let info: ServiceInfo = (&state).into();
+    assert_eq!(info.status, "running");
+    assert!(info.started_at.is_some());
+    assert_eq!(info.stopped_at, None);
+    assert_eq!(info.signal, None);
+}
+
+/// Test ServiceInfo serialization round-trip preserves stopped_at and signal
+#[test]
+fn test_service_info_serialization_new_fields_roundtrip() {
+    let info = ServiceInfo {
+        status: "failed".to_string(),
+        pid: None,
+        started_at: None,
+        stopped_at: Some(1700000000),
+        health_check_failures: 0,
+        exit_code: None,
+        signal: Some(9),
+    };
+
+    let yaml = serde_yaml::to_string(&info).unwrap();
+    let deserialized: ServiceInfo = serde_yaml::from_str(&yaml).unwrap();
+    assert_eq!(deserialized.stopped_at, Some(1700000000));
+    assert_eq!(deserialized.signal, Some(9));
+}
+
+/// Test ServiceInfo deserialization backward compatibility (old format without new fields)
+#[test]
+fn test_service_info_deserialization_backward_compatible() {
+    let yaml = r#"
+status: running
+pid: 1234
+started_at: 1700000000
+health_check_failures: 0
+"#;
+    let info: ServiceInfo = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(info.status, "running");
+    assert_eq!(info.pid, Some(1234));
+    assert_eq!(info.stopped_at, None);
+    assert_eq!(info.signal, None);
+    assert_eq!(info.exit_code, None);
 }

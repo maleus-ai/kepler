@@ -149,7 +149,13 @@ for bin in "${BINARIES[@]}"; do
     fi
 done
 
-# Step 2: Install binaries (requires root)
+# Step 2: Stop running daemon before replacing binaries
+if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    info "Stopping running kepler daemon"
+    as_root systemctl stop "$SERVICE_NAME"
+fi
+
+# Step 3: Install binaries (requires root)
 info "Installing binaries to ${BIN_DIR}"
 as_root mkdir -p "${BIN_DIR}"
 for bin in "${BINARIES[@]}"; do
@@ -158,7 +164,7 @@ for bin in "${BINARIES[@]}"; do
     echo "  ${BIN_DIR}/${bin}"
 done
 
-# Step 3: Create kepler group
+# Step 4: Create kepler group
 if getent group kepler >/dev/null 2>&1; then
     info "Group 'kepler' already exists"
 else
@@ -166,7 +172,7 @@ else
     as_root groupadd kepler
 fi
 
-# Step 4: Create state directory
+# Step 5: Create state directory
 if [[ -d "${STATE_DIR}" ]]; then
     info "State directory ${STATE_DIR} already exists"
 else
@@ -176,7 +182,7 @@ fi
 as_root chown root:kepler "${STATE_DIR}"
 as_root chmod 0770 "${STATE_DIR}"
 
-# Step 5: Systemd service
+# Step 6: Systemd service
 install_systemd() {
     info "Installing systemd service"
     as_root tee "${SYSTEMD_DIR}/${SERVICE_NAME}.service" >/dev/null <<UNIT
@@ -208,7 +214,7 @@ else
     warn "systemctl not found, skipping systemd service"
 fi
 
-# Step 6: Add user to kepler group
+# Step 7: Add user to kepler group
 CURRENT_USER="${SUDO_USER:-${USER:-}}"
 if [[ -n "$CURRENT_USER" ]] && [[ "$CURRENT_USER" != "root" ]]; then
     if id -nG "$CURRENT_USER" 2>/dev/null | grep -qw kepler; then

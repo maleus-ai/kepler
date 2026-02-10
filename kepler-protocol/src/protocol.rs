@@ -355,11 +355,17 @@ pub struct ServiceInfo {
     pub pid: Option<u32>,
     /// Started timestamp
     pub started_at: Option<i64>,
+    /// Stopped/exited/failed timestamp
+    #[serde(default)]
+    pub stopped_at: Option<i64>,
     /// Health check failures
     pub health_check_failures: u32,
     /// Exit code (for stopped/failed services)
     #[serde(default)]
     pub exit_code: Option<i32>,
+    /// Signal that killed the process (e.g., 9 for SIGKILL)
+    #[serde(default)]
+    pub signal: Option<i32>,
 }
 
 /// A log entry
@@ -405,10 +411,43 @@ pub enum ServerMessage {
     },
 }
 
-/// Server-pushed events (extensible for future use)
+/// Server-pushed events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerEvent {
-    // Future: LogLine, ServiceStateChanged, etc.
+    /// Progress update for a specific request
+    Progress {
+        request_id: u64,
+        event: ProgressEvent,
+    },
+}
+
+/// A progress event for a single service during a lifecycle operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgressEvent {
+    pub service: String,
+    pub phase: ServicePhase,
+}
+
+/// Expected final state for a service during a start operation
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ServiceTarget {
+    Started,
+    Healthy,
+}
+
+/// Phase of a service lifecycle operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ServicePhase {
+    Pending { target: ServiceTarget },
+    Waiting,
+    Starting,
+    Started,
+    Healthy,
+    Stopping,
+    Stopped,
+    Cleaning,
+    Cleaned,
+    Failed { message: String },
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;

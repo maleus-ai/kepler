@@ -34,6 +34,7 @@ pub struct ProcessExitEvent {
     pub config_path: PathBuf,
     pub service_name: String,
     pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
 }
 
 /// Parameters for spawning a service
@@ -170,10 +171,22 @@ async fn monitor_process(
     tokio::select! {
         // Wait for process to exit naturally
         result = child.wait() => {
-            let exit_code = result.ok().and_then(|s| s.code());
+            let status = result.ok();
+            let exit_code = status.as_ref().and_then(|s| s.code());
+            #[cfg(unix)]
+            let signal = if exit_code.is_none() {
+                status.as_ref().and_then(|s| {
+                    use std::os::unix::process::ExitStatusExt;
+                    s.signal()
+                })
+            } else {
+                None
+            };
+            #[cfg(not(unix))]
+            let signal = None;
             info!(
-                "Service {} exited with code {:?}",
-                service_name, exit_code
+                "Service {} exited with code {:?} signal {:?}",
+                service_name, exit_code, signal
             );
 
             // Send exit event with overflow handling
@@ -181,6 +194,7 @@ async fn monitor_process(
                 config_path,
                 service_name: service_name.clone(),
                 exit_code,
+                signal,
             };
 
             // Try to send immediately, with fallback to blocking send

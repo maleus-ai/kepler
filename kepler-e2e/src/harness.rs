@@ -540,14 +540,16 @@ impl E2eHarness {
         self.get_logs(config_path, service, lines).await
     }
 
-    /// Extract PID from ps output for a service
+    /// Extract PID from ps output for a service.
+    /// PID is always the last column: "NAME  STATUS  PID"
+    /// STATUS can be multi-word (e.g., "Up 5s", "Exited (0) 14s ago")
     pub fn extract_pid_from_ps(&self, ps_output: &str, service: &str) -> Option<u32> {
         for line in ps_output.lines() {
             if line.contains(service) {
-                // Format is typically: "service_name  status  pid"
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    return parts[2].parse().ok();
+                // PID is the last token
+                if let Some(last) = parts.last() {
+                    return last.parse().ok();
                 }
             }
         }
@@ -562,6 +564,7 @@ impl E2eHarness {
         status_to_avoid: &str,
         timeout_duration: Duration,
     ) -> E2eResult<()> {
+        let display_pattern = status_to_display_pattern(status_to_avoid);
         let start = std::time::Instant::now();
 
         while start.elapsed() < timeout_duration {
@@ -569,7 +572,7 @@ impl E2eHarness {
             if output.success() {
                 let mut found_with_status = false;
                 for line in output.stdout.lines() {
-                    if line.contains(service) && line.contains(status_to_avoid) {
+                    if line.contains(service) && line.contains(display_pattern) {
                         found_with_status = true;
                         break;
                     }
@@ -587,7 +590,10 @@ impl E2eHarness {
         )))
     }
 
-    /// Wait for service to reach any of several possible statuses
+    /// Wait for service to reach any of several possible statuses.
+    ///
+    /// Accepts logical status names ("running", "stopped", etc.) and maps them
+    /// to the Docker-style display format used by `kepler ps`.
     pub async fn wait_for_service_status_any(
         &self,
         config_path: &Path,
@@ -595,6 +601,10 @@ impl E2eHarness {
         expected_statuses: &[&str],
         timeout_duration: Duration,
     ) -> E2eResult<String> {
+        let patterns: Vec<(&str, &str)> = expected_statuses
+            .iter()
+            .map(|s| (*s, status_to_display_pattern(s)))
+            .collect();
         let start = std::time::Instant::now();
 
         while start.elapsed() < timeout_duration {
@@ -602,9 +612,9 @@ impl E2eHarness {
             if output.success() {
                 for line in output.stdout.lines() {
                     if line.contains(service) {
-                        for status in expected_statuses {
-                            if line.contains(status) {
-                                return Ok(status.to_string());
+                        for (logical, display) in &patterns {
+                            if line.contains(display) {
+                                return Ok(logical.to_string());
                             }
                         }
                     }
@@ -690,7 +700,10 @@ impl E2eHarness {
         self.run_cli(&["-f", config_str, "ps"]).await
     }
 
-    /// Wait for a service to be in a specific status
+    /// Wait for a service to be in a specific status.
+    ///
+    /// Accepts logical status names ("running", "stopped", etc.) and maps them
+    /// to the Docker-style display format used by `kepler ps`.
     pub async fn wait_for_service_status(
         &self,
         config_path: &Path,
@@ -698,17 +711,14 @@ impl E2eHarness {
         expected_status: &str,
         timeout_duration: Duration,
     ) -> E2eResult<()> {
+        let display_pattern = status_to_display_pattern(expected_status);
         let start = std::time::Instant::now();
 
         while start.elapsed() < timeout_duration {
             let output = self.ps(config_path).await?;
-            if output.success() && output.stdout.contains(&format!("{}  {}", service, expected_status)) {
-                return Ok(());
-            }
-            // Also check for status in different column positions
             if output.success() {
                 for line in output.stdout.lines() {
-                    if line.contains(service) && line.contains(expected_status) {
+                    if line.contains(service) && line.contains(display_pattern) {
                         return Ok(());
                     }
                 }
@@ -922,6 +932,25 @@ impl E2eHarness {
         }
 
         self.create_named_config(dest_name, &content)
+    }
+}
+
+/// Map a logical service status name to the display pattern used by `kepler ps`.
+///
+/// The CLI renders Docker-style status strings (e.g., "Up 5s", "Stopped 3s ago"),
+/// so tests that check for "running" need to look for "Up " in the output.
+fn status_to_display_pattern(status: &str) -> &str {
+    match status {
+        "running" => "Up ",
+        "healthy" => "(healthy)",
+        "unhealthy" => "(unhealthy)",
+        "stopped" => "Stopped",
+        "exited" => "Exited",
+        "failed" => "Failed",
+        "starting" => "Starting",
+        "stopping" => "Stopping",
+        // Fallback: use the status as-is (for forward compatibility)
+        other => other,
     }
 }
 

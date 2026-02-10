@@ -300,7 +300,7 @@ async fn test_depends_on_completed_successfully() -> E2eResult<()> {
 
     // Wait for init-container to complete (it exits with code 0)
     harness
-        .wait_for_service_status(&config_path, "init-container", "stopped", Duration::from_secs(10))
+        .wait_for_service_status(&config_path, "init-container", "exited", Duration::from_secs(10))
         .await?;
 
     // App should start after init completes successfully
@@ -451,7 +451,7 @@ async fn test_depends_on_timeout() -> E2eResult<()> {
 
     // The backend should NOT be in a healthy running state
     assert!(
-        !backend_status.contains("running") || backend_status.contains("error") || backend_status.contains("failed") || backend_status.is_empty(),
+        !backend_status.contains("Up ") || backend_status.contains("error") || backend_status.contains("Failed") || backend_status.is_empty(),
         "Backend should not be running successfully due to dependency timeout. Status: {}",
         status.stdout
     );
@@ -530,9 +530,9 @@ async fn test_depends_on_service_stopped() -> E2eResult<()> {
     let output = harness.start_services(&config_path).await?;
     output.assert_success();
 
-    // Wait for worker to stop
+    // Wait for worker to exit naturally
     harness
-        .wait_for_service_status(&config_path, "worker", "stopped", Duration::from_secs(10))
+        .wait_for_service_status(&config_path, "worker", "exited", Duration::from_secs(10))
         .await?;
 
     // Cleanup should start after worker stops
@@ -702,17 +702,17 @@ async fn test_effective_wait_all_startup() -> E2eResult<()> {
     // All services should be running immediately after --wait returns
     let ps = harness.ps(&config_path).await?;
     assert!(
-        ps.stdout_contains("database") && (ps.stdout_contains("healthy") || ps.stdout_contains("running")),
+        ps.stdout_contains("database") && (ps.stdout_contains("healthy") || ps.stdout_contains("Up ")),
         "database should be running after --wait. ps: {}",
         ps.stdout
     );
     assert!(
-        ps.stdout_contains("backend") && ps.stdout_contains("running"),
+        ps.stdout_contains("backend") && ps.stdout_contains("Up "),
         "backend should be running after --wait. ps: {}",
         ps.stdout
     );
     assert!(
-        ps.stdout_contains("frontend") && ps.stdout_contains("running"),
+        ps.stdout_contains("frontend") && ps.stdout_contains("Up "),
         "frontend should be running after --wait. ps: {}",
         ps.stdout
     );
@@ -755,7 +755,7 @@ async fn test_effective_wait_deferred_split() -> E2eResult<()> {
         ps.stdout
     );
     assert!(
-        ps.stdout_contains("app") && ps.stdout_contains("running"),
+        ps.stdout_contains("app") && ps.stdout_contains("Up "),
         "app should be running after --wait. ps: {}",
         ps.stdout
     );
@@ -765,7 +765,7 @@ async fn test_effective_wait_deferred_split() -> E2eResult<()> {
         .find(|line| line.contains("monitor"))
         .unwrap_or("");
     assert!(
-        !monitor_line.contains("running"),
+        !monitor_line.contains("Up "),
         "monitor should NOT be running (deferred, waiting for service_failed). monitor status: {}",
         monitor_line
     );
@@ -803,7 +803,7 @@ async fn test_effective_wait_propagation() -> E2eResult<()> {
     // Only database should be running (it's the only startup service)
     let ps = harness.ps(&config_path).await?;
     assert!(
-        ps.stdout_contains("database") && ps.stdout_contains("running"),
+        ps.stdout_contains("database") && ps.stdout_contains("Up "),
         "database should be running. ps: {}",
         ps.stdout
     );
@@ -813,7 +813,7 @@ async fn test_effective_wait_propagation() -> E2eResult<()> {
         .find(|line| line.contains("monitor"))
         .unwrap_or("");
     assert!(
-        !monitor_line.contains("running"),
+        !monitor_line.contains("Up "),
         "monitor should NOT be running (deferred). status: {}",
         monitor_line
     );
@@ -822,7 +822,7 @@ async fn test_effective_wait_propagation() -> E2eResult<()> {
         .find(|line| line.contains("alerter"))
         .unwrap_or("");
     assert!(
-        !alerter_line.contains("running"),
+        !alerter_line.contains("Up "),
         "alerter should NOT be running (deferred via propagation). status: {}",
         alerter_line
     );
@@ -849,12 +849,12 @@ async fn test_effective_wait_override() -> E2eResult<()> {
     // database and app should be running regardless
     let ps = harness.ps(&config_path).await?;
     assert!(
-        ps.stdout_contains("database") && ps.stdout_contains("running"),
+        ps.stdout_contains("database") && ps.stdout_contains("Up "),
         "database should be running. ps: {}",
         ps.stdout
     );
     assert!(
-        ps.stdout_contains("app") && ps.stdout_contains("running"),
+        ps.stdout_contains("app") && ps.stdout_contains("Up "),
         "app should be running. ps: {}",
         ps.stdout
     );
@@ -943,7 +943,7 @@ async fn test_permanently_unsatisfied_dependency() -> E2eResult<()> {
 
     // Wait for setup to stop (it exits immediately with code 0)
     harness
-        .wait_for_service_status(&config_path, "setup", "stopped", Duration::from_secs(5))
+        .wait_for_service_status(&config_path, "setup", "exited", Duration::from_secs(5))
         .await?;
 
     // monitor should be marked as failed because its dependency is permanently unsatisfied
@@ -991,7 +991,7 @@ async fn test_permanently_unsatisfied_foreground_exits() -> E2eResult<()> {
 
     // Verify final states
     harness
-        .wait_for_service_status(&config_path, "setup", "stopped", Duration::from_secs(2))
+        .wait_for_service_status(&config_path, "setup", "exited", Duration::from_secs(2))
         .await?;
     harness
         .wait_for_service_status(&config_path, "monitor", "failed", Duration::from_secs(2))
@@ -1091,14 +1091,14 @@ async fn test_ps_shows_exit_code() -> E2eResult<()> {
 
     // Wait for setup to stop with exit 0
     harness
-        .wait_for_service_status(&config_path, "setup", "stopped", Duration::from_secs(5))
+        .wait_for_service_status(&config_path, "setup", "exited", Duration::from_secs(5))
         .await?;
 
     // Check ps output includes exit code
     let ps = harness.ps(&config_path).await?;
     assert!(
-        ps.stdout.contains("stopped (0)") || ps.stdout.contains("stopped(0)"),
-        "ps should show exit code for stopped service. ps output: {}",
+        ps.stdout.contains("Exited (0)"),
+        "ps should show exit code for exited service. ps output: {}",
         ps.stdout
     );
 

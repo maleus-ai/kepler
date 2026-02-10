@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,8 +16,8 @@ use tracing::debug;
 use crate::{
     errors::ClientError,
     protocol::{
-        LogMode, MAX_MESSAGE_SIZE, Request, RequestEnvelope, Response,
-        ServerMessage, StartMode, decode_server_message, encode_envelope,
+        LogMode, MAX_MESSAGE_SIZE, ProgressEvent, Request, RequestEnvelope, Response,
+        ServerEvent, ServerMessage, StartMode, decode_server_message, encode_envelope,
     },
 };
 
@@ -25,9 +26,14 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 /// Bounded channel capacity for the client writer task.
 const WRITER_CHANNEL_CAPACITY: usize = 64;
 
+struct PendingRequest {
+    response_tx: oneshot::Sender<Response>,
+    progress_tx: Option<mpsc::Sender<ProgressEvent>>,
+}
+
 pub struct Client {
     writer_tx: mpsc::Sender<Vec<u8>>,
-    pending: Arc<DashMap<u64, oneshot::Sender<Response>>>,
+    pending: Arc<DashMap<u64, PendingRequest>>,
     next_id: Arc<AtomicU64>,
     _reader_handle: JoinHandle<()>,
     _writer_handle: JoinHandle<()>,
@@ -42,7 +48,7 @@ impl Client {
 
         let (read_half, mut write_half) = stream.into_split();
 
-        let pending: Arc<DashMap<u64, oneshot::Sender<Response>>> =
+        let pending: Arc<DashMap<u64, PendingRequest>> =
             Arc::new(DashMap::new());
 
         // Writer task: receives encoded bytes and writes to stream
@@ -95,15 +101,18 @@ impl Client {
                 // Decode server message
                 match decode_server_message(&payload) {
                     Ok(ServerMessage::Response { id, response }) => {
-                        if let Some((_, tx)) = reader_pending.remove(&id) {
-                            let _ = tx.send(response);
+                        if let Some((_, pending_req)) = reader_pending.remove(&id) {
+                            let _ = pending_req.response_tx.send(response);
                         } else {
                             debug!("Received response for unknown request id={}", id);
                         }
                     }
-                    Ok(ServerMessage::Event { event }) => {
-                        debug!("Received server event: {:?}", event);
-                        // Future: forward to event channel
+                    Ok(ServerMessage::Event { event: ServerEvent::Progress { request_id, event } }) => {
+                        if let Some(pending_req) = reader_pending.get(&request_id)
+                            && let Some(ref progress_tx) = pending_req.progress_tx
+                        {
+                            let _ = progress_tx.try_send(event);
+                        }
                     }
                     Err(e) => {
                         debug!("Failed to decode server message: {}", e);
@@ -143,7 +152,10 @@ impl Client {
 
         // Create oneshot for this request
         let (tx, rx) = oneshot::channel();
-        self.pending.insert(id, tx);
+        self.pending.insert(id, PendingRequest {
+            response_tx: tx,
+            progress_tx: None,
+        });
 
         // Encode and send
         let envelope = RequestEnvelope { id, request };
@@ -155,6 +167,39 @@ impl Client {
 
         // Wait for response
         rx.await.map_err(|_| ClientError::Disconnected)
+    }
+
+    /// Send a request and receive both progress events and a response.
+    ///
+    /// Returns a progress receiver and a future that resolves to the final response.
+    /// Progress events are emitted as the server processes each service.
+    pub fn send_request_with_progress(
+        &self,
+        request: Request,
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+
+        let (response_tx, response_rx) = oneshot::channel();
+        let (progress_tx, progress_rx) = mpsc::channel(64);
+
+        self.pending.insert(id, PendingRequest {
+            response_tx,
+            progress_tx: Some(progress_tx),
+        });
+
+        let envelope = RequestEnvelope { id, request };
+        let bytes = encode_envelope(&envelope)?;
+
+        let writer_tx = self.writer_tx.clone();
+        let response_future = async move {
+            writer_tx
+                .send(bytes)
+                .await
+                .map_err(|_| ClientError::Disconnected)?;
+            response_rx.await.map_err(|_| ClientError::Disconnected)
+        };
+
+        Ok((progress_rx, response_future))
     }
 
     /// Start services for a config
@@ -206,6 +251,54 @@ impl Client {
             detach,
         })
         .await
+    }
+
+    /// Start services with progress events
+    pub fn start_with_progress(
+        &self,
+        config_path: PathBuf,
+        service: Option<String>,
+        sys_env: Option<HashMap<String, String>>,
+        mode: StartMode,
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request_with_progress(Request::Start {
+            config_path,
+            service,
+            sys_env,
+            mode,
+        })
+    }
+
+    /// Stop services with progress events
+    pub fn stop_with_progress(
+        &self,
+        config_path: PathBuf,
+        service: Option<String>,
+        clean: bool,
+        signal: Option<String>,
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request_with_progress(Request::Stop {
+            config_path,
+            service,
+            clean,
+            signal,
+        })
+    }
+
+    /// Restart services with progress events
+    pub fn restart_with_progress(
+        &self,
+        config_path: PathBuf,
+        services: Vec<String>,
+        sys_env: Option<HashMap<String, String>>,
+        detach: bool,
+    ) -> Result<(mpsc::Receiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request_with_progress(Request::Restart {
+            config_path,
+            services,
+            sys_env,
+            detach,
+        })
     }
 
     /// Recreate config for a config (re-bake config snapshot, no start/stop)

@@ -15,6 +15,7 @@ pub enum ServiceStatus {
     Failed,
     Healthy,   // Running + health checks passing
     Unhealthy, // Running but health checks failing
+    Exited,    // Process exited naturally (exit code 0)
 }
 
 impl ServiceStatus {
@@ -27,6 +28,7 @@ impl ServiceStatus {
             ServiceStatus::Failed => "failed",
             ServiceStatus::Healthy => "healthy",
             ServiceStatus::Unhealthy => "unhealthy",
+            ServiceStatus::Exited => "exited",
         }
     }
 
@@ -50,7 +52,9 @@ pub struct ServiceState {
     pub status: ServiceStatus,
     pub pid: Option<u32>,
     pub started_at: Option<DateTime<Utc>>,
+    pub stopped_at: Option<DateTime<Utc>>,
     pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
     pub health_check_failures: u32,
     pub restart_count: u32,
     /// Whether on_init hook has been run for this service
@@ -69,7 +73,9 @@ impl Default for ServiceState {
             status: ServiceStatus::Stopped,
             pid: None,
             started_at: None,
+            stopped_at: None,
             exit_code: None,
+            signal: None,
             health_check_failures: 0,
             restart_count: 0,
             initialized: false,
@@ -92,8 +98,10 @@ impl From<&ServiceState> for ServiceInfo {
             status: state.status.as_str().to_string(),
             pid: state.pid,
             started_at: state.started_at.map(|dt| dt.timestamp()),
+            stopped_at: state.stopped_at.map(|dt| dt.timestamp()),
             health_check_failures: state.health_check_failures,
             exit_code: state.exit_code,
+            signal: state.signal,
         }
     }
 }
@@ -132,6 +140,7 @@ pub enum PersistedServiceStatus {
     Failed,
     Healthy,
     Unhealthy,
+    Exited,
 }
 
 impl From<ServiceStatus> for PersistedServiceStatus {
@@ -144,6 +153,7 @@ impl From<ServiceStatus> for PersistedServiceStatus {
             ServiceStatus::Failed => PersistedServiceStatus::Failed,
             ServiceStatus::Healthy => PersistedServiceStatus::Healthy,
             ServiceStatus::Unhealthy => PersistedServiceStatus::Unhealthy,
+            ServiceStatus::Exited => PersistedServiceStatus::Exited,
         }
     }
 }
@@ -158,6 +168,7 @@ impl From<PersistedServiceStatus> for ServiceStatus {
             PersistedServiceStatus::Failed => ServiceStatus::Failed,
             PersistedServiceStatus::Healthy => ServiceStatus::Healthy,
             PersistedServiceStatus::Unhealthy => ServiceStatus::Unhealthy,
+            PersistedServiceStatus::Exited => ServiceStatus::Exited,
         }
     }
 }
@@ -169,7 +180,12 @@ pub struct PersistedServiceState {
     pub pid: Option<u32>,
     /// Unix timestamp of when the service started
     pub started_at: Option<i64>,
+    /// Unix timestamp of when the service stopped/exited/failed
+    #[serde(default)]
+    pub stopped_at: Option<i64>,
     pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub signal: Option<i32>,
     pub health_check_failures: u32,
     pub restart_count: u32,
     pub initialized: bool,
@@ -183,7 +199,9 @@ impl From<&ServiceState> for PersistedServiceState {
             status: state.status.into(),
             pid: state.pid,
             started_at: state.started_at.map(|dt| dt.timestamp()),
+            stopped_at: state.stopped_at.map(|dt| dt.timestamp()),
             exit_code: state.exit_code,
+            signal: state.signal,
             health_check_failures: state.health_check_failures,
             restart_count: state.restart_count,
             initialized: state.initialized,
@@ -205,7 +223,11 @@ impl PersistedServiceState {
             started_at: self
                 .started_at
                 .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
+            stopped_at: self
+                .stopped_at
+                .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
             exit_code: self.exit_code,
+            signal: self.signal,
             health_check_failures: self.health_check_failures,
             restart_count: self.restart_count,
             initialized: self.initialized,
@@ -225,4 +247,233 @@ pub struct PersistedConfigState {
     pub config_initialized: bool,
     /// Unix timestamp of when the snapshot was taken
     pub snapshot_time: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exited_status_as_str() {
+        assert_eq!(ServiceStatus::Exited.as_str(), "exited");
+    }
+
+    #[test]
+    fn test_exited_is_not_running() {
+        assert!(!ServiceStatus::Exited.is_running());
+    }
+
+    #[test]
+    fn test_exited_display() {
+        assert_eq!(format!("{}", ServiceStatus::Exited), "exited");
+    }
+
+    #[test]
+    fn test_persisted_status_roundtrip_exited() {
+        let persisted: PersistedServiceStatus = ServiceStatus::Exited.into();
+        assert_eq!(persisted, PersistedServiceStatus::Exited);
+        let back: ServiceStatus = persisted.into();
+        assert_eq!(back, ServiceStatus::Exited);
+    }
+
+    #[test]
+    fn test_persisted_status_all_variants_roundtrip() {
+        let variants = [
+            ServiceStatus::Stopped,
+            ServiceStatus::Starting,
+            ServiceStatus::Running,
+            ServiceStatus::Stopping,
+            ServiceStatus::Failed,
+            ServiceStatus::Healthy,
+            ServiceStatus::Unhealthy,
+            ServiceStatus::Exited,
+        ];
+        for status in variants {
+            let persisted: PersistedServiceStatus = status.into();
+            let back: ServiceStatus = persisted.into();
+            assert_eq!(back, status, "round-trip failed for {status:?}");
+        }
+    }
+
+    #[test]
+    fn test_persisted_state_stopped_at_and_signal_roundtrip() {
+        let now = Utc::now();
+        let state = ServiceState {
+            status: ServiceStatus::Exited,
+            pid: None,
+            started_at: None,
+            stopped_at: Some(now),
+            exit_code: Some(0),
+            signal: None,
+            health_check_failures: 0,
+            restart_count: 1,
+            initialized: true,
+            computed_env: HashMap::new(),
+            working_dir: PathBuf::from("/tmp"),
+            was_healthy: false,
+        };
+
+        let persisted = PersistedServiceState::from(&state);
+        assert_eq!(persisted.status, PersistedServiceStatus::Exited);
+        assert_eq!(persisted.stopped_at, Some(now.timestamp()));
+        assert_eq!(persisted.exit_code, Some(0));
+        assert!(persisted.signal.is_none());
+
+        let restored = persisted.to_service_state(HashMap::new(), PathBuf::from("/tmp"));
+        assert_eq!(restored.status, ServiceStatus::Exited);
+        assert!(restored.stopped_at.is_some());
+        assert_eq!(restored.exit_code, Some(0));
+        assert!(restored.signal.is_none());
+    }
+
+    #[test]
+    fn test_persisted_state_signal_roundtrip() {
+        let now = Utc::now();
+        let state = ServiceState {
+            status: ServiceStatus::Failed,
+            pid: None,
+            started_at: None,
+            stopped_at: Some(now),
+            exit_code: None,
+            signal: Some(9),
+            health_check_failures: 0,
+            restart_count: 0,
+            initialized: true,
+            computed_env: HashMap::new(),
+            working_dir: PathBuf::new(),
+            was_healthy: false,
+        };
+
+        let persisted = PersistedServiceState::from(&state);
+        assert_eq!(persisted.signal, Some(9));
+        assert!(persisted.exit_code.is_none());
+
+        let restored = persisted.to_service_state(HashMap::new(), PathBuf::new());
+        assert_eq!(restored.signal, Some(9));
+        assert!(restored.exit_code.is_none());
+        assert_eq!(restored.status, ServiceStatus::Failed);
+    }
+
+    #[test]
+    fn test_persisted_state_json_backward_compat() {
+        // Old JSON without stopped_at or signal should deserialize with defaults
+        let json = r#"{
+            "status": "stopped",
+            "pid": null,
+            "started_at": null,
+            "exit_code": null,
+            "health_check_failures": 0,
+            "restart_count": 0,
+            "initialized": false,
+            "was_healthy": false
+        }"#;
+        let persisted: PersistedServiceState = serde_json::from_str(json).unwrap();
+        assert!(persisted.stopped_at.is_none());
+        assert!(persisted.signal.is_none());
+        assert_eq!(persisted.status, PersistedServiceStatus::Stopped);
+    }
+
+    #[test]
+    fn test_persisted_state_json_with_new_fields() {
+        let json = r#"{
+            "status": "exited",
+            "pid": null,
+            "started_at": null,
+            "stopped_at": 1700000000,
+            "exit_code": 0,
+            "signal": null,
+            "health_check_failures": 0,
+            "restart_count": 1,
+            "initialized": true,
+            "was_healthy": false
+        }"#;
+        let persisted: PersistedServiceState = serde_json::from_str(json).unwrap();
+        assert_eq!(persisted.status, PersistedServiceStatus::Exited);
+        assert_eq!(persisted.stopped_at, Some(1700000000));
+        assert_eq!(persisted.exit_code, Some(0));
+        assert!(persisted.signal.is_none());
+    }
+
+    #[test]
+    fn test_persisted_state_json_failed_with_signal() {
+        let json = r#"{
+            "status": "failed",
+            "pid": null,
+            "started_at": null,
+            "stopped_at": 1700000000,
+            "exit_code": null,
+            "signal": 9,
+            "health_check_failures": 0,
+            "restart_count": 0,
+            "initialized": true,
+            "was_healthy": true
+        }"#;
+        let persisted: PersistedServiceState = serde_json::from_str(json).unwrap();
+        assert_eq!(persisted.status, PersistedServiceStatus::Failed);
+        assert_eq!(persisted.signal, Some(9));
+        assert!(persisted.exit_code.is_none());
+        assert!(persisted.was_healthy);
+    }
+
+    #[test]
+    fn test_service_info_from_exited_state() {
+        let now = Utc::now();
+        let state = ServiceState {
+            status: ServiceStatus::Exited,
+            pid: None,
+            started_at: None,
+            stopped_at: Some(now),
+            exit_code: Some(0),
+            signal: None,
+            health_check_failures: 0,
+            restart_count: 0,
+            initialized: true,
+            computed_env: HashMap::new(),
+            working_dir: PathBuf::new(),
+            was_healthy: false,
+        };
+
+        let info = state.to_service_info();
+        assert_eq!(info.status, "exited");
+        assert!(info.pid.is_none());
+        assert_eq!(info.stopped_at, Some(now.timestamp()));
+        assert_eq!(info.exit_code, Some(0));
+        assert!(info.signal.is_none());
+    }
+
+    #[test]
+    fn test_service_info_from_signal_killed_state() {
+        let now = Utc::now();
+        let state = ServiceState {
+            status: ServiceStatus::Failed,
+            pid: None,
+            started_at: None,
+            stopped_at: Some(now),
+            exit_code: None,
+            signal: Some(15),
+            health_check_failures: 0,
+            restart_count: 0,
+            initialized: true,
+            computed_env: HashMap::new(),
+            working_dir: PathBuf::new(),
+            was_healthy: false,
+        };
+
+        let info = state.to_service_info();
+        assert_eq!(info.status, "failed");
+        assert_eq!(info.signal, Some(15));
+        assert_eq!(info.stopped_at, Some(now.timestamp()));
+        assert!(info.exit_code.is_none());
+    }
+
+    #[test]
+    fn test_default_service_state() {
+        let state = ServiceState::default();
+        assert_eq!(state.status, ServiceStatus::Stopped);
+        assert!(state.stopped_at.is_none());
+        assert!(state.signal.is_none());
+        assert!(state.exit_code.is_none());
+        assert!(state.started_at.is_none());
+        assert!(state.pid.is_none());
+    }
 }

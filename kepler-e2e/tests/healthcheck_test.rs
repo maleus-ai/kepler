@@ -133,7 +133,7 @@ async fn test_healthcheck_start_period() -> E2eResult<()> {
     // Check it's still running (not marked unhealthy during start_period)
     let ps_output = harness.ps(&config_path).await?;
     assert!(
-        ps_output.stdout_contains("running") && !ps_output.stdout_contains("unhealthy"),
+        ps_output.stdout_contains("Up ") && !ps_output.stdout_contains("unhealthy"),
         "Service should be running during start_period. stdout: {}",
         ps_output.stdout
     );

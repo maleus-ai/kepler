@@ -14,11 +14,12 @@ use crate::{commands::Commands, commands::DaemonCommands, config::Config, errors
 use chrono::{DateTime, Local, Utc};
 use clap::Parser;
 use colored::{Color, Colorize};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use kepler_daemon::Daemon;
 use kepler_protocol::{
     client::Client,
     errors::ClientError,
-    protocol::{ConfigStatus, CursorLogEntry, LogCursorData, LogEntry, LogMode, Response, ResponseData, ServiceInfo, StartMode},
+    protocol::{ConfigStatus, CursorLogEntry, LogCursorData, LogEntry, LogMode, ProgressEvent, Response, ResponseData, ServiceInfo, ServicePhase, ServiceTarget, StartMode},
 };
 use tabled::{Table, Tabled};
 use tabled::settings::Style;
@@ -103,23 +104,26 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Commands::Start { service, detach, wait, timeout } => {
-            execute_lifecycle(
+            execute_lifecycle_with_progress(
                 &client, &canonical_path, detach, wait, &timeout,
-                client.start(canonical_path.clone(), service.clone(), Some(sys_env.clone()), StartMode::WaitStartup),
+                client.start_with_progress(canonical_path.clone(), service.clone(), Some(sys_env.clone()), StartMode::WaitStartup)?,
                 client.start(canonical_path.clone(), service.clone(), Some(sys_env), StartMode::Detached),
                 service.as_deref(),
             ).await?;
         }
 
         Commands::Stop { service, clean, signal } => {
-            let response = client.stop(canonical_path, service, clean, signal).await?;
+            let (progress_rx, response_future) = client.stop_with_progress(
+                canonical_path, service, clean, signal,
+            )?;
+            let response = run_with_progress(progress_rx, response_future).await?;
             handle_response(response);
         }
 
         Commands::Restart { services, detach, wait, timeout } => {
-            execute_lifecycle(
+            execute_lifecycle_with_progress(
                 &client, &canonical_path, detach, wait, &timeout,
-                client.restart(canonical_path.clone(), services.clone(), Some(sys_env.clone()), false),
+                client.restart_with_progress(canonical_path.clone(), services.clone(), Some(sys_env.clone()), false)?,
                 client.restart(canonical_path.clone(), services, Some(sys_env), true),
                 None,
             ).await?;
@@ -164,27 +168,157 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
-/// Execute a lifecycle command (start/restart) with shared detach/wait/foreground logic.
+/// Consume progress events and render them using indicatif, then return the final response.
 ///
-/// - `wait_action`: async fn to call for wait/foreground modes (blocking)
-/// - `detach_action`: async fn to call for detach mode (fire-and-forget)
+/// Creates a MultiProgress with per-service spinner lines. As progress events arrive,
+/// updates the corresponding line. When the response future completes, finishes all bars.
+/// Falls back to plain text when stdout is not a TTY (indicatif hides itself automatically).
+async fn run_with_progress(
+    mut progress_rx: tokio::sync::mpsc::Receiver<ProgressEvent>,
+    response_future: impl std::future::Future<Output = std::result::Result<Response, ClientError>>,
+) -> std::result::Result<Response, ClientError> {
+    let mp = MultiProgress::new();
+
+    let style_active = ProgressStyle::with_template("{spinner:.yellow} Service {prefix:.bold}  {msg}")
+        .unwrap()
+        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ");
+    let style_done = ProgressStyle::with_template("  Service {prefix:.bold}  {msg:.green}")
+        .unwrap();
+    let style_fail = ProgressStyle::with_template("  Service {prefix:.bold}  {msg:.red}")
+        .unwrap();
+
+    let mut bars: HashMap<String, ProgressBar> = HashMap::new();
+    let mut targets: HashMap<String, ServiceTarget> = HashMap::new();
+
+    tokio::pin!(response_future);
+
+    let mut response = None;
+
+    loop {
+        tokio::select! {
+            biased;
+            event = progress_rx.recv() => {
+                match event {
+                    Some(event) => {
+                        let pb = bars.entry(event.service.clone()).or_insert_with(|| {
+                            let pb = mp.add(ProgressBar::new_spinner());
+                            pb.set_style(style_active.clone());
+                            pb.set_prefix(event.service.clone());
+                            pb.enable_steady_tick(Duration::from_millis(80));
+                            pb
+                        });
+
+                        match &event.phase {
+                            ServicePhase::Pending { target } => {
+                                targets.insert(event.service.clone(), target.clone());
+                                pb.set_message("Starting...");
+                            }
+                            ServicePhase::Waiting => {
+                                pb.set_message("Waiting...");
+                            }
+                            ServicePhase::Starting => {
+                                pb.set_message("Starting...");
+                            }
+                            ServicePhase::Started => {
+                                let target = targets.get(&event.service);
+                                if target == Some(&ServiceTarget::Healthy) {
+                                    // Health check pending — keep spinner active
+                                    pb.set_message("Health check...");
+                                } else {
+                                    pb.set_style(style_done.clone());
+                                    pb.finish_with_message("Started");
+                                }
+                            }
+                            ServicePhase::Healthy => {
+                                pb.set_style(style_done.clone());
+                                pb.finish_with_message("Healthy");
+                            }
+                            ServicePhase::Stopping => {
+                                pb.set_message("Stopping...");
+                            }
+                            ServicePhase::Stopped => {
+                                pb.set_style(style_done.clone());
+                                pb.finish_with_message("Stopped");
+                            }
+                            ServicePhase::Cleaning => {
+                                pb.set_message("Cleaning...");
+                            }
+                            ServicePhase::Cleaned => {
+                                pb.set_style(style_done.clone());
+                                pb.finish_with_message("Cleaned");
+                            }
+                            ServicePhase::Failed { message } => {
+                                pb.set_style(style_fail.clone());
+                                pb.finish_with_message(format!("Failed: {}", message));
+                            }
+                        }
+                    }
+                    None => {
+                        // Progress channel closed (PendingRequest removed from map).
+                        // The response oneshot fires right after, so wait for it if needed.
+                        if response.is_none() {
+                            response = Some(response_future.await);
+                        }
+                        break;
+                    }
+                }
+            }
+            resp = &mut response_future, if response.is_none() => {
+                response = Some(resp);
+                // Keep consuming remaining progress events until channel closes
+            }
+        }
+    }
+
+    // Drain any remaining progress events
+    while let Ok(event) = progress_rx.try_recv() {
+        let pb = bars.entry(event.service.clone()).or_insert_with(|| {
+            let pb = mp.add(ProgressBar::new_spinner());
+            pb.set_style(style_active.clone());
+            pb.set_prefix(event.service.clone());
+            pb
+        });
+        match &event.phase {
+            ServicePhase::Started => { pb.set_style(style_done.clone()); pb.finish_with_message("Started"); }
+            ServicePhase::Healthy => { pb.set_style(style_done.clone()); pb.finish_with_message("Healthy"); }
+            ServicePhase::Stopped => { pb.set_style(style_done.clone()); pb.finish_with_message("Stopped"); }
+            ServicePhase::Cleaned => { pb.set_style(style_done.clone()); pb.finish_with_message("Cleaned"); }
+            ServicePhase::Failed { message } => { pb.set_style(style_fail.clone()); pb.finish_with_message(format!("Failed: {}", message)); }
+            _ => {}
+        }
+    }
+
+    // response is guaranteed to be Some: the progress channel only closes after
+    // the PendingRequest is removed (which happens when the response arrives),
+    // and the select also captures the response directly.
+    response.expect("response must arrive before progress channel closes")
+}
+
+/// Execute a lifecycle command (start/restart) with progress display.
+///
+/// - `wait_action`: (progress_rx, response_future) from `*_with_progress()` — used for wait/foreground modes
+/// - `detach_action`: async fn to call for detach mode (fire-and-forget, no progress)
 /// - `follow_service`: service filter to pass to follow_logs in foreground mode (None = all)
 #[allow(clippy::too_many_arguments)]
-async fn execute_lifecycle(
+async fn execute_lifecycle_with_progress(
     client: &Client,
     config_path: &Path,
     detach: bool,
     wait: bool,
     timeout: &Option<String>,
-    wait_action: impl Future<Output = std::result::Result<Response, kepler_protocol::errors::ClientError>>,
+    wait_action: (tokio::sync::mpsc::Receiver<ProgressEvent>, impl Future<Output = std::result::Result<Response, kepler_protocol::errors::ClientError>>),
     detach_action: impl Future<Output = std::result::Result<Response, kepler_protocol::errors::ClientError>>,
     follow_service: Option<&str>,
 ) -> Result<()> {
     if detach && wait {
+        let (progress_rx, response_future) = wait_action;
         if let Some(timeout_str) = timeout {
             let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
                 .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
-            let result = tokio::time::timeout(timeout_duration, wait_action).await;
+            let result = tokio::time::timeout(
+                timeout_duration,
+                run_with_progress(progress_rx, response_future),
+            ).await;
             match result {
                 Ok(Ok(response)) => handle_response(response),
                 Ok(Err(e)) => return Err(e.into()),
@@ -194,16 +328,25 @@ async fn execute_lifecycle(
                 }
             }
         } else {
-            let response = wait_action.await?;
+            let response = run_with_progress(progress_rx, response_future).await?;
             handle_response(response);
         }
     } else if detach {
+        // Drop the progress channel since we're not using it
+        drop(wait_action);
         let response = detach_action.await?;
         handle_response(response);
     } else {
-        let response = wait_action.await?;
-        handle_response(response);
-        follow_logs_until_quiescent(client, config_path, follow_service).await?;
+        // Foreground mode: start services and stream logs concurrently.
+        // Uses WaitStartup so the daemon processes the start synchronously
+        // (logs are produced immediately), while cursor polling picks them up.
+        let (_progress_rx, response_future) = wait_action;
+        drop(detach_action);
+        let (_, log_result) = tokio::join!(
+            response_future,
+            follow_logs_until_quiescent(client, config_path, follow_service),
+        );
+        log_result?;
     }
     Ok(())
 }
@@ -455,13 +598,129 @@ async fn handle_ps_all(client: &Client) -> Result<()> {
     }
 }
 
-/// Format status with inline exit code for stopped/failed services
-fn format_status_with_exit_code(info: &ServiceInfo) -> String {
-    match info.exit_code {
-        Some(code) if info.status == "stopped" || info.status == "failed" => {
-            format!("{} ({})", info.status, code)
+/// Map a signal number to a human-readable name
+fn signal_name(sig: i32) -> String {
+    match sig {
+        1 => "SIGHUP".to_string(),
+        2 => "SIGINT".to_string(),
+        3 => "SIGQUIT".to_string(),
+        6 => "SIGABRT".to_string(),
+        9 => "SIGKILL".to_string(),
+        14 => "SIGALRM".to_string(),
+        15 => "SIGTERM".to_string(),
+        n => format!("SIG{}", n),
+    }
+}
+
+/// Format a compact duration since a timestamp, e.g. "14s ago", "5m ago"
+fn format_duration_since(ts: i64) -> String {
+    let stopped = DateTime::<Utc>::from_timestamp(ts, 0);
+    let now = Utc::now();
+
+    if let Some(stopped_at) = stopped {
+        let secs = (now - stopped_at).num_seconds().max(0);
+        let dur = if secs < 60 {
+            format!("{}s", secs)
+        } else if secs < 3600 {
+            format!("{}m", secs / 60)
+        } else if secs < 86400 {
+            format!("{}h", secs / 3600)
+        } else {
+            format!("{}d", secs / 86400)
+        };
+        format!("{} ago", dur)
+    } else {
+        String::new()
+    }
+}
+
+/// Format a compact uptime duration, e.g. "5m", "2h"
+fn format_uptime_compact(started_at_ts: i64) -> String {
+    let started_at = DateTime::<Utc>::from_timestamp(started_at_ts, 0);
+    let now = Utc::now();
+
+    if let Some(started) = started_at {
+        let secs = (now - started).num_seconds().max(0);
+        if secs < 60 {
+            format!("{}s", secs)
+        } else if secs < 3600 {
+            format!("{}m", secs / 60)
+        } else if secs < 86400 {
+            format!("{}h", secs / 3600)
+        } else {
+            format!("{}d", secs / 86400)
         }
-        _ => info.status.clone(),
+    } else {
+        String::new()
+    }
+}
+
+/// Format exit code or signal for display, e.g. "(0)", "(SIGTERM)"
+fn format_exit_info(info: &ServiceInfo) -> String {
+    if let Some(sig) = info.signal {
+        format!("({})", signal_name(sig))
+    } else if let Some(code) = info.exit_code {
+        format!("({})", code)
+    } else {
+        String::new()
+    }
+}
+
+/// Docker-style status formatting
+fn format_status(info: &ServiceInfo) -> String {
+    match info.status.as_str() {
+        "running" => {
+            if let Some(ts) = info.started_at {
+                format!("Up {}", format_uptime_compact(ts))
+            } else {
+                "Up".to_string()
+            }
+        }
+        "healthy" => {
+            if let Some(ts) = info.started_at {
+                format!("Up {} (healthy)", format_uptime_compact(ts))
+            } else {
+                "Up (healthy)".to_string()
+            }
+        }
+        "unhealthy" => {
+            if let Some(ts) = info.started_at {
+                format!("Up {} (unhealthy)", format_uptime_compact(ts))
+            } else {
+                "Up (unhealthy)".to_string()
+            }
+        }
+        "starting" => "Starting".to_string(),
+        "stopping" => "Stopping".to_string(),
+        "stopped" => {
+            let ago = info.stopped_at.map(format_duration_since).unwrap_or_default();
+            if ago.is_empty() {
+                "Stopped".to_string()
+            } else {
+                format!("Stopped {}", ago)
+            }
+        }
+        "exited" => {
+            let exit_info = format_exit_info(info);
+            let ago = info.stopped_at.map(format_duration_since).unwrap_or_default();
+            match (exit_info.is_empty(), ago.is_empty()) {
+                (true, true) => "Exited".to_string(),
+                (false, true) => format!("Exited {}", exit_info),
+                (true, false) => format!("Exited {}", ago),
+                (false, false) => format!("Exited {} {}", exit_info, ago),
+            }
+        }
+        "failed" => {
+            let exit_info = format_exit_info(info);
+            let ago = info.stopped_at.map(format_duration_since).unwrap_or_default();
+            match (exit_info.is_empty(), ago.is_empty()) {
+                (true, true) => "Failed".to_string(),
+                (false, true) => format!("Failed {}", exit_info),
+                (true, false) => format!("Failed {}", ago),
+                (false, false) => format!("Failed {} {}", exit_info, ago),
+            }
+        }
+        other => other.to_string(),
     }
 }
 
@@ -473,27 +732,13 @@ struct ServiceRow {
     status: String,
     #[tabled(rename = "PID")]
     pid: String,
-    #[tabled(rename = "UPTIME")]
-    uptime: String,
-    #[tabled(rename = "HEALTH")]
-    health: String,
 }
 
 fn format_service_row(name: &str, info: &ServiceInfo) -> ServiceRow {
     ServiceRow {
         name: name.to_string(),
-        status: format_status_with_exit_code(info),
+        status: format_status(info),
         pid: info.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
-        uptime: info.started_at.map(format_uptime).unwrap_or_else(|| "-".to_string()),
-        health: if info.health_check_failures > 0 {
-            format!("{} fail", info.health_check_failures)
-        } else if info.status == "healthy" {
-            "ok".to_string()
-        } else if info.status == "unhealthy" {
-            "failing".to_string()
-        } else {
-            "-".to_string()
-        },
     }
 }
 
@@ -507,10 +752,6 @@ struct MultiConfigRow {
     status: String,
     #[tabled(rename = "PID")]
     pid: String,
-    #[tabled(rename = "UPTIME")]
-    uptime: String,
-    #[tabled(rename = "HEALTH")]
-    health: String,
 }
 
 fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>) {
@@ -554,8 +795,6 @@ fn print_multi_config_table(configs: &[ConfigStatus]) {
                 name: service.name,
                 status: service.status,
                 pid: service.pid,
-                uptime: service.uptime,
-                health: service.health,
             }
         })
         .collect();
@@ -564,27 +803,6 @@ fn print_multi_config_table(configs: &[ConfigStatus]) {
     println!("{table}");
 }
 
-fn format_uptime(started_at_ts: i64) -> String {
-    let started_at = DateTime::<Utc>::from_timestamp(started_at_ts, 0);
-    let now = Utc::now();
-
-    if let Some(started) = started_at {
-        let duration = now - started;
-        let secs = duration.num_seconds().max(0);
-
-        if secs < 60 {
-            format!("{}s", secs)
-        } else if secs < 3600 {
-            format!("{}m {}s", secs / 60, secs % 60)
-        } else if secs < 86400 {
-            format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-        } else {
-            format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
-        }
-    } else {
-        "-".to_string()
-    }
-}
 
 /// Trait abstracting client operations used by follow_logs_loop, enabling unit tests.
 trait FollowClient {
@@ -710,6 +928,13 @@ async fn stream_cursor_logs(
                         cursor_id = None;
                         continue;
                     }
+                    // In UntilQuiescent mode (foreground start), the config may not
+                    // be loaded yet because the start request is being processed
+                    // concurrently. Retry until it becomes available.
+                    if mode == StreamMode::UntilQuiescent && message == "Config not loaded" {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
                     eprintln!("Error: {}", message);
                     break;
                 }
@@ -735,10 +960,12 @@ async fn stream_cursor_logs(
                 }
             }
             StreamMode::UntilQuiescent => {
-                // When caught up, check quiescence
+                // When caught up, check quiescence. Only "exited" and "failed"
+                // are considered naturally terminal — "stopped" is excluded because
+                // it can be a transient state during restart (stop → start).
                 if !has_more_data
                     && let Ok(status_response) = client.status(Some(config_path.to_path_buf())).await
-                    && is_all_terminal(&status_response)
+                    && is_all_naturally_terminal(&status_response)
                 {
                     break;
                 }
@@ -764,6 +991,8 @@ async fn stream_cursor_logs(
     Ok(())
 }
 
+/// Check if all services are in a terminal state (stopped, exited, or failed).
+/// Used after Ctrl+C shutdown when we've explicitly sent a stop command.
 fn is_all_terminal(response: &Response) -> bool {
     if let Response::Ok {
         data: Some(ResponseData::ServiceStatus(services)),
@@ -773,7 +1002,25 @@ fn is_all_terminal(response: &Response) -> bool {
         !services.is_empty()
             && services
                 .values()
-                .all(|info| matches!(info.status.as_str(), "stopped" | "failed"))
+                .all(|info| matches!(info.status.as_str(), "stopped" | "failed" | "exited"))
+    } else {
+        false
+    }
+}
+
+/// Check if all services have naturally reached a terminal state (exited or failed).
+/// Excludes "stopped" because it can be a transient state during restart (stop → start).
+/// Used for UntilQuiescent mode where we only want to exit on definitive outcomes.
+fn is_all_naturally_terminal(response: &Response) -> bool {
+    if let Response::Ok {
+        data: Some(ResponseData::ServiceStatus(services)),
+        ..
+    } = response
+    {
+        !services.is_empty()
+            && services
+                .values()
+                .all(|info| matches!(info.status.as_str(), "failed" | "exited"))
     } else {
         false
     }
@@ -1189,8 +1436,10 @@ mod tests {
                         status: status.to_string(),
                         pid: None,
                         started_at: None,
+                        stopped_at: None,
                         health_check_failures: 0,
                         exit_code: None,
+                        signal: None,
                     },
                 )
             })
@@ -1220,13 +1469,13 @@ mod tests {
     // Normal cursor polling
     // ========================================================================
 
-    /// Reads all cursor batches and exits when services are quiescent.
+    /// Reads all cursor batches and exits when services are naturally terminal.
     #[tokio::test(start_paused = true)]
     async fn test_follow_reads_cursor_and_exits_on_quiescence() {
         let mock = MockClient::new();
         mock.push_cursor(cursor_response(&[("svc", "line-1"), ("svc", "line-2")], true));
         mock.push_cursor(cursor_response(&[("svc", "line-3")], false));
-        mock.push_status(status_response(&[("svc", "stopped")]));
+        mock.push_status(status_response(&[("svc", "exited")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
@@ -1249,7 +1498,7 @@ mod tests {
         mock.push_cursor(cursor_response(&[("svc", "a")], true));
         mock.push_cursor(cursor_response(&[("svc", "b")], true));
         mock.push_cursor(cursor_response(&[("svc", "c")], false));
-        mock.push_status(status_response(&[("svc", "stopped")]));
+        mock.push_status(status_response(&[("svc", "exited")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
@@ -1273,9 +1522,9 @@ mod tests {
         // First pass: drain cursor, status says still running
         mock.push_cursor(cursor_response(&[("svc", "a")], false));
         mock.push_status(status_response(&[("svc", "running")]));
-        // Second pass: more data arrives, drain, now quiescent
+        // Second pass: more data arrives, drain, now naturally terminal
         mock.push_cursor(cursor_response(&[("svc", "b")], false));
-        mock.push_status(status_response(&[("svc", "stopped")]));
+        mock.push_status(status_response(&[("svc", "exited")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
@@ -1396,7 +1645,7 @@ mod tests {
             "Cursor expired or invalid: cursor_0",
         )));
         mock.push_cursor(cursor_response(&[("svc", "line-1")], false));
-        mock.push_status(status_response(&[("svc", "stopped")]));
+        mock.push_status(status_response(&[("svc", "exited")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
@@ -1438,7 +1687,7 @@ mod tests {
     async fn test_follow_empty_cursor_checks_quiescence() {
         let mock = MockClient::new();
         mock.push_cursor(cursor_response(&[], false));
-        mock.push_status(status_response(&[("svc", "stopped")]));
+        mock.push_status(status_response(&[("svc", "exited")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
@@ -1453,17 +1702,17 @@ mod tests {
         assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 1);
     }
 
-    /// Shutdown with services that take multiple polls to stop.
+    /// Services that take multiple polls to reach natural terminal state.
     #[tokio::test(start_paused = true)]
     async fn test_follow_shutdown_waits_for_all_services_to_stop() {
         let mock = MockClient::new();
         mock.push_cursor(cursor_response(&[("svc", "line-1")], false));
         // First quiescence check: still running → loop continues
-        mock.push_status(status_response(&[("web", "running"), ("db", "stopped")]));
+        mock.push_status(status_response(&[("web", "running"), ("db", "exited")]));
         // After sleep, cursor returns empty batch, caught up again
         mock.push_cursor(cursor_response(&[], false));
-        // Second quiescence check: all stopped
-        mock.push_status(status_response(&[("web", "stopped"), ("db", "stopped")]));
+        // Second quiescence check: all naturally terminal
+        mock.push_status(status_response(&[("web", "exited"), ("db", "exited")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
@@ -1503,5 +1752,266 @@ mod tests {
         assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 4);
         // Only 1 cursor read before shutdown took effect
         assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 1);
+    }
+
+    // ========================================================================
+    // Signal name mapping
+    // ========================================================================
+
+    #[test]
+    fn test_signal_name_common_signals() {
+        assert_eq!(signal_name(1), "SIGHUP");
+        assert_eq!(signal_name(2), "SIGINT");
+        assert_eq!(signal_name(3), "SIGQUIT");
+        assert_eq!(signal_name(6), "SIGABRT");
+        assert_eq!(signal_name(9), "SIGKILL");
+        assert_eq!(signal_name(14), "SIGALRM");
+        assert_eq!(signal_name(15), "SIGTERM");
+    }
+
+    #[test]
+    fn test_signal_name_unknown_signals() {
+        assert_eq!(signal_name(10), "SIG10");
+        assert_eq!(signal_name(31), "SIG31");
+        assert_eq!(signal_name(99), "SIG99");
+    }
+
+    // ========================================================================
+    // format_status Docker-style output
+    // ========================================================================
+
+    fn make_info(status: &str) -> ServiceInfo {
+        ServiceInfo {
+            status: status.to_string(),
+            pid: None,
+            started_at: None,
+            stopped_at: None,
+            health_check_failures: 0,
+            exit_code: None,
+            signal: None,
+        }
+    }
+
+    #[test]
+    fn test_format_status_running_with_uptime() {
+        let mut info = make_info("running");
+        info.pid = Some(1234);
+        info.started_at = Some(chrono::Utc::now().timestamp() - 300); // 5 minutes ago
+        let status = format_status(&info);
+        assert_eq!(status, "Up 5m");
+    }
+
+    #[test]
+    fn test_format_status_running_no_uptime() {
+        let info = make_info("running");
+        let status = format_status(&info);
+        assert_eq!(status, "Up");
+    }
+
+    #[test]
+    fn test_format_status_healthy_with_uptime() {
+        let mut info = make_info("healthy");
+        info.started_at = Some(chrono::Utc::now().timestamp() - 60);
+        let status = format_status(&info);
+        assert_eq!(status, "Up 1m (healthy)");
+    }
+
+    #[test]
+    fn test_format_status_unhealthy_with_uptime() {
+        let mut info = make_info("unhealthy");
+        info.started_at = Some(chrono::Utc::now().timestamp() - 3600);
+        let status = format_status(&info);
+        assert_eq!(status, "Up 1h (unhealthy)");
+    }
+
+    #[test]
+    fn test_format_status_starting() {
+        let info = make_info("starting");
+        assert_eq!(format_status(&info), "Starting");
+    }
+
+    #[test]
+    fn test_format_status_stopping() {
+        let info = make_info("stopping");
+        assert_eq!(format_status(&info), "Stopping");
+    }
+
+    #[test]
+    fn test_format_status_stopped_with_ago() {
+        let mut info = make_info("stopped");
+        info.stopped_at = Some(chrono::Utc::now().timestamp() - 14);
+        let status = format_status(&info);
+        assert_eq!(status, "Stopped 14s ago");
+    }
+
+    #[test]
+    fn test_format_status_stopped_no_timestamp() {
+        let info = make_info("stopped");
+        assert_eq!(format_status(&info), "Stopped");
+    }
+
+    #[test]
+    fn test_format_status_exited_with_code_and_ago() {
+        let mut info = make_info("exited");
+        info.exit_code = Some(0);
+        info.stopped_at = Some(chrono::Utc::now().timestamp() - 14);
+        let status = format_status(&info);
+        assert_eq!(status, "Exited (0) 14s ago");
+    }
+
+    #[test]
+    fn test_format_status_exited_with_signal() {
+        let mut info = make_info("exited");
+        info.signal = Some(15);
+        info.stopped_at = Some(chrono::Utc::now().timestamp() - 5);
+        let status = format_status(&info);
+        assert_eq!(status, "Exited (SIGTERM) 5s ago");
+    }
+
+    #[test]
+    fn test_format_status_exited_no_info() {
+        let info = make_info("exited");
+        assert_eq!(format_status(&info), "Exited");
+    }
+
+    #[test]
+    fn test_format_status_failed_with_code() {
+        let mut info = make_info("failed");
+        info.exit_code = Some(1);
+        info.stopped_at = Some(chrono::Utc::now().timestamp() - 5);
+        let status = format_status(&info);
+        assert_eq!(status, "Failed (1) 5s ago");
+    }
+
+    #[test]
+    fn test_format_status_failed_with_sigkill() {
+        let mut info = make_info("failed");
+        info.signal = Some(9);
+        info.stopped_at = Some(chrono::Utc::now().timestamp() - 5);
+        let status = format_status(&info);
+        assert_eq!(status, "Failed (SIGKILL) 5s ago");
+    }
+
+    #[test]
+    fn test_format_status_failed_no_info() {
+        let info = make_info("failed");
+        assert_eq!(format_status(&info), "Failed");
+    }
+
+    #[test]
+    fn test_format_status_signal_takes_priority_over_exit_code() {
+        // When both signal and exit_code are present, signal should be displayed
+        let mut info = make_info("failed");
+        info.exit_code = Some(137);
+        info.signal = Some(9);
+        info.stopped_at = Some(chrono::Utc::now().timestamp() - 5);
+        let status = format_status(&info);
+        assert_eq!(status, "Failed (SIGKILL) 5s ago");
+    }
+
+    // ========================================================================
+    // format_duration_since
+    // ========================================================================
+
+    #[test]
+    fn test_format_duration_since_seconds() {
+        let ts = chrono::Utc::now().timestamp() - 30;
+        assert_eq!(format_duration_since(ts), "30s ago");
+    }
+
+    #[test]
+    fn test_format_duration_since_minutes() {
+        let ts = chrono::Utc::now().timestamp() - 300;
+        assert_eq!(format_duration_since(ts), "5m ago");
+    }
+
+    #[test]
+    fn test_format_duration_since_hours() {
+        let ts = chrono::Utc::now().timestamp() - 7200;
+        assert_eq!(format_duration_since(ts), "2h ago");
+    }
+
+    #[test]
+    fn test_format_duration_since_days() {
+        let ts = chrono::Utc::now().timestamp() - 172800;
+        assert_eq!(format_duration_since(ts), "2d ago");
+    }
+
+    // ========================================================================
+    // is_all_terminal / is_all_naturally_terminal
+    // ========================================================================
+
+    #[test]
+    fn test_is_all_terminal_includes_exited() {
+        let response = status_response(&[("svc", "exited")]).unwrap();
+        assert!(is_all_terminal(&response));
+    }
+
+    #[test]
+    fn test_is_all_terminal_mixed_stopped_exited_failed() {
+        let response = status_response(&[
+            ("a", "stopped"),
+            ("b", "exited"),
+            ("c", "failed"),
+        ]).unwrap();
+        assert!(is_all_terminal(&response));
+    }
+
+    #[test]
+    fn test_is_all_terminal_running_not_terminal() {
+        let response = status_response(&[
+            ("a", "exited"),
+            ("b", "running"),
+        ]).unwrap();
+        assert!(!is_all_terminal(&response));
+    }
+
+    #[test]
+    fn test_naturally_terminal_excludes_stopped() {
+        // "stopped" is NOT naturally terminal (could be mid-restart)
+        let response = status_response(&[("svc", "stopped")]).unwrap();
+        assert!(!is_all_naturally_terminal(&response));
+        // But it IS terminal for the Ctrl+C shutdown flow
+        assert!(is_all_terminal(&response));
+    }
+
+    #[test]
+    fn test_naturally_terminal_exited_and_failed() {
+        let response = status_response(&[
+            ("a", "exited"),
+            ("b", "failed"),
+        ]).unwrap();
+        assert!(is_all_naturally_terminal(&response));
+        assert!(is_all_terminal(&response));
+    }
+
+    #[test]
+    fn test_naturally_terminal_mixed_stopped_and_exited() {
+        // One stopped + one exited: NOT naturally terminal (stopped blocks it)
+        let response = status_response(&[
+            ("a", "stopped"),
+            ("b", "exited"),
+        ]).unwrap();
+        assert!(!is_all_naturally_terminal(&response));
+        assert!(is_all_terminal(&response));
+    }
+
+    /// Exited services are quiescent — UntilQuiescent mode exits.
+    #[tokio::test(start_paused = true)]
+    async fn test_follow_exits_on_exited_quiescence() {
+        let mock = MockClient::new();
+        mock.push_cursor(cursor_response(&[("svc", "done")], false));
+        mock.push_status(status_response(&[("svc", "exited")]));
+
+        let config_path = PathBuf::from("/fake/config.yaml");
+        let mut collected = Vec::new();
+
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
+
+        assert_eq!(collected, vec!["done"]);
     }
 }

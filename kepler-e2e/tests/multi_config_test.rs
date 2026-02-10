@@ -116,7 +116,7 @@ async fn test_stop_one_keeps_other() -> E2eResult<()> {
     // Config B should still be running
     let ps_b = harness.ps(&config_b).await?;
     assert!(
-        ps_b.stdout_contains("running"),
+        ps_b.stdout_contains("Up "),
         "Config B should still be running after stopping A. stdout: {}",
         ps_b.stdout
     );
