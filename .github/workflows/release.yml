@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0). Leave empty for artifact-only build."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.93
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config g++
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            release-${{ runner.os }}-cargo-
+
+      - name: Build release binaries
+        run: cargo build --release -p kepler-cli -p kepler-daemon -p kepler-exec
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TARBALL="kepler-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          STAGING="kepler-${VERSION}"
+
+          mkdir -p "${STAGING}"
+          cp target/release/kepler "${STAGING}/"
+          cp target/release/kepler-daemon "${STAGING}/"
+          cp target/release/kepler-exec "${STAGING}/"
+          cp install.sh "${STAGING}/"
+
+          tar czf "${TARBALL}" "${STAGING}"
+          echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.TARBALL }}
+          path: ${{ env.TARBALL }}
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.TARBALL }}
+          generate_release_notes: true

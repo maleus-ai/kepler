@@ -81,7 +81,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TARGET_DIR="${SCRIPT_DIR}/target/release"
+
+# Auto-detect binaries next to install.sh (e.g. extracted tarball)
+if [[ -f "${SCRIPT_DIR}/kepler" ]] && [[ -f "${SCRIPT_DIR}/kepler-daemon" ]] && [[ -f "${SCRIPT_DIR}/kepler-exec" ]]; then
+    TARGET_DIR="$SCRIPT_DIR"
+else
+    TARGET_DIR="${SCRIPT_DIR}/target/release"
+fi
 
 # Acquire sudo upfront (skip if already root)
 if [[ $EUID -ne 0 ]]; then
@@ -151,7 +157,7 @@ done
 
 # Step 2: Stop running daemon before replacing binaries
 WAS_RUNNING=false
-if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+if [[ "$OPT_SYSTEMD" != "no" ]] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     WAS_RUNNING=true
     info "Stopping running kepler daemon"
     as_root systemctl stop "$SERVICE_NAME"
@@ -223,15 +229,20 @@ if [[ -n "$CURRENT_USER" ]] && [[ "$CURRENT_USER" != "root" ]]; then
         info "User '$CURRENT_USER' is already in the kepler group"
     else
         echo ""
-        read -rp "Add user '$CURRENT_USER' to the kepler group? [Y/n] " answer
-        case "${answer,,}" in
-            n|no) ;;
-            *)
-                as_root usermod -aG kepler "$CURRENT_USER"
-                info "Added '$CURRENT_USER' to the kepler group"
-                warn "You must log out and log back in for group changes to take effect."
-                ;;
-        esac
+        if [ -t 0 ]; then
+            read -rp "Add user '$CURRENT_USER' to the kepler group? [Y/n] " answer
+            case "${answer,,}" in
+                n|no) ;;
+                *)
+                    as_root usermod -aG kepler "$CURRENT_USER"
+                    info "Added '$CURRENT_USER' to the kepler group"
+                    warn "You must log out and log back in for group changes to take effect."
+                    ;;
+            esac
+        else
+            warn "Non-interactive shell — skipping group prompt."
+            echo "  Add user manually: sudo usermod -aG kepler $CURRENT_USER"
+        fi
     fi
 else
     echo ""

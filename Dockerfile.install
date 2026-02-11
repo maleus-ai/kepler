@@ -1,0 +1,56 @@
+# Dockerfile.install — Install Kepler from a GitHub Release (private repo)
+#
+# Build:
+#   echo "ghp_YourToken" > .gh_token
+#   docker build --secret id=gh_token,src=.gh_token \
+#                --build-arg KEPLER_VERSION=v0.1.0 \
+#                -f Dockerfile.install -t myapp-with-kepler .
+#   rm .gh_token
+
+# ---------------------------------------------------------------------------
+# Stage 1: Download and extract the release tarball
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04 AS downloader
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl jq ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG KEPLER_VERSION
+ARG KEPLER_REPO=maleus-ai/kepler
+
+RUN --mount=type=secret,id=gh_token \
+    set -e; \
+    GH_TOKEN=$(cat /run/secrets/gh_token); \
+    ASSET_NAME="kepler-${KEPLER_VERSION}-x86_64-unknown-linux-gnu.tar.gz"; \
+    \
+    # Get the asset download URL from the release
+    ASSET_URL=$(curl -fsSL \
+        -H "Authorization: token ${GH_TOKEN}" \
+        -H "Accept: application/vnd.github.v3+json" \
+        "https://api.github.com/repos/${KEPLER_REPO}/releases/tags/${KEPLER_VERSION}" \
+        | jq -r ".assets[] | select(.name == \"${ASSET_NAME}\") | .url"); \
+    \
+    if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then \
+        echo "ERROR: Asset ${ASSET_NAME} not found in release ${KEPLER_VERSION}" >&2; \
+        exit 1; \
+    fi; \
+    \
+    # Download the asset (private repo requires the Accept header for binary download)
+    curl -fsSL \
+        -H "Authorization: token ${GH_TOKEN}" \
+        -H "Accept: application/octet-stream" \
+        "$ASSET_URL" \
+        -o "/tmp/${ASSET_NAME}"; \
+    \
+    mkdir -p /tmp/kepler; \
+    tar xzf "/tmp/${ASSET_NAME}" -C /tmp/kepler --strip-components=1
+
+# ---------------------------------------------------------------------------
+# Stage 2: Install into the final image
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04
+
+COPY --from=downloader /tmp/kepler /tmp/kepler
+
+RUN /tmp/kepler/install.sh --no-build --no-systemd \
+    && rm -rf /tmp/kepler
