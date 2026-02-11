@@ -6,7 +6,8 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::sync::{broadcast, mpsc};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -54,8 +55,8 @@ pub struct ConfigActor {
     /// System environment variables captured from the CLI
     sys_env: HashMap<String, String>,
 
-    /// Broadcast channel for service status changes (used by Subscribe handler)
-    status_tx: broadcast::Sender<ServiceStatusChange>,
+    /// Subscriber registry for service status changes (used by Subscribe handler)
+    subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>,
 
     rx: mpsc::Receiver<ConfigCommand>,
 }
@@ -267,9 +268,10 @@ impl ConfigActor {
 
         // Create channels
         let (tx, rx) = mpsc::channel(256);
-        let (status_tx, _) = broadcast::channel::<ServiceStatusChange>(256);
+        let subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>> =
+            Arc::new(Mutex::new(Vec::new()));
 
-        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, status_tx.clone());
+        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone());
 
         let actor = ConfigActor {
             config_path: canonical_path,
@@ -288,7 +290,7 @@ impl ConfigActor {
             restored_from_snapshot,
             event_handler_spawned: false,
             sys_env: resolved_sys_env,
-            status_tx,
+            subscribers,
             rx,
         };
 
@@ -852,8 +854,8 @@ impl ConfigActor {
         }
         service_state.status = status;
 
-        // Broadcast status change to subscribers
-        let _ = self.status_tx.send(ServiceStatusChange {
+        // Notify subscribers of status change
+        self.notify_subscribers(ServiceStatusChange {
             service: service_name.to_string(),
             status,
         });
@@ -921,10 +923,11 @@ impl ConfigActor {
         }
 
         let new_status = service_state.status;
+        let failures = service_state.health_check_failures;
 
-        // Broadcast status change to subscribers (only if status actually changed)
+        // Notify subscribers of status change (only if status actually changed)
         if previous_status != new_status {
-            let _ = self.status_tx.send(ServiceStatusChange {
+            self.notify_subscribers(ServiceStatusChange {
                 service: service_name.to_string(),
                 status: new_status,
             });
@@ -933,8 +936,14 @@ impl ConfigActor {
         Ok(HealthCheckUpdate {
             previous_status,
             new_status,
-            failures: service_state.health_check_failures,
+            failures,
         })
+    }
+
+    /// Notify all subscribers of a status change, auto-pruning dead senders.
+    fn notify_subscribers(&self, change: ServiceStatusChange) {
+        let mut subs = self.subscribers.lock().unwrap();
+        subs.retain(|tx| tx.send(change.clone()).is_ok());
     }
 
     /// Cleanup all resources when shutting down

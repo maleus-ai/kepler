@@ -456,7 +456,7 @@ impl ServiceOrchestrator {
             let effective_timeout = dep_config.timeout.or(global_timeout);
             let deadline = effective_timeout.map(|t| start + t);
 
-            // Subscribe to broadcast channel for instant notification of state changes
+            // Subscribe to state changes for instant notification
             let mut status_rx = handle.subscribe_state_changes();
 
             loop {
@@ -529,9 +529,8 @@ impl ServiceOrchestrator {
                 };
 
                 match recv_result {
-                    Ok(_) => continue, // status changed somewhere, re-check all conditions
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    Some(_) => continue, // status changed somewhere, re-check all conditions
+                    None => {
                         return Err(OrchestratorError::StartupCancelled(
                             service_name.to_string(),
                         ));
@@ -608,50 +607,89 @@ impl ServiceOrchestrator {
 
         let mut stopped = Vec::new();
 
-        // Stop services in reverse dependency order
-        for service_name in &services_to_stop {
-            // Check if active (includes Starting/Stopping, not just Running)
-            let is_active = handle
-                .get_service_state(service_name)
-                .await
-                .map(|s| s.status.is_active())
-                .unwrap_or(false);
+        // Stop services in reverse dependency order.
+        // Loop to catch services that become active during stop (e.g., deferred
+        // services triggered by service_stopped conditions).
+        for pass in 0..services_to_stop.len() {
+            let mut pass_stopped = false;
 
-            if !is_active {
-                continue;
-            }
-
-            // Emit Stop event
-            handle.emit_event(service_name, ServiceEvent::Stop).await;
-
-            // Get service context
-            let ctx = handle.get_service_context(service_name).await;
-
-            if let Some(ref ctx) = ctx {
-                // Run pre_stop hook
-                if let Err(e) = self
-                    .run_service_hook(ctx, service_name, ServiceHookType::PreStop)
+            for service_name in &services_to_stop {
+                // Check if active (includes Starting/Stopping, not just Running)
+                let is_active = handle
+                    .get_service_state(service_name)
                     .await
-                {
-                    warn!("Hook pre_stop failed for {}: {}", service_name, e);
-                }
-            }
+                    .map(|s| s.status.is_active())
+                    .unwrap_or(false);
 
-            // Stop the service
-            stop_service(service_name, handle.clone(), signal)
-                .await
-                .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
-
-            // Run post_stop hook (after process stopped)
-            if let Some(ref ctx) = ctx
-                && let Err(e) = self
-                    .run_service_hook(ctx, service_name, ServiceHookType::PostStop)
-                    .await
-                {
-                    warn!("Hook post_stop failed for {}: {}", service_name, e);
+                if !is_active {
+                    continue;
                 }
 
-            stopped.push(service_name.clone());
+                // Emit Stop event
+                handle.emit_event(service_name, ServiceEvent::Stop).await;
+
+                // Get service context
+                let ctx = handle.get_service_context(service_name).await;
+
+                if let Some(ref ctx) = ctx {
+                    // Run pre_stop hook
+                    if let Err(e) = self
+                        .run_service_hook(ctx, service_name, ServiceHookType::PreStop)
+                        .await
+                    {
+                        warn!("Hook pre_stop failed for {}: {}", service_name, e);
+                    }
+                }
+
+                // Stop the service
+                stop_service(service_name, handle.clone(), signal)
+                    .await
+                    .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
+
+                // Run post_stop hook (after process stopped)
+                if let Some(ref ctx) = ctx
+                    && let Err(e) = self
+                        .run_service_hook(ctx, service_name, ServiceHookType::PostStop)
+                        .await
+                    {
+                        warn!("Hook post_stop failed for {}: {}", service_name, e);
+                    }
+
+                stopped.push(service_name.clone());
+                pass_stopped = true;
+            }
+
+            if !pass_stopped {
+                // No services were stopped in this pass — check if any are still
+                // starting up (deferred services may be spawning asynchronously)
+                if pass > 0 {
+                    // Brief settle time for async service spawning
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+
+                    let any_active = {
+                        let mut found = false;
+                        for service_name in &services_to_stop {
+                            let is_active = handle
+                                .get_service_state(service_name)
+                                .await
+                                .map(|s| s.status.is_active())
+                                .unwrap_or(false);
+                            if is_active {
+                                found = true;
+                                break;
+                            }
+                        }
+                        found
+                    };
+
+                    if !any_active {
+                        break;
+                    }
+                    // Some services became active during the settle — loop again
+                } else {
+                    break;
+                }
+            }
         }
 
         // Run global post_stop hook if stopping all and services were stopped

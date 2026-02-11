@@ -1,8 +1,8 @@
 //! Tests for service status transitions during start/stop/restart lifecycle operations.
 //!
-//! Status changes are now emitted via broadcast channel (ServiceStatusChange) in the
+//! Status changes are emitted via per-subscriber unbounded mpsc channels in the
 //! config actor. These tests verify the orchestrator emits correct status transitions
-//! by subscribing to the broadcast channel on ConfigActorHandle.
+//! by subscribing to state changes on ConfigActorHandle.
 
 use kepler_daemon::config::{DependencyCondition, DependencyConfig, DependencyEntry, DependsOn, RestartPolicy};
 use kepler_daemon::config_actor::ServiceStatusChange;
@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 
 /// Mutex to synchronize environment variable setting
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -106,9 +106,9 @@ async fn setup_orchestrator_with_exit_handler(
     (orchestrator, config_path, exit_tx, restart_tx, exit_handler)
 }
 
-/// Collect status change events from a broadcast receiver, waiting for `expected_count` or timeout.
+/// Collect status change events from an unbounded receiver, waiting for `expected_count` or timeout.
 async fn collect_status_changes(
-    rx: &mut broadcast::Receiver<ServiceStatusChange>,
+    rx: &mut mpsc::UnboundedReceiver<ServiceStatusChange>,
     expected_count: usize,
     timeout: Duration,
 ) -> Vec<(String, ServiceStatus)> {
@@ -121,23 +121,22 @@ async fn collect_status_changes(
             break;
         }
         match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Ok(change)) => {
+            Ok(Some(change)) => {
                 events.push((change.service, change.status));
             }
-            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-            Ok(Err(broadcast::error::RecvError::Closed)) => break,
-            Err(_) => break,
+            Ok(None) => break, // Channel closed
+            Err(_) => break,   // Timeout
         }
     }
     events
 }
 
-/// Subscribe to status changes for a config, returning a broadcast receiver.
+/// Subscribe to status changes for a config, returning an unbounded receiver.
 /// Must be called after start_services loads the config.
 async fn subscribe_to_config(
     orchestrator: &ServiceOrchestrator,
     config_path: &std::path::Path,
-) -> Option<broadcast::Receiver<ServiceStatusChange>> {
+) -> Option<mpsc::UnboundedReceiver<ServiceStatusChange>> {
     let canonical = std::fs::canonicalize(config_path).ok()?;
     let handle = orchestrator.registry().get(&canonical)?;
     Some(handle.subscribe_state_changes())

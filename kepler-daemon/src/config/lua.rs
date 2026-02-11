@@ -82,7 +82,7 @@ pub fn process_lua_scripts(
                     service_name: None,
                     hook_name: None,
                 };
-                process_lua_tags_recursive(logs_value, &evaluator, &ctx, config_dir, config_path)?;
+                process_lua_tags_recursive(logs_value, &evaluator, &ctx, config_dir, config_path, "kepler.logs")?;
             }
 
             // Process kepler.hooks
@@ -126,7 +126,8 @@ fn process_service_lua(
             service_name: Some(service_name.to_string()),
             hook_name: None,
         };
-        process_single_lua_tag(env_file_value, evaluator, &ctx, config_dir, config_path)?;
+        let field_path = format!("{}.env_file", service_name);
+        process_single_lua_tag(env_file_value, evaluator, &ctx, config_dir, config_path, &field_path)?;
     }
 
     // Step 3: Load env_file content if specified (into ctx.env_file)
@@ -158,7 +159,8 @@ fn process_service_lua(
             service_name: Some(service_name.to_string()),
             hook_name: None,
         };
-        process_single_lua_tag(environment_value, evaluator, &ctx, config_dir, config_path)?;
+        let field_path = format!("{}.environment", service_name);
+        process_single_lua_tag(environment_value, evaluator, &ctx, config_dir, config_path, &field_path)?;
     }
 
     // Step 5: Merge environment array into full env (sys_env + env_file + environment)
@@ -187,6 +189,7 @@ fn process_service_lua(
     for (key, field_value) in service_map.iter_mut() {
         let key_str = key.as_str().unwrap_or("");
         if key_str != "env_file" && key_str != "environment" {
+            let field_path = format!("{}.{}", service_name, key_str);
             // Special handling for hooks - pass hook_name context
             if key_str == "hooks" {
                 process_service_hooks_lua(
@@ -198,7 +201,7 @@ fn process_service_lua(
                     config_path,
                 )?;
             } else {
-                process_lua_tags_recursive(field_value, evaluator, &ctx, config_dir, config_path)?;
+                process_lua_tags_recursive(field_value, evaluator, &ctx, config_dir, config_path, &field_path)?;
             }
         }
     }
@@ -230,6 +233,7 @@ fn process_service_hooks_lua(
 
     for hook_name in hook_names {
         if let Some(hook_value) = hooks_map.get_mut(Value::String(hook_name.clone())) {
+            let field_path = format!("{}.hooks.{}", service_name, hook_name);
             let ctx = EvalContext {
                 sys_env: base_ctx.sys_env.clone(),
                 env_file: base_ctx.env_file.clone(),
@@ -237,7 +241,7 @@ fn process_service_hooks_lua(
                 service_name: Some(service_name.to_string()),
                 hook_name: Some(hook_name),
             };
-            process_lua_tags_recursive(hook_value, evaluator, &ctx, config_dir, config_path)?;
+            process_lua_tags_recursive(hook_value, evaluator, &ctx, config_dir, config_path, &field_path)?;
         }
     }
 
@@ -267,6 +271,7 @@ fn process_global_hooks_lua(
 
     for hook_name in hook_names {
         if let Some(hook_value) = hooks_map.get_mut(Value::String(hook_name.clone())) {
+            let field_path = format!("kepler.hooks.{}", hook_name);
             let ctx = EvalContext {
                 sys_env: sys_env.clone(),
                 env_file: HashMap::new(),
@@ -274,7 +279,7 @@ fn process_global_hooks_lua(
                 service_name: None, // Global hooks have no service
                 hook_name: Some(hook_name),
             };
-            process_lua_tags_recursive(hook_value, evaluator, &ctx, config_dir, config_path)?;
+            process_lua_tags_recursive(hook_value, evaluator, &ctx, config_dir, config_path, &field_path)?;
         }
     }
 
@@ -288,6 +293,7 @@ fn process_single_lua_tag(
     ctx: &EvalContext,
     config_dir: &Path,
     config_path: &Path,
+    field_path: &str,
 ) -> Result<()> {
     use serde_yaml::Value;
 
@@ -295,7 +301,7 @@ fn process_single_lua_tag(
         let tag = tagged.tag.to_string();
         if tag == "!lua" || tag == "!lua_file" {
             let result =
-                evaluate_lua_tag(&tag, &tagged.value, evaluator, ctx, config_dir, config_path)?;
+                evaluate_lua_tag(&tag, &tagged.value, evaluator, ctx, config_dir, config_path, field_path)?;
             *value = result;
         }
     }
@@ -310,6 +316,7 @@ fn process_lua_tags_recursive(
     ctx: &EvalContext,
     config_dir: &Path,
     config_path: &Path,
+    field_path: &str,
 ) -> Result<()> {
     use serde_yaml::Value;
 
@@ -324,6 +331,7 @@ fn process_lua_tags_recursive(
                     ctx,
                     config_dir,
                     config_path,
+                    field_path,
                 )?;
                 *value = result;
             }
@@ -333,8 +341,17 @@ fn process_lua_tags_recursive(
             if let Value::Mapping(map) = value {
                 let keys: Vec<serde_yaml::Value> = map.keys().cloned().collect();
                 for key in keys {
+                    let child_path = if let Some(key_str) = key.as_str() {
+                        if field_path.is_empty() {
+                            key_str.to_string()
+                        } else {
+                            format!("{}.{}", field_path, key_str)
+                        }
+                    } else {
+                        field_path.to_string()
+                    };
                     if let Some(v) = map.get_mut(&key) {
-                        process_lua_tags_recursive(v, evaluator, ctx, config_dir, config_path)?;
+                        process_lua_tags_recursive(v, evaluator, ctx, config_dir, config_path, &child_path)?;
                     }
                 }
             }
@@ -342,7 +359,7 @@ fn process_lua_tags_recursive(
         Value::Sequence(_) => {
             if let Value::Sequence(seq) = value {
                 for item in seq.iter_mut() {
-                    process_lua_tags_recursive(item, evaluator, ctx, config_dir, config_path)?;
+                    process_lua_tags_recursive(item, evaluator, ctx, config_dir, config_path, field_path)?;
                 }
             }
         }
@@ -360,6 +377,7 @@ fn evaluate_lua_tag(
     ctx: &EvalContext,
     config_dir: &Path,
     config_path: &Path,
+    field_path: &str,
 ) -> Result<serde_yaml::Value> {
     let code = if tag == "!lua_file" {
         // For !lua_file, the value is a path to a Lua file
@@ -390,7 +408,7 @@ fn evaluate_lua_tag(
     };
 
     // Evaluate the Lua code
-    let result: mlua::Value = evaluator.eval(&code, ctx).map_err(|e| DaemonError::LuaError {
+    let result: mlua::Value = evaluator.eval(&code, ctx, field_path).map_err(|e| DaemonError::LuaError {
         path: config_path.to_path_buf(),
         message: format!("Lua error: {}", e),
     })?;

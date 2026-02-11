@@ -748,7 +748,7 @@ fn test_lua_io_library_blocked() {
     let ctx = EvalContext::default();
 
     // Attempt to use io.open
-    let result = eval.eval::<mlua::Value>(r#"return io.open("/etc/passwd", "r")"#, &ctx);
+    let result = eval.eval::<mlua::Value>(r#"return io.open("/etc/passwd", "r")"#, &ctx, "test");
     assert!(
         result.is_err(),
         "io.open should not be available in Lua sandbox"
@@ -765,7 +765,7 @@ fn test_lua_os_execute_blocked() {
     let ctx = EvalContext::default();
 
     // Attempt to use os.execute
-    let result = eval.eval::<mlua::Value>(r#"return os.execute("echo hello")"#, &ctx);
+    let result = eval.eval::<mlua::Value>(r#"return os.execute("echo hello")"#, &ctx, "test");
     assert!(
         result.is_err(),
         "os.execute should not be available in Lua sandbox"
@@ -782,7 +782,7 @@ fn test_lua_loadfile_blocked() {
     let ctx = EvalContext::default();
 
     // Attempt to use loadfile
-    let result = eval.eval::<mlua::Value>(r#"return loadfile("/etc/passwd")"#, &ctx);
+    let result = eval.eval::<mlua::Value>(r#"return loadfile("/etc/passwd")"#, &ctx, "test");
     assert!(
         result.is_err(),
         "loadfile should not be available in Lua sandbox"
@@ -799,7 +799,7 @@ fn test_lua_dofile_blocked() {
     let ctx = EvalContext::default();
 
     // Attempt to use dofile
-    let result = eval.eval::<mlua::Value>(r#"return dofile("/etc/passwd")"#, &ctx);
+    let result = eval.eval::<mlua::Value>(r#"return dofile("/etc/passwd")"#, &ctx, "test");
     assert!(
         result.is_err(),
         "dofile should not be available in Lua sandbox"
@@ -816,7 +816,7 @@ fn test_lua_debug_library_blocked() {
     let ctx = EvalContext::default();
 
     // Attempt to use debug library
-    let result = eval.eval::<mlua::Value>(r#"return debug.getinfo(1)"#, &ctx);
+    let result = eval.eval::<mlua::Value>(r#"return debug.getinfo(1)"#, &ctx, "test");
     assert!(
         result.is_err(),
         "debug library should not be available in Lua sandbox"
@@ -838,7 +838,7 @@ fn test_lua_rawset_cannot_modify_env() {
     ctx.env = HashMap::from([("SECRET".into(), "original".into())]);
 
     // First verify the value is accessible
-    let result: String = eval.eval(r#"return ctx.env.SECRET"#, &ctx).unwrap();
+    let result: String = eval.eval(r#"return ctx.env.SECRET"#, &ctx, "test").unwrap();
     assert_eq!(result, "original");
 
     // rawset on a frozen table should error
@@ -848,7 +848,7 @@ fn test_lua_rawset_cannot_modify_env() {
         end
         return ctx.env.SECRET
     "#;
-    let result = eval.eval::<mlua::Value>(code, &ctx);
+    let result = eval.eval::<mlua::Value>(code, &ctx, "test");
     // Either rawset throws on the frozen table, or if rawset is not available,
     // the value is unchanged. Both outcomes are acceptable.
     match result {
@@ -876,7 +876,7 @@ fn test_lua_getmetatable_frozen() {
 
     // On a Luau-frozen table, getmetatable returns nil (metatable is protected)
     let result: mlua::Value = eval
-        .eval(r#"return getmetatable(ctx.env)"#, &ctx)
+        .eval(r#"return getmetatable(ctx.env)"#, &ctx, "test")
         .unwrap();
     assert!(
         matches!(result, mlua::Value::Nil),
@@ -895,7 +895,7 @@ fn test_lua_ctx_table_frozen() {
     let ctx = EvalContext::default();
 
     // Writing to ctx should raise an error
-    let result = eval.eval::<mlua::Value>(r#"ctx.injected = "hacked"; return nil"#, &ctx);
+    let result = eval.eval::<mlua::Value>(r#"ctx.injected = "hacked"; return nil"#, &ctx, "test");
     assert!(
         result.is_err(),
         "Writing to ctx should fail: ctx is frozen"
@@ -912,7 +912,7 @@ fn test_lua_require_accessible() {
     let ctx = EvalContext::default();
 
     // require should be a function (accessible through the global fallback)
-    let result: String = eval.eval(r#"return type(require)"#, &ctx).unwrap();
+    let result: String = eval.eval(r#"return type(require)"#, &ctx, "test").unwrap();
     assert_eq!(result, "function", "require should be available as a function");
 }
 

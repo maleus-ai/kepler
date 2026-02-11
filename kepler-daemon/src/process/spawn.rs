@@ -317,6 +317,13 @@ fn spawn_capture_task(
                 }
                 if let Some(ref mut w) = writer {
                     w.write(&line);
+                    // Flush when the reader has no more buffered data (i.e., the
+                    // next next_line() call would need to wait for the process).
+                    // This ensures log lines become visible promptly while still
+                    // batching consecutive lines that arrive together.
+                    if lines.get_ref().buffer().is_empty() {
+                        w.flush();
+                    }
                 }
             }
         }

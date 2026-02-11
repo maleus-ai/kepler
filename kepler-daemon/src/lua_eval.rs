@@ -75,11 +75,11 @@ impl LuaEvaluator {
     /// - `global`: Shared mutable table for cross-block state
     /// - Access to all functions defined in `lua:` block and standard library
     /// - `require()` can load files relative to the config directory
-    pub fn eval<T: FromLua>(&self, code: &str, ctx: &EvalContext) -> LuaResult<T> {
+    pub fn eval<T: FromLua>(&self, code: &str, ctx: &EvalContext, chunk_name: &str) -> LuaResult<T> {
         let env_table = self.build_env_table(ctx)?;
 
         let chunk = self.lua.load(code);
-        let func = chunk.set_name("!lua").set_environment(env_table).into_function()?;
+        let func = chunk.set_name(chunk_name).set_environment(env_table).into_function()?;
 
         func.call(())
     }
@@ -361,7 +361,7 @@ mod tests {
         let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
-        let result: String = eval.eval(r#"return "hello""#, &ctx).unwrap();
+        let result: String = eval.eval(r#"return "hello""#, &ctx, "test").unwrap();
         assert_eq!(result, "hello");
     }
 
@@ -370,7 +370,7 @@ mod tests {
         let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
-        let result: Value = eval.eval(r#"return {"a", "b", "c"}"#, &ctx).unwrap();
+        let result: Value = eval.eval(r#"return {"a", "b", "c"}"#, &ctx, "test").unwrap();
         let vec = lua_value_to_string_vec(result).unwrap();
         assert_eq!(vec, vec!["a", "b", "c"]);
     }
@@ -385,7 +385,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result: String = eval.eval(r#"return ctx.env.FOO"#, &ctx).unwrap();
+        let result: String = eval.eval(r#"return ctx.env.FOO"#, &ctx, "test").unwrap();
         assert_eq!(result, "bar");
     }
 
@@ -394,7 +394,7 @@ mod tests {
         let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
-        let result = eval.eval::<Value>(r#"ctx.env.NEW = "value""#, &ctx);
+        let result = eval.eval::<Value>(r#"ctx.env.NEW = "value""#, &ctx, "test");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -410,10 +410,10 @@ mod tests {
         let ctx = EvalContext::default();
 
         // First block sets global
-        let _: Value = eval.eval(r#"global.port = 8080"#, &ctx).unwrap();
+        let _: Value = eval.eval(r#"global.port = 8080"#, &ctx, "test").unwrap();
 
         // Second block reads it
-        let port: i64 = eval.eval(r#"return global.port"#, &ctx).unwrap();
+        let port: i64 = eval.eval(r#"return global.port"#, &ctx, "test").unwrap();
         assert_eq!(port, 8080);
     }
 
@@ -425,7 +425,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result: String = eval.eval(r#"return ctx.service_name"#, &ctx).unwrap();
+        let result: String = eval.eval(r#"return ctx.service_name"#, &ctx, "test").unwrap();
         assert_eq!(result, "backend");
     }
 
@@ -445,7 +445,7 @@ mod tests {
 
         // Use it from a !lua block
         let ctx = EvalContext::default();
-        let result: i64 = eval.eval(r#"return double(21)"#, &ctx).unwrap();
+        let result: i64 = eval.eval(r#"return double(21)"#, &ctx, "test").unwrap();
         assert_eq!(result, 42);
     }
 
@@ -454,7 +454,7 @@ mod tests {
         let eval = LuaEvaluator::new(&test_config_dir()).unwrap();
         let ctx = EvalContext::default();
 
-        let result: Value = eval.eval(r#"return {FOO="bar", BAZ="qux"}"#, &ctx).unwrap();
+        let result: Value = eval.eval(r#"return {FOO="bar", BAZ="qux"}"#, &ctx, "test").unwrap();
         let map = lua_table_to_env_map(result).unwrap();
 
         assert_eq!(map.get("FOO"), Some(&"bar".to_string()));
@@ -467,7 +467,7 @@ mod tests {
         let ctx = EvalContext::default();
 
         let result: Value = eval
-            .eval(r#"return {"FOO=bar", "BAZ=qux"}"#, &ctx)
+            .eval(r#"return {"FOO=bar", "BAZ=qux"}"#, &ctx, "test")
             .unwrap();
         let vec = lua_table_to_env_vec(&eval.lua, result).unwrap();
 
@@ -484,7 +484,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result: String = eval.eval(r#"return ctx.hook_name"#, &ctx).unwrap();
+        let result: String = eval.eval(r#"return ctx.hook_name"#, &ctx, "test").unwrap();
         assert_eq!(result, "on_start");
     }
 
@@ -494,7 +494,7 @@ mod tests {
         let ctx = EvalContext::default();
 
         // service_name should be nil when not set
-        let result: Value = eval.eval(r#"return ctx.service_name"#, &ctx).unwrap();
+        let result: Value = eval.eval(r#"return ctx.service_name"#, &ctx, "test").unwrap();
         assert!(matches!(result, Value::Nil));
     }
 
@@ -505,12 +505,12 @@ mod tests {
 
         // String functions should work
         let result: String = eval
-            .eval(r#"return string.upper("hello")"#, &ctx)
+            .eval(r#"return string.upper("hello")"#, &ctx, "test")
             .unwrap();
         assert_eq!(result, "HELLO");
 
         // Math functions should work
-        let result: i64 = eval.eval(r#"return math.max(1, 5, 3)"#, &ctx).unwrap();
+        let result: i64 = eval.eval(r#"return math.max(1, 5, 3)"#, &ctx, "test").unwrap();
         assert_eq!(result, 5);
     }
 }

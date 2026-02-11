@@ -37,7 +37,7 @@ pub struct HealthCheckUpdate {
 }
 
 /// Event emitted when a service status changes.
-/// Broadcast via the config actor's broadcast channel.
+/// Delivered to all subscribers via the config actor's subscriber registry.
 #[derive(Debug, Clone)]
 pub struct ServiceStatusChange {
     pub service: String,

@@ -324,7 +324,7 @@ async fn handle_request(
 
             // Get handle + config for progress tracking
             let progress_handle = registry.get(&config_path);
-            let (tracked_services, state_rx) = match &progress_handle {
+            let (tracked_services, clean_services, state_rx) = match &progress_handle {
                 Some(handle) => {
                     let config = handle.get_config().await;
                     let rx = handle.subscribe_state_changes();
@@ -353,12 +353,13 @@ async fn handle_request(
                                     active.push(svc.clone());
                                 }
                             }
-                            (active, Some(rx))
+                            let clean_targets = if clean { all_services } else { Vec::new() };
+                            (active, clean_targets, Some(rx))
                         }
-                        None => (Vec::new(), Some(rx)),
+                        None => (Vec::new(), Vec::new(), Some(rx)),
                     }
                 }
-                None => (Vec::new(), None),
+                None => (Vec::new(), Vec::new(), None),
             };
 
             // Send initial Stopping phase for each active service (creates all bars upfront)
@@ -369,35 +370,29 @@ async fn handle_request(
                 }).await;
             }
 
-            // Spawn forwarding task to relay broadcast state changes as ProgressEvents
+            // Spawn forwarding task to relay state changes as ProgressEvents
             let fwd_task = if let Some(mut state_rx) = state_rx {
                 let fwd_progress = progress.clone();
                 let fwd_services = tracked_services.clone();
                 let fwd_clean = clean;
                 Some(tokio::spawn(async move {
-                    loop {
-                        match state_rx.recv().await {
-                            Ok(change) => {
-                                if !fwd_services.contains(&change.service) {
-                                    continue;
-                                }
-                                // When clean=true, skip Stopped events to keep bar active for Cleaning
-                                if fwd_clean && change.status == ServiceStatus::Stopped {
-                                    continue;
-                                }
-                                let phase = match change.status {
-                                    ServiceStatus::Stopping => ServicePhase::Stopping,
-                                    ServiceStatus::Stopped => ServicePhase::Stopped,
-                                    _ => continue,
-                                };
-                                fwd_progress.send(ProgressEvent {
-                                    service: change.service,
-                                    phase,
-                                }).await;
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    while let Some(change) = state_rx.recv().await {
+                        if !fwd_services.contains(&change.service) {
+                            continue;
                         }
+                        // When clean=true, skip Stopped events to keep bar active for Cleaning
+                        if fwd_clean && change.status == ServiceStatus::Stopped {
+                            continue;
+                        }
+                        let phase = match change.status {
+                            ServiceStatus::Stopping => ServicePhase::Stopping,
+                            ServiceStatus::Stopped => ServicePhase::Stopped,
+                            _ => continue,
+                        };
+                        fwd_progress.send(ProgressEvent {
+                            service: change.service,
+                            phase,
+                        }).await;
                     }
                 }))
             } else {
@@ -409,21 +404,21 @@ async fn handle_request(
                 .stop_services(&config_path, service.as_deref(), clean, signal_num)
                 .await;
 
-            // Brief sleep to drain remaining broadcast events, then abort forwarding task
+            // Brief sleep to drain remaining events, then abort forwarding task
             tokio::time::sleep(Duration::from_millis(50)).await;
             if let Some(task) = fwd_task {
                 task.abort();
             }
 
-            // If clean, send Cleaning → Cleaned for each tracked service
+            // If clean, send Cleaning → Cleaned for each service
             if clean {
-                for svc in &tracked_services {
+                for svc in &clean_services {
                     progress.send(ProgressEvent {
                         service: svc.clone(),
                         phase: ServicePhase::Cleaning,
                     }).await;
                 }
-                for svc in &tracked_services {
+                for svc in &clean_services {
                     progress.send(ProgressEvent {
                         service: svc.clone(),
                         phase: ServicePhase::Cleaned,
@@ -492,34 +487,28 @@ async fn handle_request(
                 }).await;
             }
 
-            // Spawn forwarding task to relay broadcast state changes as ProgressEvents
+            // Spawn forwarding task to relay state changes as ProgressEvents
             let fwd_task = if let Some(mut state_rx) = state_rx {
                 let fwd_progress = progress.clone();
                 let fwd_services = tracked_services.clone();
                 Some(tokio::spawn(async move {
-                    loop {
-                        match state_rx.recv().await {
-                            Ok(change) => {
-                                if !fwd_services.contains(&change.service) {
-                                    continue;
-                                }
-                                let phase = match change.status {
-                                    ServiceStatus::Stopping => ServicePhase::Stopping,
-                                    ServiceStatus::Stopped => ServicePhase::Stopped,
-                                    ServiceStatus::Starting => ServicePhase::Starting,
-                                    ServiceStatus::Running => ServicePhase::Started,
-                                    ServiceStatus::Healthy => ServicePhase::Healthy,
-                                    ServiceStatus::Failed => ServicePhase::Failed { message: "failed".to_string() },
-                                    _ => continue,
-                                };
-                                fwd_progress.send(ProgressEvent {
-                                    service: change.service,
-                                    phase,
-                                }).await;
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    while let Some(change) = state_rx.recv().await {
+                        if !fwd_services.contains(&change.service) {
+                            continue;
                         }
+                        let phase = match change.status {
+                            ServiceStatus::Stopping => ServicePhase::Stopping,
+                            ServiceStatus::Stopped => ServicePhase::Stopped,
+                            ServiceStatus::Starting => ServicePhase::Starting,
+                            ServiceStatus::Running => ServicePhase::Started,
+                            ServiceStatus::Healthy => ServicePhase::Healthy,
+                            ServiceStatus::Failed => ServicePhase::Failed { message: "failed".to_string() },
+                            _ => continue,
+                        };
+                        fwd_progress.send(ProgressEvent {
+                            service: change.service,
+                            phase,
+                        }).await;
                     }
                 }))
             } else {
@@ -531,7 +520,7 @@ async fn handle_request(
                 .restart_services(&config_path, &services, sys_env)
                 .await;
 
-            // Brief sleep to drain remaining broadcast events, then abort forwarding task
+            // Brief sleep to drain remaining events, then abort forwarding task
             tokio::time::sleep(Duration::from_millis(50)).await;
             if let Some(task) = fwd_task {
                 task.abort();
@@ -773,20 +762,16 @@ async fn handle_request(
                 None => return Response::error("Config not loaded"),
             };
 
-            // Send initial snapshot as ProgressEvents
+            // Subscribe FIRST — events during snapshot are buffered in unbounded channel
+            let mut rx = handle.subscribe_state_changes();
+
+            // THEN send initial snapshot as ProgressEvents (no gap possible)
             for (name, svc_config) in &config.services {
                 if services.as_ref().is_none_or(|s| s.contains(name)) {
                     let state = handle.get_service_state(name).await;
                     let has_hc = svc_config.healthcheck.is_some();
                     let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
                     let phase = status_to_phase(state.as_ref().map(|s| s.status), target);
-                    // During initial snapshot, services not yet reached by the start
-                    // operation are still in their previous terminal state — show as
-                    // Waiting (they'll transition to Starting once deps are met).
-                    let phase = match phase {
-                        ServicePhase::Stopped | ServicePhase::Failed { .. } => ServicePhase::Waiting,
-                        other => other,
-                    };
                     progress.send(ProgressEvent {
                         service: name.clone(),
                         phase,
@@ -794,13 +779,12 @@ async fn handle_request(
                 }
             }
 
-            // Stream state changes until client disconnects
-            let mut rx = handle.subscribe_state_changes();
+            // Stream state changes until client disconnects or channel closes
             loop {
                 tokio::select! {
                     event = rx.recv() => {
                         match event {
-                            Ok(change) if services.as_ref().is_none_or(|s| s.contains(&change.service)) => {
+                            Some(change) if services.as_ref().is_none_or(|s| s.contains(&change.service)) => {
                                 let has_hc = config.services.get(&change.service)
                                     .is_some_and(|s| s.healthcheck.is_some());
                                 let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
@@ -809,9 +793,8 @@ async fn handle_request(
                                     phase: status_to_phase(Some(change.status), target),
                                 }).await;
                             }
-                            Ok(_) => {} // filtered out
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            Some(_) => {} // filtered out
+                            None => break, // Channel closed (config unloaded)
                         }
                     }
                     _ = progress.closed() => break, // Client disconnected

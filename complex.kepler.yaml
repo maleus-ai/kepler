@@ -1,0 +1,1126 @@
+# complex.kepler.yaml — Stress-test config exercising every Kepler feature
+#
+# 50 services across 8 tiers: Infrastructure → Setup → Core → Business →
+# Workers → Monitoring → Deferred/Reactive
+#
+# All commands use sh -c with basic unix tools only (echo, sleep, touch, test, date, exit).
+# No real databases, servers, or network services are needed.
+
+lua: |
+  -- Global port counter
+  _port = 5000
+  function next_port()
+    _port = _port + 1
+    return tostring(_port)
+  end
+
+  -- Service registry for cross-referencing
+  _services = {}
+  function register_service(name)
+    _services[name] = true
+    return name
+  end
+
+  -- Build environment array for a service with optional extras
+  function svc_env(name, extras)
+    local env = {
+      "SERVICE_NAME=" .. name,
+      "SERVICE_PORT=" .. next_port()
+    }
+    if extras then
+      for _, e in ipairs(extras) do
+        table.insert(env, e)
+      end
+    end
+    return env
+  end
+
+kepler:
+  sys_env: inherit
+  timeout: 30s
+
+  logs:
+    max_size: "1M"
+    buffer_size: 4096
+    retention:
+      on_stop: clear
+      on_start: clear
+
+  hooks:
+    on_init:
+      run: echo "Global on_init — initializing platform"
+      environment:
+        - KEPLER_PHASE=init
+      working_dir: /tmp
+    pre_start:
+      command: ["sh", "-c", "echo 'Global pre_start — preparing services'"]
+    post_start:
+      run: echo "Global post_start — all services triggered"
+    pre_stop:
+      command: ["sh", "-c", "echo 'Global pre_stop — beginning shutdown'"]
+    post_stop:
+      run: echo "Global post_stop — shutdown complete"
+    pre_restart:
+      command: ["sh", "-c", "echo 'Global pre_restart — restarting services'"]
+    post_restart:
+      run: echo "Global post_restart — restart complete"
+    pre_cleanup:
+      command: ["sh", "-c", "echo 'Global pre_cleanup — cleaning resources'"]
+
+services:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 1: Infrastructure (5 services, no deps, all with healthchecks)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 1. postgres — Full-featured infra service
+  postgres:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'PostgreSQL starting'; touch /tmp/pg_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/pg_ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+      start_period: 3s
+    limits:
+      memory: "512M"
+      cpu_time: 300
+      max_fds: 1024
+    logs:
+      max_size: "2M"
+      buffer_size: 8192
+      retention:
+        on_stop: retain
+        on_start: clear
+        on_restart: retain
+        on_exit: retain
+    hooks:
+      on_init:
+        run: echo "postgres on_init — creating data directory"
+      pre_start:
+        command: ["sh", "-c", "echo 'postgres pre_start — checking config'"]
+      post_start:
+        command:
+          ["sh", "-c", "echo 'postgres post_start — accepting connections'"]
+      post_healthcheck_success:
+        run: echo "postgres healthcheck passed"
+      post_healthcheck_fail:
+        run: echo "postgres healthcheck FAILED"
+
+  # 2. redis — With sys_env override and hook environment
+  redis:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Redis starting'; touch /tmp/redis_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    sys_env: clear
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/redis_ready"]
+      interval: 1s
+      timeout: 2s
+      retries: 3
+      start_period: 1s
+    limits:
+      memory: "256M"
+      max_fds: 512
+    hooks:
+      post_start:
+        run: echo "redis post_start — server ready"
+        environment:
+          - REDIS_MODE=standalone
+
+  # 3. rabbitmq — Lua environment, service-level wait
+  rabbitmq:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'RabbitMQ starting'; touch /tmp/rmq_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    wait: true
+    environment: !lua |
+      return svc_env(ctx.service_name, {"AMQP_PORT=" .. next_port()})
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/rmq_ready"]
+      interval: 3s
+      timeout: 5s
+      retries: 4
+      start_period: 5s
+
+  # 4. minio — Variable expansion with defaults, working_dir
+  minio:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'MinIO starting on ${MINIO_PORT:-9000}'; touch /tmp/minio_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    working_dir: /tmp
+    environment:
+      - MINIO_ROOT_USER=${MINIO_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_PASS:-minioadmin}
+      - MINIO_PORT=${MINIO_PORT:-9000}
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/minio_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+
+  # 5. consul — Variable expansion with :+, hook with working_dir
+  consul:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Consul starting ${CONSUL_DC:+in datacenter}'; touch /tmp/consul_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    environment:
+      - CONSUL_BIND=0.0.0.0
+      - CONSUL_DC=${CONSUL_DC:+production}
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/consul_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    hooks:
+      pre_start:
+        run: echo "consul pre_start — checking bind address"
+        working_dir: /tmp
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 2: One-Shot Setup (5 services, service_completed_successfully / service_healthy deps)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 6. db-migration — Depends on postgres healthy with timeout
+  db-migration:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Running database migrations...'; sleep 1; echo 'Migrations complete'; exit 0",
+      ]
+    restart: no
+    depends_on:
+      postgres:
+        condition: service_healthy
+        timeout: 60s
+    hooks:
+      pre_start:
+        run: echo "db-migration pre_start — checking schema version"
+      post_exit:
+        run: echo "db-migration post_exit — migration finished"
+
+  # 7. db-seed — Depends on db-migration completed
+  db-seed:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Seeding database...'; sleep 1; echo 'Seed data loaded'; exit 0",
+      ]
+    restart: no
+    depends_on:
+      db-migration:
+        condition: service_completed_successfully
+    environment:
+      - SEED_ENV=development
+      - SEED_COUNT=100
+
+  # 8. redis-init — Depends on redis healthy
+  redis-init:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Initializing Redis keyspaces...'; sleep 1; echo 'Redis init complete'; exit 0",
+      ]
+    restart: no
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # 9. minio-init — Depends on minio healthy with timeout, limits
+  minio-init:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Creating MinIO buckets...'; sleep 1; echo 'Buckets created'; exit 0",
+      ]
+    restart: no
+    depends_on:
+      minio:
+        condition: service_healthy
+        timeout: 30s
+    limits:
+      memory: "128M"
+
+  # 10. consul-register — Depends on consul healthy, lua environment
+  consul-register:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Registering services in Consul...'; sleep 1; echo 'Registration complete'; exit 0",
+      ]
+    restart: no
+    depends_on:
+      consul:
+        condition: service_healthy
+    environment: !lua |
+      return svc_env(ctx.service_name, nil)
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 3: Core Services (5 services)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 11. auth-service — 3 deps (2 healthy + 1 completed), 7 hooks
+  auth-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Auth service starting'; touch /tmp/auth_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    depends_on:
+      - postgres:
+          condition: service_healthy
+          restart: true
+      - redis:
+          condition: service_healthy
+      - db-migration:
+          condition: service_completed_successfully
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/auth_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    hooks:
+      on_init:
+        run: echo "auth-service on_init — loading JWT keys"
+      pre_start:
+        run: echo "auth-service pre_start — validating config"
+      post_start:
+        command: ["sh", "-c", "echo 'auth-service post_start — listening'"]
+      pre_stop:
+        run: echo "auth-service pre_stop — draining connections"
+      post_stop:
+        command: ["sh", "-c", "echo 'auth-service post_stop — cleanup done'"]
+      pre_restart:
+        run: echo "auth-service pre_restart — saving state"
+      post_restart:
+        run: echo "auth-service post_restart — state restored"
+
+  # 12. config-service — restart:on-failure, healthcheck start_period:0s
+  config-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Config service starting'; touch /tmp/config_ready; while true; do sleep 5; done",
+      ]
+    restart: on-failure
+    depends_on:
+      - consul:
+          condition: service_healthy
+          restart: true
+      - consul-register:
+          condition: service_completed_successfully
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/config_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 0s
+
+  # 13. gateway — File watching, wait:false, long timeout dep
+  gateway:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'API Gateway starting'; touch /tmp/gateway_ready; while true; do sleep 5; done",
+      ]
+    wait: false
+    restart:
+      policy: always
+      watch: ["./gateway/**/*.conf"]
+    depends_on:
+      - auth-service:
+          condition: service_healthy
+          timeout: 120s
+      - config-service:
+          condition: service_healthy
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/gateway_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+
+  # 14. event-bus — Lua healthcheck test, restart:always
+  event-bus:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Event bus starting'; touch /tmp/eventbus_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    depends_on:
+      - rabbitmq:
+          condition: service_healthy
+          restart: true
+    healthcheck:
+      test: !lua |
+        return {"sh", "-c", "test -f /tmp/eventbus_ready"}
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+
+  # 15. storage-service — Lua environment with ctx.env, restart:on-failure
+  storage-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Storage service starting'; touch /tmp/storage_ready; while true; do sleep 5; done",
+      ]
+    restart: on-failure
+    depends_on:
+      - minio:
+          condition: service_healthy
+      - minio-init:
+          condition: service_completed_successfully
+    environment: !lua |
+      return svc_env(ctx.service_name, {"STORAGE_BACKEND=s3"})
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/storage_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 4: Business Services (10 services)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 16. user-service
+  user-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'User service starting'; touch /tmp/user_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    depends_on:
+      - auth-service:
+          condition: service_healthy
+      - postgres:
+          condition: service_healthy
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/user_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+
+  # 17. product-service — logs store:false
+  product-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Product service starting'; touch /tmp/product_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    depends_on:
+      - postgres:
+          condition: service_healthy
+      - redis:
+          condition: service_healthy
+      - config-service:
+          condition: service_started
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/product_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    logs:
+      store: false
+
+  # 18. inventory-service — restart:on-failure
+  inventory-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Inventory service starting'; touch /tmp/inventory_ready; while true; do sleep 5; done",
+      ]
+    restart: on-failure
+    depends_on:
+      - product-service:
+          condition: service_started
+      - redis:
+          condition: service_healthy
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/inventory_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+
+  # 19. order-service — 4-dep fan-in, memory limit
+  order-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Order service starting'; touch /tmp/order_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    depends_on:
+      - user-service:
+          condition: service_started
+      - product-service:
+          condition: service_started
+      - inventory-service:
+          condition: service_started
+      - event-bus:
+          condition: service_healthy
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/order_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    limits:
+      memory: "1G"
+
+  # 20. payment-service — Healthcheck hooks
+  payment-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Payment service starting'; touch /tmp/payment_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    depends_on:
+      - order-service:
+          condition: service_started
+      - auth-service:
+          condition: service_healthy
+          restart: true
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/payment_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    hooks:
+      post_healthcheck_success:
+        run: echo "payment-service healthcheck passed — PCI compliance OK"
+      post_healthcheck_fail:
+        command:
+          [
+            "sh",
+            "-c",
+            "echo 'payment-service healthcheck FAILED — alerting ops'",
+          ]
+
+  # 21. notification-service — Lua depends_on
+  notification-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Notification service starting'; touch /tmp/notif_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    depends_on: !lua |
+      return {
+        {["event-bus"] = {condition = "service_healthy"}},
+        {["rabbitmq"] = {condition = "service_healthy"}}
+      }
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/notif_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+
+  # 22. email-service — Watch + logs store extended, post_exit hook
+  email-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Email service starting'; while true; do sleep 5; done",
+      ]
+    restart:
+      policy: always
+      watch: ["./templates/**/*.html"]
+    depends_on:
+      - notification-service:
+          condition: service_started
+    logs:
+      store:
+        stdout: true
+        stderr: false
+    hooks:
+      post_exit:
+        run: echo "email-service exited — flushing email queue"
+
+  # 23. search-service — Lua command, wait:false
+  search-service:
+    command: !lua |
+      return {"sh", "-c", "echo Search service starting on port " .. next_port() .. "; touch /tmp/search_ready; while true; do sleep 5; done"}
+    restart: always
+    wait: false
+    depends_on:
+      - postgres:
+          condition: service_healthy
+      - redis:
+          condition: service_healthy
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/search_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+
+  # 24. analytics-service — 3-way fan-in including completed dep
+  analytics-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Analytics service starting'; touch /tmp/analytics_ready; while true; do sleep 5; done",
+      ]
+    restart: on-failure
+    depends_on:
+      - postgres:
+          condition: service_healthy
+      - event-bus:
+          condition: service_healthy
+      - redis-init:
+          condition: service_completed_successfully
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/analytics_ready"]
+      interval: 3s
+      timeout: 5s
+      retries: 4
+      start_period: 3s
+
+  # 25. report-service — restart:no, logs retention on_exit:retain
+  report-service:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Report service starting'; sleep 2; echo 'Report generated'; exit 0",
+      ]
+    restart: no
+    depends_on:
+      - analytics-service:
+          condition: service_healthy
+          timeout: 60s
+      - storage-service:
+          condition: service_started
+    logs:
+      retention:
+        on_exit: retain
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 5: Workers (10 services)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 26. order-worker — limits memory + max_fds
+  order-worker:
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''Order worker started''; while true; do echo "[$(date +%T)] Processing orders"; sleep 10; done',
+      ]
+    restart: always
+    depends_on:
+      - order-service:
+          condition: service_started
+      - event-bus:
+          condition: service_healthy
+    limits:
+      memory: "256M"
+      max_fds: 256
+
+  # 27. payment-worker — limits cpu_time only
+  payment-worker:
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''Payment worker started''; while true; do echo "[$(date +%T)] Processing payments"; sleep 10; done',
+      ]
+    restart: always
+    depends_on:
+      - payment-service:
+          condition: service_started
+      - event-bus:
+          condition: service_healthy
+    limits:
+      cpu_time: 600
+
+  # 28. email-worker — pre_restart + post_restart hooks
+  email-worker:
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''Email worker started''; while true; do echo "[$(date +%T)] Sending emails"; sleep 10; done',
+      ]
+    restart: on-failure
+    depends_on:
+      - email-service:
+          condition: service_started
+      - event-bus:
+          condition: service_healthy
+    hooks:
+      pre_restart:
+        run: echo "email-worker pre_restart — flushing pending emails"
+      post_restart:
+        command:
+          ["sh", "-c", "echo 'email-worker post_restart — resuming queue'"]
+
+  # 29. search-indexer — Lua watch pattern, limits memory
+  search-indexer:
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''Search indexer started''; while true; do echo "[$(date +%T)] Indexing"; sleep 10; done',
+      ]
+    restart:
+      policy: always
+      watch: !lua |
+        return {"./data/**/*.json", "./schema/*.yaml"}
+    depends_on:
+      - search-service:
+          condition: service_started
+      - event-bus:
+          condition: service_healthy
+    limits:
+      memory: "512M"
+
+  # 30. analytics-worker — Custom log config
+  analytics-worker:
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''Analytics worker started''; while true; do echo "[$(date +%T)] Crunching numbers"; sleep 10; done',
+      ]
+    restart: always
+    depends_on:
+      - analytics-service:
+          condition: service_started
+      - event-bus:
+          condition: service_healthy
+    logs:
+      buffer_size: 16384
+      max_size: "500K"
+
+  # 31. notification-worker — env_file
+  notification-worker:
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''Notification worker started''; while true; do echo "[$(date +%T)] Sending notifications"; sleep 10; done',
+      ]
+    restart: always
+    depends_on:
+      - notification-service:
+          condition: service_started
+      - rabbitmq:
+          condition: service_healthy
+    env_file: .env
+
+  # 32. cache-warmer — 3-dep fan-in
+  cache-warmer:
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''Cache warmer started''; while true; do echo "[$(date +%T)] Warming cache"; sleep 30; done',
+      ]
+    restart: on-failure
+    depends_on:
+      - redis:
+          condition: service_healthy
+      - product-service:
+          condition: service_started
+      - user-service:
+          condition: service_started
+
+  # 33. data-sync-worker — sys_env:clear override, log retention override
+  data-sync-worker:
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''Data sync worker started''; while true; do echo "[$(date +%T)] Syncing data"; sleep 15; done',
+      ]
+    restart: always
+    sys_env: clear
+    depends_on:
+      - postgres:
+          condition: service_healthy
+      - redis:
+          condition: service_healthy
+      - event-bus:
+          condition: service_healthy
+    logs:
+      retention:
+        on_stop: retain
+        on_start: retain
+        on_restart: retain
+        on_exit: retain
+
+  # 34. file-processor — ALL 3 limits
+  file-processor:
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''File processor started''; while true; do echo "[$(date +%T)] Processing files"; sleep 10; done',
+      ]
+    restart: on-failure
+    depends_on:
+      - storage-service:
+          condition: service_started
+      - event-bus:
+          condition: service_healthy
+    limits:
+      memory: "1G"
+      max_fds: 2048
+      cpu_time: 3600
+
+  # 35. scheduled-cleanup — logs retention on_exit:clear
+  scheduled-cleanup:
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''Cleanup scheduler started''; while true; do echo "[$(date +%T)] Running cleanup"; sleep 60; done',
+      ]
+    restart: always
+    depends_on:
+      - postgres:
+          condition: service_healthy
+      - storage-service:
+          condition: service_started
+    logs:
+      retention:
+        on_exit: clear
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 6: Monitoring (8 services)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 36. metrics-collector — No deps (wide parallelism), healthcheck, limits
+  metrics-collector:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Metrics collector starting'; touch /tmp/metrics_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/metrics_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    limits:
+      memory: "128M"
+
+  # 37. log-aggregator — No deps, logs store extended (stdout:false, stderr:true)
+  log-aggregator:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Log aggregator starting'; while true; do sleep 5; done",
+      ]
+    restart: always
+    logs:
+      store:
+        stdout: false
+        stderr: true
+
+  # 38. health-monitor — 5-dep fan-in (ALL infra healthy)
+  health-monitor:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Health monitor starting'; touch /tmp/healthmon_ready; while true; do sleep 5; done",
+      ]
+    restart: always
+    depends_on:
+      - postgres:
+          condition: service_healthy
+      - redis:
+          condition: service_healthy
+      - rabbitmq:
+          condition: service_healthy
+      - minio:
+          condition: service_healthy
+      - consul:
+          condition: service_healthy
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/healthmon_ready"]
+      interval: 3s
+      timeout: 5s
+      retries: 4
+      start_period: 3s
+
+  # 39. alert-manager — Lua environment with ctx.hook_name and ctx.service_name
+  alert-manager:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Alert manager starting'; while true; do sleep 5; done",
+      ]
+    restart: always
+    depends_on:
+      - health-monitor:
+          condition: service_healthy
+      - metrics-collector:
+          condition: service_started
+    hooks:
+      pre_start:
+        run: echo "alert-manager pre_start"
+        environment: !lua |
+          return {"ALERT_SVC=" .. ctx.service_name, "ALERT_HOOK=" .. ctx.hook_name}
+
+  # 40. dashboard — 4-dep fan-in, Lua command, healthcheck
+  dashboard:
+    command: !lua |
+      return {"sh", "-c", "echo Dashboard on port " .. next_port() .. "; touch /tmp/dash_ready; while true; do sleep 5; done"}
+    restart: always
+    depends_on:
+      - metrics-collector:
+          condition: service_started
+      - log-aggregator:
+          condition: service_started
+      - health-monitor:
+          condition: service_started
+      - alert-manager:
+          condition: service_started
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/dash_ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+
+  # 41. uptime-checker — Lua global table usage
+  uptime-checker:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Uptime checker starting'; touch /tmp/uptime_ready; while true; do sleep 10; done",
+      ]
+    restart: always
+    depends_on:
+      - consul:
+          condition: service_healthy
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/uptime_ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    environment: !lua |
+      register_service(ctx.service_name)
+      return svc_env(ctx.service_name, nil)
+
+  # 42. trace-collector — Deep chain (5+ levels: rabbitmq→event-bus→gateway→trace-collector)
+  trace-collector:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Trace collector starting'; while true; do sleep 5; done",
+      ]
+    restart: on-failure
+    depends_on:
+      - gateway:
+          condition: service_started
+      - event-bus:
+          condition: service_healthy
+
+  # 43. audit-logger — 3 deps, ALL 4 retention=retain, limits max_fds
+  audit-logger:
+    command:
+      ["sh", "-c", "echo 'Audit logger starting'; while true; do sleep 5; done"]
+    restart: always
+    depends_on:
+      - auth-service:
+          condition: service_started
+      - event-bus:
+          condition: service_started
+      - postgres:
+          condition: service_started
+    logs:
+      retention:
+        on_stop: retain
+        on_start: retain
+        on_restart: retain
+        on_exit: retain
+    limits:
+      max_fds: 4096
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 7: Deferred/Reactive (7 services)
+  # Uses service_failed, service_stopped, service_unhealthy conditions
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 44. postgres-failover — service_failed with exit_code range + single value
+  postgres-failover:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'FAILOVER: Promoting PostgreSQL replica'; sleep 2; echo 'Failover complete'; exit 0",
+      ]
+    restart: no
+    depends_on:
+      - postgres:
+          condition: service_failed
+          exit_code: ["1:10", 42]
+
+  # 45. redis-failover — service_failed (any exit code)
+  redis-failover:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'FAILOVER: Switching to Redis replica'; sleep 2; echo 'Redis failover complete'; exit 0",
+      ]
+    restart: no
+    depends_on:
+      - redis:
+          condition: service_failed
+
+  # 46. cleanup-on-stop — service_stopped with and without exit_code filter
+  cleanup-on-stop:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Cleaning up after service stop'; sleep 1; echo 'Cleanup done'; exit 0",
+      ]
+    restart: no
+    depends_on:
+      - order-service:
+          condition: service_stopped
+          exit_code: [0]
+      - payment-service:
+          condition: service_stopped
+
+  # 47. health-alert — service_unhealthy (deferred condition, fires if health-monitor becomes unhealthy)
+  health-alert:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'ALERT: Health monitor became unhealthy!'; sleep 1; exit 0",
+      ]
+    restart: no
+    depends_on:
+      - health-monitor:
+          condition: service_unhealthy
+
+  # 48. cascade-handler — Deferred chain (depends on deferred service completing)
+  cascade-handler:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Cascade handler — running post-failover tasks'; sleep 1; exit 0",
+      ]
+    restart: no
+    depends_on:
+      - postgres-failover:
+          condition: service_completed_successfully
+
+  # 49. emergency-shutdown — 3x service_failed fan-in, edge-level wait:false
+  emergency-shutdown:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'EMERGENCY: Multiple infrastructure failures detected!'; echo 'Initiating emergency shutdown'; sleep 2; exit 0",
+      ]
+    restart: no
+    depends_on:
+      - postgres:
+          condition: service_failed
+          wait: false
+      - redis:
+          condition: service_failed
+          wait: false
+      - rabbitmq:
+          condition: service_failed
+          wait: false
+    hooks:
+      on_init:
+        run: echo "emergency-shutdown on_init — loading runbook"
+      pre_start:
+        run: echo "emergency-shutdown pre_start — notifying oncall"
+      post_exit:
+        run: echo "emergency-shutdown post_exit — incident report filed"
+
+  # 50. post-mortem — Depends on emergency-shutdown completing, env expansion, hook command format
+  post-mortem:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Post-mortem analysis starting'; echo 'Report dir: ${REPORT_DIR:-/tmp/reports}'; sleep 2; echo 'Post-mortem complete'; exit 0",
+      ]
+    restart: no
+    depends_on:
+      - emergency-shutdown:
+          condition: service_completed_successfully
+          timeout: 300s
+    environment:
+      - REPORT_DIR=${REPORT_DIR:-/tmp/reports}
+      - INCIDENT_ID=${INCIDENT_ID:-unknown}
+    hooks:
+      post_exit:
+        command: ["sh", "-c", "echo 'post-mortem post_exit — archiving report'"]

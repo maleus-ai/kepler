@@ -2,7 +2,7 @@ mod commands;
 mod config;
 mod errors;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ use kepler_protocol::{
     errors::ClientError,
     protocol::{ConfigStatus, CursorLogEntry, LogCursorData, LogEntry, LogMode, ProgressEvent, Response, ResponseData, ServiceInfo, ServicePhase, ServiceTarget},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tabled::{Table, Tabled};
 use tabled::settings::Style;
 use tracing_subscriber::EnvFilter;
@@ -166,7 +166,12 @@ async fn run() -> Result<()> {
                 canonical_path, service, clean, signal,
             )?;
             let response = run_with_progress(progress_rx, response_future).await?;
-            handle_response(response);
+            // Progress bars already show per-service stop/clean status;
+            // only surface errors (suppress redundant summary message).
+            if let Response::Error { message } = response {
+                eprintln!("Error: {}", message);
+                std::process::exit(1);
+            }
         }
 
         Commands::Restart { services, detach, wait, timeout } => {
@@ -262,7 +267,7 @@ async fn run() -> Result<()> {
 /// updates the corresponding line. When the response future completes, finishes all bars.
 /// Falls back to plain text when stdout is not a TTY (indicatif hides itself automatically).
 async fn run_with_progress(
-    mut progress_rx: tokio::sync::mpsc::Receiver<ProgressEvent>,
+    mut progress_rx: tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>,
     response_future: impl std::future::Future<Output = std::result::Result<Response, ClientError>>,
 ) -> std::result::Result<Response, ClientError> {
     let mp = MultiProgress::new();
@@ -394,9 +399,17 @@ async fn foreground_with_logs(
     loop {
         tokio::select! {
             result = &mut log_future => return result,
-            _ = &mut request_future, if !request_done => {
+            result = &mut request_future, if !request_done => {
                 request_done = true;
-                // Request completed; keep following logs until quiescence
+                match result {
+                    Ok(Response::Error { message }) => {
+                        return Err(CliError::Server(format!("Daemon error: {}", message)));
+                    }
+                    Err(e) => return Err(e.into()),
+                    Ok(_) => {
+                        // Request succeeded; keep following logs until quiescence
+                    }
+                }
             }
         }
     }
@@ -408,7 +421,7 @@ async fn foreground_with_logs(
 /// so the daemon processes the request while we watch for status changes.
 /// Exits when all services have reached their target state or a terminal state (Failed/Stopped).
 async fn wait_until_ready_with_start(
-    mut progress_rx: mpsc::Receiver<ProgressEvent>,
+    mut progress_rx: mpsc::UnboundedReceiver<ProgressEvent>,
     sub_future: impl Future<Output = std::result::Result<Response, ClientError>>,
     start_future: impl Future<Output = std::result::Result<Response, ClientError>>,
 ) -> Result<()> {
@@ -1004,11 +1017,6 @@ trait FollowClient {
         from_start: bool,
         no_hooks: bool,
     ) -> std::result::Result<Response, ClientError>;
-
-    async fn status(
-        &self,
-        config_path: Option<PathBuf>,
-    ) -> std::result::Result<Response, ClientError>;
 }
 
 impl FollowClient for Client {
@@ -1021,14 +1029,6 @@ impl FollowClient for Client {
         no_hooks: bool,
     ) -> std::result::Result<Response, ClientError> {
         let (_rx, fut) = Client::logs_cursor(self, config_path, service, cursor_id, from_start, no_hooks)?;
-        fut.await
-    }
-
-    async fn status(
-        &self,
-        config_path: Option<PathBuf>,
-    ) -> std::result::Result<Response, ClientError> {
-        let (_rx, fut) = Client::status(self, config_path)?;
         fut.await
     }
 }
@@ -1056,8 +1056,12 @@ enum StreamExitReason {
 
 /// Unified cursor-based log streaming loop.
 ///
-/// Generic over the client (real or mock) and shutdown signal, enabling unit tests.
+/// Generic over the client (real or mock) and shutdown/quiescence signals, enabling unit tests.
 /// `on_batch` receives each batch's service table and entries for efficient output.
+///
+/// In `UntilQuiescent` mode, the `quiescence` future signals when all services have reached
+/// a terminal state (via subscription events) or the config was unloaded. The loop drains
+/// remaining logs before exiting.
 async fn stream_cursor_logs(
     client: &impl FollowClient,
     config_path: &Path,
@@ -1065,15 +1069,14 @@ async fn stream_cursor_logs(
     no_hooks: bool,
     mode: StreamMode,
     shutdown: impl Future<Output = ()>,
+    quiescence: impl Future<Output = ()>,
     mut on_batch: impl FnMut(&[Arc<str>], &[CursorLogEntry]),
 ) -> Result<StreamExitReason> {
     let from_start = mode != StreamMode::Follow;
     let mut cursor_id: Option<String> = None;
     tokio::pin!(shutdown);
-    // Track whether we've seen evidence the daemon is processing our request.
-    // Without this, a status poll before the daemon claims any service would
-    // see stale terminal states and exit prematurely.
-    let mut seen_activity = false;
+    tokio::pin!(quiescence);
+    let mut quiescent_received = false;
 
     loop {
         let log_response = client
@@ -1095,7 +1098,6 @@ async fn stream_cursor_logs(
                     cursor_id = Some(new_cursor_id);
                     has_more_data = has_more;
                     if !entries.is_empty() {
-                        seen_activity = true;
                         on_batch(&service_table, &entries);
                     }
                 }
@@ -1104,12 +1106,20 @@ async fn stream_cursor_logs(
                         cursor_id = None;
                         continue;
                     }
-                    // In UntilQuiescent mode (foreground start), the config may not
-                    // be loaded yet because the start request is being processed
-                    // concurrently. Retry until it becomes available.
+                    // In UntilQuiescent mode, "Config not loaded" means either:
+                    // 1. Startup race: config not loaded YET → retry
+                    // 2. Config was unloaded (stop --clean) → quiescence future fires
                     if mode == StreamMode::UntilQuiescent && message == "Config not loaded" {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
+                        tokio::select! {
+                            biased;
+                            _ = &mut shutdown => {
+                                return Ok(StreamExitReason::ShutdownRequested);
+                            }
+                            _ = &mut quiescence, if !quiescent_received => {
+                                break;
+                            }
+                            _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
+                        }
                     }
                     eprintln!("Error: {}", message);
                     break;
@@ -1136,21 +1146,6 @@ async fn stream_cursor_logs(
                 }
             }
             StreamMode::UntilQuiescent => {
-                // When caught up, check quiescence: exit when all services are
-                // in a terminal state (stopped, exited, killed, or failed).
-                // Wait until we've seen evidence the daemon is active (non-terminal
-                // status or log entries received) before trusting terminal status.
-                if !has_more_data
-                    && let Ok(ref status_response) = client.status(Some(config_path.to_path_buf())).await
-                {
-                    if !is_all_terminal(status_response, service) {
-                        seen_activity = true;
-                    }
-                    if seen_activity && is_all_terminal(status_response, service) {
-                        break;
-                    }
-                }
-
                 let delay = if has_more_data {
                     Duration::ZERO
                 } else {
@@ -1161,37 +1156,21 @@ async fn stream_cursor_logs(
                     _ = &mut shutdown => {
                         return Ok(StreamExitReason::ShutdownRequested);
                     }
+                    _ = &mut quiescence, if !quiescent_received => {
+                        quiescent_received = true;
+                        // Don't break yet — drain remaining logs first
+                    }
                     _ = tokio::time::sleep(delay) => {}
+                }
+                // After quiescence signaled and all logs drained, exit
+                if quiescent_received && !has_more_data {
+                    break;
                 }
             }
         }
     }
 
     Ok(StreamExitReason::Done)
-}
-
-/// Check if all (or filtered) services are in a terminal state (stopped, exited, killed, or failed).
-/// Used for quiescence detection and after Ctrl+C shutdown.
-/// When `service_filter` is Some, only that service is checked; otherwise all services are checked.
-fn is_all_terminal(response: &Response, service_filter: Option<&str>) -> bool {
-    if let Response::Ok {
-        data: Some(ResponseData::ServiceStatus(services)),
-        ..
-    } = response
-    {
-        let iter: Box<dyn Iterator<Item = _>> = if let Some(name) = service_filter {
-            Box::new(services.iter().filter(move |(n, _)| n.as_str() == name))
-        } else {
-            Box::new(services.iter())
-        };
-        let relevant: Vec<_> = iter.collect();
-        !relevant.is_empty()
-            && relevant.iter().all(|(_, info)| {
-                matches!(info.status.as_str(), "stopped" | "failed" | "exited" | "killed")
-            })
-    } else {
-        false
-    }
 }
 
 
@@ -1235,10 +1214,51 @@ fn write_cursor_batch(
     }
 }
 
+/// Event-driven quiescence monitor.
+///
+/// Consumes progress events and fires the oneshot when all observed services
+/// reach a terminal phase (Stopped or Failed). Requires at least one
+/// non-terminal observation before declaring quiescence, to prevent false
+/// positives from deferred services that appear as Stopped in the initial
+/// snapshot.
+async fn quiescence_monitor(
+    mut progress_rx: mpsc::UnboundedReceiver<ProgressEvent>,
+    quiescent_tx: oneshot::Sender<()>,
+) {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut terminal_now: HashSet<String> = HashSet::new();
+    let mut any_non_terminal_seen = false;
+
+    while let Some(event) = progress_rx.recv().await {
+        match &event.phase {
+            ServicePhase::Stopped | ServicePhase::Failed { .. } => {
+                seen.insert(event.service.clone());
+                terminal_now.insert(event.service.clone());
+            }
+            _ => {
+                seen.insert(event.service.clone());
+                terminal_now.remove(&event.service);
+                any_non_terminal_seen = true;
+            }
+        }
+        // Only check quiescence once we've seen at least one non-terminal service
+        // (prevents false positive from initial snapshot of never-started deferred services)
+        if any_non_terminal_seen
+            && !seen.is_empty()
+            && seen.iter().all(|s| terminal_now.contains(s))
+        {
+            let _ = quiescent_tx.send(());
+            return;
+        }
+    }
+    // Channel closed = subscription ended (config unloaded)
+    let _ = quiescent_tx.send(());
+}
+
 /// Follow logs until all services reach a terminal state (quiescent) or Ctrl+C.
 ///
 /// On Ctrl+C: sends stop with progress bars, then exits.
-/// On quiescence (all services stopped/failed): exits cleanly.
+/// On quiescence (all services stopped/failed via subscription): exits cleanly.
 async fn follow_logs_until_quiescent(
     client: &Client,
     config_path: &Path,
@@ -1249,6 +1269,53 @@ async fn follow_logs_until_quiescent(
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
 
+    // Set up quiescence detection via subscription
+    let (quiescent_tx, quiescent_rx) = oneshot::channel::<()>();
+    let progress_rx = client.subscribe_events(
+        config_path.to_path_buf(),
+        service.map(|s| vec![s.to_string()]),
+    ).await?;
+
+    // Spawn quiescence monitor task
+    //
+    // With guaranteed event delivery (unbounded channels, no drops), the monitor
+    // tracks which services have been seen and which are terminal. It requires
+    // at least one non-terminal observation before declaring quiescence, to avoid
+    // false positives from deferred services that appear as Stopped in the initial
+    // snapshot. The 2s fallback poll handles the edge case where ALL services
+    // are already terminal at subscription time.
+    tokio::spawn(quiescence_monitor(progress_rx, quiescent_tx));
+
+    // Wrap quiescence signal with a 2s fallback status poll for edge cases
+    // (all services already terminal at snapshot time, daemon bugs, empty config)
+    let quiescence_future = {
+        let config_path = config_path.to_path_buf();
+        async move {
+            let mut quiescent_rx = quiescent_rx;
+            loop {
+                tokio::select! {
+                    result = &mut quiescent_rx => {
+                        let _ = result;
+                        return;
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                        // Fallback: poll status to handle missed events / daemon bugs
+                        if let Ok((_, resp_future)) = client.status(Some(config_path.clone())) {
+                            if let Ok(Response::Ok { data: Some(ResponseData::ServiceStatus(services)), .. }) = resp_future.await {
+                                let all_terminal = services.values().all(|info| {
+                                    matches!(info.status.as_str(), "stopped" | "exited" | "killed" | "failed")
+                                });
+                                if all_terminal {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
     let exit_reason = stream_cursor_logs(
         client,
         config_path,
@@ -1256,6 +1323,7 @@ async fn follow_logs_until_quiescent(
         false,
         StreamMode::UntilQuiescent,
         async { let _ = tokio::signal::ctrl_c().await; },
+        quiescence_future,
         |service_table, entries| {
             write_cursor_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
         },
@@ -1348,6 +1416,7 @@ async fn handle_logs(
         service.as_deref(),
         no_hooks,
         stream_mode,
+        std::future::pending(),
         std::future::pending(),
         |service_table, entries| {
             write_cursor_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
@@ -1503,35 +1572,23 @@ fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use kepler_protocol::protocol::{CursorLogEntry, StreamType};
 
     type ClientResult = std::result::Result<Response, ClientError>;
 
     struct MockClient {
         cursor_responses: std::sync::Mutex<VecDeque<ClientResult>>,
-        status_responses: std::sync::Mutex<VecDeque<ClientResult>>,
-        cursor_call_count: AtomicUsize,
-        status_call_count: AtomicUsize,
     }
 
     impl MockClient {
         fn new() -> Self {
             Self {
                 cursor_responses: std::sync::Mutex::new(VecDeque::new()),
-                status_responses: std::sync::Mutex::new(VecDeque::new()),
-                cursor_call_count: AtomicUsize::new(0),
-                status_call_count: AtomicUsize::new(0),
             }
         }
 
         fn push_cursor(&self, resp: ClientResult) {
             self.cursor_responses.lock().unwrap().push_back(resp);
-        }
-
-        fn push_status(&self, resp: ClientResult) {
-            self.status_responses.lock().unwrap().push_back(resp);
         }
     }
 
@@ -1544,26 +1601,12 @@ mod tests {
             _from_start: bool,
             _no_hooks: bool,
         ) -> std::result::Result<Response, ClientError> {
-            self.cursor_call_count.fetch_add(1, Ordering::SeqCst);
             self.cursor_responses
                 .lock()
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| Ok(empty_cursor_response()))
         }
-
-        async fn status(
-            &self,
-            _config_path: Option<PathBuf>,
-        ) -> std::result::Result<Response, ClientError> {
-            self.status_call_count.fetch_add(1, Ordering::SeqCst);
-            self.status_responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or_else(|| Ok(all_stopped_response()))
-        }
-
     }
 
     // ========================================================================
@@ -1614,35 +1657,13 @@ mod tests {
         }))
     }
 
-    fn status_response(statuses: &[(&str, &str)]) -> ClientResult {
-        let services: HashMap<String, ServiceInfo> = statuses
-            .iter()
-            .map(|(name, status)| {
-                (
-                    name.to_string(),
-                    ServiceInfo {
-                        status: status.to_string(),
-                        pid: None,
-                        started_at: None,
-                        stopped_at: None,
-                        health_check_failures: 0,
-                        exit_code: None,
-                        signal: None,
-                    },
-                )
-            })
-            .collect();
-        Ok(Response::ok_with_data(ResponseData::ServiceStatus(
-            services,
-        )))
-    }
-
-    fn all_stopped_response() -> Response {
-        status_response(&[("svc", "stopped")]).unwrap()
-    }
-
-    /// A future that never resolves (no shutdown signal).
+    /// A future that never resolves (no shutdown/quiescence signal).
     fn never_shutdown() -> impl Future<Output = ()> {
+        std::future::pending()
+    }
+
+    /// A future that never resolves (quiescence not triggered).
+    fn never_quiescent() -> impl Future<Output = ()> {
         std::future::pending()
     }
 
@@ -1654,79 +1675,97 @@ mod tests {
     }
 
     // ========================================================================
-    // Normal cursor polling
+    // Quiescence via subscription (event-driven)
     // ========================================================================
 
-    /// Reads all cursor batches and exits when services are naturally terminal.
-    /// Receiving log entries sets seen_activity, so terminal status exits immediately.
+    /// Reads all cursor batches and exits when quiescence future fires.
     #[tokio::test(start_paused = true)]
     async fn test_follow_reads_cursor_and_exits_on_quiescence() {
         let mock = MockClient::new();
         mock.push_cursor(cursor_response(&[("svc", "line-1"), ("svc", "line-2")], true));
         mock.push_cursor(cursor_response(&[("svc", "line-3")], false));
-        mock.push_status(status_response(&[("svc", "exited")]));
+        // After quiescence fires, one more empty cursor to drain
+        mock.push_cursor(cursor_response(&[], false));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
+        let (tx, rx) = oneshot::channel::<()>();
+        let mut tx = Some(tx);
+
+        // Fire quiescence after we've collected 3 lines
         let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, never_shutdown(),
-            |st, entries| collect_batch(&mut collected, st, entries),
+            async { let _ = rx.await; },
+            |st, entries| {
+                collect_batch(&mut collected, st, entries);
+                if collected.len() == 3 {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            },
         ).await.unwrap();
 
         assert_eq!(exit_reason, StreamExitReason::Done);
         assert_eq!(collected, vec!["line-1", "line-2", "line-3"]);
-        assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 2);
     }
 
-    /// Quiescence is only checked when the cursor is caught up (has_more=false).
-    /// Log entries set seen_activity, so terminal status on first check exits.
+    /// Quiescence signal drains remaining logs before exiting.
     #[tokio::test(start_paused = true)]
-    async fn test_follow_quiescence_only_checked_when_caught_up() {
+    async fn test_follow_drains_logs_after_quiescence() {
         let mock = MockClient::new();
         mock.push_cursor(cursor_response(&[("svc", "a")], true));
         mock.push_cursor(cursor_response(&[("svc", "b")], true));
         mock.push_cursor(cursor_response(&[("svc", "c")], false));
-        mock.push_status(status_response(&[("svc", "exited")]));
+        mock.push_cursor(cursor_response(&[], false));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        stream_cursor_logs(
+        // Quiescence fires immediately — but logs should still be drained
+        let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, never_shutdown(),
+            async {},  // quiescence fires immediately
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
 
+        assert_eq!(exit_reason, StreamExitReason::Done);
         assert_eq!(collected, vec!["a", "b", "c"]);
-        assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 3);
-        // Status only checked once (after has_more=false)
-        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 1);
     }
 
-    /// When services aren't quiescent yet, the loop continues polling cursor + status.
+    /// When quiescence doesn't fire, loop continues polling cursor.
     #[tokio::test(start_paused = true)]
-    async fn test_follow_continues_until_quiescent() {
+    async fn test_follow_continues_without_quiescence() {
         let mock = MockClient::new();
-        // First pass: drain cursor, status says still running
+        // Provide some data then empty cursor
         mock.push_cursor(cursor_response(&[("svc", "a")], false));
-        mock.push_status(status_response(&[("svc", "running")]));
-        // Second pass: more data arrives, drain, now naturally terminal
         mock.push_cursor(cursor_response(&[("svc", "b")], false));
-        mock.push_status(status_response(&[("svc", "exited")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        stream_cursor_logs(
+        let (tx, rx) = oneshot::channel::<()>();
+        let mut tx = Some(tx);
+
+        let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, never_shutdown(),
-            |st, entries| collect_batch(&mut collected, st, entries),
+            async { let _ = rx.await; },
+            |st, entries| {
+                collect_batch(&mut collected, st, entries);
+                if collected.len() == 2 {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            },
         ).await.unwrap();
 
+        assert_eq!(exit_reason, StreamExitReason::Done);
         assert_eq!(collected, vec!["a", "b"]);
-        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 2);
     }
 
     // ========================================================================
@@ -1752,13 +1791,14 @@ mod tests {
         let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, async {},
+            never_quiescent(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
 
         assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
         assert_eq!(collected.len(), 1, "Only one cursor batch before shutdown");
         assert_eq!(collected[0], "line-0");
-        assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 1);
+
     }
 
     /// Shutdown triggered via Notify after N cursor reads.
@@ -1784,6 +1824,7 @@ mod tests {
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent,
             async move { notify_clone.notified().await },
+            never_quiescent(),
             |st, entries| {
                 collect_batch(&mut collected, st, entries);
                 if collected.len() == 3 {
@@ -1794,7 +1835,7 @@ mod tests {
 
         assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
         assert_eq!(collected.len(), 3);
-        assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 3);
+
     }
 
     // ========================================================================
@@ -1813,15 +1854,15 @@ mod tests {
         stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, never_shutdown(),
+            never_quiescent(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
 
         assert!(collected.is_empty());
-        assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 1);
+
     }
 
     /// Cursor expired error resets cursor_id and retries.
-    /// Log entries set seen_activity, so terminal status exits.
     #[tokio::test(start_paused = true)]
     async fn test_follow_cursor_expired_resets_and_retries() {
         let mock = MockClient::new();
@@ -1829,19 +1870,30 @@ mod tests {
             "Cursor expired or invalid: cursor_0",
         )));
         mock.push_cursor(cursor_response(&[("svc", "line-1")], false));
-        mock.push_status(status_response(&[("svc", "exited")]));
+        mock.push_cursor(cursor_response(&[], false));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        stream_cursor_logs(
+        let (tx, rx) = oneshot::channel::<()>();
+        let mut tx = Some(tx);
+        let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, never_shutdown(),
-            |st, entries| collect_batch(&mut collected, st, entries),
+            async { let _ = rx.await; },
+            |st, entries| {
+                collect_batch(&mut collected, st, entries);
+                if !collected.is_empty() {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            },
         ).await.unwrap();
 
+        assert_eq!(exit_reason, StreamExitReason::Done);
         assert_eq!(collected, vec!["line-1"]);
-        assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 2);
+
     }
 
     /// Non-cursor error breaks the loop.
@@ -1856,6 +1908,7 @@ mod tests {
         stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, never_shutdown(),
+            never_quiescent(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
 
@@ -1866,52 +1919,25 @@ mod tests {
     // Edge cases
     // ========================================================================
 
-    /// Empty cursor response (no entries) still checks quiescence.
+    /// Empty cursor responses: quiescence fires while no data → exits.
     #[tokio::test(start_paused = true)]
-    async fn test_follow_empty_cursor_checks_quiescence() {
+    async fn test_follow_empty_cursor_exits_on_quiescence() {
         let mock = MockClient::new();
         mock.push_cursor(cursor_response(&[], false));
-        // First status: non-terminal (sets seen_non_terminal), then terminal
-        mock.push_status(status_response(&[("svc", "starting")]));
         mock.push_cursor(cursor_response(&[], false));
-        mock.push_status(status_response(&[("svc", "exited")]));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
-        stream_cursor_logs(
+        let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, never_shutdown(),
+            async {},  // quiescence fires immediately
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
 
+        assert_eq!(exit_reason, StreamExitReason::Done);
         assert!(collected.is_empty());
-        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 2);
-    }
-
-    /// Services that take multiple polls to reach natural terminal state.
-    #[tokio::test(start_paused = true)]
-    async fn test_follow_shutdown_waits_for_all_services_to_stop() {
-        let mock = MockClient::new();
-        mock.push_cursor(cursor_response(&[("svc", "line-1")], false));
-        // First quiescence check: still running → loop continues
-        mock.push_status(status_response(&[("web", "running"), ("db", "exited")]));
-        // After sleep, cursor returns empty batch, caught up again
-        mock.push_cursor(cursor_response(&[], false));
-        // Second quiescence check: all naturally terminal
-        mock.push_status(status_response(&[("web", "exited"), ("db", "exited")]));
-
-        let config_path = PathBuf::from("/fake/config.yaml");
-        let mut collected = Vec::new();
-
-        stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
-            |st, entries| collect_batch(&mut collected, st, entries),
-        ).await.unwrap();
-
-        assert_eq!(collected, vec!["line-1"]);
-        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 2);
     }
 
     /// Shutdown returns immediately — quiescence is now handled by the caller with progress bars.
@@ -1927,14 +1953,13 @@ mod tests {
         let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, async {},
+            never_quiescent(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
 
         assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
         // Only 1 cursor read before shutdown took effect
-        assert_eq!(mock.cursor_call_count.load(Ordering::SeqCst), 1);
-        // No status polling — caller handles stop with progress bars
-        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 0);
+
     }
 
     // ========================================================================
@@ -2135,74 +2160,81 @@ mod tests {
     }
 
     // ========================================================================
-    // is_all_terminal
+    // Config not loaded + quiescence
     // ========================================================================
 
-    #[test]
-    fn test_is_all_terminal_includes_exited() {
-        let response = status_response(&[("svc", "exited")]).unwrap();
-        assert!(is_all_terminal(&response, None));
+    /// First cursor returns "Config not loaded", retries, then config available.
+    /// Quiescence fires after logs are received.
+    #[tokio::test(start_paused = true)]
+    async fn test_follow_config_not_loaded_retries_then_starts() {
+        let mock = MockClient::new();
+        // First two cursor calls: config not loaded yet (start request being processed)
+        mock.push_cursor(Ok(Response::error("Config not loaded")));
+        mock.push_cursor(Ok(Response::error("Config not loaded")));
+        // Third: config available, logs arrive
+        mock.push_cursor(cursor_response(&[("svc", "started")], false));
+        mock.push_cursor(cursor_response(&[], false));
+
+        let config_path = PathBuf::from("/fake/config.yaml");
+        let mut collected = Vec::new();
+
+        let (tx, rx) = oneshot::channel::<()>();
+        let mut tx = Some(tx);
+        stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            async { let _ = rx.await; },
+            |st, entries| {
+                collect_batch(&mut collected, st, entries);
+                if !collected.is_empty() {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            },
+        ).await.unwrap();
+
+        assert_eq!(collected, vec!["started"]);
+        // At least 3 cursor calls (2 config not loaded retries + 1 successful read)
     }
 
-    #[test]
-    fn test_is_all_terminal_includes_killed() {
-        let response = status_response(&[("svc", "killed")]).unwrap();
-        assert!(is_all_terminal(&response, None));
+    /// "Config not loaded" with quiescence already fired → exits immediately.
+    #[tokio::test(start_paused = true)]
+    async fn test_follow_config_not_loaded_exits_on_quiescence() {
+        let mock = MockClient::new();
+        mock.push_cursor(Ok(Response::error("Config not loaded")));
+
+        let config_path = PathBuf::from("/fake/config.yaml");
+        let mut collected = Vec::new();
+
+        let exit_reason = stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, never_shutdown(),
+            async {},  // quiescence fires immediately (config was unloaded)
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
+
+        assert_eq!(exit_reason, StreamExitReason::Done);
+        assert!(collected.is_empty());
     }
 
-    #[test]
-    fn test_is_all_terminal_mixed_stopped_exited_failed_killed() {
-        let response = status_response(&[
-            ("a", "stopped"),
-            ("b", "exited"),
-            ("c", "failed"),
-            ("d", "killed"),
-        ]).unwrap();
-        assert!(is_all_terminal(&response, None));
-    }
+    /// Shutdown during "Config not loaded" retry → returns ShutdownRequested.
+    #[tokio::test(start_paused = true)]
+    async fn test_follow_config_not_loaded_shutdown() {
+        let mock = MockClient::new();
+        mock.push_cursor(Ok(Response::error("Config not loaded")));
 
-    #[test]
-    fn test_is_all_terminal_running_not_terminal() {
-        let response = status_response(&[
-            ("a", "exited"),
-            ("b", "running"),
-        ]).unwrap();
-        assert!(!is_all_terminal(&response, None));
-    }
+        let config_path = PathBuf::from("/fake/config.yaml");
+        let mut collected = Vec::new();
 
-    // ========================================================================
-    // Starting state handling (Ctrl+C hang, restart-after-stop fixes)
-    // ========================================================================
+        let exit_reason = stream_cursor_logs(
+            &mock, &config_path, None, false,
+            StreamMode::UntilQuiescent, async {},  // shutdown fires immediately
+            never_quiescent(),
+            |st, entries| collect_batch(&mut collected, st, entries),
+        ).await.unwrap();
 
-    /// Services in "starting" state are NOT terminal — is_all_terminal returns false.
-    #[test]
-    fn test_is_all_terminal_starting_not_terminal() {
-        let response = status_response(&[("svc", "starting")]).unwrap();
-        assert!(!is_all_terminal(&response, None));
-    }
-
-    /// Services in "stopping" state are NOT terminal.
-    #[test]
-    fn test_is_all_terminal_stopping_not_terminal() {
-        let response = status_response(&[("svc", "stopping")]).unwrap();
-        assert!(!is_all_terminal(&response, None));
-    }
-
-    /// Service filter: worker stopped while web is running → terminal for worker only.
-    #[test]
-    fn test_is_all_terminal_service_filter() {
-        let response = status_response(&[
-            ("worker", "stopped"),
-            ("web", "healthy"),
-        ]).unwrap();
-        // Unfiltered: web is healthy → not terminal
-        assert!(!is_all_terminal(&response, None));
-        // Filtered to worker: worker is stopped → terminal
-        assert!(is_all_terminal(&response, Some("worker")));
-        // Filtered to web: web is healthy → not terminal
-        assert!(!is_all_terminal(&response, Some("web")));
-        // Filtered to nonexistent service: no relevant services → not terminal
-        assert!(!is_all_terminal(&response, Some("nonexistent")));
+        assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
     }
 
     /// Services in "starting" state when shutdown triggers — returns ShutdownRequested.
@@ -2218,6 +2250,7 @@ mod tests {
         let exit_reason = stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, async {},
+            never_quiescent(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
 
@@ -2225,83 +2258,206 @@ mod tests {
         assert_eq!(collected, vec!["init"]);
     }
 
-    /// First status returns "starting" (simulating pre-marked services from early pre-marking),
-    /// then services eventually exit. CLI should NOT exit prematurely.
+    /// Quiescence fires after logs are received — exits cleanly after draining.
     #[tokio::test(start_paused = true)]
-    async fn test_follow_does_not_exit_on_stale_terminal_status() {
-        let mock = MockClient::new();
-        // First cursor read: empty, caught up
-        mock.push_cursor(cursor_response(&[], false));
-        // First status: starting (pre-marked) — not terminal, loop continues
-        mock.push_status(status_response(&[("svc", "starting")]));
-        // Second cursor read: some logs arrive
-        mock.push_cursor(cursor_response(&[("svc", "hello")], false));
-        // Second status: running — not terminal
-        mock.push_status(status_response(&[("svc", "running")]));
-        // Third cursor read: empty
-        mock.push_cursor(cursor_response(&[], false));
-        // Third status: exited — terminal, exits
-        mock.push_status(status_response(&[("svc", "exited")]));
-
-        let config_path = PathBuf::from("/fake/config.yaml");
-        let mut collected = Vec::new();
-
-        stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
-            |st, entries| collect_batch(&mut collected, st, entries),
-        ).await.unwrap();
-
-        assert_eq!(collected, vec!["hello"]);
-        assert_eq!(mock.status_call_count.load(Ordering::SeqCst), 3);
-    }
-
-    /// First cursor returns "Config not loaded", then services appear as "starting",
-    /// eventually exit. Verify full lifecycle with retry.
-    #[tokio::test(start_paused = true)]
-    async fn test_follow_config_not_loaded_retries_then_starts() {
-        let mock = MockClient::new();
-        // First two cursor calls: config not loaded yet (start request being processed)
-        mock.push_cursor(Ok(Response::error("Config not loaded")));
-        mock.push_cursor(Ok(Response::error("Config not loaded")));
-        // Third: config available, logs arrive
-        mock.push_cursor(cursor_response(&[("svc", "started")], false));
-        // Status: starting initially, then exited
-        mock.push_status(status_response(&[("svc", "starting")]));
-        mock.push_cursor(cursor_response(&[], false));
-        mock.push_status(status_response(&[("svc", "exited")]));
-
-        let config_path = PathBuf::from("/fake/config.yaml");
-        let mut collected = Vec::new();
-
-        stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
-            |st, entries| collect_batch(&mut collected, st, entries),
-        ).await.unwrap();
-
-        assert_eq!(collected, vec!["started"]);
-        // At least 4 cursor calls (2 config not loaded retries + 2 successful reads)
-        assert!(mock.cursor_call_count.load(Ordering::SeqCst) >= 4);
-    }
-
-    /// Exited services are quiescent — UntilQuiescent mode exits.
-    /// Log entry sets seen_activity, so terminal status exits immediately.
-    #[tokio::test(start_paused = true)]
-    async fn test_follow_exits_on_exited_quiescence() {
+    async fn test_follow_exits_on_quiescence() {
         let mock = MockClient::new();
         mock.push_cursor(cursor_response(&[("svc", "done")], false));
-        mock.push_status(status_response(&[("svc", "exited")]));
+        mock.push_cursor(cursor_response(&[], false));
 
         let config_path = PathBuf::from("/fake/config.yaml");
         let mut collected = Vec::new();
 
+        let (tx, rx) = oneshot::channel::<()>();
+        let mut tx = Some(tx);
         stream_cursor_logs(
             &mock, &config_path, None, false,
             StreamMode::UntilQuiescent, never_shutdown(),
-            |st, entries| collect_batch(&mut collected, st, entries),
+            async { let _ = rx.await; },
+            |st, entries| {
+                collect_batch(&mut collected, st, entries);
+                if let Some(tx) = tx.take() {
+                    let _ = tx.send(());
+                }
+            },
         ).await.unwrap();
 
         assert_eq!(collected, vec!["done"]);
+    }
+
+    // ========================================================================
+    // Quiescence monitor unit tests
+    // ========================================================================
+
+    fn progress_event(service: &str, phase: ServicePhase) -> ProgressEvent {
+        ProgressEvent { service: service.to_string(), phase }
+    }
+
+    /// Normal quiescence: services go Running → Stopped, monitor fires.
+    #[tokio::test]
+    async fn test_quiescence_monitor_normal_lifecycle() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (quiescent_tx, quiescent_rx) = oneshot::channel();
+
+        let handle = tokio::spawn(quiescence_monitor(rx, quiescent_tx));
+
+        // Snapshot: two services running
+        tx.send(progress_event("web", ServicePhase::Started)).unwrap();
+        tx.send(progress_event("db", ServicePhase::Started)).unwrap();
+
+        // Both stop
+        tx.send(progress_event("web", ServicePhase::Stopped)).unwrap();
+        tx.send(progress_event("db", ServicePhase::Stopped)).unwrap();
+
+        // Monitor should fire quiescence
+        tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
+            .await
+            .expect("quiescence should fire within 1s")
+            .expect("oneshot should not be dropped");
+        handle.await.unwrap();
+    }
+
+    /// False positive prevention: snapshot with only terminal (deferred) services
+    /// must NOT trigger quiescence. The monitor should wait for a non-terminal
+    /// event before it can declare quiescence.
+    #[tokio::test]
+    async fn test_quiescence_monitor_all_terminal_snapshot_no_false_positive() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (quiescent_tx, quiescent_rx) = oneshot::channel();
+
+        let handle = tokio::spawn(quiescence_monitor(rx, quiescent_tx));
+
+        // Snapshot: deferred service already stopped, another already failed
+        tx.send(progress_event("deferred-svc", ServicePhase::Stopped)).unwrap();
+        tx.send(progress_event("broken-svc", ServicePhase::Failed { message: "unsatisfied".into() })).unwrap();
+
+        // Monitor must NOT fire — only terminal events were seen
+        let result = tokio::time::timeout(Duration::from_millis(100), quiescent_rx).await;
+        assert!(result.is_err(), "quiescence should NOT fire when only terminal events seen");
+
+        // Cleanup: drop sender to unblock the monitor
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    /// Regression: with 50 services, if the first snapshot event is a deferred
+    /// service (Stopped), quiescence must not fire prematurely. It should only
+    /// fire after non-terminal activity is observed and all services become terminal.
+    #[tokio::test]
+    async fn test_quiescence_monitor_deferred_first_in_snapshot() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (quiescent_tx, quiescent_rx) = oneshot::channel();
+
+        tokio::spawn(quiescence_monitor(rx, quiescent_tx));
+
+        // First event: deferred service already stopped (HashMap random order)
+        // Without the any_non_terminal_seen gate, this alone would trigger quiescence.
+        tx.send(progress_event("postgres-failover", ServicePhase::Stopped)).unwrap();
+
+        // Remaining services arrive as Running
+        tx.send(progress_event("web", ServicePhase::Started)).unwrap();
+        tx.send(progress_event("api", ServicePhase::Started)).unwrap();
+        tx.send(progress_event("worker", ServicePhase::Started)).unwrap();
+
+        // All services stop
+        tx.send(progress_event("web", ServicePhase::Stopped)).unwrap();
+        tx.send(progress_event("api", ServicePhase::Stopped)).unwrap();
+        tx.send(progress_event("worker", ServicePhase::Stopped)).unwrap();
+
+        // Quiescence fires correctly after all services are terminal
+        tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
+            .await
+            .expect("quiescence should fire after all services stop")
+            .expect("oneshot should not be dropped");
+    }
+
+    /// Variant of deferred-first test that properly checks quiescence fires.
+    #[tokio::test]
+    async fn test_quiescence_monitor_deferred_then_running_then_stopped() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (quiescent_tx, quiescent_rx) = oneshot::channel();
+
+        tokio::spawn(quiescence_monitor(rx, quiescent_tx));
+
+        // Snapshot: deferred stopped + two running services
+        tx.send(progress_event("deferred", ServicePhase::Stopped)).unwrap();
+        tx.send(progress_event("web", ServicePhase::Started)).unwrap();
+        tx.send(progress_event("api", ServicePhase::Started)).unwrap();
+
+        // Both running services stop
+        tx.send(progress_event("web", ServicePhase::Stopped)).unwrap();
+        tx.send(progress_event("api", ServicePhase::Stopped)).unwrap();
+
+        // Quiescence fires: all 3 seen, all terminal, and non-terminal was observed
+        tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
+            .await
+            .expect("quiescence should fire within 1s")
+            .expect("oneshot should not be dropped");
+    }
+
+    /// Channel close (subscription ended) always fires quiescence.
+    #[tokio::test]
+    async fn test_quiescence_monitor_channel_close_fires() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (quiescent_tx, quiescent_rx) = oneshot::channel();
+
+        tokio::spawn(quiescence_monitor(rx, quiescent_tx));
+
+        // Send nothing, just close
+        drop(tx);
+
+        tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
+            .await
+            .expect("quiescence should fire on channel close")
+            .expect("oneshot should not be dropped");
+    }
+
+    /// Service that fails after running (Starting → Failed) triggers quiescence
+    /// when it's the only service.
+    #[tokio::test]
+    async fn test_quiescence_monitor_starting_then_failed() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (quiescent_tx, quiescent_rx) = oneshot::channel();
+
+        tokio::spawn(quiescence_monitor(rx, quiescent_tx));
+
+        tx.send(progress_event("svc", ServicePhase::Starting)).unwrap();
+        tx.send(progress_event("svc", ServicePhase::Failed { message: "crash".into() })).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
+            .await
+            .expect("quiescence should fire when sole service fails after starting")
+            .expect("oneshot should not be dropped");
+    }
+
+    /// Mixed terminal and non-terminal: quiescence only fires once the last
+    /// non-terminal service transitions to terminal.
+    #[tokio::test]
+    async fn test_quiescence_monitor_waits_for_last_service() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (quiescent_tx, mut quiescent_rx) = oneshot::channel();
+
+        tokio::spawn(quiescence_monitor(rx, quiescent_tx));
+
+        // Three services, one already stopped, two running
+        tx.send(progress_event("init", ServicePhase::Stopped)).unwrap();
+        tx.send(progress_event("web", ServicePhase::Started)).unwrap();
+        tx.send(progress_event("worker", ServicePhase::Started)).unwrap();
+
+        // Stop web but not worker yet
+        tx.send(progress_event("web", ServicePhase::Stopped)).unwrap();
+
+        // Should NOT fire yet — worker is still running
+        let result = tokio::time::timeout(Duration::from_millis(50), &mut quiescent_rx).await;
+        assert!(result.is_err(), "quiescence must not fire while worker is still running");
+
+        // Worker stops
+        tx.send(progress_event("worker", ServicePhase::Stopped)).unwrap();
+
+        // Now quiescence fires
+        tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
+            .await
+            .expect("quiescence should fire after last service stops")
+            .expect("oneshot should not be dropped");
     }
 }

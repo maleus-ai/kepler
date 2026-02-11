@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::config::{KeplerConfig, LogConfig, ServiceConfig, SysEnvPolicy};
@@ -27,7 +28,7 @@ pub struct ConfigActorHandle {
     config_path: PathBuf,
     config_hash: String,
     tx: mpsc::Sender<ConfigCommand>,
-    status_tx: broadcast::Sender<ServiceStatusChange>,
+    subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>,
 }
 
 impl ConfigActorHandle {
@@ -36,13 +37,13 @@ impl ConfigActorHandle {
         config_path: PathBuf,
         config_hash: String,
         tx: mpsc::Sender<ConfigCommand>,
-        status_tx: broadcast::Sender<ServiceStatusChange>,
+        subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>,
     ) -> Self {
         Self {
             config_path,
             config_hash,
             tx,
-            status_tx,
+            subscribers,
         }
     }
 
@@ -56,9 +57,12 @@ impl ConfigActorHandle {
         &self.config_hash
     }
 
-    /// Subscribe to service status change events (broadcast channel).
-    pub fn subscribe_state_changes(&self) -> broadcast::Receiver<ServiceStatusChange> {
-        self.status_tx.subscribe()
+    /// Subscribe to service status change events.
+    /// Returns an unbounded receiver that is guaranteed to receive all events.
+    pub fn subscribe_state_changes(&self) -> mpsc::UnboundedReceiver<ServiceStatusChange> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.subscribers.lock().unwrap().push(tx);
+        rx
     }
 
     // === Query Methods ===

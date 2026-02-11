@@ -142,7 +142,7 @@ impl ServiceEventHandler {
             let effective_timeout = dep_config.timeout.or(global_timeout);
             let deadline = effective_timeout.map(|t| Instant::now() + t);
 
-            // Subscribe to broadcast channel for instant notification of state changes
+            // Subscribe to state changes for instant notification
             let mut status_rx = self.handle.subscribe_state_changes();
 
             loop {
@@ -178,8 +178,8 @@ impl ServiceEventHandler {
                 };
 
                 match recv_result {
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Some(_) => continue,
+                    None => break, // Channel closed
                 }
             }
 
