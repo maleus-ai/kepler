@@ -15,7 +15,23 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross-packages: ""
+            cross-env: {}
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross-packages: "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu"
+            cross-env:
+              CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+              CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+              CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+
+    runs-on: ${{ matrix.runner }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,9 +40,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.93"
+          targets: ${{ matrix.target }}
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config g++
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config g++ ${{ matrix.cross-packages }}
 
       - name: Cache cargo registry & target
         uses: actions/cache@v4
@@ -35,12 +54,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: release-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: release-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            release-${{ runner.os }}-cargo-
+            release-${{ matrix.target }}-cargo-
 
       - name: Build release binaries
-        run: cargo build --release -p kepler-cli -p kepler-daemon -p kepler-exec
+        env: ${{ matrix.cross-env }}
+        run: cargo build --release --target ${{ matrix.target }} -p kepler-cli -p kepler-daemon -p kepler-exec
 
       - name: Determine version
         id: version
@@ -56,14 +76,16 @@ jobs:
       - name: Package tarball
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          TARBALL="kepler-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          TARGET="${{ matrix.target }}"
+          TARBALL="kepler-${VERSION}-${TARGET}.tar.gz"
           STAGING="kepler-${VERSION}"
 
           mkdir -p "${STAGING}"
-          cp target/release/kepler "${STAGING}/"
-          cp target/release/kepler-daemon "${STAGING}/"
-          cp target/release/kepler-exec "${STAGING}/"
+          cp "target/${TARGET}/release/kepler" "${STAGING}/"
+          cp "target/${TARGET}/release/kepler-daemon" "${STAGING}/"
+          cp "target/${TARGET}/release/kepler-exec" "${STAGING}/"
           cp install.sh "${STAGING}/"
+          cp get-kepler.sh "${STAGING}/"
 
           tar czf "${TARBALL}" "${STAGING}"
           echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
@@ -74,9 +96,24 @@ jobs:
           name: ${{ env.TARBALL }}
           path: ${{ env.TARBALL }}
 
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect tarballs
+        run: |
+          mkdir -p release
+          find artifacts -name '*.tar.gz' -exec mv {} release/ \;
+          ls -lh release/
+
       - name: Create GitHub Release
-        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.TARBALL }}
+          files: release/*.tar.gz
           generate_release_notes: true
