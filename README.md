@@ -17,10 +17,18 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 
 ## Installation
 
-**Prerequisites:** Rust 1.85+ ([rustup](https://rustup.rs/)), Linux
+```bash
+# Install latest release
+curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash
+
+# Install a specific version
+curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash -s v0.1.0
+```
+
+Or build from source (requires Rust 1.85+):
 
 ```bash
-git clone https://github.com/your-org/kepler.git
+git clone https://github.com/maleus-ai/kepler.git
 cd kepler
 ./install.sh
 ```

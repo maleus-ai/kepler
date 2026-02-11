@@ -37,6 +37,21 @@ This guide walks you through installing Kepler, setting up your system, and runn
 
 Pre-built binaries are available on the [GitHub Releases](https://github.com/maleus-ai/kepler/releases) page. This is the easiest way to install Kepler without building from source.
 
+### One-line install (recommended)
+
+```bash
+# Install latest version
+curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash
+
+# Install a specific version
+curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash -s v0.1.0
+
+# Install without systemd service
+curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash -s v0.1.0 --no-systemd
+```
+
+### Manual download
+
 1. Download the latest release tarball for your platform
 2. Extract the archive:
    ```bash
