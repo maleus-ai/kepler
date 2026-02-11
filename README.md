@@ -123,7 +123,3 @@ For a ready-to-run example, see [`example.kepler.yaml`](example.kepler.yaml).
 | [`kepler-exec`](kepler-exec/) | Privilege-dropping wrapper -- setuid/setgid/rlimits |
 | [`kepler-tests`](kepler-tests/) | Integration test helpers -- TestDaemonHarness |
 | [`kepler-e2e`](kepler-e2e/) | E2E test suite -- real binary testing |
-
-## License
-
-MIT
