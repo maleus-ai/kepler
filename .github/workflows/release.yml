@@ -109,7 +109,7 @@ jobs:
       - name: Collect tarballs
         run: |
           mkdir -p release
-          find artifacts -name '*.tar.gz' -exec mv {} release/ \;
+          find artifacts -type f -name '*.tar.gz' -exec mv {} release/ \;
           ls -lh release/
 
       - name: Create GitHub Release
