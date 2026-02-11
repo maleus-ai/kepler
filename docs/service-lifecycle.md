@@ -69,7 +69,7 @@ The `kepler ps` command shows status in a Docker-style format:
 | Unhealthy | `Up <duration> (unhealthy)` | `Up 2m (unhealthy)` |
 | Starting | `Starting` | `Starting` |
 | Stopping | `Stopping` | `Stopping` |
-| Stopped | `Stopped` | `Stopped` |
+| Stopped | `Stopped` or `Stopped <duration> ago` | `Stopped`, `Stopped 5m ago` |
 | Exited | `Exited (<code>) <duration> ago` | `Exited (0) 14s ago`, `Exited (1) 5s ago` |
 | Killed | `Killed (<signal>) <duration> ago` | `Killed (SIGKILL) 3s ago` |
 | Failed | `Failed <duration> ago` | `Failed 2s ago` |

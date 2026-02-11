@@ -4,31 +4,58 @@ This guide walks you through installing Kepler, setting up your system, and runn
 
 ## Table of Contents
 
-- [Prerequisites](#prerequisites)
-- [Installing from Source](#installing-from-source)
-- [Install Options](#install-options)
-- [Post-Install Setup](#post-install-setup)
-- [Quick Start Tutorial](#quick-start-tutorial)
-- [Systemd Integration](#systemd-integration)
-- [Verifying Installation](#verifying-installation)
-- [Running Tests](#running-tests)
+- [Getting Started](#getting-started)
+  - [Table of Contents](#table-of-contents)
+  - [Prerequisites](#prerequisites)
+  - [Installing from GitHub Releases](#installing-from-github-releases)
+  - [Installing from Source](#installing-from-source)
+    - [Installed Binaries](#installed-binaries)
+  - [Install Options](#install-options)
+  - [Post-Install Setup](#post-install-setup)
+  - [Quick Start Tutorial](#quick-start-tutorial)
+    - [1. Create a configuration file](#1-create-a-configuration-file)
+    - [2. Start the daemon and services](#2-start-the-daemon-and-services)
+    - [3. Monitor and manage](#3-monitor-and-manage)
+  - [Systemd Integration](#systemd-integration)
+  - [Verifying Installation](#verifying-installation)
+  - [Running Tests](#running-tests)
+  - [See Also](#see-also)
 
 ---
 
 ## Prerequisites
 
 - **Linux** (Unix socket and privilege-dropping features require Linux)
-- **Rust toolchain** (1.85+): Install via [rustup](https://rustup.rs/)
+- **Rust toolchain** (1.85+): Only required when installing from source. Install via [rustup](https://rustup.rs/)
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
 
 ---
 
+## Installing from GitHub Releases
+
+Pre-built binaries are available on the [GitHub Releases](https://github.com/maleus-ai/kepler/releases) page. This is the easiest way to install Kepler without building from source.
+
+1. Download the latest release tarball for your platform
+2. Extract the archive:
+   ```bash
+   tar xzf kepler-<version>-<arch>.tar.gz
+   cd kepler-<version>-<arch>
+   ```
+3. Run the install script (skips building since binaries are already present):
+   ```bash
+   ./install.sh --no-build
+   ```
+
+The install script auto-detects pre-built binaries next to itself (in the extracted tarball directory) and installs them directly, skipping the `cargo build` step.
+
+---
+
 ## Installing from Source
 
 ```bash
-git clone https://github.com/your-org/kepler.git
+git clone https://github.com/maleus-ai/kepler.git
 cd kepler
 ./install.sh
 ```
@@ -43,11 +70,11 @@ The install script performs the following steps:
 
 ### Installed Binaries
 
-| Binary | Description |
-|--------|-------------|
-| `kepler` | CLI client (used by all users in the `kepler` group) |
-| `kepler-daemon` | Daemon process (must run as root) |
-| `kepler-exec` | Privilege-dropping wrapper (used internally by the daemon) |
+| Binary          | Description                                                |
+| --------------- | ---------------------------------------------------------- |
+| `kepler`        | CLI client (used by all users in the `kepler` group)       |
+| `kepler-daemon` | Daemon process (must run as root)                          |
+| `kepler-exec`   | Privilege-dropping wrapper (used internally by the daemon) |
 
 ---
 

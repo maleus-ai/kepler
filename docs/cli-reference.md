@@ -165,7 +165,7 @@ Status display examples:
 - `Exited (1) 5s ago` -- Exited with non-zero code
 - `Killed (SIGKILL) 3s ago` -- Killed by signal
 - `Failed 2s ago` -- Spawn failure or dependency permanently unsatisfied
-- `Stopped` -- Manually stopped
+- `Stopped` or `Stopped 5m ago` -- Manually stopped
 - `Starting` -- Service is starting
 - `Stopping` -- Service is stopping
 
