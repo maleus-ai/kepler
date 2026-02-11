@@ -535,3 +535,252 @@ async fn test_working_dir_expansion() {
 
     harness.stop_service("test").await.unwrap();
 }
+
+/// Relative working_dir is resolved relative to the config file's directory
+#[tokio::test]
+async fn test_relative_working_dir_resolved_from_config_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("relative_workdir");
+
+    // Create a subdirectory where the config file will live
+    let config_subdir = temp_dir.path().join("configs");
+    std::fs::create_dir_all(&config_subdir).unwrap();
+
+    // Create a target directory that is a sibling of the config subdir
+    let target_dir = temp_dir.path().join("target_workdir");
+    std::fs::create_dir_all(&target_dir).unwrap();
+
+    // Use relative path "../target_workdir" - should resolve relative to config_subdir
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("pwd >> {} && sleep 3600", marker_path.display()),
+            ])
+            .with_working_dir(std::path::PathBuf::from("../target_workdir"))
+            .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, &config_subdir)
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("relative_workdir", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Service should have written pwd");
+    let content = content.unwrap();
+    let expected = target_dir.canonicalize().unwrap();
+    assert_eq!(
+        content.trim(),
+        expected.to_string_lossy(),
+        "Relative working_dir should resolve relative to config file directory"
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Absolute working_dir is used as-is regardless of config file location
+#[tokio::test]
+async fn test_absolute_working_dir_unchanged() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("absolute_workdir");
+
+    // Create an absolute target directory
+    let target_dir = temp_dir.path().join("absolute_target");
+    std::fs::create_dir_all(&target_dir).unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("pwd >> {} && sleep 3600", marker_path.display()),
+            ])
+            .with_working_dir(target_dir.clone())
+            .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("absolute_workdir", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Service should have written pwd");
+    let content = content.unwrap();
+    let expected = target_dir.canonicalize().unwrap();
+    assert_eq!(
+        content.trim(),
+        expected.to_string_lossy(),
+        "Absolute working_dir should be used as-is"
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// working_dir "." resolves to the config file's directory
+#[tokio::test]
+async fn test_dot_working_dir_resolves_to_config_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("dot_workdir");
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("pwd >> {} && sleep 3600", marker_path.display()),
+            ])
+            .with_working_dir(std::path::PathBuf::from("."))
+            .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("dot_workdir", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Service should have written pwd");
+    let content = content.unwrap();
+    let expected = temp_dir.path().canonicalize().unwrap();
+    assert_eq!(
+        content.trim(),
+        expected.to_string_lossy(),
+        "working_dir '.' should resolve to config file directory"
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// working_dir ".." resolves to parent of config file's directory
+#[tokio::test]
+async fn test_dotdot_working_dir_resolves_to_parent() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("dotdot_workdir");
+
+    // Create a subdirectory for the config file
+    let config_subdir = temp_dir.path().join("nested");
+    std::fs::create_dir_all(&config_subdir).unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("pwd >> {} && sleep 3600", marker_path.display()),
+            ])
+            .with_working_dir(std::path::PathBuf::from(".."))
+            .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, &config_subdir)
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("dotdot_workdir", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Service should have written pwd");
+    let content = content.unwrap();
+    let expected = temp_dir.path().canonicalize().unwrap();
+    assert_eq!(
+        content.trim(),
+        expected.to_string_lossy(),
+        "working_dir '..' should resolve to parent of config file directory"
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Non-existent working_dir produces a clear error mentioning the directory
+#[tokio::test]
+async fn test_nonexistent_working_dir_error_message() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::new(vec!["pwd".to_string()])
+                .with_working_dir(std::path::PathBuf::from("/nonexistent/path/that/does/not/exist"))
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    let result = harness.start_service("test").await;
+    assert!(result.is_err(), "Starting service with non-existent working_dir should fail");
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Working directory") && err.contains("does not exist"),
+        "Error should mention the working directory does not exist. Got: {}",
+        err
+    );
+}
+
+/// Non-existent relative working_dir produces a clear error with the resolved path
+#[tokio::test]
+async fn test_nonexistent_relative_working_dir_error_message() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::new(vec!["pwd".to_string()])
+                .with_working_dir(std::path::PathBuf::from("./no_such_subdir"))
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    let result = harness.start_service("test").await;
+    assert!(result.is_err(), "Starting service with non-existent relative working_dir should fail");
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Working directory") && err.contains("does not exist"),
+        "Error should mention the working directory does not exist. Got: {}",
+        err
+    );
+    // The resolved path should contain the config dir prefix, not just the relative part
+    assert!(
+        err.contains("no_such_subdir"),
+        "Error should include the directory name. Got: {}",
+        err
+    );
+}

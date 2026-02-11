@@ -174,7 +174,8 @@ async fn run_status_change_hook(
         let working_dir = ctx
             .service_config
             .working_dir
-            .clone()
+            .as_ref()
+            .map(|wd| ctx.config_dir.join(wd))
             .unwrap_or_else(|| ctx.config_dir.clone());
 
         let hook_params = ServiceHookParams::from_service_context(

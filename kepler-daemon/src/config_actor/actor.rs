@@ -236,7 +236,8 @@ impl ConfigActor {
                     .map(|(name, service_config)| {
                         let working_dir = service_config
                             .working_dir
-                            .clone()
+                            .as_ref()
+                            .map(|wd| config_dir.join(wd))
                             .unwrap_or_else(|| config_dir.clone());
 
                         let computed_env =
@@ -843,6 +844,7 @@ impl ConfigActor {
             .ok_or_else(|| DaemonError::ServiceNotFound(service_name.to_string()))?;
         if status == ServiceStatus::Starting || status == ServiceStatus::Running {
             service_state.was_healthy = false;
+            service_state.health_check_failures = 0;
             service_state.stopped_at = None;
             service_state.signal = None;
             service_state.exit_code = None;

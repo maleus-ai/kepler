@@ -449,3 +449,61 @@ async fn test_healthcheck_hook_fires_once_per_transition() {
 
     harness.stop_service("test").await.unwrap();
 }
+
+/// Health check failure counter resets when service restarts
+#[tokio::test]
+async fn test_health_check_failures_reset_on_restart() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_healthcheck(
+                    TestHealthCheckBuilder::always_unhealthy()
+                        .with_interval(Duration::from_millis(100))
+                        .with_retries(3)
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+    harness.start_health_checker("test").await.unwrap();
+
+    // Wait until service becomes unhealthy (failures >= retries)
+    let result = wait_for_unhealthy(
+        harness.handle(),
+        "test",
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(result.is_ok(), "Service should become unhealthy");
+
+    // Verify failures accumulated
+    let state = harness.handle().get_service_state("test").await.unwrap();
+    assert!(
+        state.health_check_failures >= 3,
+        "Should have at least 3 failures, got {}",
+        state.health_check_failures
+    );
+
+    // Stop and restart the service
+    harness.stop_service("test").await.unwrap();
+    harness.start_service("test").await.unwrap();
+
+    // Failure counter should be reset after restart
+    let state = harness.handle().get_service_state("test").await.unwrap();
+    assert_eq!(
+        state.health_check_failures, 0,
+        "Health check failure counter should reset on restart, got {}",
+        state.health_check_failures
+    );
+
+    harness.stop_service("test").await.unwrap();
+}

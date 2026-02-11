@@ -256,6 +256,13 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
         }
     }
 
+    if !spec.working_dir.exists() {
+        return Err(DaemonError::Config(format!(
+            "Working directory '{}' does not exist",
+            spec.working_dir.display()
+        )));
+    }
+
     cmd.current_dir(&spec.working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

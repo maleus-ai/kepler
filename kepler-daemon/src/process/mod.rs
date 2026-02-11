@@ -62,7 +62,8 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
 
     let working_dir = service_config
         .working_dir
-        .clone()
+        .as_ref()
+        .map(|wd| config_dir.join(wd))
         .unwrap_or_else(|| config_dir.to_path_buf());
 
     // Get environment from the service context (already pre-computed)
