@@ -28,16 +28,20 @@ jobs:
             env: {}
           - target: x86_64-unknown-linux-musl
             runner: blacksmith-4vcpu-ubuntu-2204
-            packages: pkg-config musl-tools musl-dev g++
+            packages: pkg-config
+            musl-toolchain: x86_64-linux-musl-cross
             env:
-              CC: musl-gcc
-              CXX: g++
+              CC_x86_64_unknown_linux_musl: /opt/musl-cross/bin/x86_64-linux-musl-gcc
+              CXX_x86_64_unknown_linux_musl: /opt/musl-cross/bin/x86_64-linux-musl-g++
+              CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: /opt/musl-cross/bin/x86_64-linux-musl-gcc
           - target: aarch64-unknown-linux-musl
-            runner: blacksmith-4vcpu-ubuntu-2204-arm
-            packages: pkg-config musl-tools musl-dev g++
+            runner: blacksmith-4vcpu-ubuntu-2204
+            packages: pkg-config
+            musl-toolchain: aarch64-linux-musl-cross
             env:
-              CC: musl-gcc
-              CXX: g++
+              CC_aarch64_unknown_linux_musl: /opt/musl-cross/bin/aarch64-linux-musl-gcc
+              CXX_aarch64_unknown_linux_musl: /opt/musl-cross/bin/aarch64-linux-musl-g++
+              CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: /opt/musl-cross/bin/aarch64-linux-musl-gcc
           - target: x86_64-apple-darwin
             runner: macos-15-intel
             packages: ""
@@ -64,6 +68,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Install musl cross toolchain
+        if: matrix.musl-toolchain
+        run: |
+          curl -sSfL "https://musl.cc/${{ matrix.musl-toolchain }}.tgz" | sudo tar xzf - -C /opt/
+          sudo mv "/opt/${{ matrix.musl-toolchain }}" /opt/musl-cross
 
       - name: Cache cargo registry & target
         uses: actions/cache@v4
