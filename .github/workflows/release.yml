@@ -39,11 +39,11 @@ jobs:
               CC: musl-gcc
               CXX: g++
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-15-intel
             packages: ""
             env: {}
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
             packages: ""
             env: {}
 
