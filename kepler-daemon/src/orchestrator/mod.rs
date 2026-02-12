@@ -757,6 +757,17 @@ impl ServiceOrchestrator {
                 handle.emit_event(service_name, ServiceEvent::Cleanup).await;
             }
 
+            // Run service-level pre_cleanup hooks
+            for service_name in &services_to_stop {
+                let ctx = handle.get_service_context(service_name).await;
+                if let Some(ref ctx) = ctx {
+                    if let Err(e) = self.run_service_hook(ctx, service_name, ServiceHookType::PreCleanup).await {
+                        warn!("Hook pre_cleanup failed for {}: {}", service_name, e);
+                    }
+                }
+            }
+
+            // Run global pre_cleanup hook
             if let Some(ref log_cfg) = log_config
                 && let Err(e) = run_global_hook(
                     &global_hooks,

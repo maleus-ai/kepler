@@ -140,6 +140,7 @@ impl<'de> Deserialize<'de> for ExitCodeFilter {
 ///     condition: service_started
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DependencyConfig {
     /// Condition that must be met before dependent can start
     #[serde(default)]

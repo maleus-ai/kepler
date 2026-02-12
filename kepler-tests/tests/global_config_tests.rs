@@ -130,8 +130,8 @@ kepler:
   sys_env: inherit
   logs:
     retention:
-      pre_stop: retain
-      pre_start: retain
+      on_stop: retain
+      on_start: retain
     max_size: 10M
   hooks:
     on_init:

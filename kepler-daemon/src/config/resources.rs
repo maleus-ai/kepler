@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 /// Resource limits for a service process
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceLimits {
     /// Memory limit (e.g., "512M", "1G", "2048K")
     #[serde(default, skip_serializing_if = "Option::is_none")]

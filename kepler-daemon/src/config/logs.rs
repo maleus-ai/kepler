@@ -56,6 +56,7 @@ impl LogStoreConfig {
 
 /// Log retention settings for different lifecycle events
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogRetentionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_stop: Option<LogRetention>,
@@ -69,6 +70,7 @@ pub struct LogRetentionConfig {
 
 /// Log configuration
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogConfig {
     /// Whether to store logs (default: true for both streams)
     #[serde(default, skip_serializing_if = "Option::is_none")]

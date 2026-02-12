@@ -116,6 +116,7 @@ pub enum ServiceHookType {
     PreRestart,
     PostRestart,
     PostExit,
+    PreCleanup,
     PostHealthcheckSuccess,
     PostHealthcheckFail,
 }
@@ -131,6 +132,7 @@ impl ServiceHookType {
             ServiceHookType::PreRestart => "pre_restart",
             ServiceHookType::PostRestart => "post_restart",
             ServiceHookType::PostExit => "post_exit",
+            ServiceHookType::PreCleanup => "pre_cleanup",
             ServiceHookType::PostHealthcheckSuccess => "post_healthcheck_success",
             ServiceHookType::PostHealthcheckFail => "post_healthcheck_fail",
         }
@@ -155,6 +157,7 @@ impl ServiceHookType {
             Self::PreRestart => &hooks.pre_restart,
             Self::PostRestart => &hooks.post_restart,
             Self::PostExit => &hooks.post_exit,
+            Self::PreCleanup => &hooks.pre_cleanup,
             Self::PostHealthcheckSuccess => &hooks.post_healthcheck_success,
             Self::PostHealthcheckFail => &hooks.post_healthcheck_fail,
         }

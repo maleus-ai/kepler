@@ -126,6 +126,7 @@ pub fn resolve_log_buffer_size(
 
 /// Global Kepler configuration (under the `kepler` namespace)
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeplerGlobalConfig {
     /// Global system environment inheritance policy
     /// Applied to all services unless overridden at the service level
@@ -153,6 +154,7 @@ pub struct KeplerGlobalConfig {
 
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeplerConfig {
     /// Inline Lua code that runs in global scope to define functions
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,6 +170,7 @@ pub struct KeplerConfig {
 
 /// Service configuration
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
     pub command: Vec<String>,
     #[serde(default)]
@@ -953,5 +956,81 @@ services:
 "#;
         let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unknown_service_field_rejected() {
+        let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    unknown_field: true
+"#;
+        let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "unknown field under service should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field"), "error should mention unknown field: {}", err);
+    }
+
+    #[test]
+    fn test_unknown_hook_field_rejected() {
+        let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    hooks:
+      on_stop:
+        run: echo "stop"
+"#;
+        let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "on_stop is not a valid service hook and should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field"), "error should mention unknown field: {}", err);
+    }
+
+    #[test]
+    fn test_unknown_global_field_rejected() {
+        let yaml = r#"
+kepler:
+  unknown: true
+
+services:
+  app:
+    command: ["./app"]
+"#;
+        let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "unknown field under kepler should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field"), "error should mention unknown field: {}", err);
+    }
+
+    #[test]
+    fn test_unknown_root_field_rejected() {
+        let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+version: "3"
+"#;
+        let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "unknown field at root level should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field"), "error should mention unknown field: {}", err);
+    }
+
+    #[test]
+    fn test_service_pre_cleanup_hook_parses() {
+        let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    hooks:
+      pre_cleanup:
+        run: echo "cleaning up"
+"#;
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let app = config.services.get("app").unwrap();
+        let hooks = app.hooks.as_ref().unwrap();
+        assert!(hooks.pre_cleanup.is_some(), "pre_cleanup hook should be parsed");
     }
 }

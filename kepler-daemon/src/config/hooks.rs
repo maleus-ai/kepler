@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 /// Global hooks that run at daemon lifecycle events
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalHooks {
     pub on_init: Option<HookCommand>,
     pub pre_start: Option<HookCommand>,
@@ -18,6 +19,7 @@ pub struct GlobalHooks {
 
 /// Service-specific hooks
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceHooks {
     pub on_init: Option<HookCommand>,
     pub pre_start: Option<HookCommand>,
@@ -27,12 +29,14 @@ pub struct ServiceHooks {
     pub pre_restart: Option<HookCommand>,
     pub post_restart: Option<HookCommand>,
     pub post_exit: Option<HookCommand>,
+    pub pre_cleanup: Option<HookCommand>,
     pub post_healthcheck_success: Option<HookCommand>,
     pub post_healthcheck_fail: Option<HookCommand>,
 }
 
 /// Common fields shared by both hook command variants
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookCommon {
     #[serde(default)]
     pub user: Option<String>,
@@ -135,6 +139,7 @@ impl ServiceHooks {
             &mut self.pre_restart,
             &mut self.post_restart,
             &mut self.post_exit,
+            &mut self.pre_cleanup,
             &mut self.post_healthcheck_success,
             &mut self.post_healthcheck_fail,
         ]

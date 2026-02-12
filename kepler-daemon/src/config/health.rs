@@ -7,6 +7,7 @@ use super::duration::{deserialize_duration, serialize_duration};
 
 /// Health check configuration
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HealthCheck {
     pub test: Vec<String>,
     #[serde(default = "default_interval", deserialize_with = "deserialize_duration", serialize_with = "serialize_duration")]
