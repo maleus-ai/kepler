@@ -168,7 +168,7 @@ fn drop_privileges(uid: Option<u32>, gid: Option<u32>) {
 #[cfg(unix)]
 fn setgroups_portable(groups: &[nix::unistd::Gid]) -> Result<(), nix::errno::Errno> {
     let gids: Vec<libc::gid_t> = groups.iter().map(|g| g.as_raw()).collect();
-    let ret = unsafe { libc::setgroups(gids.len() as libc::size_t, gids.as_ptr()) };
+    let ret = unsafe { libc::setgroups(gids.len() as _, gids.as_ptr()) };
     if ret == 0 {
         Ok(())
     } else {
