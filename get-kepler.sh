@@ -27,33 +27,35 @@ error() { echo -e "${RED}==> ERROR:${NC} $*" >&2; }
 
 usage() {
     cat <<EOF
-Usage: get-kepler.sh [VERSION] [INSTALL_OPTIONS...]
+Usage: get-kepler.sh [VERSION] [OPTIONS...]
 
 Download and install Kepler from GitHub Releases.
 
 Arguments:
   VERSION             Version tag to install (e.g. v0.1.0). Defaults to latest release.
 
-Install options (passed through to install.sh):
-  --no-systemd        Skip systemd service installation
+Options:
+  --gnu               Use glibc (gnu) build instead of musl (Linux only)
+  --no-systemd        Skip systemd service installation (passed to install.sh)
 
 Examples:
-  # Install latest version
+  # Install latest version (static musl build)
   curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash
 
   # Install specific version
   curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash -s v0.1.0
 
+  # Install glibc build instead of musl
+  curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash -s -- --gnu
+
   # Install specific version without systemd
   curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash -s v0.1.0 --no-systemd
-
-  # Install latest without systemd
-  curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash -s -- --no-systemd
 EOF
 }
 
 # Parse arguments: first positional arg starting with 'v' is the version, rest forwarded to install.sh
 VERSION=""
+USE_GNU=false
 INSTALL_ARGS=()
 
 for arg in "$@"; do
@@ -61,6 +63,9 @@ for arg in "$@"; do
         -h|--help)
             usage
             exit 0
+            ;;
+        --gnu)
+            USE_GNU=true
             ;;
         v*)
             if [[ -z "$VERSION" ]]; then
@@ -75,15 +80,35 @@ for arg in "$@"; do
     esac
 done
 
-# Detect architecture
-detect_arch() {
-    local arch
+# Detect target triple
+detect_target() {
+    local arch os libc
     arch="$(uname -m)"
-    case "$arch" in
-        x86_64)  echo "x86_64-unknown-linux-gnu" ;;
-        aarch64) echo "aarch64-unknown-linux-gnu" ;;
+    os="$(uname -s)"
+
+    case "$os" in
+        Linux)
+            if [[ "$USE_GNU" == true ]]; then
+                libc="gnu"
+            else
+                libc="musl"
+            fi
+            case "$arch" in
+                x86_64)  echo "x86_64-unknown-linux-${libc}" ;;
+                aarch64) echo "aarch64-unknown-linux-${libc}" ;;
+                *)
+                    error "Unsupported architecture: $arch"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        Darwin)
+            error "Pre-built binaries are not available for macOS yet."
+            error "See https://github.com/${REPO}#installation for build-from-source instructions."
+            exit 1
+            ;;
         *)
-            error "Unsupported architecture: $arch"
+            error "Unsupported OS: $os"
             exit 1
             ;;
     esac
@@ -142,7 +167,7 @@ resolve_latest_version() {
 
 # --- Main ---
 
-ARCH="$(detect_arch)"
+ARCH="$(detect_target)"
 
 if [[ -z "$VERSION" ]]; then
     info "Resolving latest version..."
