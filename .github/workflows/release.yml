@@ -38,77 +38,69 @@ permissions:
   contents: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Build matrix
+        id: set-matrix
+        run: |
+          TARGETS='[]'
+          add() { TARGETS=$(echo "$TARGETS" | jq -c ". + [$1]"); }
+
+          if [[ "${{ github.event_name }}" == "push" || "${{ inputs.linux-gnu-x86_64 }}" == "true" ]]; then
+            add '{"target":"x86_64-unknown-linux-gnu","runner":"blacksmith-4vcpu-ubuntu-2204","packages":"pkg-config g++","musl-toolchain":"","env":{}}'
+          fi
+          if [[ "${{ github.event_name }}" == "push" || "${{ inputs.linux-gnu-aarch64 }}" == "true" ]]; then
+            add '{"target":"aarch64-unknown-linux-gnu","runner":"blacksmith-4vcpu-ubuntu-2204-arm","packages":"pkg-config g++","musl-toolchain":"","env":{}}'
+          fi
+          if [[ "${{ github.event_name }}" == "push" || "${{ inputs.linux-musl-x86_64 }}" == "true" ]]; then
+            add '{"target":"x86_64-unknown-linux-musl","runner":"blacksmith-4vcpu-ubuntu-2204","packages":"pkg-config","musl-toolchain":"x86_64-linux-musl-cross","env":{"CC_x86_64_unknown_linux_musl":"/opt/musl-cross/bin/x86_64-linux-musl-gcc","CXX_x86_64_unknown_linux_musl":"/opt/musl-cross/bin/x86_64-linux-musl-g++","CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER":"/opt/musl-cross/bin/x86_64-linux-musl-gcc"}}'
+          fi
+          if [[ "${{ github.event_name }}" == "push" || "${{ inputs.linux-musl-aarch64 }}" == "true" ]]; then
+            add '{"target":"aarch64-unknown-linux-musl","runner":"blacksmith-4vcpu-ubuntu-2204","packages":"pkg-config","musl-toolchain":"aarch64-linux-musl-cross","env":{"CC_aarch64_unknown_linux_musl":"/opt/musl-cross/bin/aarch64-linux-musl-gcc","CXX_aarch64_unknown_linux_musl":"/opt/musl-cross/bin/aarch64-linux-musl-g++","CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER":"/opt/musl-cross/bin/aarch64-linux-musl-gcc"}}'
+          fi
+          if [[ "${{ github.event_name }}" == "push" || "${{ inputs.macos-x86_64 }}" == "true" ]]; then
+            add '{"target":"x86_64-apple-darwin","runner":"macos-15-intel","packages":"","musl-toolchain":"","env":{}}'
+          fi
+          if [[ "${{ github.event_name }}" == "push" || "${{ inputs.macos-aarch64 }}" == "true" ]]; then
+            add '{"target":"aarch64-apple-darwin","runner":"macos-15","packages":"","musl-toolchain":"","env":{}}'
+          fi
+
+          echo "matrix={\"include\":$TARGETS}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
+    if: ${{ fromJSON(needs.prepare.outputs.matrix).include[0] != null }}
     strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: blacksmith-4vcpu-ubuntu-2204
-            packages: pkg-config g++
-            env: {}
-            enabled: ${{ github.event_name == 'push' || inputs.linux-gnu-x86_64 }}
-          - target: aarch64-unknown-linux-gnu
-            runner: blacksmith-4vcpu-ubuntu-2204-arm
-            packages: pkg-config g++
-            env: {}
-            enabled: ${{ github.event_name == 'push' || inputs.linux-gnu-aarch64 }}
-          - target: x86_64-unknown-linux-musl
-            runner: blacksmith-4vcpu-ubuntu-2204
-            packages: pkg-config
-            musl-toolchain: x86_64-linux-musl-cross
-            env:
-              CC_x86_64_unknown_linux_musl: /opt/musl-cross/bin/x86_64-linux-musl-gcc
-              CXX_x86_64_unknown_linux_musl: /opt/musl-cross/bin/x86_64-linux-musl-g++
-              CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: /opt/musl-cross/bin/x86_64-linux-musl-gcc
-            enabled: ${{ github.event_name == 'push' || inputs.linux-musl-x86_64 }}
-          - target: aarch64-unknown-linux-musl
-            runner: blacksmith-4vcpu-ubuntu-2204
-            packages: pkg-config
-            musl-toolchain: aarch64-linux-musl-cross
-            env:
-              CC_aarch64_unknown_linux_musl: /opt/musl-cross/bin/aarch64-linux-musl-gcc
-              CXX_aarch64_unknown_linux_musl: /opt/musl-cross/bin/aarch64-linux-musl-g++
-              CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: /opt/musl-cross/bin/aarch64-linux-musl-gcc
-            enabled: ${{ github.event_name == 'push' || inputs.linux-musl-aarch64 }}
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-            packages: ""
-            env: {}
-            enabled: ${{ github.event_name == 'push' || inputs.macos-x86_64 }}
-          - target: aarch64-apple-darwin
-            runner: macos-15
-            packages: ""
-            env: {}
-            enabled: ${{ github.event_name == 'push' || inputs.macos-aarch64 }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout
-        if: matrix.enabled == 'true'
         uses: actions/checkout@v4
 
       - name: Install Rust 1.93
-        if: matrix.enabled == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.93"
           targets: ${{ matrix.target }}
 
       - name: Install build dependencies
-        if: matrix.enabled == 'true' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.packages }}
 
       - name: Install musl cross toolchain
-        if: matrix.enabled == 'true' && matrix.musl-toolchain
+        if: matrix.musl-toolchain != ''
         run: |
           curl -sSfL "https://musl.cc/${{ matrix.musl-toolchain }}.tgz" | sudo tar xzf - -C /opt/
           sudo mv "/opt/${{ matrix.musl-toolchain }}" /opt/musl-cross
 
       - name: Cache cargo registry & target
-        if: matrix.enabled == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -120,12 +112,10 @@ jobs:
             release-${{ matrix.target }}-cargo-
 
       - name: Build release binaries
-        if: matrix.enabled == 'true'
         env: ${{ matrix.env }}
         run: cargo build --release --target ${{ matrix.target }} -p kepler-cli -p kepler-daemon -p kepler-exec
 
       - name: Determine version
-        if: matrix.enabled == 'true'
         id: version
         run: |
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
@@ -137,7 +127,6 @@ jobs:
           fi
 
       - name: Package tarball
-        if: matrix.enabled == 'true'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TARGET="${{ matrix.target }}"
@@ -155,7 +144,6 @@ jobs:
           echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
-        if: matrix.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.TARBALL }}
