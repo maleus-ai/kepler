@@ -102,6 +102,31 @@ impl ServiceOrchestrator {
         service_filter: Option<&str>,
         sys_env: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
+        let result = self
+            .start_services_inner(config_path, service_filter, sys_env)
+            .await;
+
+        // If start failed entirely, clean up the config from the registry
+        // so that a retry re-loads the config fresh instead of seeing stale state.
+        if result.is_err() {
+            if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
+                if handle.all_services_stopped().await {
+                    self.registry.unload(&config_path.to_path_buf()).await;
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Inner implementation of start_services, separated so the outer method
+    /// can perform cleanup on failure.
+    async fn start_services_inner(
+        &self,
+        config_path: &Path,
+        service_filter: Option<&str>,
+        sys_env: Option<HashMap<String, String>>,
+    ) -> Result<String, OrchestratorError> {
         // Get or create the config actor
         let handle = self
             .registry
@@ -365,6 +390,21 @@ impl ServiceOrchestrator {
             return Ok(());
         }
 
+        // Run the actual startup. If anything fails after claiming, reset
+        // status to Failed so the service isn't stuck in Starting forever.
+        let result = self.execute_service_startup(handle, service_name).await;
+        if result.is_err() {
+            let _ = handle.set_service_status(service_name, ServiceStatus::Failed).await;
+        }
+        result
+    }
+
+    /// Execute the actual service startup sequence (after claiming).
+    async fn execute_service_startup(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+    ) -> Result<(), OrchestratorError> {
         // Get service context (single round-trip)
         let ctx = handle
             .get_service_context(service_name)
