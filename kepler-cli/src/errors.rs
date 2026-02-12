@@ -26,7 +26,7 @@ pub enum CliError {
         source: std::io::Error,
     },
 
-    #[error("Server error: {0}")]
+    #[error("{0}")]
     Server(String),
 
     #[error("IO error: {0}")]

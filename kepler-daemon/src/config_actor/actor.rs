@@ -216,7 +216,15 @@ impl ConfigActor {
                 }
 
                 // Parse config from the secure copy (baking with sys_env)
-                let config = KeplerConfig::load(&copied_config_path, &resolved_sys_env)?;
+                // Map error to show the original config path, not the internal copy
+                let config = KeplerConfig::load(&copied_config_path, &resolved_sys_env)
+                    .map_err(|e| match e {
+                        DaemonError::ConfigParse { source, .. } => DaemonError::ConfigParse {
+                            path: canonical_path.clone(),
+                            source,
+                        },
+                        other => other,
+                    })?;
 
                 // Get config directory
                 let config_dir = canonical_path

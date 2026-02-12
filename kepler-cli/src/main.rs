@@ -403,7 +403,7 @@ async fn foreground_with_logs(
                 request_done = true;
                 match result {
                     Ok(Response::Error { message }) => {
-                        return Err(CliError::Server(format!("Daemon error: {}", message)));
+                        return Err(CliError::Server(message));
                     }
                     Err(e) => return Err(e.into()),
                     Ok(_) => {
