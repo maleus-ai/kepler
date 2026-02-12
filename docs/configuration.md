@@ -179,7 +179,7 @@ See [Hooks](hooks.md) for format, execution order, and examples.
 | `restart` | `string\|object` | `no` | Restart policy. See [Restart Configuration](#restart-configuration) |
 | `healthcheck` | `object` | - | Health check config. See [Health Checks](health-checks.md) |
 | `hooks` | `object` | - | Service-specific hooks. See [Hooks](hooks.md) |
-| `user` | `string` | - | User to run as (Unix). See [Privilege Dropping](privilege-dropping.md) |
+| `user` | `string` | CLI user | User to run as (Unix). Defaults to the CLI user who loaded the config. See [Privilege Dropping](privilege-dropping.md) |
 | `group` | `string` | - | Group override (Unix) |
 | `logs` | `object` | - | Log configuration. See [Log Management](log-management.md) |
 | `limits` | `object` | - | Resource limits. See [Privilege Dropping](privilege-dropping.md) |

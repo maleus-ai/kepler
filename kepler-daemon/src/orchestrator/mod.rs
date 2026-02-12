@@ -94,6 +94,10 @@ impl ServiceOrchestrator {
     /// If `service_filter` is provided, only starts that service and its dependencies.
     /// Otherwise starts all services in dependency order.
     ///
+    /// The `config_owner` parameter provides the UID/GID of the CLI user.
+    /// On fresh config loads, services without an explicit `user:` will default
+    /// to running as this user.
+    ///
     /// Runs the full pipeline synchronously and responds when complete.
     /// The CLI decides whether to await the response or fire-and-forget.
     pub async fn start_services(
@@ -101,9 +105,10 @@ impl ServiceOrchestrator {
         config_path: &Path,
         service_filter: Option<&str>,
         sys_env: Option<HashMap<String, String>>,
+        config_owner: Option<(u32, u32)>,
     ) -> Result<String, OrchestratorError> {
         let result = self
-            .start_services_inner(config_path, service_filter, sys_env)
+            .start_services_inner(config_path, service_filter, sys_env, config_owner)
             .await;
 
         // If start failed entirely, clean up the config from the registry
@@ -126,11 +131,12 @@ impl ServiceOrchestrator {
         config_path: &Path,
         service_filter: Option<&str>,
         sys_env: Option<HashMap<String, String>>,
+        config_owner: Option<(u32, u32)>,
     ) -> Result<String, OrchestratorError> {
         // Get or create the config actor
         let handle = self
             .registry
-            .get_or_create(config_path.to_path_buf(), sys_env.clone())
+            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner)
             .await?;
 
         let config_dir = handle.get_config_dir().await;
@@ -1118,12 +1124,15 @@ impl ServiceOrchestrator {
     /// - Persists the new snapshot
     /// - Does NOT start any services or run any hooks
     ///
+    /// The `config_owner` parameter provides the UID/GID of the new CLI user.
+    ///
     /// Use this when the config file has changed or you want to pick up
     /// new environment variables without starting services.
     pub async fn recreate_services(
         &self,
         config_path: &Path,
         sys_env: Option<HashMap<String, String>>,
+        config_owner: Option<(u32, u32)>,
     ) -> Result<String, OrchestratorError> {
         info!("Recreating config for {:?} (rebake only)", config_path);
 
@@ -1147,7 +1156,7 @@ impl ServiceOrchestrator {
         // Re-load config with new sys_env (re-reads source, re-expands env vars)
         let handle = self
             .registry
-            .get_or_create(config_path.to_path_buf(), sys_env)
+            .get_or_create(config_path.to_path_buf(), sys_env, config_owner)
             .await?;
 
         // Persist the rebaked config snapshot

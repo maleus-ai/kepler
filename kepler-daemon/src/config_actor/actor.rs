@@ -70,9 +70,15 @@ impl ConfigActor {
     ///
     /// The `sys_env` parameter provides system environment variables captured from the CLI.
     /// If None and no snapshot exists, defaults to an empty env with a warning.
+    ///
+    /// The `config_owner` parameter provides the UID/GID of the CLI user that loaded
+    /// this config. If provided and uid != 0, services and global hooks without an
+    /// explicit `user:` field will default to running as this user instead of root.
+    /// This is only applied on fresh loads — snapshot restoration already has user baked.
     pub fn create(
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
+        config_owner: Option<(u32, u32)>,
     ) -> Result<(ConfigActorHandle, Self)> {
         // Canonicalize path first
         let canonical_path = std::fs::canonicalize(&config_path).map_err(|e| {
@@ -217,7 +223,7 @@ impl ConfigActor {
 
                 // Parse config from the secure copy (baking with sys_env)
                 // Map error to show the original config path, not the internal copy
-                let config = KeplerConfig::load(&copied_config_path, &resolved_sys_env)
+                let mut config = KeplerConfig::load(&copied_config_path, &resolved_sys_env)
                     .map_err(|e| match e {
                         DaemonError::ConfigParse { source, .. } => DaemonError::ConfigParse {
                             path: canonical_path.clone(),
@@ -225,6 +231,11 @@ impl ConfigActor {
                         },
                         other => other,
                     })?;
+
+                // Bake default user into services and global hooks based on CLI user
+                if let Some((uid, gid)) = config_owner {
+                    config.resolve_default_user(uid, gid);
+                }
 
                 // Get config directory
                 let config_dir = canonical_path

@@ -38,7 +38,28 @@ services:
     user: "1000:1000"
 ```
 
-When `user` is set, the daemon drops privileges for that service's process. When `user` is not set, the service runs as root (the daemon's user).
+When `user` is set, the daemon drops privileges for that service's process.
+
+### Default User (Config Owner)
+
+When `user` is **not** set, the default depends on who loaded the config:
+
+- **Non-root CLI user**: Services default to the CLI user's UID:GID. This is baked into the config at load time, so it persists across daemon restarts.
+- **Root CLI user**: Services run as root (the daemon's user), same as before.
+
+This means a non-root member of the `kepler` group cannot accidentally run services as root. To explicitly run a service as root, set `user: root` or `user: "0"`.
+
+```yaml
+services:
+  # If loaded by uid 1000, this runs as 1000:1000
+  worker:
+    command: ["./worker"]
+
+  # Explicit root override
+  privileged:
+    command: ["./setup"]
+    user: root
+```
 
 ---
 
@@ -72,7 +93,7 @@ This ensures the service process never runs as root, even momentarily after spaw
 
 ## Hook Inheritance
 
-Service hooks inherit the service's `user` by default:
+Service hooks inherit the service's `user` by default. Since the config owner's UID:GID is baked into services without an explicit `user:`, service hooks also inherit this default:
 
 ```yaml
 services:
@@ -86,6 +107,8 @@ services:
         run: ./teardown.sh
         user: root               # Override: runs as root
 ```
+
+Global hooks do not inherit from any service. Instead, when a non-root CLI user loads the config, global hooks without a `user:` field are baked with the CLI user's UID:GID. To run a global hook as root, set `user: root` explicitly.
 
 Each hook can override `user` to run as a different user.
 

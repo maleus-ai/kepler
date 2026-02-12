@@ -140,7 +140,7 @@ Service hooks inherit from their parent service by default:
 - **Environment**: Hook receives the service's environment, plus any additional vars from `environment`/`env_file`
 - **Working directory**: Hook uses the service's `working_dir` unless overridden
 
-Global hooks do not inherit from any service.
+Global hooks do not inherit from any service. However, when a non-root CLI user loads the config, global hooks without an explicit `user:` field default to the CLI user's UID:GID (same as services). To run a global hook as root, set `user: root`.
 
 ---
 

@@ -418,6 +418,43 @@ impl KeplerConfig {
         Ok(())
     }
 
+    /// Bake the default user into services and global hooks where `user` is `None`.
+    ///
+    /// When the CLI invoking user is not root (uid != 0), services and global hooks
+    /// that don't specify an explicit `user:` field will default to running as the
+    /// CLI user instead of root. This is called after `KeplerConfig::load()` on
+    /// the fresh load path (not on snapshot restoration, where user is already baked).
+    ///
+    /// Service hooks are NOT baked here — they inherit from the service user via
+    /// `run_hook()` at runtime.
+    pub fn resolve_default_user(&mut self, uid: u32, gid: u32) {
+        // Root is already the daemon user — no change needed
+        if uid == 0 {
+            return;
+        }
+        let user_str = format!("{}:{}", uid, gid);
+
+        // Bake into services
+        for service in self.services.values_mut() {
+            if service.user.is_none() {
+                service.user = Some(user_str.clone());
+            }
+        }
+
+        // Bake into global hooks (they don't inherit from any service)
+        if let Some(ref mut kepler) = self.kepler {
+            if let Some(ref mut hooks) = kepler.hooks {
+                for hook_slot in hooks.all_hooks_mut() {
+                    if let Some(hook) = hook_slot {
+                        if hook.user().is_none() {
+                            hook.common_mut().user = Some(user_str.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // === Accessor methods for kepler namespace ===
 
     /// Get global hooks configuration
@@ -1016,6 +1053,104 @@ version: "3"
         assert!(result.is_err(), "unknown field at root level should be rejected");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown field"), "error should mention unknown field: {}", err);
+    }
+
+    // ================================================================
+    // resolve_default_user tests
+    // ================================================================
+
+    #[test]
+    fn test_resolve_default_user_sets_services() {
+        let yaml = r#"
+services:
+  svc_a:
+    command: ["./a"]
+  svc_b:
+    command: ["./b"]
+    user: "root"
+"#;
+        let mut config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        config.resolve_default_user(1000, 1000);
+
+        // svc_a had no user → should be baked
+        assert_eq!(
+            config.services.get("svc_a").unwrap().user,
+            Some("1000:1000".to_string())
+        );
+        // svc_b had explicit user → should NOT be overwritten
+        assert_eq!(
+            config.services.get("svc_b").unwrap().user,
+            Some("root".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_default_user_root_noop() {
+        let yaml = r#"
+services:
+  svc:
+    command: ["./svc"]
+"#;
+        let mut config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        config.resolve_default_user(0, 0);
+
+        // Root is no-op — user stays None
+        assert_eq!(config.services.get("svc").unwrap().user, None);
+    }
+
+    #[test]
+    fn test_resolve_default_user_bakes_global_hooks() {
+        let yaml = r#"
+kepler:
+  hooks:
+    pre_start:
+      run: echo "hello"
+    post_start:
+      run: echo "world"
+      user: "root"
+
+services:
+  svc:
+    command: ["./svc"]
+"#;
+        let mut config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        config.resolve_default_user(1000, 1000);
+
+        let hooks = config.kepler.as_ref().unwrap().hooks.as_ref().unwrap();
+        // pre_start had no user → should be baked
+        assert_eq!(
+            hooks.pre_start.as_ref().unwrap().user(),
+            Some("1000:1000")
+        );
+        // post_start had explicit user → should NOT be overwritten
+        assert_eq!(
+            hooks.post_start.as_ref().unwrap().user(),
+            Some("root")
+        );
+    }
+
+    #[test]
+    fn test_resolve_default_user_preserves_hook_user() {
+        let yaml = r#"
+kepler:
+  hooks:
+    on_init:
+      run: echo "init"
+      user: "daemon"
+
+services:
+  svc:
+    command: ["./svc"]
+"#;
+        let mut config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        config.resolve_default_user(1000, 1000);
+
+        let hooks = config.kepler.as_ref().unwrap().hooks.as_ref().unwrap();
+        // on_init had explicit user "daemon" → should NOT be overwritten
+        assert_eq!(
+            hooks.on_init.as_ref().unwrap().user(),
+            Some("daemon")
+        );
     }
 
     #[test]

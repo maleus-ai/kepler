@@ -155,6 +155,12 @@ Services can run as specific users/groups:
 - Resource limits applied via `setrlimit()`
 - Service process runs as the target user
 
+### Default User from CLI Invoker
+
+When a non-root CLI user loads a config, services and global hooks without an explicit `user:` field default to the CLI user's UID:GID. This is baked into the config snapshot at load time, so it persists across daemon restarts. Root CLI users see no change -- services without `user:` still run as root.
+
+This prevents non-root `kepler` group members from accidentally running services as root. To explicitly run as root, set `user: root`.
+
 Hooks inherit the service's user by default, with per-hook override capability.
 
 See [Privilege Dropping](privilege-dropping.md) for details.

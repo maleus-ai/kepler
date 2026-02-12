@@ -46,12 +46,17 @@ impl ConfigRegistry {
     /// The `sys_env` parameter provides the system environment variables captured
     /// from the CLI. If None, the daemon's current environment is used.
     ///
+    /// The `config_owner` parameter provides the UID/GID of the CLI user.
+    /// On fresh loads, services without an explicit `user:` field will default
+    /// to running as this user instead of root. Ignored for existing actors.
+    ///
     /// Uses `OnceCell` to ensure exactly one actor is created per path,
     /// even under concurrent calls for the same path.
     pub async fn get_or_create(
         &self,
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
+        config_owner: Option<(u32, u32)>,
     ) -> Result<ConfigActorHandle> {
         // Canonicalize path first
         let canonical_path = std::fs::canonicalize(&config_path).map_err(|e| {
@@ -75,7 +80,7 @@ impl ConfigRegistry {
 
         // Exactly one caller initializes; others await the result
         let result = cell.get_or_try_init(|| async {
-            let (handle, actor) = ConfigActor::create(config_path, sys_env)?;
+            let (handle, actor) = ConfigActor::create(config_path, sys_env, config_owner)?;
             tokio::spawn(actor.run());
             Ok(handle)
         }).await;

@@ -54,6 +54,14 @@ fn parse_groups_from_status(content: &str, target_gid: u32) -> bool {
 pub type Result<T> = std::result::Result<T, ServerError>;
 pub type ShutdownTx = mpsc::Sender<()>;
 
+/// Peer credentials extracted from the Unix socket connection.
+/// Provides the UID and GID of the connecting CLI client.
+#[derive(Debug, Clone, Copy)]
+pub struct PeerCredentials {
+    pub uid: u32,
+    pub gid: u32,
+}
+
 /// Bounded channel capacity for the per-connection writer task.
 const WRITER_CHANNEL_CAPACITY: usize = 256;
 
@@ -94,7 +102,7 @@ impl ProgressSender {
 
 pub struct Server<F, Fut>
 where
-    F: Fn(Request, ShutdownTx, ProgressSender) -> Fut + Send + Sync + 'static,
+    F: Fn(Request, ShutdownTx, ProgressSender, PeerCredentials) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response> + Send,
 {
     socket_path: PathBuf,
@@ -108,7 +116,7 @@ use crate::protocol::Request;
 
 impl<F, Fut> Server<F, Fut>
 where
-    F: Fn(Request, ShutdownTx, ProgressSender) -> Fut + Send + Sync + 'static,
+    F: Fn(Request, ShutdownTx, ProgressSender, PeerCredentials) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response> + Send,
 {
     pub fn new(socket_path: PathBuf, handler: F) -> Result<Self> {
@@ -216,12 +224,13 @@ async fn handle_client<F, Fut>(
     shutdown_tx: mpsc::Sender<()>,
 ) -> Result<()>
 where
-    F: Fn(Request, ShutdownTx, ProgressSender) -> Fut + Send + Sync + 'static,
+    F: Fn(Request, ShutdownTx, ProgressSender, PeerCredentials) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response> + Send,
 {
     debug!("Client connected");
 
-    // Verify peer credentials
+    // Verify peer credentials and capture uid/gid for the handler
+    let peer_credentials;
     #[cfg(unix)]
     {
         let cred = stream.peer_cred().map_err(ServerError::PeerCredentials)?;
@@ -247,6 +256,11 @@ where
             }
             debug!("Peer credentials verified: UID {} in kepler group", cred.uid());
         }
+
+        peer_credentials = PeerCredentials {
+            uid: cred.uid(),
+            gid: cred.gid(),
+        };
     }
 
     // Split stream into read/write halves
@@ -333,7 +347,7 @@ where
         let write_tx = write_tx.clone();
         tokio::spawn(async move {
             let progress_sender = ProgressSender::new(write_tx.clone(), request_id);
-            let response = handler(request, shutdown_tx, progress_sender).await;
+            let response = handler(request, shutdown_tx, progress_sender, peer_credentials).await;
             let msg = ServerMessage::Response {
                 id: request_id,
                 response,

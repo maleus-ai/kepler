@@ -57,6 +57,24 @@ impl TestDaemonHarness {
         Self::finish(handle, actor, config_path, config_dir)
     }
 
+    /// Create a new test harness with a specific config owner (uid, gid).
+    /// This simulates a non-root CLI user loading the config — services without
+    /// an explicit `user:` field will default to running as this user.
+    pub async fn new_with_config_owner(
+        config: KeplerConfig,
+        config_dir: &Path,
+        config_owner: Option<(u32, u32)>,
+    ) -> std::io::Result<Self> {
+        let config_path = Self::write_config(&config, config_dir)?;
+
+        let (handle, actor) = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            Self::create_actor_with_owner(&config_path, config_dir, config_owner)?
+        };
+
+        Self::finish(handle, actor, config_path, config_dir)
+    }
+
     fn write_config(config: &KeplerConfig, config_dir: &Path) -> std::io::Result<PathBuf> {
         let config_path = config_dir.join("kepler.yaml");
         let config_yaml = serde_yaml::to_string(config)
@@ -66,12 +84,20 @@ impl TestDaemonHarness {
     }
 
     fn create_actor(config_path: &Path, config_dir: &Path) -> std::io::Result<(ConfigActorHandle, ConfigActor)> {
+        Self::create_actor_with_owner(config_path, config_dir, None)
+    }
+
+    fn create_actor_with_owner(
+        config_path: &Path,
+        config_dir: &Path,
+        config_owner: Option<(u32, u32)>,
+    ) -> std::io::Result<(ConfigActorHandle, ConfigActor)> {
         let kepler_state_dir = config_dir.join(".kepler");
         // SAFETY: Caller must hold ENV_LOCK to prevent races with parallel tests.
         unsafe {
             std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
         }
-        ConfigActor::create(config_path.to_path_buf(), Some(std::env::vars().collect()))
+        ConfigActor::create(config_path.to_path_buf(), Some(std::env::vars().collect()), config_owner)
             .map_err(|e| std::io::Error::other(e.to_string()))
     }
 

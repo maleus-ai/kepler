@@ -8,7 +8,7 @@ use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_daemon::Daemon;
 use kepler_protocol::protocol::{ProgressEvent, Request, Response, ResponseData, ServicePhase, ServiceTarget};
-use kepler_protocol::server::{ProgressSender, Server};
+use kepler_protocol::server::{PeerCredentials, ProgressSender, Server};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -181,11 +181,11 @@ async fn main() -> anyhow::Result<()> {
     let handler_cursor_manager = cursor_manager.clone();
 
     // Create the async request handler
-    let handler = move |request: Request, shutdown_tx: mpsc::Sender<()>, progress: ProgressSender| {
+    let handler = move |request: Request, shutdown_tx: mpsc::Sender<()>, progress: ProgressSender, peer: PeerCredentials| {
         let orchestrator = handler_orchestrator.clone();
         let registry = handler_registry.clone();
         let cursor_manager = handler_cursor_manager.clone();
-        async move { handle_request(request, orchestrator, registry, cursor_manager, shutdown_tx, progress).await }
+        async move { handle_request(request, orchestrator, registry, cursor_manager, shutdown_tx, progress, peer).await }
     };
 
     // Create server
@@ -259,6 +259,7 @@ async fn handle_request(
     cursor_manager: Arc<CursorManager>,
     shutdown_tx: mpsc::Sender<()>,
     progress: ProgressSender,
+    peer: PeerCredentials,
 ) -> Response {
     match request {
         Request::Ping => Response::ok_with_message("pong".to_string()),
@@ -292,7 +293,7 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
             match orchestrator
-                .start_services(&config_path, service.as_deref(), sys_env)
+                .start_services(&config_path, service.as_deref(), sys_env, Some((peer.uid, peer.gid)))
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -542,7 +543,7 @@ async fn handle_request(
             };
 
             match orchestrator
-                .recreate_services(&config_path, sys_env)
+                .recreate_services(&config_path, sys_env, Some((peer.uid, peer.gid)))
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -901,7 +902,7 @@ async fn discover_existing_configs(
 
         // Load the config (will restore from snapshot)
         info!("Restoring config from {:?}", source_path);
-        match registry.get_or_create(source_path.clone(), None).await {
+        match registry.get_or_create(source_path.clone(), None, None).await {
             Ok(handle) => {
                 restored += 1;
 
@@ -920,7 +921,7 @@ async fn discover_existing_configs(
 
                     for service_name in &services_to_respawn {
                         match orchestrator
-                            .start_services(&source_path, Some(service_name), None)
+                            .start_services(&source_path, Some(service_name), None, None)
                             .await
                         {
                             Ok(_) => {

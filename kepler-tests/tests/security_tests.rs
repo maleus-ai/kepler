@@ -7,7 +7,7 @@
 //!
 //! Tests run inside Docker as root with kepler group and test users available.
 
-use kepler_daemon::config::{HookCommand, HookCommon, ServiceHooks};
+use kepler_daemon::config::{GlobalHooks, HookCommand, HookCommon, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::{TestDaemonHarness, UMASK_LOCK};
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -1283,6 +1283,319 @@ fn test_socket_path_symlink_detected() {
 // ============================================================================
 // Log Truncation Symlink Tests
 // ============================================================================
+
+// ============================================================================
+// Default User (Config Owner) Tests
+// ============================================================================
+// These tests verify that when a non-root CLI user loads a config, services
+// and hooks without an explicit `user:` field default to the CLI user's UID:GID.
+
+/// Verify that services without a `user:` field run as the config owner
+#[tokio::test]
+#[cfg(unix)]
+async fn test_default_user_from_config_owner() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+    // Make temp dir world-accessible so uid 65534 can chdir
+    std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "no-user",
+            TestServiceBuilder::long_running().build(), // No .with_user()
+        )
+        .build();
+
+    // Config owner is uid 65534 (nobody)
+    let harness = TestDaemonHarness::new_with_config_owner(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+    )
+    .await
+    .unwrap();
+
+    harness.start_service("no-user").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let pid = harness
+        .handle()
+        .get_service_state("no-user")
+        .await
+        .and_then(|s| s.pid);
+    assert!(pid.is_some(), "Service should have a PID");
+
+    let actual_uid = get_process_uid(pid.unwrap());
+    assert_eq!(
+        actual_uid,
+        Some(65534),
+        "Service without user: field should run as config owner (UID 65534), got {:?}",
+        actual_uid
+    );
+
+    harness.stop_service("no-user").await.unwrap();
+}
+
+/// Verify that an explicit `user:` field overrides the config owner default
+#[tokio::test]
+#[cfg(unix)]
+async fn test_default_user_explicit_override() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "explicit-root",
+            TestServiceBuilder::long_running()
+                .with_user("0") // Explicitly root
+                .build(),
+        )
+        .build();
+
+    // Config owner is uid 65534, but service has explicit user: "0"
+    let harness = TestDaemonHarness::new_with_config_owner(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+    )
+    .await
+    .unwrap();
+
+    harness.start_service("explicit-root").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let pid = harness
+        .handle()
+        .get_service_state("explicit-root")
+        .await
+        .and_then(|s| s.pid);
+    assert!(pid.is_some(), "Service should have a PID");
+
+    let actual_uid = get_process_uid(pid.unwrap());
+    assert_eq!(
+        actual_uid,
+        Some(0),
+        "Explicit user: 0 should override config owner, got {:?}",
+        actual_uid
+    );
+
+    harness.stop_service("explicit-root").await.unwrap();
+}
+
+/// Verify that root config owner is a no-op (services still run as root)
+#[tokio::test]
+#[cfg(unix)]
+async fn test_default_user_root_config_owner_noop() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "root-owner",
+            TestServiceBuilder::long_running().build(), // No .with_user()
+        )
+        .build();
+
+    // Config owner is root — should be no-op
+    let harness = TestDaemonHarness::new_with_config_owner(
+        config,
+        temp_dir.path(),
+        Some((0, 0)),
+    )
+    .await
+    .unwrap();
+
+    harness.start_service("root-owner").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let pid = harness
+        .handle()
+        .get_service_state("root-owner")
+        .await
+        .and_then(|s| s.pid);
+    assert!(pid.is_some(), "Service should have a PID");
+
+    let actual_uid = get_process_uid(pid.unwrap());
+    assert_eq!(
+        actual_uid,
+        Some(0),
+        "Root config owner should be no-op — service runs as root, got {:?}",
+        actual_uid
+    );
+
+    harness.stop_service("root-owner").await.unwrap();
+}
+
+/// Verify that service hooks inherit the baked default user from config owner
+#[tokio::test]
+#[cfg(unix)]
+async fn test_default_user_service_hook_inherits() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+    std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let uid_marker_path = marker.marker_path("hook_default_uid");
+
+    // Service has NO user field; hook writes its UID to marker
+    let hooks = ServiceHooks {
+        pre_start: Some(HookCommand::script(format!("id -u > {}", uid_marker_path.display()))),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "hooked",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(), // No .with_user()
+        )
+        .build();
+
+    // Config owner is uid 65534 — should be baked into service, hook inherits
+    let harness = TestDaemonHarness::new_with_config_owner(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+    )
+    .await
+    .unwrap();
+
+    harness.start_service("hooked").await.unwrap();
+
+    assert!(
+        marker.wait_for_marker("hook_default_uid", Duration::from_secs(5)).await,
+        "Hook should have written UID marker"
+    );
+
+    let hook_uid: u32 = std::fs::read_to_string(&uid_marker_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    assert_eq!(
+        hook_uid, 65534,
+        "Service hook should inherit baked user from config owner (UID 65534), got {}",
+        hook_uid
+    );
+
+    harness.stop_service("hooked").await.unwrap();
+}
+
+/// Verify that global hooks get the default user baked into their config
+#[tokio::test]
+#[cfg(unix)]
+async fn test_default_user_global_hook() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Global hook with no user: field
+    let global_hooks = GlobalHooks {
+        pre_start: Some(HookCommand::script("echo global")),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .with_global_hooks(global_hooks)
+        .add_service("svc", TestServiceBuilder::long_running().build())
+        .build();
+
+    // Config owner is uid 65534
+    let harness = TestDaemonHarness::new_with_config_owner(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+    )
+    .await
+    .unwrap();
+
+    // Verify the baked config has user set on the global hook
+    let baked_config = harness.handle().get_config().await.unwrap();
+    let global_hook = baked_config
+        .kepler
+        .as_ref()
+        .and_then(|k| k.hooks.as_ref())
+        .and_then(|h| h.pre_start.as_ref());
+
+    assert!(global_hook.is_some(), "Global pre_start hook should exist");
+    let hook_user = global_hook.unwrap().user();
+    assert_eq!(
+        hook_user,
+        Some("65534:65534"),
+        "Global hook should have user baked from config owner, got {:?}",
+        hook_user
+    );
+}
+
+/// Verify that a hook with explicit `user:` overrides the config owner default
+#[tokio::test]
+#[cfg(unix)]
+async fn test_default_user_hook_explicit_override() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+    std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let uid_marker_path = marker.marker_path("hook_override_uid");
+
+    // Hook explicitly sets user: "0" (root)
+    let hooks = ServiceHooks {
+        pre_start: Some(HookCommand::Script {
+            run: format!("id -u > {}", uid_marker_path.display()),
+            common: HookCommon {
+                user: Some("0".to_string()),
+                ..Default::default()
+            },
+        }),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "hook-override",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(), // No .with_user()
+        )
+        .build();
+
+    // Config owner is uid 65534, but hook has explicit user: "0"
+    let harness = TestDaemonHarness::new_with_config_owner(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+    )
+    .await
+    .unwrap();
+
+    harness.start_service("hook-override").await.unwrap();
+
+    assert!(
+        marker.wait_for_marker("hook_override_uid", Duration::from_secs(5)).await,
+        "Hook should have written UID marker"
+    );
+
+    let hook_uid: u32 = std::fs::read_to_string(&uid_marker_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    assert_eq!(
+        hook_uid, 0,
+        "Hook with explicit user: 0 should run as root despite config owner being 65534, got {}",
+        hook_uid
+    );
+
+    harness.stop_service("hook-override").await.unwrap();
+}
 
 /// Verify that log truncation rejects symlinked log files.
 ///
