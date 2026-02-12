@@ -9,6 +9,30 @@ on:
       tag:
         description: "Tag to release (e.g. v0.1.0). Leave empty for artifact-only build."
         required: false
+      linux-gnu-x86_64:
+        description: "x86_64-unknown-linux-gnu"
+        type: boolean
+        default: true
+      linux-gnu-aarch64:
+        description: "aarch64-unknown-linux-gnu"
+        type: boolean
+        default: true
+      linux-musl-x86_64:
+        description: "x86_64-unknown-linux-musl"
+        type: boolean
+        default: true
+      linux-musl-aarch64:
+        description: "aarch64-unknown-linux-musl"
+        type: boolean
+        default: true
+      macos-x86_64:
+        description: "x86_64-apple-darwin"
+        type: boolean
+        default: true
+      macos-aarch64:
+        description: "aarch64-apple-darwin"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -22,10 +46,12 @@ jobs:
             runner: blacksmith-4vcpu-ubuntu-2204
             packages: pkg-config g++
             env: {}
+            enabled: ${{ github.event_name == 'push' || inputs.linux-gnu-x86_64 }}
           - target: aarch64-unknown-linux-gnu
             runner: blacksmith-4vcpu-ubuntu-2204-arm
             packages: pkg-config g++
             env: {}
+            enabled: ${{ github.event_name == 'push' || inputs.linux-gnu-aarch64 }}
           - target: x86_64-unknown-linux-musl
             runner: blacksmith-4vcpu-ubuntu-2204
             packages: pkg-config
@@ -34,6 +60,7 @@ jobs:
               CC_x86_64_unknown_linux_musl: /opt/musl-cross/bin/x86_64-linux-musl-gcc
               CXX_x86_64_unknown_linux_musl: /opt/musl-cross/bin/x86_64-linux-musl-g++
               CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: /opt/musl-cross/bin/x86_64-linux-musl-gcc
+            enabled: ${{ github.event_name == 'push' || inputs.linux-musl-x86_64 }}
           - target: aarch64-unknown-linux-musl
             runner: blacksmith-4vcpu-ubuntu-2204
             packages: pkg-config
@@ -42,16 +69,20 @@ jobs:
               CC_aarch64_unknown_linux_musl: /opt/musl-cross/bin/aarch64-linux-musl-gcc
               CXX_aarch64_unknown_linux_musl: /opt/musl-cross/bin/aarch64-linux-musl-g++
               CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: /opt/musl-cross/bin/aarch64-linux-musl-gcc
+            enabled: ${{ github.event_name == 'push' || inputs.linux-musl-aarch64 }}
           - target: x86_64-apple-darwin
             runner: macos-15-intel
             packages: ""
             env: {}
+            enabled: ${{ github.event_name == 'push' || inputs.macos-x86_64 }}
           - target: aarch64-apple-darwin
             runner: macos-15
             packages: ""
             env: {}
+            enabled: ${{ github.event_name == 'push' || inputs.macos-aarch64 }}
 
     runs-on: ${{ matrix.runner }}
+    if: ${{ matrix.enabled == 'true' }}
 
     steps:
       - name: Checkout

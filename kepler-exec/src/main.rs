@@ -134,13 +134,13 @@ fn drop_privileges(uid: Option<u32>, gid: Option<u32>) {
     // Without this, the child inherits the daemon's supplementary groups
     // (e.g. docker, sudo, wheel), defeating privilege separation.
     if uid.is_some() || gid.is_some() {
-        use nix::unistd::{Gid, setgroups};
+        use nix::unistd::Gid;
 
-        let target_groups = match gid {
+        let target_groups: Vec<Gid> = match gid {
             Some(g) => vec![Gid::from_raw(g)],
             None => vec![],
         };
-        if let Err(e) = setgroups(&target_groups) {
+        if let Err(e) = setgroups_portable(&target_groups) {
             eprintln!("kepler-exec: setgroups({:?}) failed: {}", target_groups, e);
             process::exit(127);
         }
@@ -163,27 +163,40 @@ fn drop_privileges(uid: Option<u32>, gid: Option<u32>) {
     }
 }
 
+/// Portable setgroups: nix::unistd::setgroups is not available on Apple targets,
+/// so we call libc::setgroups directly.
+#[cfg(unix)]
+fn setgroups_portable(groups: &[nix::unistd::Gid]) -> Result<(), nix::errno::Errno> {
+    let gids: Vec<libc::gid_t> = groups.iter().map(|g| g.as_raw()).collect();
+    let ret = unsafe { libc::setgroups(gids.len() as libc::size_t, gids.as_ptr()) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(nix::errno::Errno::last())
+    }
+}
+
 /// Close all file descriptors above stderr (fd > 2) to prevent leaking
 /// daemon resources (sockets, log files, etc.) to the child process.
 #[cfg(unix)]
 fn close_inherited_fds() {
-    // Try close_range(3..) syscall first (Linux 5.9+), fall back to /proc iteration
-    let close_range_result: Result<(), nix::errno::Errno> = {
-        // close_range(3, u32::MAX, 0) closes all fds from 3 to max
+    // Try close_range syscall first (Linux 5.9+)
+    #[cfg(target_os = "linux")]
+    {
         let ret = unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
         if ret == 0 {
-            Ok(())
-        } else {
-            Err(nix::errno::Errno::last())
+            return;
         }
-    };
-
-    if close_range_result.is_ok() {
-        return;
     }
 
-    // Fallback: iterate /proc/self/fd
-    if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+    // Fallback: iterate fd directory (/proc/self/fd on Linux, /dev/fd on macOS)
+    let fd_dir = if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+
+    if let Ok(entries) = std::fs::read_dir(fd_dir) {
         let fds_to_close: Vec<i32> = entries
             .filter_map(|e| e.ok())
             .filter_map(|e| e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()))
