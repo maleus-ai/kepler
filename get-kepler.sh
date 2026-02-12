@@ -103,9 +103,14 @@ detect_target() {
             esac
             ;;
         Darwin)
-            error "Pre-built binaries are not available for macOS yet."
-            error "See https://github.com/${REPO}#installation for build-from-source instructions."
-            exit 1
+            case "$arch" in
+                x86_64)  echo "x86_64-apple-darwin" ;;
+                arm64)   echo "aarch64-apple-darwin" ;;
+                *)
+                    error "Unsupported architecture: $arch"
+                    exit 1
+                    ;;
+            esac
             ;;
         *)
             error "Unsupported OS: $os"
