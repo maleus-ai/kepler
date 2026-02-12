@@ -82,31 +82,33 @@ jobs:
             enabled: ${{ github.event_name == 'push' || inputs.macos-aarch64 }}
 
     runs-on: ${{ matrix.runner }}
-    if: ${{ matrix.enabled == 'true' }}
 
     steps:
       - name: Checkout
+        if: matrix.enabled == 'true'
         uses: actions/checkout@v4
 
       - name: Install Rust 1.93
+        if: matrix.enabled == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.93"
           targets: ${{ matrix.target }}
 
       - name: Install build dependencies
-        if: runner.os == 'Linux'
+        if: matrix.enabled == 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.packages }}
 
       - name: Install musl cross toolchain
-        if: matrix.musl-toolchain
+        if: matrix.enabled == 'true' && matrix.musl-toolchain
         run: |
           curl -sSfL "https://musl.cc/${{ matrix.musl-toolchain }}.tgz" | sudo tar xzf - -C /opt/
           sudo mv "/opt/${{ matrix.musl-toolchain }}" /opt/musl-cross
 
       - name: Cache cargo registry & target
+        if: matrix.enabled == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -118,10 +120,12 @@ jobs:
             release-${{ matrix.target }}-cargo-
 
       - name: Build release binaries
+        if: matrix.enabled == 'true'
         env: ${{ matrix.env }}
         run: cargo build --release --target ${{ matrix.target }} -p kepler-cli -p kepler-daemon -p kepler-exec
 
       - name: Determine version
+        if: matrix.enabled == 'true'
         id: version
         run: |
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
@@ -133,6 +137,7 @@ jobs:
           fi
 
       - name: Package tarball
+        if: matrix.enabled == 'true'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TARGET="${{ matrix.target }}"
@@ -150,6 +155,7 @@ jobs:
           echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
+        if: matrix.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.TARBALL }}
