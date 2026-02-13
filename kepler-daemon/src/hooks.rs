@@ -7,6 +7,22 @@ use crate::env::build_hook_env;
 use crate::errors::{DaemonError, Result};
 use crate::logs::LogWriterConfig;
 use crate::process::{spawn_blocking, BlockingMode, CommandSpec};
+use kepler_protocol::protocol::{ProgressEvent, ServicePhase};
+use kepler_protocol::server::ProgressSender;
+
+/// Emit a hook progress event if progress sender is available.
+async fn emit_hook_event(
+    progress: &Option<ProgressSender>,
+    service: &str,
+    phase: ServicePhase,
+) {
+    if let Some(p) = progress {
+        p.send(ProgressEvent {
+            service: service.to_string(),
+            phase,
+        }).await;
+    }
+}
 
 /// Context for running a hook
 pub struct HookRunContext<'a> {
@@ -254,7 +270,11 @@ pub fn global_hook_service_name(hook_type: GlobalHookType) -> String {
     format!("global.{}", hook_type.as_str())
 }
 
-/// Run a global hook if it exists
+/// Run a global hook if it exists.
+///
+/// When `progress` is `Some`, emits `HookStarted` before and
+/// `HookCompleted`/`HookFailed` after execution. Skipped when the hook
+/// is not defined.
 ///
 /// Note: Global hooks always run as the daemon user (no service user to inherit).
 pub async fn run_global_hook(
@@ -264,6 +284,7 @@ pub async fn run_global_hook(
     env: &HashMap<String, String>,
     log_config: Option<&LogWriterConfig>,
     global_log_config: Option<&LogConfig>,
+    progress: &Option<ProgressSender>,
 ) -> Result<()> {
     let hooks = match hooks {
         Some(h) => h,
@@ -272,6 +293,9 @@ pub async fn run_global_hook(
 
     if let Some(hook) = hook_type.get(hooks) {
         info!("Running global {} hook", hook_type.as_str());
+        let hook_name = hook_type.as_str().to_string();
+        emit_hook_event(progress, "global", ServicePhase::HookStarted { hook: hook_name.clone() }).await;
+
         let service_name = global_hook_service_name(hook_type);
         // Resolve store settings from global config
         let (store_stdout, store_stderr) = resolve_log_store(None, global_log_config);
@@ -286,7 +310,15 @@ pub async fn run_global_hook(
             store_stdout,
             store_stderr,
         };
-        run_hook(hook, &ctx).await?;
+        match run_hook(hook, &ctx).await {
+            Ok(()) => {
+                emit_hook_event(progress, "global", ServicePhase::HookCompleted { hook: hook_name }).await;
+            }
+            Err(e) => {
+                emit_hook_event(progress, "global", ServicePhase::HookFailed { hook: hook_name, message: e.to_string() }).await;
+                return Err(e);
+            }
+        }
     }
 
     Ok(())
@@ -297,12 +329,17 @@ pub fn service_hook_log_name(service_name: &str, hook_type: ServiceHookType) -> 
     format!("{}.{}", service_name, hook_type.as_str())
 }
 
-/// Run a service hook if it exists
+/// Run a service hook if it exists.
+///
+/// When `progress` is `Some`, emits `HookStarted` before and
+/// `HookCompleted`/`HookFailed` after execution. Skipped when the hook
+/// is not defined.
 pub async fn run_service_hook(
     hooks: &Option<ServiceHooks>,
     hook_type: ServiceHookType,
     service_name: &str,
     params: &ServiceHookParams<'_>,
+    progress: &Option<ProgressSender>,
 ) -> Result<()> {
     let hooks = match hooks {
         Some(h) => h,
@@ -315,6 +352,9 @@ pub async fn run_service_hook(
             hook_type.as_str(),
             service_name
         );
+        let hook_name = hook_type.as_str().to_string();
+        emit_hook_event(progress, service_name, ServicePhase::HookStarted { hook: hook_name.clone() }).await;
+
         let log_name = service_hook_log_name(service_name, hook_type);
         // Resolve store settings: service config > global config > default
         let (store_stdout, store_stderr) = resolve_log_store(params.service_log_config, params.global_log_config);
@@ -329,7 +369,9 @@ pub async fn run_service_hook(
             store_stderr,
         };
         match run_hook(hook, &ctx).await {
-            Ok(()) => {}
+            Ok(()) => {
+                emit_hook_event(progress, service_name, ServicePhase::HookCompleted { hook: hook_name }).await;
+            }
             Err(e) => {
                 error!(
                     "Hook {} failed for service {}: {}",
@@ -337,6 +379,7 @@ pub async fn run_service_hook(
                     service_name,
                     e
                 );
+                emit_hook_event(progress, service_name, ServicePhase::HookFailed { hook: hook_name, message: e.to_string() }).await;
                 return Err(e);
             }
         }

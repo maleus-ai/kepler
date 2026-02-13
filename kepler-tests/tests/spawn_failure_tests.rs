@@ -72,14 +72,14 @@ async fn test_start_with_nonexistent_working_dir_retries_without_hanging() {
 
     // First start should fail with a spawn error
     let result = orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), None)
+        .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await;
     assert!(result.is_err(), "First start should fail due to nonexistent working directory");
 
     // Second start must complete (fail or succeed) within a reasonable time — NOT hang.
     let result2 = tokio::time::timeout(
         Duration::from_secs(5),
-        orchestrator.start_services(&config_path, None, Some(sys_env.clone()), None),
+        orchestrator.start_services(&config_path, None, Some(sys_env.clone()), None, None),
     )
     .await;
 
@@ -123,7 +123,7 @@ async fn test_failed_config_remains_in_registry() {
 
     // Start should fail
     let result = orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), None)
+        .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await;
     assert!(result.is_err(), "Start should fail with bad working directory");
 

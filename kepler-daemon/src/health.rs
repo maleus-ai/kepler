@@ -191,6 +191,7 @@ async fn run_status_change_hook(
             hook_type,
             service_name,
             &hook_params,
+            &None,
         )
         .await
         {

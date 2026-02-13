@@ -39,6 +39,7 @@ use crate::process::{spawn_service, stop_service, ProcessExitEvent, SpawnService
 use crate::state::ServiceStatus;
 use crate::watcher::{spawn_file_watcher, FileChangeEvent};
 use kepler_protocol::protocol::PrunedConfigInfo;
+use kepler_protocol::server::ProgressSender;
 
 /// Context for post-startup work, bundling all parameters into a single struct.
 struct StartupContext<'a> {
@@ -53,7 +54,9 @@ struct StartupContext<'a> {
     stored_env: &'a HashMap<String, String>,
     log_config: &'a LogWriterConfig,
     run_global_hooks: bool,
+    progress: &'a Option<ProgressSender>,
 }
+
 
 /// Coordinator for service lifecycle operations.
 ///
@@ -106,6 +109,7 @@ impl ServiceOrchestrator {
         service_filter: Option<&str>,
         sys_env: Option<HashMap<String, String>>,
         config_owner: Option<(u32, u32)>,
+        progress: Option<ProgressSender>,
     ) -> Result<String, OrchestratorError> {
         // Get or create the config actor
         let handle = self
@@ -178,6 +182,7 @@ impl ServiceOrchestrator {
                     &stored_env,
                     Some(&log_config),
                     global_log_config.as_ref(),
+                    &progress,
                 )
                 .await?;
             }
@@ -190,6 +195,7 @@ impl ServiceOrchestrator {
                 &stored_env,
                 Some(&log_config),
                 global_log_config.as_ref(),
+                &progress,
             )
             .await?;
         }
@@ -204,7 +210,7 @@ impl ServiceOrchestrator {
                     continue;
                 }
 
-                match self.start_single_service(&handle, service_name).await {
+                match self.start_single_service(&handle, service_name, &progress).await {
                     Ok(()) => started.push(service_name.clone()),
                     Err(OrchestratorError::StartupCancelled(_)) => {
                         debug!("Service {} startup was cancelled, skipping", service_name);
@@ -229,7 +235,7 @@ impl ServiceOrchestrator {
 
             // Start startup cluster services
             let started = if !startup_services.is_empty() {
-                self.start_services_by_level(&startup_services, &config, &handle, true).await?
+                self.start_services_by_level(&startup_services, &config, &handle, true, &progress).await?
             } else {
                 Vec::new()
             };
@@ -247,6 +253,7 @@ impl ServiceOrchestrator {
                 stored_env: &stored_env,
                 log_config: &log_config,
                 run_global_hooks: true,
+                progress: &progress,
             }).await?;
 
             // Spawn deferred services in background (don't block the response)
@@ -261,6 +268,7 @@ impl ServiceOrchestrator {
                         &config_clone,
                         &handle_clone,
                         false,
+                        &None, // No progress for deferred (background) services
                     ).await {
                         warn!("Error starting deferred services: {}", e);
                     }
@@ -284,6 +292,7 @@ impl ServiceOrchestrator {
                 stored_env: &stored_env,
                 log_config: &log_config,
                 run_global_hooks: false, // no global hooks for specific service
+                progress: &progress,
             }).await?;
         }
 
@@ -342,6 +351,7 @@ impl ServiceOrchestrator {
                     ctx.stored_env,
                     Some(ctx.log_config),
                     ctx.global_log_config,
+                    ctx.progress,
                 )
                 .await
             {
@@ -362,6 +372,7 @@ impl ServiceOrchestrator {
         &self,
         handle: &ConfigActorHandle,
         service_name: &str,
+        progress: &Option<ProgressSender>,
     ) -> Result<(), OrchestratorError> {
         // Atomically claim this service for starting. If another concurrent
         // request already claimed it (or it's already running), skip.
@@ -372,7 +383,7 @@ impl ServiceOrchestrator {
 
         // Run the actual startup. If anything fails after claiming, reset
         // status to Failed so the service isn't stuck in Starting forever.
-        let result = self.execute_service_startup(handle, service_name).await;
+        let result = self.execute_service_startup(handle, service_name, progress).await;
         if result.is_err() {
             let _ = handle.set_service_status(service_name, ServiceStatus::Failed).await;
         }
@@ -384,6 +395,7 @@ impl ServiceOrchestrator {
         &self,
         handle: &ConfigActorHandle,
         service_name: &str,
+        progress: &Option<ProgressSender>,
     ) -> Result<(), OrchestratorError> {
         // Get service context (single round-trip)
         let ctx = handle
@@ -404,7 +416,7 @@ impl ServiceOrchestrator {
             // Emit Init event
             handle.emit_event(service_name, ServiceEvent::Init).await;
 
-            self.run_service_hook(&ctx, service_name, ServiceHookType::OnInit)
+            self.run_service_hook(&ctx, service_name, ServiceHookType::OnInit, progress)
                 .await?;
         }
 
@@ -412,7 +424,7 @@ impl ServiceOrchestrator {
         handle.emit_event(service_name, ServiceEvent::Start).await;
 
         // Run pre_start hook
-        self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart)
+        self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, progress)
             .await?;
 
         // Apply on_start log retention
@@ -434,7 +446,7 @@ impl ServiceOrchestrator {
         self.spawn_service(handle, service_name, &ctx).await?;
 
         // Run post_start hook (after process spawned)
-        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart).await {
+        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart, progress).await {
             warn!("Hook post_start failed for {}: {}", service_name, e);
         }
 
@@ -619,6 +631,7 @@ impl ServiceOrchestrator {
                 &stored_env,
                 Some(log_cfg),
                 global_log_config.as_ref(),
+                &None,
             )
             .await
         {
@@ -654,7 +667,7 @@ impl ServiceOrchestrator {
                 if let Some(ref ctx) = ctx {
                     // Run pre_stop hook
                     if let Err(e) = self
-                        .run_service_hook(ctx, service_name, ServiceHookType::PreStop)
+                        .run_service_hook(ctx, service_name, ServiceHookType::PreStop, &None)
                         .await
                     {
                         warn!("Hook pre_stop failed for {}: {}", service_name, e);
@@ -669,7 +682,7 @@ impl ServiceOrchestrator {
                 // Run post_stop hook (after process stopped)
                 if let Some(ref ctx) = ctx
                     && let Err(e) = self
-                        .run_service_hook(ctx, service_name, ServiceHookType::PostStop)
+                        .run_service_hook(ctx, service_name, ServiceHookType::PostStop, &None)
                         .await
                     {
                         warn!("Hook post_stop failed for {}: {}", service_name, e);
@@ -722,6 +735,7 @@ impl ServiceOrchestrator {
                 &stored_env,
                 Some(log_cfg),
                 global_log_config.as_ref(),
+                &None,
             )
             .await
         {
@@ -741,7 +755,7 @@ impl ServiceOrchestrator {
             for service_name in &services_to_stop {
                 let ctx = handle.get_service_context(service_name).await;
                 if let Some(ref ctx) = ctx {
-                    if let Err(e) = self.run_service_hook(ctx, service_name, ServiceHookType::PreCleanup).await {
+                    if let Err(e) = self.run_service_hook(ctx, service_name, ServiceHookType::PreCleanup, &None).await {
                         warn!("Hook pre_cleanup failed for {}: {}", service_name, e);
                     }
                 }
@@ -756,6 +770,7 @@ impl ServiceOrchestrator {
                     &stored_env,
                     Some(log_cfg),
                     global_log_config.as_ref(),
+                    &None,
                 )
                 .await
             {
@@ -957,6 +972,7 @@ impl ServiceOrchestrator {
                 &stored_env,
                 Some(log_cfg),
                 global_log_config.as_ref(),
+                &None,
             )
             .await
         {
@@ -985,12 +1001,12 @@ impl ServiceOrchestrator {
                 .await;
 
             // Run pre_restart hook
-            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreRestart).await {
+            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreRestart, &None).await {
                 warn!("Hook pre_restart failed for {}: {}", service_name, e);
             }
 
             // Run pre_stop hook
-            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStop).await {
+            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStop, &None).await {
                 warn!("Hook pre_stop failed for {}: {}", service_name, e);
             }
 
@@ -1003,7 +1019,7 @@ impl ServiceOrchestrator {
             }
 
             // Run post_stop hook
-            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStop).await {
+            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStop, &None).await {
                 warn!("Hook post_stop failed for {}: {}", service_name, e);
             }
 
@@ -1029,7 +1045,7 @@ impl ServiceOrchestrator {
             handle.emit_event(service_name, ServiceEvent::Start).await;
 
             // Run pre_start hook
-            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart).await {
+            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, &None).await {
                 warn!("Hook pre_start failed for {}: {}", service_name, e);
                 continue;
             }
@@ -1043,12 +1059,12 @@ impl ServiceOrchestrator {
                     restarted.push(service_name.clone());
 
                     // Run post_start hook
-                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart).await {
+                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart, &None).await {
                         warn!("Hook post_start failed for {}: {}", service_name, e);
                     }
 
                     // Run post_restart hook
-                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart).await {
+                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart, &None).await {
                         warn!("Hook post_restart failed for {}: {}", service_name, e);
                     }
 
@@ -1075,6 +1091,7 @@ impl ServiceOrchestrator {
                 &stored_env,
                 Some(log_cfg),
                 global_log_config.as_ref(),
+                &None,
             )
             .await
         {
@@ -1187,7 +1204,7 @@ impl ServiceOrchestrator {
 
         // Run pre_restart hook
         if let Err(e) = self
-            .run_service_hook(&ctx, service_name, ServiceHookType::PreRestart)
+            .run_service_hook(&ctx, service_name, ServiceHookType::PreRestart, &None)
             .await
         {
             warn!("Hook pre_restart failed for {}: {}", service_name, e);
@@ -1195,7 +1212,7 @@ impl ServiceOrchestrator {
 
         // Run pre_stop hook
         if let Err(e) = self
-            .run_service_hook(&ctx, service_name, ServiceHookType::PreStop)
+            .run_service_hook(&ctx, service_name, ServiceHookType::PreStop, &None)
             .await
         {
             warn!("Hook pre_stop failed for {}: {}", service_name, e);
@@ -1212,7 +1229,7 @@ impl ServiceOrchestrator {
 
         // Run post_stop hook (after process stopped)
         if let Err(e) = self
-            .run_service_hook(&ctx, service_name, ServiceHookType::PostStop)
+            .run_service_hook(&ctx, service_name, ServiceHookType::PostStop, &None)
             .await
         {
             warn!("Hook post_stop failed for {}: {}", service_name, e);
@@ -1231,7 +1248,7 @@ impl ServiceOrchestrator {
         handle.emit_event(service_name, ServiceEvent::Start).await;
 
         // Run pre_start hook (runs on every start, including restarts)
-        self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart)
+        self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, &None)
             .await?;
 
         // Apply on_start log retention
@@ -1242,12 +1259,12 @@ impl ServiceOrchestrator {
         self.spawn_service(&handle, service_name, &ctx).await?;
 
         // Run post_start hook (after process spawned)
-        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart).await {
+        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart, &None).await {
             warn!("Hook post_start failed for {}: {}", service_name, e);
         }
 
         // Run post_restart hook (after restart complete)
-        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart).await {
+        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart, &None).await {
             warn!("Hook post_restart failed for {}: {}", service_name, e);
         }
 
@@ -1295,7 +1312,7 @@ impl ServiceOrchestrator {
 
         // Run post_exit hook
         if let Err(e) = self
-            .run_service_hook(&ctx, service_name, ServiceHookType::PostExit)
+            .run_service_hook(&ctx, service_name, ServiceHookType::PostExit, &None)
             .await
         {
             warn!("Hook post_exit failed for {}: {}", service_name, e);
@@ -1336,7 +1353,7 @@ impl ServiceOrchestrator {
 
             // Run pre_restart hook
             if let Err(e) = self
-                .run_service_hook(&ctx, service_name, ServiceHookType::PreRestart)
+                .run_service_hook(&ctx, service_name, ServiceHookType::PreRestart, &None)
                 .await
             {
                 warn!("Hook pre_restart failed for {}: {}", service_name, e);
@@ -1344,7 +1361,7 @@ impl ServiceOrchestrator {
 
             // Run pre_start hook
             if let Err(e) = self
-                .run_service_hook(&ctx, service_name, ServiceHookType::PreStart)
+                .run_service_hook(&ctx, service_name, ServiceHookType::PreStart, &None)
                 .await
             {
                 warn!("Hook pre_start failed for {}: {}", service_name, e);
@@ -1364,12 +1381,12 @@ impl ServiceOrchestrator {
             match self.spawn_service(&handle, service_name, &ctx).await {
                 Ok(()) => {
                     // Run post_start hook (after process spawned)
-                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart).await {
+                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart, &None).await {
                         warn!("Hook post_start failed for {}: {}", service_name, e);
                     }
 
                     // Run post_restart hook (after restart complete)
-                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart).await {
+                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart, &None).await {
                         warn!("Hook post_restart failed for {}: {}", service_name, e);
                     }
 
@@ -1442,6 +1459,7 @@ impl ServiceOrchestrator {
         config: &KeplerConfig,
         handle: &ConfigActorHandle,
         fail_fast: bool,
+        progress: &Option<ProgressSender>,
     ) -> Result<Vec<String>, OrchestratorError> {
         let levels = get_start_levels(&config.services)?;
         let mut started = Vec::new();
@@ -1466,8 +1484,9 @@ impl ServiceOrchestrator {
                 let handle_clone = handle.clone();
                 let service_name_clone = service_name.clone();
                 let self_ref = self;
+                let progress_ref = progress;
                 tasks.push(async move {
-                    let result = self_ref.start_single_service(&handle_clone, &service_name_clone).await;
+                    let result = self_ref.start_single_service(&handle_clone, &service_name_clone, progress_ref).await;
                     (service_name_clone, result)
                 });
             }
@@ -1503,12 +1522,13 @@ impl ServiceOrchestrator {
 
     // --- Internal helpers ---
 
-    /// Run a service hook
+    /// Run a service hook, forwarding the progress sender for event emission.
     async fn run_service_hook(
         &self,
         ctx: &ServiceContext,
         service_name: &str,
         hook_type: ServiceHookType,
+        progress: &Option<ProgressSender>,
     ) -> Result<(), OrchestratorError> {
         let hook_params = ServiceHookParams::from_service_context(
             &ctx.service_config,
@@ -1523,6 +1543,7 @@ impl ServiceOrchestrator {
             hook_type,
             service_name,
             &hook_params,
+            progress,
         )
         .await
         .map_err(|e| OrchestratorError::HookFailed(e.to_string()))
@@ -1784,6 +1805,7 @@ impl ServiceOrchestrator {
             &snapshot.sys_env,
             None, // No log buffer for prune
             snapshot.config.global_logs(),
+            &None,
         )
         .await
         {

@@ -440,6 +440,12 @@ pub enum ServicePhase {
     Cleaning,
     Cleaned,
     Failed { message: String },
+    /// A lifecycle hook started execution
+    HookStarted { hook: String },
+    /// A lifecycle hook completed successfully (exit code 0)
+    HookCompleted { hook: String },
+    /// A lifecycle hook failed (non-zero exit code)
+    HookFailed { hook: String, message: String },
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
@@ -1035,6 +1041,9 @@ mod tests {
             ServicePhase::Cleaning,
             ServicePhase::Cleaned,
             ServicePhase::Failed { message: "boom".into() },
+            ServicePhase::HookStarted { hook: "pre_start".into() },
+            ServicePhase::HookCompleted { hook: "pre_start".into() },
+            ServicePhase::HookFailed { hook: "on_init".into(), message: "Exit code: Some(127)".into() },
         ];
 
         for (i, phase) in phases.into_iter().enumerate() {

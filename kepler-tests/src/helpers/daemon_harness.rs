@@ -197,6 +197,7 @@ impl TestDaemonHarness {
                 ServiceHookType::OnInit,
                 service_name,
                 &hook_params,
+                &None,
             )
             .await?;
 
@@ -212,6 +213,7 @@ impl TestDaemonHarness {
             ServiceHookType::PreStart,
             service_name,
             &hook_params,
+            &None,
         )
         .await?;
 
@@ -314,6 +316,7 @@ impl TestDaemonHarness {
             ServiceHookType::PreStop,
             service_name,
             &hook_params,
+            &None,
         )
         .await?;
 
@@ -345,6 +348,7 @@ impl TestDaemonHarness {
             ServiceHookType::PreStop,
             service_name,
             &hook_params,
+            &None,
         )
         .await?;
 
@@ -418,6 +422,7 @@ impl TestDaemonHarness {
                     ServiceHookType::PreRestart,
                     &event.service_name,
                     &hook_params,
+                    &None,
                 )
                 .await;
 
@@ -516,6 +521,7 @@ impl TestDaemonHarness {
                     ServiceHookType::PostExit,
                     &event.service_name,
                     &hook_params,
+                    &None,
                 )
                 .await;
 
@@ -553,6 +559,7 @@ impl TestDaemonHarness {
                         ServiceHookType::PreRestart,
                         &event.service_name,
                         &hook_params,
+                        &None,
                     )
                     .await;
 
