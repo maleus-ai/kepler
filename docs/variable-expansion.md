@@ -30,7 +30,7 @@ The following config fields are expanded at config load time:
 - `working_dir`
 - `env_file`
 - `user`
-- `group`
+- `groups`
 - `environment` entries
 - `limits.memory`
 - `restart.watch` patterns
@@ -57,7 +57,7 @@ The available variables depend on the expansion stage. See [Environment Variable
 |-------|----------------|---------------------|
 | 1 | `env_file` path | System environment |
 | 2 | `environment` array | System env + env_file vars |
-| 3 | `working_dir`, `user`, `group`, etc. | System env + env_file + environment |
+| 3 | `working_dir`, `user`, `groups`, etc. | System env + env_file + environment |
 
 ---
 

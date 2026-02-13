@@ -183,15 +183,17 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
             let exec_path = find_kepler_exec().expect("kepler-exec verified present above");
             let mut wrapper_args: Vec<String> = Vec::new();
 
-            // Resolve uid/gid to numeric values
+            // Pass user spec to kepler-exec (it does its own resolution)
             if let Some(ref user) = spec.user {
-                use crate::user::resolve_user;
-                let (uid, gid) = resolve_user(user, spec.group.as_deref())?;
-                wrapper_args.push("--uid".to_string());
-                wrapper_args.push(uid.to_string());
-                wrapper_args.push("--gid".to_string());
-                wrapper_args.push(gid.to_string());
-                debug!("Command will run as uid={}, gid={} (via kepler-exec)", uid, gid);
+                wrapper_args.push("--user".to_string());
+                wrapper_args.push(user.clone());
+                debug!("Command will run as user='{}' (via kepler-exec)", user);
+            }
+
+            // Pass explicit groups lockdown if specified
+            if !spec.groups.is_empty() {
+                wrapper_args.push("--groups".to_string());
+                wrapper_args.push(spec.groups.join(","));
             }
 
             // Resolve resource limits to numeric values
@@ -234,24 +236,73 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
         cmd = Command::new(program);
         cmd.args(args);
 
-        // Fallback: apply user/group directly (triggers fork)
+        // Fallback: apply user/group/groups and resource limits via pre_exec (triggers fork)
         #[cfg(unix)]
-        if let Some(ref user) = spec.user {
-            use crate::user::resolve_user;
-            let (uid, gid) = resolve_user(user, spec.group.as_deref())?;
-            cmd.uid(uid);
-            cmd.gid(gid);
-            debug!("Command will run as uid={}, gid={} (fork fallback)", uid, gid);
-        }
+        {
+            let user_ref = spec.user.clone();
+            let groups_ref = spec.groups.clone();
+            let limits_ref = spec.limits.clone();
+            let needs_pre_exec = user_ref.is_some() || limits_ref.is_some();
 
-        // Fallback: apply resource limits via pre_exec (triggers fork)
-        #[cfg(unix)]
-        if let Some(ref limits) = spec.limits {
-            let limits = limits.clone();
-            // SAFETY: pre_exec runs in a forked child process before exec.
-            // apply_resource_limits only calls setrlimit which is async-signal-safe.
-            unsafe {
-                cmd.pre_exec(move || apply_resource_limits(&limits));
+            if needs_pre_exec {
+                // Resolve user before pre_exec (requires passwd/group lookups)
+                let resolved = if let Some(ref user) = user_ref {
+                    use crate::user::resolve_user;
+                    let r = resolve_user(user)?;
+                    debug!("Command will run as uid={}, gid={} (fork fallback)", r.uid, r.gid);
+                    Some(r)
+                } else {
+                    None
+                };
+
+                // Resolve group names to gids before pre_exec
+                let resolved_groups: Vec<u32> = if !groups_ref.is_empty() {
+                    groups_ref.iter().map(|g| crate::user::resolve_group(g)).collect::<crate::errors::Result<Vec<u32>>>()?
+                } else {
+                    Vec::new()
+                };
+
+                // SAFETY: pre_exec runs in a forked child process before exec.
+                // setgroups/initgroups/setgid/setuid/setrlimit are async-signal-safe.
+                unsafe {
+                    cmd.pre_exec(move || {
+                        if let Some(ref resolved) = resolved {
+                            // Set supplementary groups
+                            if !resolved_groups.is_empty() {
+                                let gids: Vec<libc::gid_t> = resolved_groups.iter().copied().collect();
+                                if libc::setgroups(gids.len() as _, gids.as_ptr()) != 0 {
+                                    return Err(std::io::Error::last_os_error());
+                                }
+                            } else if let Some(ref username) = resolved.username {
+                                let c_name = std::ffi::CString::new(username.as_str())
+                                    .map_err(|_| std::io::Error::other("invalid username"))?;
+                                if libc::initgroups(c_name.as_ptr(), resolved.gid) != 0 {
+                                    return Err(std::io::Error::last_os_error());
+                                }
+                            } else {
+                                let gid: libc::gid_t = resolved.gid;
+                                if libc::setgroups(1, &gid) != 0 {
+                                    return Err(std::io::Error::last_os_error());
+                                }
+                            }
+
+                            // setgid then setuid
+                            if libc::setgid(resolved.gid) != 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            if libc::setuid(resolved.uid) != 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        }
+
+                        // Apply resource limits
+                        if let Some(ref limits) = limits_ref {
+                            apply_resource_limits(limits)?;
+                        }
+
+                        Ok(())
+                    });
+                }
             }
         }
     }

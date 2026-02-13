@@ -200,7 +200,7 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub user: Option<String>,
     #[serde(default)]
-    pub group: Option<String>,
+    pub groups: Vec<String>,
     /// Resource limits for the process
     #[serde(default)]
     pub limits: Option<ResourceLimits>,

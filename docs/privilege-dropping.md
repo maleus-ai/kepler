@@ -5,7 +5,7 @@ Kepler can run services and hooks as specific users/groups with resource limits.
 ## Table of Contents
 
 - [User Configuration](#user-configuration)
-- [Group Configuration](#group-configuration)
+- [Supplementary Groups](#supplementary-groups)
 - [How Privilege Dropping Works](#how-privilege-dropping-works)
 - [Hook Inheritance](#hook-inheritance)
 - [Resource Limits](#resource-limits)
@@ -15,12 +15,13 @@ Kepler can run services and hooks as specific users/groups with resource limits.
 
 ## User Configuration
 
-The `user` field specifies which user the service runs as. Three formats are supported:
+The `user` field specifies which user the service runs as. Four formats are supported:
 
 | Format | Example | Description |
 |--------|---------|-------------|
 | Username | `"node"` | Resolve user by name |
-| Numeric UID | `"1000"` | Resolve user by UID |
+| Numeric UID | `"1000"` | Resolve user by UID (GID defaults to same value) |
+| Username:Group | `"node:docker"` | User by name with primary group override |
 | UID:GID | `"1000:1000"` | Explicit UID and GID |
 
 ```yaml
@@ -36,6 +37,10 @@ services:
   frontend:
     command: ["npm", "run", "dev"]
     user: "1000:1000"
+
+  docker-service:
+    command: ["./build"]
+    user: "appuser:docker"    # Run as appuser with docker as primary group
 ```
 
 When `user` is set, the daemon drops privileges for that service's process.
@@ -63,16 +68,36 @@ services:
 
 ---
 
-## Group Configuration
+## Supplementary Groups
 
-The `group` field provides an explicit group override. When not set, the service uses the user's primary group:
+By default, when a service runs as a named user, all supplementary groups from `/etc/group` are loaded via `initgroups()`. This preserves access to resources that require group membership (e.g., Docker socket requiring the `docker` group).
+
+The `groups` field provides an optional lockdown of supplementary groups. When specified, only the listed groups are set via `setgroups()`, replacing the default behavior:
 
 ```yaml
 services:
+  # Default: all supplementary groups from /etc/group are loaded
   backend:
     command: ["./server"]
     user: appuser
-    group: developers    # Override primary group
+
+  # Explicit lockdown: only docker and kepler groups
+  build-service:
+    command: ["./build"]
+    user: appuser
+    groups: ["docker", "kepler"]
+```
+
+| Behavior | When | What happens |
+|----------|------|--------------|
+| Default (no `groups`) | User resolved by name | `initgroups(username, gid)` loads all supplementary groups |
+| Default (no `groups`) | Numeric UID with no passwd entry | `setgroups([gid])` sets only the primary group |
+| Explicit lockdown | `groups` specified | `setgroups(resolved_gids)` sets exactly those groups |
+
+Groups can be specified as names or numeric GIDs:
+
+```yaml
+groups: ["docker", "1001", "kepler"]
 ```
 
 ---
@@ -82,10 +107,11 @@ services:
 Kepler uses the `kepler-exec` helper binary to drop privileges:
 
 1. Daemon spawns `kepler-exec` (still running as root)
-2. `kepler-exec` calls `setgid()` to set the target group
-3. `kepler-exec` calls `setuid()` to set the target user
-4. `kepler-exec` applies resource limits (if configured)
-5. `kepler-exec` executes the service command
+2. `kepler-exec` resolves the user specification and sets supplementary groups (`initgroups` or `setgroups`)
+3. `kepler-exec` calls `setgid()` to set the primary group
+4. `kepler-exec` calls `setuid()` to set the target user
+5. `kepler-exec` applies resource limits (if configured)
+6. `kepler-exec` executes the service command
 
 This ensures the service process never runs as root, even momentarily after spawn.
 
@@ -151,8 +177,7 @@ Examples: `"256M"`, `"1G"`, `"2048K"`
 services:
   backend:
     command: ["node", "server.js"]
-    user: node
-    group: webapps
+    user: "node:webapps"
     limits:
       memory: "1G"
       max_fds: 4096

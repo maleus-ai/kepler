@@ -58,8 +58,7 @@ services:
   backend:
     working_dir: ./apps/backend
     command: ["npm", "run", "dev"]
-    user: node
-    group: developers
+    user: "node:developers"
     depends_on:
       database:
         condition: service_healthy  # Wait for DB to be healthy
@@ -179,8 +178,8 @@ See [Hooks](hooks.md) for format, execution order, and examples.
 | `restart` | `string\|object` | `no` | Restart policy. See [Restart Configuration](#restart-configuration) |
 | `healthcheck` | `object` | - | Health check config. See [Health Checks](health-checks.md) |
 | `hooks` | `object` | - | Service-specific hooks. See [Hooks](hooks.md) |
-| `user` | `string` | CLI user | User to run as (Unix). Defaults to the CLI user who loaded the config. See [Privilege Dropping](privilege-dropping.md) |
-| `group` | `string` | - | Group override (Unix) |
+| `user` | `string` | CLI user | User to run as (Unix). Supports `"name"`, `"uid"`, `"name:group"`, `"uid:gid"`. Defaults to the CLI user who loaded the config. See [Privilege Dropping](privilege-dropping.md) |
+| `groups` | `string[]` | `[]` | Supplementary groups lockdown (Unix). When empty, all groups are loaded via `initgroups`. See [Privilege Dropping](privilege-dropping.md) |
 | `logs` | `object` | - | Log configuration. See [Log Management](log-management.md) |
 | `limits` | `object` | - | Resource limits. See [Privilege Dropping](privilege-dropping.md) |
 | `wait` | `bool` | - | Override startup/deferred classification. See [Dependencies](dependencies.md) |
@@ -189,7 +188,8 @@ See [Hooks](hooks.md) for format, execution order, and examples.
 
 User format (Unix only):
 - `"username"` -- resolve by name
-- `"1000"` -- numeric UID
+- `"1000"` -- numeric UID (GID defaults to same value)
+- `"username:group"` -- user by name with primary group override
 - `"1000:1000"` -- explicit UID:GID
 
 ### Resource Limits

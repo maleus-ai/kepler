@@ -98,7 +98,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         working_dir,
         env,
         service_config.user.clone(),
-        service_config.group.clone(),
+        service_config.groups.clone(),
         service_config.limits.clone(),
         clear_env,
     );

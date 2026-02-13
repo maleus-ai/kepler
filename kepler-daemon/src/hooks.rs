@@ -15,7 +15,7 @@ pub struct HookRunContext<'a> {
     pub log_config: Option<&'a LogWriterConfig>,
     pub service_name: &'a str,
     pub service_user: Option<&'a str>,
-    pub service_group: Option<&'a str>,
+    pub service_groups: &'a [String],
     pub store_stdout: bool,
     pub store_stderr: bool,
 }
@@ -26,7 +26,7 @@ pub struct ServiceHookParams<'a> {
     pub env: &'a HashMap<String, String>,
     pub log_config: Option<&'a LogWriterConfig>,
     pub service_user: Option<&'a str>,
-    pub service_group: Option<&'a str>,
+    pub service_groups: &'a [String],
     pub service_log_config: Option<&'a LogConfig>,
     pub global_log_config: Option<&'a LogConfig>,
 }
@@ -48,7 +48,7 @@ impl<'a> ServiceHookParams<'a> {
             env,
             log_config,
             service_user: service_config.user.as_deref(),
-            service_group: service_config.group.as_deref(),
+            service_groups: &service_config.groups,
             service_log_config: service_config.logs.as_ref(),
             global_log_config,
         }
@@ -204,12 +204,14 @@ pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>) -> Result<()
         None => ctx.service_user.map(|s| s.to_string()), // Inherit from service
     };
 
-    // Determine effective group
-    // Priority: hook group > service group
-    let effective_group = hook
-        .group()
-        .map(|s| s.to_string())
-        .or_else(|| ctx.service_group.map(|s| s.to_string()));
+    // Determine effective groups
+    // Priority: hook groups > service groups
+    let hook_groups = hook.groups();
+    let effective_groups = if !hook_groups.is_empty() {
+        hook_groups.to_vec()
+    } else {
+        ctx.service_groups.to_vec()
+    };
 
     debug!(
         "Running hook: {} {:?}",
@@ -223,7 +225,7 @@ pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>) -> Result<()
         effective_working_dir,
         hook_env,
         effective_user,
-        effective_group,
+        effective_groups,
     );
 
     // Spawn using blocking mode with logging
@@ -280,7 +282,7 @@ pub async fn run_global_hook(
             log_config,
             service_name: &service_name,
             service_user: None,
-            service_group: None,
+            service_groups: &[],
             store_stdout,
             store_stderr,
         };
@@ -322,7 +324,7 @@ pub async fn run_service_hook(
             log_config: params.log_config,
             service_name: &log_name,
             service_user: params.service_user,
-            service_group: params.service_group,
+            service_groups: params.service_groups,
             store_stdout,
             store_stderr,
         };

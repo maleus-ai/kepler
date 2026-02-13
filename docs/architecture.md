@@ -657,7 +657,7 @@ flowchart TD
 |-------|------------------|-------------------|
 | 1 | `env_file` path | System environment only |
 | 2 | `environment` array entries | System env + env_file variables |
-| 3 | `working_dir`, `user`, `group`, `limits.memory`, `restart.watch` | System env + env_file + environment array |
+| 3 | `working_dir`, `user`, `groups`, `limits.memory`, `restart.watch` | System env + env_file + environment array |
 
 See [Environment Variables](environment-variables.md) for the full reference.
 
@@ -783,7 +783,7 @@ This ordering ensures that each stage has access to the variables it needs while
 
 The daemon must run as root. This is enforced unconditionally on startup — the daemon exits with an error if not running as root. Root is required to:
 
-- Drop privileges per-service (setuid/setgid to the configured `user`/`group`)
+- Drop privileges per-service (setuid/setgid/initgroups to the configured `user`/`groups`)
 - Create and chown the state directory and socket to `root:kepler`
 - Set resource limits on spawned processes
 
@@ -791,11 +791,12 @@ For user-facing documentation, see [Privilege Dropping](privilege-dropping.md) a
 
 ### Privilege Dropping
 
-Services can run as specific user/group:
+Services can run as specific user/groups:
 
-- User formats: `"username"`, `"1000"`, `"1000:1000"`
-- Hooks inherit service user by default (can override)
-- The daemon drops privileges per-service at spawn time via `setuid()`/`setgid()`
+- User formats: `"username"`, `"1000"`, `"username:group"`, `"uid:gid"`
+- By default, all supplementary groups are loaded via `initgroups()`; the `groups` field provides explicit lockdown
+- Hooks inherit service user and groups by default (can override)
+- The daemon drops privileges per-service at spawn time via `initgroups()`/`setgroups()` + `setgid()` + `setuid()`
 
 ### Environment Isolation
 

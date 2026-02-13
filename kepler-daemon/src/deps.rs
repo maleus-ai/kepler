@@ -460,7 +460,7 @@ mod tests {
             hooks: None,
             logs: None,
             user: None,
-            group: None,
+            groups: Vec::new(),
             limits: None,
             wait: None,
         }
@@ -499,7 +499,7 @@ mod tests {
             hooks: None,
             logs: None,
             user: None,
-            group: None,
+            groups: Vec::new(),
             limits: None,
             wait: None,
         }
