@@ -32,19 +32,22 @@ This only changes where state files are stored. All security checks (root requir
 
 ## Environment Inheritance
 
-By default, Kepler **inherits** the system environment when starting services. This means services have access to `PATH`, `HOME`, and other standard environment variables, which is what most users expect.
+By default, Kepler **clears** the environment before starting services. Only explicitly configured variables are passed. This prevents unintended environment leakage.
 
 The `sys_env` option controls this behavior (configurable globally under `kepler.sys_env` or per-service):
 
 | Value | Description |
 |-------|-------------|
-| `inherit` (default) | Inherit all system environment variables captured from the CLI at config load time |
-| `clear` | Start with empty environment, only explicit vars are passed |
+| `clear` (default) | Start with empty environment, only explicit vars are passed |
+| `inherit` | Inherit all system environment variables captured from the CLI at config load time |
 
 ```yaml
+kepler:
+  sys_env: clear    # Default: clear environment
+
 services:
   app:
-    sys_env: clear  # Opt into isolated environment for this service
+    sys_env: inherit  # This service inherits system env
 ```
 
 ---
@@ -132,48 +135,38 @@ services:
 
 ## Security Considerations
 
-**Default inheritance (`sys_env: inherit`):**
-- All environment variables from the CLI session at config load time are passed
-- Services have access to `PATH`, `HOME`, `USER`, and other standard variables
-- This is the default, matching user expectations for most development and deployment workflows
-
-**Isolated environment (`sys_env: clear`):**
+**Default isolation (`sys_env: clear`):**
 - Sensitive variables from your shell (`AWS_SECRET_KEY`, `API_TOKENS`, etc.) are NOT automatically passed to services
 - Only explicitly configured variables are available
-- Recommended for production environments where environment isolation is important
+- This is the recommended mode for production
 
+**Explicit passthrough (recommended over `inherit`):**
 ```yaml
 services:
   app:
     command: ["./app"]
-    sys_env: clear
     environment:
-      - PATH=/usr/bin:/bin
-      - NODE_ENV=production
+      - PATH=${PATH}
+      - HOME=${HOME}
+      - USER=${USER}
 ```
+
+**Full inheritance (`sys_env: inherit`):**
+- All environment variables from the CLI session at config load time are passed
+- Use only for apps that require the full system environment
+- Be aware of potential security implications
 
 ---
 
 ## Examples
 
-### Inherit System Environment (Default)
-
-```yaml
-services:
-  my-app:
-    command: ["./my-app"]
-    # sys_env: inherit  # This is the default
-    environment:
-      - EXTRA_VAR=value  # Additional vars on top of inherited
-```
-
-### Isolated Environment
+### Controlled Environment (Default)
 
 ```yaml
 services:
   app:
     command: ["./app"]
-    sys_env: clear     # Opt into isolated environment
+    # sys_env: clear  # This is the default
     environment:
       - PATH=/usr/bin:/bin       # Explicit PATH
       - NODE_ENV=production
@@ -181,13 +174,23 @@ services:
     env_file: .env               # Additional vars from file
 ```
 
-### Selective Passthrough (with clear)
+### Inherit System Environment
+
+```yaml
+services:
+  my-app:
+    command: ["./my-app"]
+    sys_env: inherit  # Inherit all environment variables from CLI at config load time
+    environment:
+      - EXTRA_VAR=value  # Additional vars on top of inherited
+```
+
+### Selective Passthrough
 
 ```yaml
 services:
   app:
     command: ["./app"]
-    sys_env: clear
     environment:
       - PATH=${PATH}
       - HOME=${HOME}

@@ -180,8 +180,8 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub env_file: Option<PathBuf>,
     /// System environment inheritance policy
-    /// - `clear`: Start with empty environment, only explicit vars are passed
-    /// - `inherit` (default): Inherit all system environment variables from the daemon
+    /// - `clear` (default): Start with empty environment, only explicit vars are passed
+    /// - `inherit`: Inherit all system environment variables from the daemon
     #[serde(default)]
     pub sys_env: SysEnvPolicy,
     #[serde(default)]
@@ -489,28 +489,28 @@ mod tests {
 
     #[test]
     fn test_resolve_sys_env_service_overrides_global() {
-        // Service explicit setting (clear) should override global (inherit)
-        let service_sys_env = SysEnvPolicy::Clear;
-        let global_sys_env = Some(SysEnvPolicy::Inherit);
+        // Service explicit setting (inherit) should override global (clear)
+        let service_sys_env = SysEnvPolicy::Inherit;
+        let global_sys_env = Some(SysEnvPolicy::Clear);
         let result = resolve_sys_env(&service_sys_env, global_sys_env.as_ref());
-        assert_eq!(result, SysEnvPolicy::Clear);
+        assert_eq!(result, SysEnvPolicy::Inherit);
     }
 
     #[test]
     fn test_resolve_sys_env_uses_global_when_service_default() {
-        // When service uses default (Inherit), global (Clear) should apply
-        let service_sys_env = SysEnvPolicy::Inherit; // default
-        let global_sys_env = Some(SysEnvPolicy::Clear);
+        // When service uses default (Clear), global (Inherit) should apply
+        let service_sys_env = SysEnvPolicy::Clear; // default
+        let global_sys_env = Some(SysEnvPolicy::Inherit);
         let result = resolve_sys_env(&service_sys_env, global_sys_env.as_ref());
-        assert_eq!(result, SysEnvPolicy::Clear);
+        assert_eq!(result, SysEnvPolicy::Inherit);
     }
 
     #[test]
     fn test_resolve_sys_env_falls_back_to_default() {
-        // When both service and global are unset, should use default (Inherit)
-        let service_sys_env = SysEnvPolicy::Inherit;
+        // When both service and global are unset, should use default (Clear)
+        let service_sys_env = SysEnvPolicy::Clear;
         let result = resolve_sys_env(&service_sys_env, None);
-        assert_eq!(result, SysEnvPolicy::Inherit);
+        assert_eq!(result, SysEnvPolicy::Clear);
     }
 
     #[test]

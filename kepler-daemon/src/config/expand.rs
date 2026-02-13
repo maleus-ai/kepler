@@ -165,7 +165,7 @@ pub fn expand_service_hooks(
 }
 
 /// Resolve sys_env policy for a service.
-/// Priority: service explicit setting > global setting > default (Inherit)
+/// Priority: service explicit setting > global setting > default (Clear)
 ///
 /// A service's sys_env is considered "explicit" if it's not the default value.
 /// This allows services to explicitly set `sys_env: clear` to override a global
@@ -174,7 +174,7 @@ pub fn resolve_sys_env(
     service_sys_env: &SysEnvPolicy,
     global_sys_env: Option<&SysEnvPolicy>,
 ) -> SysEnvPolicy {
-    // Service explicit setting > Global > Default(Inherit)
+    // Service explicit setting > Global > Default(Clear)
     // Note: We can't distinguish between "not specified" and "specified as default"
     // in the current config model, so we check if service_sys_env != default
     if *service_sys_env != SysEnvPolicy::default() {
