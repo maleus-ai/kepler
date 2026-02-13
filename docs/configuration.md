@@ -28,7 +28,7 @@ For a ready-to-run example, see [`example.kepler.yaml`](../example.kepler.yaml).
 
 ```yaml
 kepler:
-  sys_env: inherit       # Global sys_env policy (clear or inherit), default: inherit
+  sys_env: clear         # Global sys_env policy (clear or inherit), default: clear
   timeout: 30s           # Global default timeout for dependency waits
   logs:
     buffer_size: 16384   # 16KB buffer for better write throughput
@@ -134,7 +134,7 @@ Settings under the `kepler:` namespace apply to all services unless overridden.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `sys_env` | `string` | `inherit` | System env policy: `clear` or `inherit`. See [Environment Variables](environment-variables.md) |
+| `sys_env` | `string` | `clear` | System env policy: `clear` or `inherit`. See [Environment Variables](environment-variables.md) |
 | `timeout` | `duration` | none | Global default timeout for dependency waits. See [Dependencies](dependencies.md) |
 | `logs` | `object` | - | Global log settings. See [Log Management](log-management.md) |
 | `hooks` | `object` | - | Global lifecycle hooks. See [Hooks](hooks.md) |
@@ -174,7 +174,7 @@ See [Hooks](hooks.md) for format, execution order, and examples.
 | `depends_on` | `string[]\|object` | `[]` | Service dependencies. See [Dependencies](dependencies.md) |
 | `environment` | `string[]` | `[]` | Environment variables (`KEY=value`). See [Environment Variables](environment-variables.md) |
 | `env_file` | `string` | - | Path to `.env` file |
-| `sys_env` | `string` | `inherit` | System env policy: `clear` or `inherit` |
+| `sys_env` | `string` | `clear` | System env policy: `clear` or `inherit` |
 | `restart` | `string\|object` | `no` | Restart policy. See [Restart Configuration](#restart-configuration) |
 | `healthcheck` | `object` | - | Health check config. See [Health Checks](health-checks.md) |
 | `hooks` | `object` | - | Service-specific hooks. See [Hooks](hooks.md) |
