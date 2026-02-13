@@ -100,7 +100,7 @@ user: ${SERVICE_USER}
 |-------|------------------|-------------------|
 | 1 | `env_file` path | System environment only |
 | 2 | `environment` array entries | System env + env_file variables |
-| 3 | `working_dir`, `user`, `group`, `limits.memory`, `restart.watch` | System env + env_file + environment array |
+| 3 | `working_dir`, `user`, `groups`, `limits.memory`, `restart.watch` | System env + env_file + environment array |
 
 See [Variable Expansion](variable-expansion.md) for the full syntax reference.
 

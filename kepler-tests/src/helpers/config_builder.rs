@@ -113,7 +113,7 @@ pub struct TestServiceBuilder {
     logs: Option<LogConfig>,
     limits: Option<ResourceLimits>,
     user: Option<String>,
-    group: Option<String>,
+    groups: Vec<String>,
     wait: Option<bool>,
 }
 
@@ -133,7 +133,7 @@ impl TestServiceBuilder {
             logs: None,
             limits: None,
             user: None,
-            group: None,
+            groups: Vec::new(),
             wait: None,
         }
     }
@@ -259,9 +259,9 @@ impl TestServiceBuilder {
         self
     }
 
-    /// Set the group to run the service as
-    pub fn with_group(mut self, group: &str) -> Self {
-        self.group = Some(group.to_string());
+    /// Set the supplementary groups lockdown
+    pub fn with_groups(mut self, groups: Vec<String>) -> Self {
+        self.groups = groups;
         self
     }
 
@@ -283,7 +283,7 @@ impl TestServiceBuilder {
             hooks: self.hooks,
             logs: self.logs,
             user: self.user,
-            group: self.group,
+            groups: self.groups,
             limits: self.limits,
             wait: self.wait,
         }
@@ -428,11 +428,11 @@ impl TestHookBuilder {
         }
     }
 
-    /// Create a script hook with a custom group
-    pub fn script_with_group(script: &str, group: &str) -> HookCommand {
+    /// Create a script hook with custom groups
+    pub fn script_with_groups(script: &str, groups: Vec<String>) -> HookCommand {
         HookCommand::Script {
             run: script.to_string(),
-            common: HookCommon { group: Some(group.to_string()), ..Default::default() },
+            common: HookCommon { groups, ..Default::default() },
         }
     }
 
@@ -444,13 +444,13 @@ impl TestHookBuilder {
         }
     }
 
-    /// Create a script hook with custom user and group
-    pub fn script_with_user_and_group(script: &str, user: &str, group: &str) -> HookCommand {
+    /// Create a script hook with custom user and groups
+    pub fn script_with_user_and_groups(script: &str, user: &str, groups: Vec<String>) -> HookCommand {
         HookCommand::Script {
             run: script.to_string(),
             common: HookCommon {
                 user: Some(user.to_string()),
-                group: Some(group.to_string()),
+                groups,
                 ..Default::default()
             },
         }

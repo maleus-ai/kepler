@@ -571,8 +571,8 @@ services:
     user: "999:999"
   app:
     command: ["node", "server.js"]
-    user: node
-    group: docker
+    user: "node:docker"
+    groups: ["docker", "kepler"]
   no_user:
     command: ["echo", "hi"]
 "#;
@@ -582,23 +582,23 @@ services:
 
     // User by name
     assert_eq!(config.services["web"].user.as_deref(), Some("www-data"));
-    assert!(config.services["web"].group.is_none());
+    assert!(config.services["web"].groups.is_empty());
 
     // User by numeric uid
     assert_eq!(config.services["worker"].user.as_deref(), Some("1000"));
-    assert!(config.services["worker"].group.is_none());
+    assert!(config.services["worker"].groups.is_empty());
 
     // User with explicit uid:gid
     assert_eq!(config.services["database"].user.as_deref(), Some("999:999"));
-    assert!(config.services["database"].group.is_none());
+    assert!(config.services["database"].groups.is_empty());
 
-    // User with group override
-    assert_eq!(config.services["app"].user.as_deref(), Some("node"));
-    assert_eq!(config.services["app"].group.as_deref(), Some("docker"));
+    // User with colon group and supplementary groups lockdown
+    assert_eq!(config.services["app"].user.as_deref(), Some("node:docker"));
+    assert_eq!(config.services["app"].groups, vec!["docker", "kepler"]);
 
     // No user specified
     assert!(config.services["no_user"].user.is_none());
-    assert!(config.services["no_user"].group.is_none());
+    assert!(config.services["no_user"].groups.is_empty());
 }
 
 /// Hook user configuration parsing

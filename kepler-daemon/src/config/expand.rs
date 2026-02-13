@@ -45,7 +45,7 @@ pub fn expand_global_hooks(
 }
 
 /// Expand environment variables in a hook command.
-/// Expands: user, group, working_dir, env_file, environment.
+/// Expands: user, groups, working_dir, env_file, environment.
 /// NOTE: We intentionally do NOT expand run/command - shell variables should be
 /// expanded by the shell at runtime using the process's environment.
 pub fn expand_hook_command(
@@ -58,7 +58,7 @@ pub fn expand_hook_command(
     if let Some(u) = &mut common.user {
         *u = expand_with_context(u, context, sys_env);
     }
-    if let Some(g) = &mut common.group {
+    for g in &mut common.groups {
         *g = expand_with_context(g, context, sys_env);
     }
     if let Some(wd) = &mut common.working_dir {
@@ -99,11 +99,11 @@ pub fn expand_service_config(
     // NOTE: env_file path is already expanded before this function is called
     // (using sys_env only, since we need it to load the env_file first)
 
-    // Expand user/group
+    // Expand user/groups
     if let Some(ref mut u) = service.user {
         *u = expand_with_context(u, &expanded_context, sys_env);
     }
-    if let Some(ref mut g) = service.group {
+    for g in &mut service.groups {
         *g = expand_with_context(g, &expanded_context, sys_env);
     }
 

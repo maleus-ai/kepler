@@ -3,37 +3,54 @@
 use crate::errors::{DaemonError, Result};
 use nix::unistd::{Group, User};
 
-/// Resolve a user specification to (uid, gid)
+/// Resolved user information
+pub struct ResolvedUser {
+    pub uid: u32,
+    pub gid: u32,
+    pub username: Option<String>,
+}
+
+/// Resolve a user specification to ResolvedUser
 ///
 /// Supported formats:
 /// - `"username"` - looks up user by name
 /// - `"1000"` - numeric uid (gid defaults to same value)
+/// - `"username:group"` - user by name with group override
 /// - `"1000:1000"` - explicit uid:gid
-pub fn resolve_user(user: &str, group: Option<&str>) -> Result<(u32, u32)> {
-    let (uid, default_gid) = if let Some((uid_str, gid_str)) = user.split_once(':') {
-        // Format: "uid:gid"
-        let uid = uid_str
-            .parse::<u32>()
-            .map_err(|_| DaemonError::UserNotFound(user.to_string()))?;
-        let gid = gid_str
-            .parse::<u32>()
-            .map_err(|_| DaemonError::GroupNotFound(gid_str.to_string()))?;
-        (uid, gid)
+pub fn resolve_user(user: &str) -> Result<ResolvedUser> {
+    if let Some((left, right)) = user.split_once(':') {
+        // Format: "left:right"
+        let (uid, username) = resolve_user_part(left, user)?;
+        let gid = resolve_group(right)?;
+        Ok(ResolvedUser { uid, gid, username })
     } else if let Ok(uid) = user.parse::<u32>() {
-        // Numeric uid - use same for gid
-        (uid, uid)
+        // Numeric uid - use same for gid, try reverse-lookup for username
+        let username = User::from_uid(nix::unistd::Uid::from_raw(uid))
+            .ok()
+            .flatten()
+            .map(|u| u.name);
+        Ok(ResolvedUser { uid, gid: uid, username })
     } else {
         // Username - lookup via nix
-        lookup_user_by_name(user)?
-    };
+        let (uid, gid) = lookup_user_by_name(user)?;
+        Ok(ResolvedUser { uid, gid, username: Some(user.to_string()) })
+    }
+}
 
-    // Override gid if group specified
-    let gid = match group {
-        Some(g) => resolve_group(g)?,
-        None => default_gid,
-    };
-
-    Ok((uid, gid))
+/// Resolve the user part of a "user:group" spec to (uid, Option<username>).
+fn resolve_user_part(spec: &str, full_spec: &str) -> Result<(u32, Option<String>)> {
+    if let Ok(uid) = spec.parse::<u32>() {
+        let username = User::from_uid(nix::unistd::Uid::from_raw(uid))
+            .ok()
+            .flatten()
+            .map(|u| u.name);
+        Ok((uid, username))
+    } else {
+        let user = User::from_name(spec)
+            .map_err(|_| DaemonError::UserNotFound(full_spec.to_string()))?
+            .ok_or_else(|| DaemonError::UserNotFound(full_spec.to_string()))?;
+        Ok((user.uid.as_raw(), Some(user.name)))
+    }
 }
 
 /// Look up a user by name and return (uid, gid)
@@ -50,7 +67,7 @@ fn lookup_user_by_name(username: &str) -> Result<(u32, u32)> {
 /// Supports:
 /// - `"groupname"` - looks up group by name
 /// - `"1000"` - numeric gid
-fn resolve_group(group: &str) -> Result<u32> {
+pub fn resolve_group(group: &str) -> Result<u32> {
     // Try numeric first
     if let Ok(gid) = group.parse::<u32>() {
         return Ok(gid);
@@ -70,37 +87,55 @@ mod tests {
 
     #[test]
     fn test_resolve_numeric_uid() {
-        let (uid, gid) = resolve_user("1000", None).unwrap();
-        assert_eq!(uid, 1000);
-        assert_eq!(gid, 1000);
+        let resolved = resolve_user("1000").unwrap();
+        assert_eq!(resolved.uid, 1000);
+        assert_eq!(resolved.gid, 1000);
     }
 
     #[test]
     fn test_resolve_uid_gid_pair() {
-        let (uid, gid) = resolve_user("1000:2000", None).unwrap();
-        assert_eq!(uid, 1000);
-        assert_eq!(gid, 2000);
-    }
-
-    #[test]
-    fn test_resolve_with_group_override() {
-        let (uid, gid) = resolve_user("1000", Some("2000")).unwrap();
-        assert_eq!(uid, 1000);
-        assert_eq!(gid, 2000);
+        let resolved = resolve_user("1000:2000").unwrap();
+        assert_eq!(resolved.uid, 1000);
+        assert_eq!(resolved.gid, 2000);
     }
 
     #[test]
     fn test_resolve_root() {
         // root user should exist on all Unix systems
-        let result = resolve_user("root", None);
-        assert!(result.is_ok());
-        let (uid, _gid) = result.unwrap();
-        assert_eq!(uid, 0);
+        let resolved = resolve_user("root").unwrap();
+        assert_eq!(resolved.uid, 0);
+        assert_eq!(resolved.username, Some("root".to_string()));
     }
 
     #[test]
     fn test_resolve_nonexistent_user() {
-        let result = resolve_user("nonexistent_user_12345", None);
+        let result = resolve_user("nonexistent_user_12345");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_group_numeric() {
+        assert_eq!(resolve_group("2000").unwrap(), 2000);
+    }
+
+    #[test]
+    fn test_resolve_group_root() {
+        // root group should exist on all Unix systems
+        let gid = resolve_group("root").unwrap();
+        assert_eq!(gid, 0);
+    }
+
+    #[test]
+    fn test_resolve_group_nonexistent() {
+        let result = resolve_group("nonexistent_group_12345");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_numeric_uid_captures_username() {
+        // UID 0 should reverse-lookup to "root"
+        let resolved = resolve_user("0").unwrap();
+        assert_eq!(resolved.uid, 0);
+        assert_eq!(resolved.username, Some("root".to_string()));
     }
 }

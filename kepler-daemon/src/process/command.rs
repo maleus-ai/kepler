@@ -16,8 +16,8 @@ pub struct CommandSpec {
     pub environment: HashMap<String, String>,
     /// User to run the command as (Unix only)
     pub user: Option<String>,
-    /// Group to run the command as (Unix only)
-    pub group: Option<String>,
+    /// Supplementary groups lockdown (Unix only)
+    pub groups: Vec<String>,
     /// Resource limits (Unix only)
     pub limits: Option<ResourceLimits>,
     /// Whether to clear the environment before applying environment vars
@@ -32,14 +32,14 @@ impl CommandSpec {
         working_dir: PathBuf,
         environment: HashMap<String, String>,
         user: Option<String>,
-        group: Option<String>,
+        groups: Vec<String>,
     ) -> Self {
         Self {
             program_and_args,
             working_dir,
             environment,
             user,
-            group,
+            groups,
             limits: None,
             clear_env: true, // Secure default
         }
@@ -51,7 +51,7 @@ impl CommandSpec {
         working_dir: PathBuf,
         environment: HashMap<String, String>,
         user: Option<String>,
-        group: Option<String>,
+        groups: Vec<String>,
         limits: Option<ResourceLimits>,
     ) -> Self {
         Self {
@@ -59,7 +59,7 @@ impl CommandSpec {
             working_dir,
             environment,
             user,
-            group,
+            groups,
             limits,
             clear_env: true, // Secure default
         }
@@ -71,7 +71,7 @@ impl CommandSpec {
         working_dir: PathBuf,
         environment: HashMap<String, String>,
         user: Option<String>,
-        group: Option<String>,
+        groups: Vec<String>,
         limits: Option<ResourceLimits>,
         clear_env: bool,
     ) -> Self {
@@ -80,7 +80,7 @@ impl CommandSpec {
             working_dir,
             environment,
             user,
-            group,
+            groups,
             limits,
             clear_env,
         }

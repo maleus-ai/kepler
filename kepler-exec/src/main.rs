@@ -15,8 +15,8 @@ fn main() {
 
     let args: Vec<String> = env::args().skip(1).collect();
 
-    let mut uid: Option<u32> = None;
-    let mut gid: Option<u32> = None;
+    let mut user_spec: Option<String> = None;
+    let mut groups_spec: Option<String> = None;
     let mut rlimit_as: Option<u64> = None;
     let mut rlimit_cpu: Option<u64> = None;
     let mut rlimit_nofile: Option<u64> = None;
@@ -26,13 +26,13 @@ fn main() {
 
     while i < args.len() {
         match args[i].as_str() {
-            "--uid" => {
+            "--user" => {
                 i += 1;
-                uid = Some(parse_u32_arg(&args, i, "--uid"));
+                user_spec = Some(parse_string_arg(&args, i, "--user"));
             }
-            "--gid" => {
+            "--groups" => {
                 i += 1;
-                gid = Some(parse_u32_arg(&args, i, "--gid"));
+                groups_spec = Some(parse_string_arg(&args, i, "--groups"));
             }
             "--rlimit-as" => {
                 i += 1;
@@ -72,8 +72,15 @@ fn main() {
     // Apply resource limits before dropping privileges
     apply_rlimits(rlimit_as, rlimit_cpu, rlimit_nofile);
 
-    // Drop privileges: clear supplementary groups, then setgid, then setuid
-    drop_privileges(uid, gid);
+    // Parse explicit groups if provided
+    let explicit_groups: Option<Vec<u32>> = groups_spec.as_deref().map(|spec| {
+        spec.split(',')
+            .map(|g| resolve_group(g.trim()))
+            .collect()
+    });
+
+    // Drop privileges: handle supplementary groups, then setgid, then setuid
+    drop_privileges(user_spec.as_deref(), explicit_groups);
 
     // Close inherited file descriptors above stderr before exec
     close_inherited_fds();
@@ -126,27 +133,136 @@ fn reject_if_setuid() {
     }
 }
 
-/// Drop privileges: clear supplementary groups, setgid, then setuid.
-/// Order matters — group operations must happen before dropping to non-root uid.
+/// Resolve a user specification string to (uid, gid, Option<username>).
+///
+/// Supported formats:
+/// - `"name"` — lookup user by name, get uid/gid from passwd
+/// - `"name:group"` — lookup user by name, resolve group separately
+/// - `"uid"` — numeric uid, gid=uid, reverse-lookup for username
+/// - `"uid:gid"` — numeric uid and gid, reverse-lookup for username
 #[cfg(unix)]
-fn drop_privileges(uid: Option<u32>, gid: Option<u32>) {
-    // Clear supplementary groups before changing primary gid/uid.
-    // Without this, the child inherits the daemon's supplementary groups
-    // (e.g. docker, sudo, wheel), defeating privilege separation.
-    if uid.is_some() || gid.is_some() {
-        use nix::unistd::Gid;
+fn resolve_user(spec: &str) -> (u32, u32, Option<String>) {
+    use nix::unistd::User;
 
-        let target_groups: Vec<Gid> = match gid {
-            Some(g) => vec![Gid::from_raw(g)],
-            None => vec![],
-        };
-        if let Err(e) = setgroups_portable(&target_groups) {
-            eprintln!("kepler-exec: setgroups({:?}) failed: {}", target_groups, e);
+    if let Some((left, right)) = spec.split_once(':') {
+        // Format: "left:right" — left is user, right is group
+        let (uid, username) = resolve_user_part(left);
+        let gid = resolve_group(right);
+        (uid, gid, username)
+    } else if let Ok(uid) = spec.parse::<u32>() {
+        // Numeric uid — reverse-lookup for username (for initgroups)
+        let username = User::from_uid(nix::unistd::Uid::from_raw(uid))
+            .ok()
+            .flatten()
+            .map(|u| u.name);
+        (uid, uid, username)
+    } else {
+        // Username — lookup by name
+        let user = User::from_name(spec).unwrap_or_else(|e| {
+            eprintln!("kepler-exec: failed to look up user '{}': {}", spec, e);
             process::exit(127);
+        });
+        let user = user.unwrap_or_else(|| {
+            eprintln!("kepler-exec: user '{}' not found", spec);
+            process::exit(127);
+        });
+        (user.uid.as_raw(), user.gid.as_raw(), Some(user.name))
+    }
+}
+
+/// Resolve the user part of a "user:group" spec to (uid, Option<username>).
+#[cfg(unix)]
+fn resolve_user_part(spec: &str) -> (u32, Option<String>) {
+    use nix::unistd::User;
+
+    if let Ok(uid) = spec.parse::<u32>() {
+        let username = User::from_uid(nix::unistd::Uid::from_raw(uid))
+            .ok()
+            .flatten()
+            .map(|u| u.name);
+        (uid, username)
+    } else {
+        let user = User::from_name(spec).unwrap_or_else(|e| {
+            eprintln!("kepler-exec: failed to look up user '{}': {}", spec, e);
+            process::exit(127);
+        });
+        let user = user.unwrap_or_else(|| {
+            eprintln!("kepler-exec: user '{}' not found", spec);
+            process::exit(127);
+        });
+        (user.uid.as_raw(), Some(user.name))
+    }
+}
+
+/// Resolve a group specification (name or numeric) to gid.
+#[cfg(unix)]
+fn resolve_group(spec: &str) -> u32 {
+    use nix::unistd::Group;
+
+    if let Ok(gid) = spec.parse::<u32>() {
+        return gid;
+    }
+
+    let grp = Group::from_name(spec).unwrap_or_else(|e| {
+        eprintln!("kepler-exec: failed to look up group '{}': {}", spec, e);
+        process::exit(127);
+    });
+    let grp = grp.unwrap_or_else(|| {
+        eprintln!("kepler-exec: group '{}' not found", spec);
+        process::exit(127);
+    });
+    grp.gid.as_raw()
+}
+
+/// Drop privileges: handle supplementary groups, setgid, then setuid.
+/// Order matters — group operations must happen before dropping to non-root uid.
+///
+/// - `user_spec` present + no `explicit_groups` → initgroups(username, gid) or setgroups([gid])
+/// - `user_spec` present + `explicit_groups` → setgroups(explicit_gids)
+/// - no `user_spec` → nothing to do
+#[cfg(unix)]
+fn drop_privileges(user_spec: Option<&str>, explicit_groups: Option<Vec<u32>>) {
+    let user_spec = match user_spec {
+        Some(s) => s,
+        None => return,
+    };
+
+    let (uid, gid, username) = resolve_user(user_spec);
+
+    // Set supplementary groups
+    match explicit_groups {
+        Some(gids) => {
+            // Explicit lockdown: use exactly these groups
+            if let Err(e) = setgroups_portable(&gids) {
+                eprintln!("kepler-exec: setgroups({:?}) failed: {}", gids, e);
+                process::exit(127);
+            }
+        }
+        None => {
+            // Default: load all supplementary groups if we have a username
+            match username {
+                Some(ref name) => {
+                    if let Err(e) = initgroups_portable(name, gid) {
+                        eprintln!(
+                            "kepler-exec: initgroups('{}', {}) failed: {}",
+                            name, gid, e
+                        );
+                        process::exit(127);
+                    }
+                }
+                None => {
+                    // No username (numeric uid with no passwd entry) — fallback to [gid]
+                    if let Err(e) = setgroups_portable(&[gid]) {
+                        eprintln!("kepler-exec: setgroups([{}]) failed: {}", gid, e);
+                        process::exit(127);
+                    }
+                }
+            }
         }
     }
 
-    if let Some(gid) = gid {
+    // setgid before setuid (must still be root to change gid)
+    {
         use nix::unistd::{Gid, setgid};
         if let Err(e) = setgid(Gid::from_raw(gid)) {
             eprintln!("kepler-exec: setgid({}) failed: {}", gid, e);
@@ -154,7 +270,8 @@ fn drop_privileges(uid: Option<u32>, gid: Option<u32>) {
         }
     }
 
-    if let Some(uid) = uid {
+    // setuid last
+    {
         use nix::unistd::{Uid, setuid};
         if let Err(e) = setuid(Uid::from_raw(uid)) {
             eprintln!("kepler-exec: setuid({}) failed: {}", uid, e);
@@ -163,11 +280,22 @@ fn drop_privileges(uid: Option<u32>, gid: Option<u32>) {
     }
 }
 
-/// Portable setgroups: nix::unistd::setgroups is not available on Apple targets,
-/// so we call libc::setgroups directly.
+/// Call libc::initgroups to load all supplementary groups for a user.
 #[cfg(unix)]
-fn setgroups_portable(groups: &[nix::unistd::Gid]) -> Result<(), nix::errno::Errno> {
-    let gids: Vec<libc::gid_t> = groups.iter().map(|g| g.as_raw()).collect();
+fn initgroups_portable(username: &str, gid: u32) -> Result<(), nix::errno::Errno> {
+    let c_name = std::ffi::CString::new(username).map_err(|_| nix::errno::Errno::EINVAL)?;
+    let ret = unsafe { libc::initgroups(c_name.as_ptr(), gid) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(nix::errno::Errno::last())
+    }
+}
+
+/// Portable setgroups: calls libc::setgroups directly.
+#[cfg(unix)]
+fn setgroups_portable(groups: &[u32]) -> Result<(), nix::errno::Errno> {
+    let gids: Vec<libc::gid_t> = groups.iter().copied().collect();
     let ret = unsafe { libc::setgroups(gids.len() as _, gids.as_ptr()) };
     if ret == 0 {
         Ok(())
@@ -210,15 +338,12 @@ fn close_inherited_fds() {
 }
 
 #[cfg(unix)]
-fn parse_u32_arg(args: &[String], i: usize, flag: &str) -> u32 {
+fn parse_string_arg(args: &[String], i: usize, flag: &str) -> String {
     if i >= args.len() {
         eprintln!("kepler-exec: {} requires a value", flag);
         process::exit(127);
     }
-    args[i].parse::<u32>().unwrap_or_else(|_| {
-        eprintln!("kepler-exec: invalid value for {}: {} (must be 0..={})", flag, args[i], u32::MAX);
-        process::exit(127);
-    })
+    args[i].clone()
 }
 
 #[cfg(unix)]

@@ -334,7 +334,7 @@ services:
   test:
     command: ["sleep", "3600"]
     user: "1000"
-    group: nonexistent_group_12345_invalid
+    groups: ["nonexistent_group_12345_invalid"]
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
@@ -346,7 +346,7 @@ services:
     let harness = harness.unwrap();
     let result = harness.start_service("test").await;
 
-    // The service should fail to start due to invalid group
+    // The service should fail to start due to invalid group in groups list
     assert!(
         result.is_err(),
         "Service with invalid group should fail to start"
@@ -627,13 +627,12 @@ async fn test_user_with_group_override() {
     // Make temp dir world-accessible so the unprivileged user can chdir into it
     std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
 
-    // User with separate group override
+    // User with colon syntax for primary group override
     let config = TestConfigBuilder::new()
         .add_service(
             "user_group",
             TestServiceBuilder::long_running()
-                .with_user("65534")
-                .with_group("65533") // Different GID
+                .with_user("65534:65533") // Different GID via colon syntax
                 .build(),
         )
         .build();

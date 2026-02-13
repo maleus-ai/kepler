@@ -19,7 +19,7 @@ Kepler's security design: root requirement, group-based access, environment isol
 The daemon must run as root. This is enforced unconditionally on startup -- the daemon exits with an error if not running as root.
 
 Root is required to:
-- **Drop privileges** per-service (`setuid`/`setgid` to configured `user`/`group`)
+- **Drop privileges** per-service (`setuid`/`setgid`/`initgroups` to configured `user`/`groups`)
 - **Create and chown** the state directory and socket to `root:kepler`
 - **Set resource limits** on spawned processes (`setrlimit`)
 
@@ -151,9 +151,10 @@ See [Lua Scripting](lua-scripting.md) for details.
 Services can run as specific users/groups:
 
 - Daemon spawns `kepler-exec` wrapper (still as root)
+- `kepler-exec` resolves user spec and sets supplementary groups (`initgroups` or `setgroups`)
 - `kepler-exec` drops privileges via `setgid()` + `setuid()`
 - Resource limits applied via `setrlimit()`
-- Service process runs as the target user
+- Service process runs as the target user with correct group memberships
 
 ### Default User from CLI Invoker
 

@@ -41,7 +41,7 @@ pub struct HookCommon {
     #[serde(default)]
     pub user: Option<String>,
     #[serde(default)]
-    pub group: Option<String>,
+    pub groups: Vec<String>,
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
     #[serde(default)]
@@ -93,8 +93,8 @@ impl HookCommand {
         self.common().user.as_deref()
     }
 
-    pub fn group(&self) -> Option<&str> {
-        self.common().group.as_deref()
+    pub fn groups(&self) -> &[String] {
+        &self.common().groups
     }
 
     pub fn working_dir(&self) -> Option<&Path> {
