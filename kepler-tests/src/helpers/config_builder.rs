@@ -104,7 +104,7 @@ pub struct TestServiceBuilder {
     working_dir: Option<PathBuf>,
     environment: Vec<String>,
     env_file: Option<PathBuf>,
-    sys_env: SysEnvPolicy,
+    sys_env: Option<SysEnvPolicy>,
     restart: RestartConfig,
     depends_on: Vec<String>,
     depends_on_extended: Option<DependsOn>,
@@ -124,7 +124,7 @@ impl TestServiceBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            sys_env: SysEnvPolicy::default(),
+            sys_env: None,
             restart: RestartConfig::default(),
             depends_on: Vec::new(),
             depends_on_extended: None,
@@ -194,7 +194,7 @@ impl TestServiceBuilder {
 
     /// Set system environment inheritance policy
     pub fn with_sys_env(mut self, policy: SysEnvPolicy) -> Self {
-        self.sys_env = policy;
+        self.sys_env = Some(policy);
         self
     }
 

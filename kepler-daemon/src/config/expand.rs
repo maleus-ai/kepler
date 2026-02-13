@@ -93,7 +93,11 @@ pub fn expand_service_config(
 
     // Expand working_dir (already partially expanded, but re-expand with full context)
     if let Some(ref mut wd) = service.working_dir {
-        *wd = PathBuf::from(expand_with_context(&wd.to_string_lossy(), &expanded_context, sys_env));
+        *wd = PathBuf::from(expand_with_context(
+            &wd.to_string_lossy(),
+            &expanded_context,
+            sys_env,
+        ));
     }
 
     // NOTE: env_file path is already expanded before this function is called
@@ -136,9 +140,10 @@ pub fn expand_service_config(
 
     // Expand resource limits
     if let Some(ref mut limits) = service.limits
-        && let Some(ref mut mem) = limits.memory {
-            *mem = expand_with_context(mem, &expanded_context, sys_env);
-        }
+        && let Some(ref mut mem) = limits.memory
+    {
+        *mem = expand_with_context(mem, &expanded_context, sys_env);
+    }
 
     // Expand restart watch patterns
     if let RestartConfig::Extended { ref mut watch, .. } = service.restart {
@@ -167,19 +172,15 @@ pub fn expand_service_hooks(
 /// Resolve sys_env policy for a service.
 /// Priority: service explicit setting > global setting > default (Clear)
 ///
-/// A service's sys_env is considered "explicit" if it's not the default value.
-/// This allows services to explicitly set `sys_env: clear` to override a global
-/// `inherit` setting.
+/// Uses `Option<SysEnvPolicy>` so we can properly distinguish between
+/// "not specified" (`None`) and an explicit value (`Some(...)`).
 pub fn resolve_sys_env(
-    service_sys_env: &SysEnvPolicy,
+    service_sys_env: Option<&SysEnvPolicy>,
     global_sys_env: Option<&SysEnvPolicy>,
 ) -> SysEnvPolicy {
-    // Service explicit setting > Global > Default(Clear)
-    // Note: We can't distinguish between "not specified" and "specified as default"
-    // in the current config model, so we check if service_sys_env != default
-    if *service_sys_env != SysEnvPolicy::default() {
-        service_sys_env.clone()
-    } else {
-        global_sys_env.cloned().unwrap_or_default()
-    }
+    // Service explicit setting > Global > Default(Inherit)
+    service_sys_env
+        .or(global_sys_env)
+        .cloned()
+        .unwrap_or(SysEnvPolicy::Inherit)
 }

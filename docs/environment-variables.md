@@ -32,22 +32,28 @@ This only changes where state files are stored. All security checks (root requir
 
 ## Environment Inheritance
 
-By default, Kepler **clears** the environment before starting services. Only explicitly configured variables are passed. This prevents unintended environment leakage.
+By default, Kepler **inherits** the system environment when starting services. This means services have access to `PATH`, `HOME`, and other standard environment variables, which is what most users expect.
 
-The `sys_env` option controls this behavior (configurable globally under `kepler.sys_env` or per-service):
+The `sys_env` option controls this behavior:
 
 | Value | Description |
 |-------|-------------|
-| `clear` (default) | Start with empty environment, only explicit vars are passed |
-| `inherit` | Inherit all system environment variables captured from the CLI at config load time |
+| `inherit` (default) | Inherit all system environment variables captured from the CLI at config load time |
+| `clear` | Start with empty environment, only explicit vars are passed |
+
+**Inheritance chain:** `kepler.sys_env` sets the global default (defaults to `inherit` when not specified). Each service and its hooks inherit from `kepler.sys_env` unless the service explicitly overrides it with its own `sys_env` setting.
 
 ```yaml
 kepler:
-  sys_env: clear    # Default: clear environment
+  sys_env: clear      # All services and hooks default to clear
 
 services:
   app:
-    sys_env: inherit  # This service inherits system env
+    command: ["./app"]
+    # sys_env not set → inherits clear from kepler.sys_env
+  worker:
+    command: ["./worker"]
+    sys_env: inherit  # Explicitly overrides to inherit for this service and its hooks
 ```
 
 ---
@@ -135,38 +141,48 @@ services:
 
 ## Security Considerations
 
-**Default isolation (`sys_env: clear`):**
+**Default inheritance (`sys_env: inherit`):**
+- All environment variables from the CLI session at config load time are passed
+- Services have access to `PATH`, `HOME`, `USER`, and other standard variables
+- This is the default, matching user expectations for most development and deployment workflows
+
+**Isolated environment (`sys_env: clear`):**
 - Sensitive variables from your shell (`AWS_SECRET_KEY`, `API_TOKENS`, etc.) are NOT automatically passed to services
 - Only explicitly configured variables are available
-- This is the recommended mode for production
+- Recommended for production environments where environment isolation is important
 
-**Explicit passthrough (recommended over `inherit`):**
 ```yaml
 services:
   app:
     command: ["./app"]
+    sys_env: clear
     environment:
-      - PATH=${PATH}
-      - HOME=${HOME}
-      - USER=${USER}
+      - PATH=/usr/bin:/bin
+      - NODE_ENV=production
 ```
-
-**Full inheritance (`sys_env: inherit`):**
-- All environment variables from the CLI session at config load time are passed
-- Use only for apps that require the full system environment
-- Be aware of potential security implications
 
 ---
 
 ## Examples
 
-### Controlled Environment (Default)
+### Inherit System Environment (Default)
+
+```yaml
+services:
+  my-app:
+    command: ["./my-app"]
+    # sys_env: inherit  # This is the default
+    environment:
+      - EXTRA_VAR=value  # Additional vars on top of inherited
+```
+
+### Isolated Environment
 
 ```yaml
 services:
   app:
     command: ["./app"]
-    # sys_env: clear  # This is the default
+    sys_env: clear     # Opt into isolated environment
     environment:
       - PATH=/usr/bin:/bin       # Explicit PATH
       - NODE_ENV=production
@@ -174,23 +190,13 @@ services:
     env_file: .env               # Additional vars from file
 ```
 
-### Inherit System Environment
-
-```yaml
-services:
-  my-app:
-    command: ["./my-app"]
-    sys_env: inherit  # Inherit all environment variables from CLI at config load time
-    environment:
-      - EXTRA_VAR=value  # Additional vars on top of inherited
-```
-
-### Selective Passthrough
+### Selective Passthrough (with clear)
 
 ```yaml
 services:
   app:
     command: ["./app"]
+    sys_env: clear
     environment:
       - PATH=${PATH}
       - HOME=${HOME}

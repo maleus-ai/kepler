@@ -6,7 +6,7 @@
 //! - Kepler namespace full config parsing
 //! - Global timeout parsing
 
-use kepler_daemon::config::{resolve_sys_env, KeplerConfig, SysEnvPolicy};
+use kepler_daemon::config::{KeplerConfig, SysEnvPolicy, resolve_sys_env};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -37,7 +37,11 @@ services:
 
     // The service should inherit the global setting (since it doesn't override)
     let service = &config.services["app"];
-    let resolved = resolve_sys_env(&service.sys_env, config.global_sys_env());
+    assert_eq!(
+        service.sys_env, None,
+        "Service sys_env should be None when not specified"
+    );
+    let resolved = resolve_sys_env(service.sys_env.as_ref(), config.global_sys_env());
     assert_eq!(
         resolved,
         SysEnvPolicy::Inherit,
@@ -93,25 +97,29 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     // Global should be inherit
-    assert_eq!(
-        config.global_sys_env(),
-        Some(&SysEnvPolicy::Inherit)
-    );
+    assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));
 
     // secure-app should use clear (explicit override)
-    // Note: Since SysEnvPolicy::Clear is the default, we can't distinguish
-    // between "explicitly set to clear" and "not set". This is a known limitation.
-    // The service's explicit setting takes precedence.
     let secure_service = &config.services["secure-app"];
     assert_eq!(
         secure_service.sys_env,
+        Some(SysEnvPolicy::Clear),
+        "secure-app should have explicit sys_env: clear"
+    );
+    let resolved = resolve_sys_env(secure_service.sys_env.as_ref(), config.global_sys_env());
+    assert_eq!(
+        resolved,
         SysEnvPolicy::Clear,
-        "secure-app should have sys_env: clear"
+        "secure-app should resolve to sys_env: clear"
     );
 
     // normal-app should use global inherit (no explicit override)
     let normal_service = &config.services["normal-app"];
-    let resolved = resolve_sys_env(&normal_service.sys_env, config.global_sys_env());
+    assert_eq!(
+        normal_service.sys_env, None,
+        "normal-app should have no explicit sys_env"
+    );
+    let resolved = resolve_sys_env(normal_service.sys_env.as_ref(), config.global_sys_env());
     assert_eq!(
         resolved,
         SysEnvPolicy::Inherit,
@@ -198,11 +206,15 @@ services:
 
     // Services should use defaults
     let service = &config.services["app"];
-    let resolved = resolve_sys_env(&service.sys_env, config.global_sys_env());
+    assert_eq!(
+        service.sys_env, None,
+        "Service sys_env should be None when not specified"
+    );
+    let resolved = resolve_sys_env(service.sys_env.as_ref(), config.global_sys_env());
     assert_eq!(
         resolved,
-        SysEnvPolicy::Clear,
-        "Should default to Clear when no global config"
+        SysEnvPolicy::Inherit,
+        "Should default to Inherit when no global config"
     );
 }
 
@@ -236,21 +248,29 @@ services:
 /// Test resolve_sys_env function directly
 #[test]
 fn test_resolve_sys_env_function() {
-    // Service explicit (inherit) overrides global (clear)
-    let result = resolve_sys_env(&SysEnvPolicy::Inherit, Some(&SysEnvPolicy::Clear));
-    assert_eq!(result, SysEnvPolicy::Inherit);
-
-    // Service default uses global
-    let result = resolve_sys_env(&SysEnvPolicy::Clear, Some(&SysEnvPolicy::Inherit));
-    assert_eq!(result, SysEnvPolicy::Inherit);
-
-    // No global, service default -> Clear
-    let result = resolve_sys_env(&SysEnvPolicy::Clear, None);
+    // Service explicit (clear) overrides global (inherit)
+    let result = resolve_sys_env(Some(&SysEnvPolicy::Clear), Some(&SysEnvPolicy::Inherit));
     assert_eq!(result, SysEnvPolicy::Clear);
 
-    // No global, service explicit inherit
-    let result = resolve_sys_env(&SysEnvPolicy::Inherit, None);
+    // Service explicit (inherit) overrides global (clear)
+    let result = resolve_sys_env(Some(&SysEnvPolicy::Inherit), Some(&SysEnvPolicy::Clear));
     assert_eq!(result, SysEnvPolicy::Inherit);
+
+    // Service unset (None) uses global (clear)
+    let result = resolve_sys_env(None, Some(&SysEnvPolicy::Clear));
+    assert_eq!(result, SysEnvPolicy::Clear);
+
+    // Service unset (None) uses global (inherit)
+    let result = resolve_sys_env(None, Some(&SysEnvPolicy::Inherit));
+    assert_eq!(result, SysEnvPolicy::Inherit);
+
+    // Both unset -> defaults to Inherit
+    let result = resolve_sys_env(None, None);
+    assert_eq!(result, SysEnvPolicy::Inherit);
+
+    // No global, service explicit clear
+    let result = resolve_sys_env(Some(&SysEnvPolicy::Clear), None);
+    assert_eq!(result, SysEnvPolicy::Clear);
 }
 
 /// Test that kepler.timeout parses correctly
@@ -271,7 +291,10 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let kepler = config.kepler.as_ref().expect("kepler namespace should exist");
+    let kepler = config
+        .kepler
+        .as_ref()
+        .expect("kepler namespace should exist");
     assert_eq!(kepler.timeout, Some(Duration::from_secs(30)));
 }
 
@@ -294,7 +317,12 @@ fn test_global_timeout_various_formats() {
         std::fs::write(&config_path, &yaml).unwrap();
         let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
         let kepler = config.kepler.as_ref().unwrap();
-        assert_eq!(kepler.timeout, Some(expected), "Failed for input: {}", input);
+        assert_eq!(
+            kepler.timeout,
+            Some(expected),
+            "Failed for input: {}",
+            input
+        );
     }
 }
 
@@ -316,7 +344,10 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let kepler = config.kepler.as_ref().expect("kepler namespace should exist");
+    let kepler = config
+        .kepler
+        .as_ref()
+        .expect("kepler namespace should exist");
     assert_eq!(kepler.timeout, None, "timeout should default to None");
 }
 
@@ -345,4 +376,206 @@ services:
     assert_eq!(kepler.timeout, Some(Duration::from_secs(60)));
     assert_eq!(kepler.sys_env, Some(SysEnvPolicy::Inherit));
     assert!(kepler.logs.is_some());
+}
+
+/// Test that global sys_env: clear cascades to all services that don't override
+#[test]
+fn test_global_clear_cascades_to_unset_services() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  sys_env: clear
+
+services:
+  app-a:
+    command: ["./app-a"]
+  app-b:
+    command: ["./app-b"]
+  app-c:
+    command: ["./app-c"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    // All services should have sys_env: None (not specified)
+    for name in ["app-a", "app-b", "app-c"] {
+        let service = &config.services[name];
+        assert_eq!(service.sys_env, None, "{} should have no explicit sys_env", name);
+
+        // All should resolve to Clear from global
+        let resolved = resolve_sys_env(service.sys_env.as_ref(), config.global_sys_env());
+        assert_eq!(
+            resolved,
+            SysEnvPolicy::Clear,
+            "{} should inherit clear from global",
+            name
+        );
+    }
+}
+
+/// Test that global sys_env: inherit cascades to all services that don't override
+#[test]
+fn test_global_inherit_cascades_to_unset_services() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  sys_env: inherit
+
+services:
+  app-a:
+    command: ["./app-a"]
+  app-b:
+    command: ["./app-b"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    for name in ["app-a", "app-b"] {
+        let service = &config.services[name];
+        assert_eq!(service.sys_env, None, "{} should have no explicit sys_env", name);
+
+        let resolved = resolve_sys_env(service.sys_env.as_ref(), config.global_sys_env());
+        assert_eq!(
+            resolved,
+            SysEnvPolicy::Inherit,
+            "{} should inherit from global",
+            name
+        );
+    }
+}
+
+/// Test mixed scenario: global clear, some services override to inherit, some don't
+#[test]
+fn test_mixed_sys_env_policies() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  sys_env: clear
+
+services:
+  secure-app:
+    command: ["./secure-app"]
+    # No sys_env → inherits clear from global
+  open-app:
+    command: ["./open-app"]
+    sys_env: inherit  # Explicitly overrides to inherit
+  another-secure:
+    command: ["./another-secure"]
+    sys_env: clear  # Explicitly set, same as global
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Clear));
+
+    // secure-app: no override → inherits clear from global
+    let service = &config.services["secure-app"];
+    assert_eq!(service.sys_env, None);
+    assert_eq!(
+        resolve_sys_env(service.sys_env.as_ref(), config.global_sys_env()),
+        SysEnvPolicy::Clear,
+    );
+
+    // open-app: explicit inherit → overrides global clear
+    let service = &config.services["open-app"];
+    assert_eq!(service.sys_env, Some(SysEnvPolicy::Inherit));
+    assert_eq!(
+        resolve_sys_env(service.sys_env.as_ref(), config.global_sys_env()),
+        SysEnvPolicy::Inherit,
+    );
+
+    // another-secure: explicit clear → same as global but explicitly set
+    let service = &config.services["another-secure"];
+    assert_eq!(service.sys_env, Some(SysEnvPolicy::Clear));
+    assert_eq!(
+        resolve_sys_env(service.sys_env.as_ref(), config.global_sys_env()),
+        SysEnvPolicy::Clear,
+    );
+}
+
+/// Test the reverse: global inherit, some services override to clear
+#[test]
+fn test_mixed_sys_env_policies_global_inherit() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  sys_env: inherit
+
+services:
+  default-app:
+    command: ["./default-app"]
+    # No sys_env → inherits inherit from global
+  locked-down:
+    command: ["./locked-down"]
+    sys_env: clear  # Explicitly overrides to clear
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));
+
+    // default-app: inherits from global
+    let service = &config.services["default-app"];
+    assert_eq!(service.sys_env, None);
+    assert_eq!(
+        resolve_sys_env(service.sys_env.as_ref(), config.global_sys_env()),
+        SysEnvPolicy::Inherit,
+    );
+
+    // locked-down: explicit clear overrides global inherit
+    let service = &config.services["locked-down"];
+    assert_eq!(service.sys_env, Some(SysEnvPolicy::Clear));
+    assert_eq!(
+        resolve_sys_env(service.sys_env.as_ref(), config.global_sys_env()),
+        SysEnvPolicy::Clear,
+    );
+}
+
+/// Test that with no kepler namespace at all, services default to inherit
+#[test]
+fn test_no_kepler_namespace_services_default_inherit() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  app-a:
+    command: ["./app-a"]
+  app-b:
+    command: ["./app-b"]
+    sys_env: clear  # Explicit override even without global
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    assert_eq!(config.global_sys_env(), None, "No kepler namespace means no global sys_env");
+
+    // app-a: no global, no service → defaults to Inherit
+    let service = &config.services["app-a"];
+    assert_eq!(service.sys_env, None);
+    assert_eq!(
+        resolve_sys_env(service.sys_env.as_ref(), config.global_sys_env()),
+        SysEnvPolicy::Inherit,
+    );
+
+    // app-b: no global, explicit clear → uses Clear
+    let service = &config.services["app-b"];
+    assert_eq!(service.sys_env, Some(SysEnvPolicy::Clear));
+    assert_eq!(
+        resolve_sys_env(service.sys_env.as_ref(), config.global_sys_env()),
+        SysEnvPolicy::Clear,
+    );
 }
