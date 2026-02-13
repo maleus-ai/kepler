@@ -69,7 +69,7 @@ Every connection is verified using Unix peer credentials:
 3. **Root clients** (UID 0) are always allowed
 4. **Other clients** are checked for `kepler` group membership:
    - Primary GID is checked
-   - Supplementary groups are read from `/proc/<pid>/status`
+   - Supplementary groups are checked via `getgrouplist()` (cross-platform)
 5. Clients not in the kepler group are rejected
 
 This ensures that only authorized users can issue commands to the daemon.

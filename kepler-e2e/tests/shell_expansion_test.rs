@@ -91,11 +91,13 @@ async fn test_env_file_path_expansion() -> E2eResult<()> {
 }
 
 /// Test that limits.memory expands variables from env_file
+/// Skipped on macOS: RLIMIT_AS is unusable because the dyld shared cache
+/// is mapped at ~6GB, exceeding any practical virtual address space limit.
 #[tokio::test]
+#[cfg(all(unix, not(target_os = "macos")))]
 async fn test_limits_memory_expansion() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
 
-    // Create env file with memory limit
     let env_file = harness.create_temp_file("limits.env", "MEM_LIMIT=128M")?;
 
     let config_path = harness.load_config_with_replacements(

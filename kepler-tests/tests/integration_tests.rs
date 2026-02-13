@@ -436,12 +436,17 @@ async fn test_resource_limits_applied() {
     use kepler_daemon::config::ResourceLimits;
 
     let temp_dir = TempDir::new().unwrap();
+    let limit_file = temp_dir.path().join("fd_limit.txt");
 
-    // Create config with resource limits
+    // Service writes its own fd limit to a file, then stays alive
     let config = TestConfigBuilder::new()
         .add_service(
             "limited",
-            TestServiceBuilder::long_running()
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("ulimit -n > {} && sleep 3600", limit_file.display()),
+            ])
                 .with_limits(ResourceLimits {
                     memory: None,
                     cpu_time: None,
@@ -466,36 +471,22 @@ async fn test_resource_limits_applied() {
     .await
     .unwrap();
 
-    // Get PID from state
-    let pid = harness
-        .handle()
-        .get_service_state("limited")
-        .await
-        .and_then(|s| s.pid);
-
-    assert!(pid.is_some(), "Service should have a PID");
-    let pid = pid.unwrap();
-
-    // Check the file descriptor limit using /proc
-    let nofile_path = format!("/proc/{}/limits", pid);
-    if let Ok(contents) = std::fs::read_to_string(&nofile_path) {
-        // Look for "Max open files" line
-        for line in contents.lines() {
-            if line.starts_with("Max open files") {
-                // Format: "Max open files            256                  256                  files"
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    let soft_limit: u64 = parts[3].parse().unwrap_or(0);
-                    assert_eq!(
-                        soft_limit, 256,
-                        "Soft limit for open files should be 256, got {}",
-                        soft_limit
-                    );
-                }
-                break;
-            }
-        }
+    // Wait for the limit file to be written by the child process
+    let mut attempts = 0;
+    while !limit_file.exists() && attempts < 50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
     }
+
+    let contents = std::fs::read_to_string(&limit_file)
+        .expect("Service should have written its fd limit to file");
+    let reported_limit: u64 = contents.trim().parse()
+        .expect("ulimit -n should output a number");
+    assert_eq!(
+        reported_limit, 256,
+        "File descriptor limit should be 256, got {}",
+        reported_limit
+    );
 
     harness.stop_service("limited").await.unwrap();
 }

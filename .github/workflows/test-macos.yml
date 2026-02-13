@@ -1,0 +1,89 @@
+name: Test macOS
+
+on:
+  pull_request:
+    types: [synchronize, opened, reopened]
+
+jobs:
+  test-macos:
+    if: contains(github.event.pull_request.labels.*.name, 'test-macos')
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.93
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: test-macos-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            test-macos-cargo-
+
+      - name: Create kepler group and test users
+        run: |
+          # Create kepler group (mirrors Dockerfile: groupadd kepler)
+          sudo dscl . -create /Groups/kepler
+          sudo dscl . -create /Groups/kepler PrimaryGroupID 600
+          sudo dscl . -create /Groups/kepler RealName "Kepler Group"
+
+          # Create test users (mirrors Dockerfile: useradd -m -s /bin/bash)
+          create_user() {
+            local username=$1
+            local uid=$2
+            sudo dscl . -create /Users/$username
+            sudo dscl . -create /Users/$username UserShell /bin/bash
+            sudo dscl . -create /Users/$username RealName "$username"
+            sudo dscl . -create /Users/$username UniqueID $uid
+            sudo dscl . -create /Users/$username PrimaryGroupID 20
+            sudo dscl . -create /Users/$username NFSHomeDirectory /Users/$username
+            sudo createhomedir -c -u $username 2>/dev/null || true
+          }
+
+          create_user testuser1 601
+          create_user testuser2 602
+          create_user noaccess 603
+
+          # Create nobody-test group (GID 65534) and user (UID 65534)
+          # Security tests use UID 65534 as a non-privileged config owner
+          sudo dscl . -create /Groups/nobody-test
+          sudo dscl . -create /Groups/nobody-test PrimaryGroupID 65534
+          create_user nobodytest 65534
+
+          # Add testuser1 and testuser2 to kepler group
+          # (mirrors Dockerfile: usermod -aG kepler testuser1 testuser2)
+          sudo dseditgroup -o edit -a testuser1 -t user kepler
+          sudo dseditgroup -o edit -a testuser2 -t user kepler
+
+          # Create kepler state directory with correct ownership
+          # (mirrors Dockerfile: mkdir + chown root:kepler + chmod 0770)
+          sudo mkdir -p /var/lib/kepler
+          sudo chown root:kepler /var/lib/kepler
+          sudo chmod 0770 /var/lib/kepler
+
+      - name: Build workspace
+        env:
+          RUST_BACKTRACE: "1"
+        run: sudo -E cargo build --workspace
+
+      - name: Copy kepler-exec for tests
+        run: sudo install target/debug/kepler-exec target/debug/deps/kepler-exec
+
+      - name: Run tests
+        env:
+          RUST_BACKTRACE: "1"
+          # Use /tmp instead of macOS per-user TMPDIR (/var/folders/.../T/)
+          # The per-user dir is mode 0700, so processes that drop to a different
+          # UID (e.g. 65534) can't traverse the path to reach temp files.
+          # /tmp (/private/tmp) is mode 1777, matching Linux behavior.
+          TMPDIR: /tmp
+        run: sudo -E cargo test --workspace

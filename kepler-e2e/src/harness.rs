@@ -123,25 +123,7 @@ impl E2eHarness {
     /// Check if the state directory for a specific config exists
     /// Config state directories are named by hash and contain source_path.txt
     pub fn config_state_exists(&self, config_path: &Path) -> bool {
-        let configs_dir = self.configs_dir();
-        if !configs_dir.exists() {
-            return false;
-        }
-
-        // Look for a directory containing source_path.txt that points to our config
-        if let Ok(entries) = std::fs::read_dir(&configs_dir) {
-            for entry in entries.flatten() {
-                let source_path_file = entry.path().join("source_path.txt");
-                if source_path_file.exists()
-                    && let Ok(content) = std::fs::read_to_string(&source_path_file) {
-                        let stored_path = PathBuf::from(content.trim());
-                        if stored_path == config_path {
-                            return true;
-                        }
-                    }
-            }
-        }
-        false
+        self.get_config_state_dir(config_path).is_some()
     }
 
     /// Get the state directory for a specific config (if it exists)
@@ -151,13 +133,18 @@ impl E2eHarness {
             return None;
         }
 
+        // Canonicalize the query path to handle macOS symlinks
+        // (e.g. /var/folders → /private/var/folders)
+        let canonical_query = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
+
         if let Ok(entries) = std::fs::read_dir(&configs_dir) {
             for entry in entries.flatten() {
                 let source_path_file = entry.path().join("source_path.txt");
                 if source_path_file.exists()
                     && let Ok(content) = std::fs::read_to_string(&source_path_file) {
                         let stored_path = PathBuf::from(content.trim());
-                        if stored_path == config_path {
+                        let canonical_stored = std::fs::canonicalize(&stored_path).unwrap_or(stored_path);
+                        if canonical_stored == canonical_query {
                             return Some(entry.path());
                         }
                     }

@@ -4,6 +4,7 @@ members = [
     "kepler-protocol",
     "kepler-daemon",
     "kepler-exec",
+    "kepler-unix",
     "kepler-tests",
     "kepler-e2e",
 ]

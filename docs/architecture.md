@@ -90,7 +90,7 @@ The daemon uses Unix peer credentials to enforce group-based access:
 1. Socket file permissions set to `0o660 root:kepler`
 2. Each connection verified via `peer_cred()`
 3. Root clients (UID 0) are always allowed
-4. Other clients must be in the `kepler` group (checked via primary GID and supplementary groups from `/proc/<pid>/status`)
+4. Other clients must be in the `kepler` group (checked via primary GID and supplementary groups via `getgrouplist()`)
 5. Connections from users not in the kepler group are rejected
 
 See [Security Model](security-model.md) for the full security design.
