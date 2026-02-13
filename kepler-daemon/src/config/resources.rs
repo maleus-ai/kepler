@@ -53,9 +53,9 @@ pub fn parse_memory_limit(s: &str) -> std::result::Result<u64, String> {
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SysEnvPolicy {
-    /// Clear system environment, only pass explicit environment vars (secure default)
-    #[default]
+    /// Clear system environment, only pass explicit environment vars
     Clear,
-    /// Inherit all system environment variables from the daemon process
+    /// Inherit all system environment variables from the daemon process (default)
+    #[default]
     Inherit,
 }

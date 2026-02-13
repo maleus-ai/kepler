@@ -112,13 +112,13 @@ Symlinks are rejected for critical paths:
 
 ## Environment Isolation
 
-By default, Kepler clears the environment before starting services (`sys_env: clear`). This prevents unintended leakage of sensitive environment variables:
+By default, Kepler inherits the system environment when starting services (`sys_env: inherit`). This ensures services have access to `PATH` and other standard variables that most programs expect.
+
+For production environments where environment isolation is important, use `sys_env: clear` to prevent unintended leakage of sensitive environment variables:
 
 - `AWS_SECRET_KEY`, `API_TOKENS`, etc. from your shell are NOT passed to services
 - Only explicitly configured `environment` entries and `env_file` variables are available
 - System env vars captured at config load time are available for variable expansion but not passed to processes
-
-Use `sys_env: inherit` only for apps that require the full system environment.
 
 See [Environment Variables](environment-variables.md) for details.
 
