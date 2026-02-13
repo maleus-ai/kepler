@@ -94,10 +94,10 @@ async fn test_start_with_nonexistent_working_dir_retries_without_hanging() {
     );
 }
 
-/// When a config fails to start any services, it should be cleaned up from the registry
-/// so that a fresh retry re-loads the config from scratch.
+/// When a config fails to start services, it should remain in the registry
+/// so that users can inspect logs and service status after a failed start.
 #[tokio::test]
-async fn test_failed_config_is_cleaned_from_registry() {
+async fn test_failed_config_remains_in_registry() {
     let temp_dir = TempDir::new().unwrap();
 
     let kepler_state_dir = temp_dir.path().join(".kepler");
@@ -122,13 +122,14 @@ async fn test_failed_config_is_cleaned_from_registry() {
     let sys_env: std::collections::HashMap<String, String> = std::env::vars().collect();
 
     // Start should fail
-    let _result = orchestrator
+    let result = orchestrator
         .start_services(&config_path, None, Some(sys_env.clone()), None)
         .await;
+    assert!(result.is_err(), "Start should fail with bad working directory");
 
-    // Config should have been cleaned up from the registry
+    // Config should remain in the registry so users can inspect logs/status
     assert!(
-        registry.get(&config_path).is_none(),
-        "Failed config should be removed from registry"
+        registry.get(&config_path).is_some(),
+        "Failed config should remain in registry for diagnostic access"
     );
 }
