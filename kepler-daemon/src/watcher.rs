@@ -81,15 +81,26 @@ impl FileWatcherActor {
         }
     }
 
-    /// Build a GlobSet from patterns
-    fn build_glob_set(patterns: &[String]) -> Option<GlobSet> {
+    /// Build include and exclude GlobSets from patterns.
+    /// Patterns starting with '!' are treated as exclusions.
+    fn build_glob_sets(patterns: &[String]) -> Option<(GlobSet, GlobSet)> {
         if patterns.is_empty() {
             return None;
         }
 
-        let mut builder = GlobSetBuilder::new();
+        let mut include_builder = GlobSetBuilder::new();
+        let mut exclude_builder = GlobSetBuilder::new();
+        let mut has_include = false;
+
         for pattern in patterns {
-            match Glob::new(pattern) {
+            let (builder, pat) = if let Some(negated) = pattern.strip_prefix('!') {
+                (&mut exclude_builder, negated)
+            } else {
+                has_include = true;
+                (&mut include_builder, pattern.as_str())
+            };
+
+            match Glob::new(pat) {
                 Ok(glob) => {
                     builder.add(glob);
                 }
@@ -98,14 +109,27 @@ impl FileWatcherActor {
                 }
             }
         }
-        builder.build().ok()
+
+        if !has_include {
+            return None;
+        }
+
+        let include_set = include_builder.build().ok()?;
+        let exclude_set = exclude_builder.build().unwrap_or_else(|_| GlobSet::empty());
+        Some((include_set, exclude_set))
     }
 
-    /// Collect all directories that need to be watched based on patterns
+    /// Collect all directories that need to be watched based on patterns.
+    /// Only include patterns (not negated) determine which directories to watch.
     fn collect_watch_dirs(patterns: &[String], default_dir: &Path) -> Vec<PathBuf> {
         let mut dirs: HashSet<PathBuf> = HashSet::new();
 
         for pattern in patterns {
+            // Skip negation patterns — they don't add watch directories
+            if pattern.starts_with('!') {
+                continue;
+            }
+
             if is_absolute_pattern(pattern) {
                 // Extract base directory from absolute pattern
                 if let Some(base_dir) = extract_base_dir(pattern) {
@@ -131,7 +155,7 @@ impl FileWatcherActor {
 
     /// Run the actor event loop
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let Some(glob_set) = Self::build_glob_set(&self.patterns) else {
+        let Some((include_set, exclude_set)) = Self::build_glob_sets(&self.patterns) else {
             debug!("No valid patterns for file watcher, exiting");
             return Ok(());
         };
@@ -188,7 +212,7 @@ impl FileWatcherActor {
             tokio::select! {
                 // Handle file change events
                 Some(events) = async_event_rx.recv() => {
-                    let should_restart = self.process_file_events(&events, &glob_set);
+                    let should_restart = self.process_file_events(&events, &include_set, &exclude_set);
                     if should_restart {
                         let event = FileChangeEvent {
                             config_path: self.config_path.clone(),
@@ -234,38 +258,259 @@ impl FileWatcherActor {
         Ok(())
     }
 
-    /// Process file events and return true if a restart should be triggered
-    fn process_file_events(&self, events: &[notify_debouncer_mini::DebouncedEvent], glob_set: &GlobSet) -> bool {
+    /// Process file events and return true if a restart should be triggered.
+    /// A file triggers a restart if it matches an include pattern and does NOT match any exclude pattern.
+    fn process_file_events(
+        &self,
+        events: &[notify_debouncer_mini::DebouncedEvent],
+        include_set: &GlobSet,
+        exclude_set: &GlobSet,
+    ) -> bool {
         for event in events {
             if event.kind == DebouncedEventKind::Any {
                 let path = &event.path;
                 let path_str = path.to_string_lossy();
 
-                // Check if the full absolute path matches any pattern
-                if glob_set.is_match(path.as_os_str()) || glob_set.is_match(&*path_str) {
-                    debug!(
-                        "File change detected for {} (absolute match): {:?}",
-                        self.service_name, path
-                    );
-                    return true;
-                }
+                // Check absolute path
+                let abs_included = include_set.is_match(path.as_os_str())
+                    || include_set.is_match(&*path_str);
 
-                // Also check relative to working_dir for relative patterns
-                if let Ok(relative) = path.strip_prefix(&self.working_dir) {
-                    let relative_str = relative.to_string_lossy();
-                    if glob_set.is_match(relative.as_os_str())
-                        || glob_set.is_match(&*relative_str)
-                    {
+                if abs_included {
+                    // Check if excluded (test both absolute and relative for exclusion)
+                    let abs_excluded = exclude_set.is_match(path.as_os_str())
+                        || exclude_set.is_match(&*path_str);
+                    let rel_excluded = path
+                        .strip_prefix(&self.working_dir)
+                        .ok()
+                        .map(|rel| {
+                            exclude_set.is_match(rel.as_os_str())
+                                || exclude_set.is_match(&*rel.to_string_lossy())
+                        })
+                        .unwrap_or(false);
+
+                    if !abs_excluded && !rel_excluded {
                         debug!(
-                            "File change detected for {} (relative match): {:?}",
+                            "File change detected for {} (absolute match): {:?}",
                             self.service_name, path
                         );
                         return true;
+                    } else {
+                        debug!(
+                            "File change excluded for {} by negation pattern: {:?}",
+                            self.service_name, path
+                        );
+                    }
+                    continue;
+                }
+
+                // Check relative path
+                if let Ok(relative) = path.strip_prefix(&self.working_dir) {
+                    let relative_str = relative.to_string_lossy();
+                    let rel_included = include_set.is_match(relative.as_os_str())
+                        || include_set.is_match(&*relative_str);
+
+                    if rel_included {
+                        let excluded = exclude_set.is_match(relative.as_os_str())
+                            || exclude_set.is_match(&*relative_str)
+                            || exclude_set.is_match(path.as_os_str())
+                            || exclude_set.is_match(&*path_str);
+
+                        if !excluded {
+                            debug!(
+                                "File change detected for {} (relative match): {:?}",
+                                self.service_name, path
+                            );
+                            return true;
+                        } else {
+                            debug!(
+                                "File change excluded for {} by negation pattern: {:?}",
+                                self.service_name, path
+                            );
+                        }
                     }
                 }
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify_debouncer_mini::DebouncedEvent;
+
+    /// Helper to build glob sets from pattern strings
+    fn make_glob_sets(patterns: &[&str]) -> (GlobSet, GlobSet) {
+        let patterns: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
+        FileWatcherActor::build_glob_sets(&patterns).unwrap()
+    }
+
+    /// Helper to create a DebouncedEvent with DebouncedEventKind::Any
+    fn file_event(path: &str) -> DebouncedEvent {
+        DebouncedEvent {
+            path: PathBuf::from(path),
+            kind: DebouncedEventKind::Any,
+        }
+    }
+
+    /// Helper to create a FileWatcherActor for testing process_file_events
+    fn make_actor(working_dir: &str) -> FileWatcherActor {
+        let (tx, _rx) = mpsc::channel(1);
+        FileWatcherActor::new(
+            PathBuf::from("/tmp/kepler.yaml"),
+            "test-service".to_string(),
+            vec![],
+            PathBuf::from(working_dir),
+            tx,
+        )
+    }
+
+    // --- build_glob_sets tests ---
+
+    #[test]
+    fn build_glob_sets_empty_returns_none() {
+        let patterns: Vec<String> = vec![];
+        assert!(FileWatcherActor::build_glob_sets(&patterns).is_none());
+    }
+
+    #[test]
+    fn build_glob_sets_only_excludes_returns_none() {
+        let patterns = vec!["!**/*.test.ts".to_string()];
+        assert!(FileWatcherActor::build_glob_sets(&patterns).is_none());
+    }
+
+    #[test]
+    fn build_glob_sets_splits_include_and_exclude() {
+        let (include, exclude) = make_glob_sets(&["**/*.ts", "!**/*.test.ts"]);
+
+        // Include matches .ts files
+        assert!(include.is_match("src/app.ts"));
+        assert!(include.is_match("src/app.test.ts"));
+
+        // Exclude only matches .test.ts files
+        assert!(!exclude.is_match("src/app.ts"));
+        assert!(exclude.is_match("src/app.test.ts"));
+    }
+
+    #[test]
+    fn build_glob_sets_multiple_excludes() {
+        let (include, exclude) =
+            make_glob_sets(&["src/**/*.ts", "!**/*.test.ts", "!**/*.spec.ts"]);
+
+        assert!(include.is_match("src/app.ts"));
+        assert!(exclude.is_match("src/app.test.ts"));
+        assert!(exclude.is_match("src/app.spec.ts"));
+        assert!(!exclude.is_match("src/app.ts"));
+    }
+
+    // --- process_file_events tests ---
+
+    #[test]
+    fn process_events_include_only() {
+        let actor = make_actor("/project");
+        let (include, exclude) = make_glob_sets(&["src/**/*.ts"]);
+        let events = vec![file_event("/project/src/app.ts")];
+
+        assert!(actor.process_file_events(&events, &include, &exclude));
+    }
+
+    #[test]
+    fn process_events_no_match() {
+        let actor = make_actor("/project");
+        let (include, exclude) = make_glob_sets(&["src/**/*.ts"]);
+        let events = vec![file_event("/project/src/style.css")];
+
+        assert!(!actor.process_file_events(&events, &include, &exclude));
+    }
+
+    #[test]
+    fn process_events_negation_excludes_file() {
+        let actor = make_actor("/project");
+        let (include, exclude) = make_glob_sets(&["src/**/*.ts", "!**/*.test.ts"]);
+
+        // Regular .ts file should trigger restart
+        let events = vec![file_event("/project/src/app.ts")];
+        assert!(actor.process_file_events(&events, &include, &exclude));
+
+        // .test.ts file should NOT trigger restart
+        let events = vec![file_event("/project/src/app.test.ts")];
+        assert!(!actor.process_file_events(&events, &include, &exclude));
+    }
+
+    #[test]
+    fn process_events_negation_multiple_excludes() {
+        let actor = make_actor("/project");
+        let (include, exclude) =
+            make_glob_sets(&["src/**/*.ts", "!**/*.test.ts", "!**/*.spec.ts"]);
+
+        assert!(actor.process_file_events(
+            &[file_event("/project/src/app.ts")],
+            &include,
+            &exclude
+        ));
+        assert!(!actor.process_file_events(
+            &[file_event("/project/src/app.test.ts")],
+            &include,
+            &exclude
+        ));
+        assert!(!actor.process_file_events(
+            &[file_event("/project/src/app.spec.ts")],
+            &include,
+            &exclude
+        ));
+    }
+
+    #[test]
+    fn process_events_mixed_batch_excluded_file_does_not_trigger() {
+        let actor = make_actor("/project");
+        let (include, exclude) = make_glob_sets(&["src/**/*.ts", "!**/*.test.ts"]);
+
+        // Batch with only excluded files should not trigger
+        let events = vec![
+            file_event("/project/src/foo.test.ts"),
+            file_event("/project/src/bar.test.ts"),
+        ];
+        assert!(!actor.process_file_events(&events, &include, &exclude));
+
+        // Batch with one included file should trigger
+        let events = vec![
+            file_event("/project/src/foo.test.ts"),
+            file_event("/project/src/app.ts"),
+        ];
+        assert!(actor.process_file_events(&events, &include, &exclude));
+    }
+
+    #[test]
+    fn process_events_negation_with_subdirectory_pattern() {
+        let actor = make_actor("/project");
+        let (include, exclude) =
+            make_glob_sets(&["src/**/*.ts", "!src/generated/**"]);
+
+        assert!(actor.process_file_events(
+            &[file_event("/project/src/app.ts")],
+            &include,
+            &exclude
+        ));
+        assert!(!actor.process_file_events(
+            &[file_event("/project/src/generated/types.ts")],
+            &include,
+            &exclude
+        ));
+    }
+
+    // --- collect_watch_dirs tests ---
+
+    #[test]
+    fn collect_watch_dirs_skips_negation_patterns() {
+        let patterns = vec![
+            "src/**/*.ts".to_string(),
+            "!**/*.test.ts".to_string(),
+        ];
+        let dirs = FileWatcherActor::collect_watch_dirs(&patterns, Path::new("/project"));
+        // Only the include pattern contributes the default dir
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs.contains(&PathBuf::from("/project")));
     }
 }
 
