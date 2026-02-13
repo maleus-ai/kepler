@@ -52,8 +52,8 @@ pub enum DaemonError {
         source: std::io::Error,
     },
 
-    #[error("Hook execution failed for {hook_type}: {message}")]
-    HookFailed { hook_type: String, message: String },
+    #[error("{service} {hook} hook failed ({message})")]
+    HookFailed { service: String, hook: String, message: String },
 
     #[error("Environment file not found: {0}")]
     EnvFileNotFound(PathBuf),

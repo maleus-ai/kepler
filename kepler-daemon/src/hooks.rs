@@ -181,7 +181,7 @@ impl ServiceHookType {
 }
 
 /// Execute a hook command
-pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>) -> Result<()> {
+pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>, service: &str, hook_name: &str) -> Result<()> {
     // Convert hook to program and args
     let program_and_args = match hook {
         HookCommand::Script { run, .. } => {
@@ -254,9 +254,14 @@ pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>) -> Result<()
 
     let result = spawn_blocking(spec, mode).await?;
     if result.exit_code != Some(0) {
+        let message = match result.exit_code {
+            Some(code) => format!("exit code {}", code),
+            None => "killed by signal".to_string(),
+        };
         return Err(DaemonError::HookFailed {
-            hook_type: format!("{} {:?}", &program_and_args[0], &program_and_args[1..]),
-            message: format!("Exit code: {:?}", result.exit_code),
+            service: service.to_string(),
+            hook: hook_name.to_string(),
+            message,
         });
     }
     Ok(())
@@ -310,7 +315,7 @@ pub async fn run_global_hook(
             store_stdout,
             store_stderr,
         };
-        match run_hook(hook, &ctx).await {
+        match run_hook(hook, &ctx, "global", hook_type.as_str()).await {
             Ok(()) => {
                 emit_hook_event(progress, "global", ServicePhase::HookCompleted { hook: hook_name }).await;
             }
@@ -368,7 +373,7 @@ pub async fn run_service_hook(
             store_stdout,
             store_stderr,
         };
-        match run_hook(hook, &ctx).await {
+        match run_hook(hook, &ctx, service_name, hook_type.as_str()).await {
             Ok(()) => {
                 emit_hook_event(progress, service_name, ServicePhase::HookCompleted { hook: hook_name }).await;
             }

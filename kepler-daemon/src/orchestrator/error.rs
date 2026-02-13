@@ -20,7 +20,7 @@ pub enum OrchestratorError {
     #[error("Failed to spawn service: {0}")]
     SpawnFailed(String),
 
-    #[error("Hook failed: {0}")]
+    #[error("{0}")]
     HookFailed(String),
 
     #[error("IO error: {0}")]
