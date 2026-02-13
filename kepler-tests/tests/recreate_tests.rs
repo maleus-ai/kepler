@@ -96,7 +96,7 @@ async fn test_restart_calls_restart_hooks() {
     // Start the service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), None)
+        .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await
         .unwrap();
 
@@ -196,7 +196,7 @@ async fn test_restart_preserves_baked_config() {
     let mut sys_env: HashMap<String, String> = std::env::vars().collect();
     sys_env.insert(env_var_name.clone(), "original_value".to_string());
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -303,7 +303,7 @@ async fn test_recreate_rebakes_config() {
     let mut sys_env: HashMap<String, String> = std::env::vars().collect();
     sys_env.insert(env_var_name.clone(), "original_value".to_string());
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -342,7 +342,7 @@ async fn test_recreate_rebakes_config() {
 
     // Start services again with new baked config
     orchestrator
-        .start_services(&config_path, None, Some(new_sys_env), None)
+        .start_services(&config_path, None, Some(new_sys_env), None, None)
         .await
         .unwrap();
 
@@ -408,7 +408,7 @@ async fn test_recreate_runs_init_hooks() {
     // Start the service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), None)
+        .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await
         .unwrap();
 
@@ -436,7 +436,7 @@ async fn test_recreate_runs_init_hooks() {
 
     // Start services again — on_init should fire because state was cleared by recreate
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -503,7 +503,7 @@ async fn test_restart_specific_service_hooks() {
     // Start both services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), None)
+        .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await
         .unwrap();
 
@@ -584,7 +584,7 @@ async fn test_restart_respects_dependency_order() {
     // Start both services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), None)
+        .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await
         .unwrap();
 
@@ -707,7 +707,7 @@ async fn test_stop_respects_reverse_dependency_order() {
     // Start all services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -786,7 +786,7 @@ async fn test_recreate_respects_dependency_order() {
     // Start both services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), None)
+        .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await
         .unwrap();
 
@@ -850,7 +850,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     // Start service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), None)
+        .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await
         .unwrap();
 
@@ -886,7 +886,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
 
     // Start services again — on_init should fire because state was cleared
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -940,7 +940,7 @@ async fn test_recreate_fails_while_services_running() {
     // Start service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), None)
+        .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await
         .unwrap();
 
@@ -998,7 +998,7 @@ async fn test_restart_calls_all_restart_hooks_in_order() {
     // Start service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 

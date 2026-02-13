@@ -293,7 +293,7 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
             match orchestrator
-                .start_services(&config_path, service.as_deref(), sys_env, Some((peer.uid, peer.gid)))
+                .start_services(&config_path, service.as_deref(), sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()))
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -921,7 +921,7 @@ async fn discover_existing_configs(
 
                     for service_name in &services_to_respawn {
                         match orchestrator
-                            .start_services(&source_path, Some(service_name), None, None)
+                            .start_services(&source_path, Some(service_name), None, None, None)
                             .await
                         {
                             Ok(_) => {

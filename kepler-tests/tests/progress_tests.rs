@@ -168,7 +168,7 @@ async fn test_start_transitions_starting_to_running() {
 
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -213,7 +213,7 @@ async fn test_start_multiple_services() {
 
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -258,7 +258,7 @@ async fn test_stop_transitions() {
 
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -304,7 +304,7 @@ async fn test_stop_already_stopped_is_noop() {
     // Start and stop
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
     orchestrator
@@ -357,7 +357,7 @@ async fn test_restart_full_lifecycle() {
 
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env.clone()), None)
+        .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await
         .unwrap();
 
@@ -436,7 +436,7 @@ async fn test_start_healthcheck_transitions_to_healthy() {
 
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -493,7 +493,7 @@ async fn test_start_mixed_services_correct_final_states() {
 
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -549,7 +549,7 @@ async fn test_broadcast_emits_stop_transitions() {
 
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -628,6 +628,7 @@ async fn test_start_deps_no_false_quiescence() {
                 &config_path_clone,
                 None,
                 Some(sys_env),
+                None,
                 None,
             )
             .await
@@ -719,7 +720,7 @@ async fn test_dependency_waiting_reacts_via_broadcast() {
     let start = std::time::Instant::now();
 
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -784,7 +785,7 @@ async fn test_restart_broadcasts_full_lifecycle_with_healthcheck() {
 
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 
@@ -896,7 +897,7 @@ async fn test_handle_exit_respawns_health_checker() {
 
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None)
+        .start_services(&config_path, None, Some(sys_env), None, None)
         .await
         .unwrap();
 

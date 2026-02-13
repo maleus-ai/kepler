@@ -344,6 +344,16 @@ async fn run_with_progress(
                                 pb.set_style(style_fail.clone());
                                 pb.finish_with_message(format!("Failed: {}", message));
                             }
+                            ServicePhase::HookStarted { hook } => {
+                                pb.set_message(format!("Hook {}...", hook));
+                            }
+                            ServicePhase::HookCompleted { .. } => {
+                                // Hook finished, next phase will update the message
+                            }
+                            ServicePhase::HookFailed { hook, message } => {
+                                pb.set_style(style_fail.clone());
+                                pb.finish_with_message(format!("Hook {} failed: {}", hook, message));
+                            }
                         }
                     }
                     None => {
@@ -502,6 +512,17 @@ async fn wait_until_ready_with_start(
                             ServicePhase::Failed { message } => {
                                 pb.set_style(style_fail.clone());
                                 pb.finish_with_message(format!("Failed: {}", message));
+                                finished.insert(event.service.clone(), true);
+                            }
+                            ServicePhase::HookStarted { hook } => {
+                                pb.set_message(format!("Hook {}...", hook));
+                            }
+                            ServicePhase::HookCompleted { .. } => {
+                                // Hook finished, next phase will update the message
+                            }
+                            ServicePhase::HookFailed { hook, message } => {
+                                pb.set_style(style_fail.clone());
+                                pb.finish_with_message(format!("Hook {} failed: {}", hook, message));
                                 finished.insert(event.service.clone(), true);
                             }
                         }
