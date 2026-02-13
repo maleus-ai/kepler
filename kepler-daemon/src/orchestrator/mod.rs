@@ -107,32 +107,6 @@ impl ServiceOrchestrator {
         sys_env: Option<HashMap<String, String>>,
         config_owner: Option<(u32, u32)>,
     ) -> Result<String, OrchestratorError> {
-        let result = self
-            .start_services_inner(config_path, service_filter, sys_env, config_owner)
-            .await;
-
-        // If start failed entirely, clean up the config from the registry
-        // so that a retry re-loads the config fresh instead of seeing stale state.
-        if result.is_err() {
-            if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
-                if handle.all_services_stopped().await {
-                    self.registry.unload(&config_path.to_path_buf()).await;
-                }
-            }
-        }
-
-        result
-    }
-
-    /// Inner implementation of start_services, separated so the outer method
-    /// can perform cleanup on failure.
-    async fn start_services_inner(
-        &self,
-        config_path: &Path,
-        service_filter: Option<&str>,
-        sys_env: Option<HashMap<String, String>>,
-        config_owner: Option<(u32, u32)>,
-    ) -> Result<String, OrchestratorError> {
         // Get or create the config actor
         let handle = self
             .registry
