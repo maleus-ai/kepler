@@ -3,14 +3,15 @@
 //! Tests the !lua and !lua_file YAML tags for dynamic config generation.
 
 use kepler_daemon::config::KeplerConfig;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
 use tempfile::TempDir;
 
 /// Lock to serialize tests that modify process environment variables.
 /// Without this, parallel tests calling set_var/remove_var race with
 /// std::env::vars() in load_config_from_string, causing flaky failures.
+/// Uses parking_lot::Mutex which does not poison on panic.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Helper to write a config file and load it with test process's environment
@@ -65,7 +66,7 @@ services:
 /// Test: !lua accesses ctx.env table
 #[test]
 fn test_lua_env_access() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock();
     let temp_dir = TempDir::new().unwrap();
 
     // Set an env var that the Lua script will read
@@ -273,7 +274,7 @@ services:
 /// Test: conditional config based on environment
 #[test]
 fn test_lua_conditional_config() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock();
     let temp_dir = TempDir::new().unwrap();
 
     unsafe {
@@ -306,7 +307,7 @@ services:
 /// Test: healthcheck test array from Lua
 #[test]
 fn test_lua_healthcheck() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock();
     let temp_dir = TempDir::new().unwrap();
 
     unsafe {
@@ -366,7 +367,7 @@ services:
 /// Test: env_file evaluation order (Lua sees system vars via ctx.sys_env)
 #[test]
 fn test_lua_env_file_evaluation_order() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock();
     let temp_dir = TempDir::new().unwrap();
 
     unsafe {
@@ -401,7 +402,7 @@ services:
 /// preserve the array-like structure when passed between functions.
 #[test]
 fn test_lua_env_transform() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock();
     let temp_dir = TempDir::new().unwrap();
 
     // Set some test env vars
@@ -416,6 +417,7 @@ fn test_lua_env_transform() {
 services:
   test:
     command: ["echo", "hello"]
+    sys_env: clear
     environment: !lua |
       local result = {}
       local prefix = "KEPLER_BACKEND_"
@@ -588,7 +590,7 @@ services:
 /// Test: !lua tag works for global logs configuration (kepler.logs)
 #[test]
 fn test_lua_global_logs_config() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock();
     let temp_dir = TempDir::new().unwrap();
 
     // Set env vars for Lua scripts to use
@@ -626,7 +628,7 @@ services:
 /// Test: !lua tag works for service-level logs configuration
 #[test]
 fn test_lua_service_logs_config() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock();
     let temp_dir = TempDir::new().unwrap();
 
     // Set env vars for Lua scripts to use
@@ -749,7 +751,7 @@ services:
 /// Test: !lua tag works for individual fields within depends_on
 #[test]
 fn test_lua_depends_on_individual_fields() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock();
     use kepler_daemon::config::DependencyCondition;
     let temp_dir = TempDir::new().unwrap();
 
@@ -794,7 +796,7 @@ services:
 /// Test: !lua tag works for conditional depends_on based on environment
 #[test]
 fn test_lua_depends_on_conditional() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock();
     let temp_dir = TempDir::new().unwrap();
 
     // Set env var to enable cache dependency

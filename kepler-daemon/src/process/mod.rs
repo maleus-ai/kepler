@@ -90,7 +90,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
 
     // Resolve sys_env policy: service setting > global setting > default (Clear)
     let global_sys_env = handle.get_global_sys_env().await;
-    let resolved_sys_env = resolve_sys_env(&service_config.sys_env, global_sys_env.as_ref());
+    let resolved_sys_env = resolve_sys_env(service_config.sys_env.as_ref(), global_sys_env.as_ref());
     let clear_env = resolved_sys_env == SysEnvPolicy::Clear;
 
     let spec = CommandSpec::with_all_options(

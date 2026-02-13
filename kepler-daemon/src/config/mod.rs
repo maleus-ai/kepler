@@ -15,13 +15,16 @@ mod lua;
 mod resources;
 mod restart;
 
-pub use deps::{DependencyCondition, DependencyConfig, DependencyEntry, DependsOn, DependsOnFormat, ExitCodeFilter};
+pub use deps::{
+    DependencyCondition, DependencyConfig, DependencyEntry, DependsOn, DependsOnFormat,
+    ExitCodeFilter,
+};
 pub use duration::{format_duration, parse_duration};
 pub use expand::resolve_sys_env;
 pub use health::HealthCheck;
 pub use hooks::{GlobalHooks, HookCommand, HookCommon, ServiceHooks};
 pub use logs::{LogConfig, LogRetention, LogRetentionConfig, LogStoreConfig};
-pub use resources::{parse_memory_limit, ResourceLimits, SysEnvPolicy};
+pub use resources::{ResourceLimits, SysEnvPolicy, parse_memory_limit};
 pub use restart::{RestartConfig, RestartPolicy};
 
 use serde::Deserialize;
@@ -180,10 +183,12 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub env_file: Option<PathBuf>,
     /// System environment inheritance policy
-    /// - `clear` (default): Start with empty environment, only explicit vars are passed
+    /// - `clear`: Start with empty environment, only explicit vars are passed
     /// - `inherit`: Inherit all system environment variables from the daemon
-    #[serde(default)]
-    pub sys_env: SysEnvPolicy,
+    /// When not specified, inherits from global `kepler.sys_env`. If that is also
+    /// unset, defaults to `inherit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sys_env: Option<SysEnvPolicy>,
     #[serde(default)]
     pub restart: RestartConfig,
     /// Dependencies with optional conditions and timeouts
@@ -337,7 +342,7 @@ impl KeplerConfig {
 
             // Step 4: Apply sys_env policy - bake sys_env into environment if inherit
             let effective_policy =
-                expand::resolve_sys_env(&service.sys_env, global_sys_env_policy.as_ref());
+                expand::resolve_sys_env(service.sys_env.as_ref(), global_sys_env_policy.as_ref());
             if effective_policy == SysEnvPolicy::Inherit {
                 // Prepend sys_env vars to environment array (service vars take priority)
                 let mut new_env: Vec<String> = sys_env
@@ -351,9 +356,10 @@ impl KeplerConfig {
 
         // Process global hooks in kepler namespace (no env_file, just sys_env)
         if let Some(ref mut kepler) = self.kepler
-            && let Some(ref mut hooks) = kepler.hooks {
-                expand::expand_global_hooks(hooks, &HashMap::new(), sys_env);
-            }
+            && let Some(ref mut hooks) = kepler.hooks
+        {
+            expand::expand_global_hooks(hooks, &HashMap::new(), sys_env);
+        }
     }
 
     /// Validate the configuration
@@ -389,7 +395,8 @@ impl KeplerConfig {
             for (dep_name, dep_config) in service.depends_on.iter() {
                 if !dep_config.exit_code.is_empty() {
                     match dep_config.condition {
-                        DependencyCondition::ServiceFailed | DependencyCondition::ServiceStopped => {}
+                        DependencyCondition::ServiceFailed
+                        | DependencyCondition::ServiceStopped => {}
                         _ => {
                             warn!(
                                 "Service '{}': exit_code filter on dependency '{}' has no effect with condition '{:?}' \
@@ -489,28 +496,35 @@ mod tests {
 
     #[test]
     fn test_resolve_sys_env_service_overrides_global() {
-        // Service explicit setting (inherit) should override global (clear)
-        let service_sys_env = SysEnvPolicy::Inherit;
-        let global_sys_env = Some(SysEnvPolicy::Clear);
-        let result = resolve_sys_env(&service_sys_env, global_sys_env.as_ref());
-        assert_eq!(result, SysEnvPolicy::Inherit);
-    }
-
-    #[test]
-    fn test_resolve_sys_env_uses_global_when_service_default() {
-        // When service uses default (Clear), global (Inherit) should apply
-        let service_sys_env = SysEnvPolicy::Clear; // default
+        // Service explicit setting (clear) should override global (inherit)
+        let service_sys_env = Some(SysEnvPolicy::Clear);
         let global_sys_env = Some(SysEnvPolicy::Inherit);
-        let result = resolve_sys_env(&service_sys_env, global_sys_env.as_ref());
+        let result = resolve_sys_env(service_sys_env.as_ref(), global_sys_env.as_ref());
+        assert_eq!(result, SysEnvPolicy::Clear);
+    }
+
+    #[test]
+    fn test_resolve_sys_env_service_inherit_overrides_global_clear() {
+        // Service explicit setting (inherit) should override global (clear)
+        let service_sys_env = Some(SysEnvPolicy::Inherit);
+        let global_sys_env = Some(SysEnvPolicy::Clear);
+        let result = resolve_sys_env(service_sys_env.as_ref(), global_sys_env.as_ref());
         assert_eq!(result, SysEnvPolicy::Inherit);
     }
 
     #[test]
-    fn test_resolve_sys_env_falls_back_to_default() {
-        // When both service and global are unset, should use default (Clear)
-        let service_sys_env = SysEnvPolicy::Clear;
-        let result = resolve_sys_env(&service_sys_env, None);
+    fn test_resolve_sys_env_uses_global_when_service_unset() {
+        // When service doesn't specify sys_env (None), global should apply
+        let global_sys_env = Some(SysEnvPolicy::Clear);
+        let result = resolve_sys_env(None, global_sys_env.as_ref());
         assert_eq!(result, SysEnvPolicy::Clear);
+    }
+
+    #[test]
+    fn test_resolve_sys_env_falls_back_to_inherit() {
+        // When both service and global are unset, should default to Inherit
+        let result = resolve_sys_env(None, None);
+        assert_eq!(result, SysEnvPolicy::Inherit);
     }
 
     #[test]
@@ -1004,9 +1018,16 @@ services:
     unknown_field: true
 "#;
         let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "unknown field under service should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown field under service should be rejected"
+        );
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("unknown field"), "error should mention unknown field: {}", err);
+        assert!(
+            err.contains("unknown field"),
+            "error should mention unknown field: {}",
+            err
+        );
     }
 
     #[test]
@@ -1020,9 +1041,16 @@ services:
         run: echo "stop"
 "#;
         let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "on_stop is not a valid service hook and should be rejected");
+        assert!(
+            result.is_err(),
+            "on_stop is not a valid service hook and should be rejected"
+        );
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("unknown field"), "error should mention unknown field: {}", err);
+        assert!(
+            err.contains("unknown field"),
+            "error should mention unknown field: {}",
+            err
+        );
     }
 
     #[test]
@@ -1036,9 +1064,16 @@ services:
     command: ["./app"]
 "#;
         let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "unknown field under kepler should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown field under kepler should be rejected"
+        );
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("unknown field"), "error should mention unknown field: {}", err);
+        assert!(
+            err.contains("unknown field"),
+            "error should mention unknown field: {}",
+            err
+        );
     }
 
     #[test]
@@ -1050,9 +1085,16 @@ services:
 version: "3"
 "#;
         let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "unknown field at root level should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown field at root level should be rejected"
+        );
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("unknown field"), "error should mention unknown field: {}", err);
+        assert!(
+            err.contains("unknown field"),
+            "error should mention unknown field: {}",
+            err
+        );
     }
 
     // ================================================================
@@ -1118,15 +1160,9 @@ services:
 
         let hooks = config.kepler.as_ref().unwrap().hooks.as_ref().unwrap();
         // pre_start had no user → should be baked
-        assert_eq!(
-            hooks.pre_start.as_ref().unwrap().user(),
-            Some("1000:1000")
-        );
+        assert_eq!(hooks.pre_start.as_ref().unwrap().user(), Some("1000:1000"));
         // post_start had explicit user → should NOT be overwritten
-        assert_eq!(
-            hooks.post_start.as_ref().unwrap().user(),
-            Some("root")
-        );
+        assert_eq!(hooks.post_start.as_ref().unwrap().user(), Some("root"));
     }
 
     #[test]
@@ -1147,10 +1183,7 @@ services:
 
         let hooks = config.kepler.as_ref().unwrap().hooks.as_ref().unwrap();
         // on_init had explicit user "daemon" → should NOT be overwritten
-        assert_eq!(
-            hooks.on_init.as_ref().unwrap().user(),
-            Some("daemon")
-        );
+        assert_eq!(hooks.on_init.as_ref().unwrap().user(), Some("daemon"));
     }
 
     #[test]
@@ -1166,6 +1199,9 @@ services:
         let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
         let app = config.services.get("app").unwrap();
         let hooks = app.hooks.as_ref().unwrap();
-        assert!(hooks.pre_cleanup.is_some(), "pre_cleanup hook should be parsed");
+        assert!(
+            hooks.pre_cleanup.is_some(),
+            "pre_cleanup hook should be parsed"
+        );
     }
 }
