@@ -399,6 +399,9 @@ async fn run_with_progress(
 
 /// Drive a foreground start/restart: runs the daemon request concurrently with log following.
 /// Exits when log following finishes (quiescence or Ctrl+C), even if the request hasn't responded.
+///
+/// On start error, the log future continues running so the cursor can drain any
+/// remaining hook logs before the error is returned to the caller.
 async fn foreground_with_logs(
     request_future: impl Future<Output = std::result::Result<Response, ClientError>>,
     log_future: impl Future<Output = Result<()>>,
@@ -406,16 +409,24 @@ async fn foreground_with_logs(
     tokio::pin!(request_future);
     tokio::pin!(log_future);
     let mut request_done = false;
+    let mut saved_error: Option<CliError> = None;
     loop {
         tokio::select! {
-            result = &mut log_future => return result,
+            result = &mut log_future => {
+                if let Some(err) = saved_error {
+                    return Err(err);
+                }
+                return result;
+            }
             result = &mut request_future, if !request_done => {
                 request_done = true;
                 match result {
                     Ok(Response::Error { message }) => {
-                        return Err(CliError::Server(message));
+                        saved_error = Some(CliError::Server(message));
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => {
+                        saved_error = Some(e.into());
+                    }
                     Ok(_) => {
                         // Request succeeded; keep following logs until quiescence
                     }
@@ -1179,7 +1190,10 @@ async fn stream_cursor_logs(
                     }
                     _ = &mut quiescence, if !quiescent_received => {
                         quiescent_received = true;
-                        // Don't break yet — drain remaining logs first
+                        // Don't break yet — do one more cursor poll to discover
+                        // any newly created log files (e.g. hook logs written
+                        // just before quiescence fired), then drain them.
+                        continue;
                     }
                     _ = tokio::time::sleep(delay) => {}
                 }
