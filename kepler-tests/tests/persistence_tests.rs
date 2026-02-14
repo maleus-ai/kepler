@@ -438,6 +438,7 @@ services:
         config_dir: PathBuf::from("/home/user/project"),
         snapshot_time: 1234567890,
         sys_env: HashMap::new(),
+        owner_uid: None,
     };
 
     // Save and load

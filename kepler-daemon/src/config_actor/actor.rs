@@ -54,6 +54,8 @@ pub struct ConfigActor {
     event_handler_spawned: bool,
     /// System environment variables captured from the CLI
     sys_env: HashMap<String, String>,
+    /// UID of the CLI user who loaded this config
+    owner_uid: Option<u32>,
 
     /// Subscriber registry for service status changes (used by Subscribe handler)
     subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>,
@@ -118,7 +120,7 @@ impl ConfigActor {
         let _ = persistence.save_source_path(&canonical_path);
 
         // Check if we have an existing expanded config snapshot
-        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_sys_env) =
+        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_sys_env, owner_uid) =
             if let Ok(Some(snapshot)) = persistence.load_expanded_config() {
                 info!(
                     "Restoring config from snapshot (taken at {})",
@@ -171,6 +173,7 @@ impl ConfigActor {
                     .unwrap_or(false);
 
                 let restored_sys_env = snapshot.sys_env;
+                let owner_uid = snapshot.owner_uid;
 
                 // Recompute wait values (safety net for old snapshots missing resolved wait)
                 let mut config = snapshot.config;
@@ -184,6 +187,7 @@ impl ConfigActor {
                     true,  // snapshot was already taken
                     true,  // restored from snapshot
                     restored_sys_env,
+                    owner_uid,
                 )
             } else {
                 // No snapshot - parse fresh from source
@@ -279,6 +283,7 @@ impl ConfigActor {
                     false, // snapshot not yet taken
                     false, // not restored from snapshot
                     resolved_sys_env,
+                    config_owner.map(|(uid, _)| uid),
                 )
             };
 
@@ -291,7 +296,7 @@ impl ConfigActor {
         let subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>> =
             Arc::new(Mutex::new(Vec::new()));
 
-        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone());
+        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), owner_uid);
 
         let actor = ConfigActor {
             config_path: canonical_path,
@@ -310,6 +315,7 @@ impl ConfigActor {
             restored_from_snapshot,
             event_handler_spawned: false,
             sys_env: resolved_sys_env,
+            owner_uid,
             subscribers,
             rx,
         };
@@ -733,6 +739,7 @@ impl ConfigActor {
             config_dir: self.config_dir.clone(),
             snapshot_time: chrono::Utc::now().timestamp(),
             sys_env: self.sys_env.clone(),
+            owner_uid: self.owner_uid,
         };
 
         // Save the snapshot

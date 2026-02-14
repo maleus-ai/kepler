@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
 
+pub mod auth;
 pub mod config;
 pub mod config_actor;
 pub mod config_registry;

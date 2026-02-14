@@ -1,3 +1,4 @@
+use kepler_daemon::auth;
 use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
 use kepler_daemon::cursor::CursorManager;
 use kepler_daemon::errors::DaemonError;
@@ -252,6 +253,23 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Extract config path from a request if it's a Tier 2 (owner-restricted) request.
+/// Returns Some(path) for Tier 2 requests, None for Tier 1/3 or filter-tier requests.
+fn tier2_config_path(request: &Request) -> Option<&PathBuf> {
+    match request {
+        Request::Stop { config_path, .. }
+        | Request::Restart { config_path, .. }
+        | Request::Recreate { config_path, .. }
+        | Request::UnloadConfig { config_path }
+        | Request::Logs { config_path, .. }
+        | Request::LogsChunk { config_path, .. }
+        | Request::LogsCursor { config_path, .. }
+        | Request::Subscribe { config_path, .. } => Some(config_path),
+        Request::Status { config_path: Some(config_path) } => Some(config_path),
+        _ => None,
+    }
+}
+
 async fn handle_request(
     request: Request,
     orchestrator: Arc<ServiceOrchestrator>,
@@ -261,6 +279,21 @@ async fn handle_request(
     progress: ProgressSender,
     peer: PeerCredentials,
 ) -> Response {
+    // Tier 3: root-only operations
+    if matches!(request, Request::Shutdown | Request::Prune { .. }) && peer.uid != 0 {
+        return Response::error("Permission denied: only root can perform this operation");
+    }
+
+    // Tier 2: owner-restricted operations
+    if let Some(path) = tier2_config_path(&request)
+        && peer.uid != 0
+        && let Ok(canonical) = canonicalize_config_path(path.clone())
+        && let Some(handle) = registry.get(&canonical)
+        && let Err(reason) = auth::check_config_access(peer.uid, handle.owner_uid())
+    {
+        return Response::error(reason);
+    }
+
     match request {
         Request::Ping => Response::ok_with_message("pong".to_string()),
 
@@ -569,8 +602,16 @@ async fn handle_request(
                 }
             }
             None => {
-                // Get status from all configs
-                let configs = registry.get_all_status().await;
+                // Get status from all configs (filtered by ownership for non-root)
+                let handles = auth::filter_owned(peer.uid, registry.all_handles());
+                let configs = futures::future::join_all(handles.iter().map(|h| async {
+                    let services = h.get_service_status(None).await.unwrap_or_default();
+                    kepler_protocol::protocol::ConfigStatus {
+                        config_path: h.config_path().to_string_lossy().to_string(),
+                        config_hash: h.config_hash().to_string(),
+                        services,
+                    }
+                })).await;
                 Response::ok_with_data(ResponseData::MultiConfigStatus(configs))
             }
         },
@@ -599,8 +640,22 @@ async fn handle_request(
         }
 
         Request::ListConfigs => {
-            let configs = registry.list_configs().await;
-            let configs: Vec<_> = configs.into_iter().map(|c| c.into()).collect();
+            // Filter by ownership for non-root
+            let handles = auth::filter_owned(peer.uid, registry.all_handles());
+            let configs = futures::future::join_all(handles.iter().map(|h| async {
+                let config = h.get_config().await;
+                let services = h.get_service_status(None).await.unwrap_or_default();
+                let running_count = services.values().filter(|s| {
+                    s.status == "running" || s.status == "healthy" || s.status == "unhealthy"
+                }).count();
+
+                kepler_protocol::protocol::LoadedConfigInfo {
+                    config_path: h.config_path().to_string_lossy().to_string(),
+                    config_hash: h.config_hash().to_string(),
+                    service_count: config.map(|c| c.services.len()).unwrap_or(0),
+                    running_count,
+                }
+            })).await;
             Response::ok_with_data(ResponseData::ConfigList(configs))
         }
 

@@ -1,0 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  auth-svc-a:
+    command: ["sh", "-c", "echo AUTH_SVC_A_RUNNING; sleep 300"]
