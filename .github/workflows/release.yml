@@ -165,6 +165,14 @@ jobs:
           find artifacts -type f -name '*.tar.gz' -exec mv {} release/ \;
           ls -lh release/
 
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create release branch
+        run: |
+          git checkout -b "${{ github.ref_name }}"
+          git push origin "${{ github.ref_name }}"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
