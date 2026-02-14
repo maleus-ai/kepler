@@ -267,6 +267,79 @@ impl E2eHarness {
         Ok(())
     }
 
+    /// Run the kepler CLI as a specific OS user via `sudo -u <user>`.
+    /// Tests run as root, so no sudoers entry is needed — root can always switch users.
+    pub async fn run_cli_as_user(&self, user: &str, args: &[&str]) -> E2eResult<CommandOutput> {
+        // TempDir creates directories with 0o700, but non-root users need to
+        // traverse the temp dir to reach the daemon socket and config files.
+        // Make it world-traversable (the socket is still protected by 0o660 root:kepler).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                self.temp_dir.path(),
+                std::fs::Permissions::from_mode(0o755),
+            )?;
+        }
+
+        let daemon_path_env = format!("KEPLER_DAEMON_PATH={}", self.temp_dir.path().display());
+        let kepler_bin_str = self.kepler_bin.to_string_lossy().to_string();
+
+        // Use `sudo -u <user> env VAR=val kepler args` to ensure env is passed
+        let mut sudo_args = vec!["-u", user, "env", &daemon_path_env, &kepler_bin_str];
+        sudo_args.extend(args);
+
+        let mut child = Command::new("sudo")
+            .args(&sudo_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut out) = stdout_pipe {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
+            }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut err) = stderr_pipe {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
+            }
+            buf
+        });
+
+        let result = timeout(Duration::from_secs(30), child.wait()).await;
+
+        match result {
+            Ok(Ok(status)) => {
+                let stdout = stdout_task.await.unwrap_or_default();
+                let stderr = stderr_task.await.unwrap_or_default();
+                Ok(CommandOutput {
+                    stdout: String::from_utf8_lossy(&stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&stderr).to_string(),
+                    exit_code: status.code().unwrap_or(-1),
+                })
+            }
+            Ok(Err(e)) => Err(E2eError::SpawnFailed(e)),
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                Err(E2eError::Timeout(format!(
+                    "CLI command as {}: {:?}",
+                    user,
+                    args.join(" ")
+                )))
+            }
+        }
+    }
+
     /// Run the kepler CLI with the given arguments
     pub async fn run_cli(&self, args: &[&str]) -> E2eResult<CommandOutput> {
         self.run_cli_with_timeout(args, Duration::from_secs(30)).await

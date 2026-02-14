@@ -35,6 +35,9 @@ pub struct ExpandedConfigSnapshot {
     pub snapshot_time: i64,
     /// System environment variables captured from the CLI at config load time
     pub sys_env: HashMap<String, String>,
+    /// UID of the CLI user who loaded this config (for per-request authorization)
+    #[serde(default)]
+    pub owner_uid: Option<u32>,
 }
 
 /// Persistence layer for a single config's state directory.
@@ -365,6 +368,44 @@ mod tests {
 
         // Test has_expanded_config
         assert!(!persistence.has_expanded_config());
+    }
+
+    #[test]
+    fn test_owner_uid_backward_compat() {
+        // Old snapshots without owner_uid should deserialize with None
+        let yaml = r#"
+config:
+  services: {}
+service_envs: {}
+service_working_dirs: {}
+config_dir: /tmp
+snapshot_time: 1700000000
+sys_env: {}
+"#;
+        let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(snapshot.owner_uid, None);
+    }
+
+    #[test]
+    fn test_owner_uid_round_trip() {
+        // Snapshot with owner_uid should survive round-trip
+        let yaml_with_uid = r#"
+config:
+  services: {}
+service_envs: {}
+service_working_dirs: {}
+config_dir: /tmp
+snapshot_time: 1700000000
+sys_env: {}
+owner_uid: 1000
+"#;
+        let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(yaml_with_uid).unwrap();
+        assert_eq!(snapshot.owner_uid, Some(1000));
+
+        // Re-serialize and verify
+        let reserialized = serde_yaml::to_string(&snapshot).unwrap();
+        let reloaded: ExpandedConfigSnapshot = serde_yaml::from_str(&reserialized).unwrap();
+        assert_eq!(reloaded.owner_uid, Some(1000));
     }
 
     #[test]

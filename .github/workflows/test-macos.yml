@@ -2,7 +2,7 @@ name: Test macOS
 
 on:
   pull_request:
-    types: [synchronize, opened, reopened]
+    types: [synchronize, opened, reopened, ready_for_review]
 
 jobs:
   test-macos:

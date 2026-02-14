@@ -29,6 +29,8 @@ pub struct ConfigActorHandle {
     config_hash: String,
     tx: mpsc::Sender<ConfigCommand>,
     subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>,
+    /// UID of the CLI user who loaded this config (for per-request authorization)
+    owner_uid: Option<u32>,
 }
 
 impl ConfigActorHandle {
@@ -38,12 +40,14 @@ impl ConfigActorHandle {
         config_hash: String,
         tx: mpsc::Sender<ConfigCommand>,
         subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>,
+        owner_uid: Option<u32>,
     ) -> Self {
         Self {
             config_path,
             config_hash,
             tx,
             subscribers,
+            owner_uid,
         }
     }
 
@@ -55,6 +59,11 @@ impl ConfigActorHandle {
     /// Get the config hash
     pub fn config_hash(&self) -> &str {
         &self.config_hash
+    }
+
+    /// Get the owner UID of this config (who loaded it)
+    pub fn owner_uid(&self) -> Option<u32> {
+        self.owner_uid
     }
 
     /// Subscribe to service status change events.
