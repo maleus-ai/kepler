@@ -119,9 +119,10 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_group_root() {
-        // root group should exist on all Unix systems
-        let gid = resolve_group("root").unwrap();
+    fn test_resolve_group_gid0() {
+        // GID 0 group is "root" on Linux, "wheel" on macOS
+        let name = if cfg!(target_os = "macos") { "wheel" } else { "root" };
+        let gid = resolve_group(name).unwrap();
         assert_eq!(gid, 0);
     }
 

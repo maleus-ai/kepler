@@ -83,7 +83,7 @@ fn main() {
     drop_privileges(user_spec.as_deref(), explicit_groups);
 
     // Close inherited file descriptors above stderr before exec
-    close_inherited_fds();
+    kepler_unix::process::close_inherited_fds();
 
     // exec the real command (replaces this process)
     use std::ffi::CString;
@@ -233,7 +233,7 @@ fn drop_privileges(user_spec: Option<&str>, explicit_groups: Option<Vec<u32>>) {
     match explicit_groups {
         Some(gids) => {
             // Explicit lockdown: use exactly these groups
-            if let Err(e) = setgroups_portable(&gids) {
+            if let Err(e) = kepler_unix::groups::setgroups(&gids) {
                 eprintln!("kepler-exec: setgroups({:?}) failed: {}", gids, e);
                 process::exit(127);
             }
@@ -242,7 +242,7 @@ fn drop_privileges(user_spec: Option<&str>, explicit_groups: Option<Vec<u32>>) {
             // Default: load all supplementary groups if we have a username
             match username {
                 Some(ref name) => {
-                    if let Err(e) = initgroups_portable(name, gid) {
+                    if let Err(e) = kepler_unix::groups::initgroups(name, gid) {
                         eprintln!(
                             "kepler-exec: initgroups('{}', {}) failed: {}",
                             name, gid, e
@@ -252,7 +252,7 @@ fn drop_privileges(user_spec: Option<&str>, explicit_groups: Option<Vec<u32>>) {
                 }
                 None => {
                     // No username (numeric uid with no passwd entry) — fallback to [gid]
-                    if let Err(e) = setgroups_portable(&[gid]) {
+                    if let Err(e) = kepler_unix::groups::setgroups(&[gid]) {
                         eprintln!("kepler-exec: setgroups([{}]) failed: {}", gid, e);
                         process::exit(127);
                     }
@@ -276,63 +276,6 @@ fn drop_privileges(user_spec: Option<&str>, explicit_groups: Option<Vec<u32>>) {
         if let Err(e) = setuid(Uid::from_raw(uid)) {
             eprintln!("kepler-exec: setuid({}) failed: {}", uid, e);
             process::exit(127);
-        }
-    }
-}
-
-/// Call libc::initgroups to load all supplementary groups for a user.
-#[cfg(unix)]
-fn initgroups_portable(username: &str, gid: u32) -> Result<(), nix::errno::Errno> {
-    let c_name = std::ffi::CString::new(username).map_err(|_| nix::errno::Errno::EINVAL)?;
-    let ret = unsafe { libc::initgroups(c_name.as_ptr(), gid) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(nix::errno::Errno::last())
-    }
-}
-
-/// Portable setgroups: calls libc::setgroups directly.
-#[cfg(unix)]
-fn setgroups_portable(groups: &[u32]) -> Result<(), nix::errno::Errno> {
-    let gids: Vec<libc::gid_t> = groups.iter().copied().collect();
-    let ret = unsafe { libc::setgroups(gids.len() as _, gids.as_ptr()) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(nix::errno::Errno::last())
-    }
-}
-
-/// Close all file descriptors above stderr (fd > 2) to prevent leaking
-/// daemon resources (sockets, log files, etc.) to the child process.
-#[cfg(unix)]
-fn close_inherited_fds() {
-    // Try close_range syscall first (Linux 5.9+)
-    #[cfg(target_os = "linux")]
-    {
-        let ret = unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
-        if ret == 0 {
-            return;
-        }
-    }
-
-    // Fallback: iterate fd directory (/proc/self/fd on Linux, /dev/fd on macOS)
-    let fd_dir = if cfg!(target_os = "linux") {
-        "/proc/self/fd"
-    } else {
-        "/dev/fd"
-    };
-
-    if let Ok(entries) = std::fs::read_dir(fd_dir) {
-        let fds_to_close: Vec<i32> = entries
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()))
-            .filter(|&fd| fd > 2)
-            .collect();
-
-        for fd in fds_to_close {
-            unsafe { libc::close(fd); }
         }
     }
 }
@@ -362,11 +305,20 @@ fn parse_u64_arg(args: &[String], i: usize, flag: &str) -> u64 {
 fn apply_rlimits(rlimit_as: Option<u64>, rlimit_cpu: Option<u64>, rlimit_nofile: Option<u64>) {
     use nix::sys::resource::{setrlimit, Resource};
 
-    if let Some(bytes) = rlimit_as
-        && let Err(e) = setrlimit(Resource::RLIMIT_AS, bytes, bytes)
-    {
-        eprintln!("kepler-exec: setrlimit(RLIMIT_AS, {}) failed: {}", bytes, e);
-        process::exit(127);
+    if let Some(bytes) = rlimit_as {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = bytes;
+            eprintln!(
+                "kepler-exec: warning: RLIMIT_AS is not supported on macOS \
+                 (incompatible with dyld shared cache); ignoring memory limit"
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        if let Err(e) = setrlimit(Resource::RLIMIT_AS, bytes, bytes) {
+            eprintln!("kepler-exec: setrlimit(RLIMIT_AS, {}) failed: {}", bytes, e);
+            process::exit(127);
+        }
     }
 
     if let Some(secs) = rlimit_cpu

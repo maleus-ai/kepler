@@ -47,6 +47,7 @@ fn is_absolute_pattern(pattern: &str) -> bool {
     pattern.starts_with('/')
 }
 
+
 /// Message sent when a file change is detected
 #[derive(Debug, Clone)]
 pub struct FileChangeEvent {

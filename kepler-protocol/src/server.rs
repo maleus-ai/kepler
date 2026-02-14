@@ -26,41 +26,10 @@ fn resolve_kepler_group_gid() -> std::result::Result<u32, ServerError> {
         .ok_or_else(|| ServerError::GroupResolution("kepler group does not exist".into()))
 }
 
-/// Check if a process (by PID) has a given GID in its supplementary groups.
-/// Reads /proc/<pid>/status to get the full group list.
-fn pid_has_supplementary_gid(pid: u32, target_gid: u32) -> bool {
-    let status_path = format!("/proc/{}/status", pid);
-    let content = match std::fs::read_to_string(&status_path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    parse_groups_from_status(&content, target_gid)
-}
-
-/// Parse the Groups line from /proc/<pid>/status content.
-/// Returns true if `target_gid` appears in the supplementary groups.
-fn parse_groups_from_status(content: &str, target_gid: u32) -> bool {
-    for line in content.lines() {
-        if let Some(groups_str) = line.strip_prefix("Groups:") {
-            return groups_str
-                .split_whitespace()
-                .filter_map(|s| s.parse::<u32>().ok())
-                .any(|gid| gid == target_gid);
-        }
-    }
-    false
-}
-
 pub type Result<T> = std::result::Result<T, ServerError>;
 pub type ShutdownTx = mpsc::Sender<()>;
 
-/// Peer credentials extracted from the Unix socket connection.
-/// Provides the UID and GID of the connecting CLI client.
-#[derive(Debug, Clone, Copy)]
-pub struct PeerCredentials {
-    pub uid: u32,
-    pub gid: u32,
-}
+pub use kepler_unix::credentials::PeerCredentials;
 
 /// Bounded channel capacity for the per-connection writer task.
 const WRITER_CHANNEL_CAPACITY: usize = 256;
@@ -241,7 +210,7 @@ where
         } else {
             let kepler_gid = resolve_kepler_group_gid()?;
             let in_group = cred.gid() == kepler_gid
-                || cred.pid().is_some_and(|pid| pid_has_supplementary_gid(pid as u32, kepler_gid));
+                || kepler_unix::groups::uid_has_gid(cred.uid(), kepler_gid);
 
             if !in_group {
                 debug!(
@@ -370,80 +339,6 @@ where
 mod tests {
     use super::*;
     use crate::protocol::{ServicePhase, decode_server_message};
-
-    // ========================================================================
-    // parse_groups_from_status tests
-    // ========================================================================
-
-    #[test]
-    fn parse_groups_single_matching_gid() {
-        let content = "\
-Name:\tcat
-Pid:\t1234
-Groups:\t1000
-";
-        assert!(parse_groups_from_status(content, 1000));
-    }
-
-    #[test]
-    fn parse_groups_multiple_gids_match() {
-        let content = "\
-Name:\tbash
-Pid:\t5678
-Groups:\t1000 27 44 100
-";
-        assert!(parse_groups_from_status(content, 44));
-        assert!(parse_groups_from_status(content, 1000));
-        assert!(parse_groups_from_status(content, 100));
-    }
-
-    #[test]
-    fn parse_groups_no_match() {
-        let content = "\
-Name:\tbash
-Pid:\t5678
-Groups:\t1000 27 44
-";
-        assert!(!parse_groups_from_status(content, 9999));
-    }
-
-    #[test]
-    fn parse_groups_missing_groups_line() {
-        let content = "\
-Name:\tbash
-Pid:\t5678
-Uid:\t1000\t1000\t1000\t1000
-Gid:\t1000\t1000\t1000\t1000
-";
-        assert!(!parse_groups_from_status(content, 1000));
-    }
-
-    #[test]
-    fn parse_groups_empty_groups_line() {
-        let content = "\
-Name:\tbash
-Groups:\t
-Pid:\t5678
-";
-        assert!(!parse_groups_from_status(content, 1000));
-    }
-
-    #[test]
-    fn parse_groups_empty_content() {
-        assert!(!parse_groups_from_status("", 1000));
-    }
-
-    #[test]
-    fn parse_groups_with_tabs_and_spaces() {
-        // Real /proc/status uses tabs after the field name
-        let content = "Groups:\t1000  27\t44\t\t100\n";
-        assert!(parse_groups_from_status(content, 27));
-        assert!(parse_groups_from_status(content, 100));
-    }
-
-    // ========================================================================
-    // ProgressSender tests
-    // ========================================================================
 
     #[tokio::test]
     async fn progress_sender_encodes_event() {

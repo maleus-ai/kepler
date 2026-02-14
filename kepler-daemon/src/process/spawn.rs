@@ -9,7 +9,6 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::CommandSpec;
-use crate::config::ResourceLimits;
 use crate::errors::{DaemonError, Result};
 use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
 
@@ -17,20 +16,22 @@ use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
 /// `Some(path)` = found, `None` = not found (will fall back to fork).
 static KEPLER_EXEC_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// Locate the `kepler-exec` binary as a sibling of the current executable.
+/// Locate the `kepler-exec` binary near the current executable.
+/// Checks as a sibling first, then in the parent directory (handles
+/// `target/debug/deps/` layout during `cargo test`).
 /// Validates ownership and permissions before trusting.
 fn find_kepler_exec() -> Option<PathBuf> {
     KEPLER_EXEC_PATH
         .get_or_init(|| {
-            if let Ok(exe) = std::env::current_exe() {
-                let sibling = exe.with_file_name("kepler-exec");
-                if sibling.is_file() && verify_binary_permissions(&sibling) {
-                    debug!("Found kepler-exec at {:?}", sibling);
-                    return Some(sibling);
-                }
+            let exe = std::env::current_exe().ok()?;
+
+            // Check as sibling (installed layout: both in the same directory)
+            let sibling = exe.with_file_name("kepler-exec");
+            if sibling.is_file() && verify_binary_permissions(&sibling) {
+                debug!("Found kepler-exec at {:?}", sibling);
+                return Some(sibling);
             }
 
-            warn!("kepler-exec binary not found; falling back to fork() for uid/gid/limits");
             None
         })
         .clone()
@@ -101,28 +102,6 @@ fn verify_binary_permissions(_path: &std::path::Path) -> bool {
     true
 }
 
-/// Apply resource limits using setrlimit (Unix only)
-/// Used as fallback when kepler-exec is not available.
-#[cfg(unix)]
-fn apply_resource_limits(limits: &ResourceLimits) -> std::io::Result<()> {
-    use crate::config::parse_memory_limit;
-    use nix::sys::resource::{setrlimit, Resource};
-
-    if let Some(ref mem_str) = limits.memory
-        && let Ok(bytes) = parse_memory_limit(mem_str) {
-            setrlimit(Resource::RLIMIT_AS, bytes, bytes).map_err(std::io::Error::other)?;
-        }
-
-    if let Some(cpu_secs) = limits.cpu_time {
-        setrlimit(Resource::RLIMIT_CPU, cpu_secs, cpu_secs).map_err(std::io::Error::other)?;
-    }
-
-    if let Some(max_fds) = limits.max_fds {
-        setrlimit(Resource::RLIMIT_NOFILE, max_fds, max_fds).map_err(std::io::Error::other)?;
-    }
-
-    Ok(())
-}
 
 /// Mode for blocking command execution
 #[derive(Debug)]
@@ -158,7 +137,7 @@ pub struct DetachedResult {
 ///
 /// When uid/gid or resource limits are needed, delegates to `kepler-exec` wrapper
 /// binary to avoid fork() overhead (keeps the Command on the posix_spawn fast path).
-/// Falls back to pre_exec/uid()/gid() if the wrapper is not found.
+/// Returns an error if `kepler-exec` is needed but not found.
 ///
 /// Returns the configured `Command` and the program name (for error context).
 fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
@@ -169,142 +148,85 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
     let program = &spec.program_and_args[0];
     let needs_wrapper = spec.user.is_some() || spec.limits.is_some();
 
-    // Try to use kepler-exec wrapper to avoid fork() overhead
-    #[cfg(unix)]
-    let use_wrapper = needs_wrapper && find_kepler_exec().is_some();
-    #[cfg(not(unix))]
-    let use_wrapper = false;
-
     let mut cmd;
-    if use_wrapper {
-        #[cfg(unix)]
-        {
-            // SAFETY: use_wrapper is true only when find_kepler_exec().is_some()
-            let exec_path = find_kepler_exec().expect("kepler-exec verified present above");
-            let mut wrapper_args: Vec<String> = Vec::new();
+    #[cfg(unix)]
+    if needs_wrapper {
+        let exec_path = find_kepler_exec().ok_or_else(|| {
+            DaemonError::Config(
+                "kepler-exec binary not found; it must be installed alongside kepler-daemon \
+                 to apply user/group/resource-limit settings"
+                    .to_string(),
+            )
+        })?;
+        let mut wrapper_args: Vec<String> = Vec::new();
 
-            // Pass user spec to kepler-exec (it does its own resolution)
-            if let Some(ref user) = spec.user {
-                wrapper_args.push("--user".to_string());
-                wrapper_args.push(user.clone());
-                debug!("Command will run as user='{}' (via kepler-exec)", user);
-            }
-
-            // Pass explicit groups lockdown if specified
-            if !spec.groups.is_empty() {
-                wrapper_args.push("--groups".to_string());
-                wrapper_args.push(spec.groups.join(","));
-            }
-
-            // Resolve resource limits to numeric values
-            if let Some(ref limits) = spec.limits {
-                use crate::config::parse_memory_limit;
-
-                if let Some(ref mem_str) = limits.memory
-                    && let Ok(bytes) = parse_memory_limit(mem_str)
-                {
-                    wrapper_args.push("--rlimit-as".to_string());
-                    wrapper_args.push(bytes.to_string());
-                }
-                if let Some(cpu_secs) = limits.cpu_time {
-                    wrapper_args.push("--rlimit-cpu".to_string());
-                    wrapper_args.push(cpu_secs.to_string());
-                }
-                if let Some(max_fds) = limits.max_fds {
-                    wrapper_args.push("--rlimit-nofile".to_string());
-                    wrapper_args.push(max_fds.to_string());
-                }
-            }
-
-            wrapper_args.push("--".to_string());
-            wrapper_args.extend(spec.program_and_args.iter().cloned());
-
-            debug!("Spawning via kepler-exec: {:?} {:?}", exec_path, wrapper_args);
-
-            cmd = Command::new(exec_path);
-            cmd.args(&wrapper_args);
+        // Validate and pass user spec to kepler-exec
+        if let Some(ref user) = spec.user {
+            // Pre-validate: catch errors early with a clear message
+            // (kepler-exec would also reject, but only as exit code 127)
+            use crate::user::resolve_user;
+            let resolved = resolve_user(user)?;
+            debug!("Command will run as uid={}, gid={} (via kepler-exec)", resolved.uid, resolved.gid);
+            wrapper_args.push("--user".to_string());
+            wrapper_args.push(user.clone());
         }
 
-        #[cfg(not(unix))]
-        {
-            unreachable!();
+        // Validate and pass explicit groups lockdown
+        if !spec.groups.is_empty() {
+            for g in &spec.groups {
+                crate::user::resolve_group(g)?;
+            }
+            wrapper_args.push("--groups".to_string());
+            wrapper_args.push(spec.groups.join(","));
         }
+
+        // Resolve resource limits to numeric values
+        if let Some(ref limits) = spec.limits {
+            use crate::config::parse_memory_limit;
+
+            if let Some(ref mem_str) = limits.memory
+                && let Ok(bytes) = parse_memory_limit(mem_str)
+            {
+                wrapper_args.push("--rlimit-as".to_string());
+                wrapper_args.push(bytes.to_string());
+            }
+            if let Some(cpu_secs) = limits.cpu_time {
+                wrapper_args.push("--rlimit-cpu".to_string());
+                wrapper_args.push(cpu_secs.to_string());
+            }
+            if let Some(max_fds) = limits.max_fds {
+                wrapper_args.push("--rlimit-nofile".to_string());
+                wrapper_args.push(max_fds.to_string());
+            }
+        }
+
+        wrapper_args.push("--".to_string());
+        wrapper_args.extend(spec.program_and_args.iter().cloned());
+
+        debug!("Spawning via kepler-exec: {:?} {:?}", exec_path, wrapper_args);
+
+        cmd = Command::new(exec_path);
+        cmd.args(&wrapper_args);
     } else {
         let args = &spec.program_and_args[1..];
         debug!("Spawning command: {} {:?}", program, args);
 
         cmd = Command::new(program);
         cmd.args(args);
+    }
 
-        // Fallback: apply user/group/groups and resource limits via pre_exec (triggers fork)
-        #[cfg(unix)]
-        {
-            let user_ref = spec.user.clone();
-            let groups_ref = spec.groups.clone();
-            let limits_ref = spec.limits.clone();
-            let needs_pre_exec = user_ref.is_some() || limits_ref.is_some();
-
-            if needs_pre_exec {
-                // Resolve user before pre_exec (requires passwd/group lookups)
-                let resolved = if let Some(ref user) = user_ref {
-                    use crate::user::resolve_user;
-                    let r = resolve_user(user)?;
-                    debug!("Command will run as uid={}, gid={} (fork fallback)", r.uid, r.gid);
-                    Some(r)
-                } else {
-                    None
-                };
-
-                // Resolve group names to gids before pre_exec
-                let resolved_groups: Vec<u32> = if !groups_ref.is_empty() {
-                    groups_ref.iter().map(|g| crate::user::resolve_group(g)).collect::<crate::errors::Result<Vec<u32>>>()?
-                } else {
-                    Vec::new()
-                };
-
-                // SAFETY: pre_exec runs in a forked child process before exec.
-                // setgroups/initgroups/setgid/setuid/setrlimit are async-signal-safe.
-                unsafe {
-                    cmd.pre_exec(move || {
-                        if let Some(ref resolved) = resolved {
-                            // Set supplementary groups
-                            if !resolved_groups.is_empty() {
-                                let gids: Vec<libc::gid_t> = resolved_groups.iter().copied().collect();
-                                if libc::setgroups(gids.len() as _, gids.as_ptr()) != 0 {
-                                    return Err(std::io::Error::last_os_error());
-                                }
-                            } else if let Some(ref username) = resolved.username {
-                                let c_name = std::ffi::CString::new(username.as_str())
-                                    .map_err(|_| std::io::Error::other("invalid username"))?;
-                                if libc::initgroups(c_name.as_ptr(), resolved.gid) != 0 {
-                                    return Err(std::io::Error::last_os_error());
-                                }
-                            } else {
-                                let gid: libc::gid_t = resolved.gid;
-                                if libc::setgroups(1, &gid) != 0 {
-                                    return Err(std::io::Error::last_os_error());
-                                }
-                            }
-
-                            // setgid then setuid
-                            if libc::setgid(resolved.gid) != 0 {
-                                return Err(std::io::Error::last_os_error());
-                            }
-                            if libc::setuid(resolved.uid) != 0 {
-                                return Err(std::io::Error::last_os_error());
-                            }
-                        }
-
-                        // Apply resource limits
-                        if let Some(ref limits) = limits_ref {
-                            apply_resource_limits(limits)?;
-                        }
-
-                        Ok(())
-                    });
-                }
-            }
+    #[cfg(not(unix))]
+    {
+        if needs_wrapper {
+            return Err(DaemonError::Config(
+                "User/group/resource-limit settings are only supported on Unix".to_string(),
+            ));
         }
+        let args = &spec.program_and_args[1..];
+        debug!("Spawning command: {} {:?}", program, args);
+
+        cmd = Command::new(program);
+        cmd.args(args);
     }
 
     if !spec.working_dir.exists() {

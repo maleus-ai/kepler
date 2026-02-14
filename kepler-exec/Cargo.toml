@@ -8,5 +8,6 @@ name = "kepler-exec"
 path = "src/main.rs"
 
 [target.'cfg(unix)'.dependencies]
+kepler-unix = { path = "../kepler-unix" }
 nix = { version = "0.31.1", features = ["resource", "user", "process"] }
 libc = "0.2"
