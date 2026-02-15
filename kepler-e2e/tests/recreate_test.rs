@@ -210,7 +210,7 @@ async fn test_restart_calls_hooks() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that recreate runs on_init hooks (because state is cleared)
+/// Test that recreate runs pre_start hooks with if condition (because state is cleared)
 #[tokio::test]
 async fn test_recreate_runs_init_hooks() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -241,12 +241,12 @@ async fn test_recreate_runs_init_hooks() -> E2eResult<()> {
         .wait_for_file_content(&marker_file, "STARTED", Duration::from_secs(5))
         .await?;
 
-    // Count initial ON_INIT calls
+    // Count initial ON_INIT calls (from pre_start with if: "not ctx.initialized")
     let content = std::fs::read_to_string(&marker_file).unwrap_or_default();
     let init_count_1 = content.matches("ON_INIT").count();
-    assert_eq!(init_count_1, 1, "on_init should fire once on first start. Content: {}", content);
+    assert_eq!(init_count_1, 1, "pre_start with if condition should fire once on first start. Content: {}", content);
 
-    // Recreate the service (should clear state and run on_init again)
+    // Recreate the service (should clear state and run the conditional hook again)
     let output = harness.recreate_services(&config_path).await?;
     output.assert_success();
 
@@ -263,7 +263,7 @@ async fn test_recreate_runs_init_hooks() -> E2eResult<()> {
     let init_count_2 = content.matches("ON_INIT").count();
     assert_eq!(
         init_count_2, 2,
-        "on_init should fire again after recreate (state cleared). Content: {}",
+        "pre_start with if condition should fire again after recreate (state cleared). Content: {}",
         content
     );
 

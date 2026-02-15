@@ -1,6 +1,6 @@
 //! Restart policy and file watching tests
 
-use kepler_daemon::config::{RestartConfig, RestartPolicy, ServiceHooks, HookCommand};
+use kepler_daemon::config::{RestartConfig, RestartPolicy, ServiceHooks, HookCommand, HookList};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -199,7 +199,7 @@ async fn test_on_restart_hook_fires() {
     let restart_hook_path = marker.marker_path("restart_hook");
 
     let hooks = ServiceHooks {
-        pre_restart: Some(HookCommand::script(format!("echo 'restart_hook' >> {}", restart_hook_path.display()))),
+        pre_restart: Some(HookList(vec![HookCommand::script(format!("echo 'restart_hook' >> {}", restart_hook_path.display()))])),
         ..Default::default()
     };
 
@@ -496,7 +496,7 @@ async fn test_watch_restart_fires_on_restart_hook() {
     std::fs::write(&watched_file, "// initial").unwrap();
 
     let hooks = ServiceHooks {
-        pre_restart: Some(HookCommand::script(format!("echo 'restart_hook' >> {}", restart_hook_path.display()))),
+        pre_restart: Some(HookList(vec![HookCommand::script(format!("echo 'restart_hook' >> {}", restart_hook_path.display()))])),
         ..Default::default()
     };
 

@@ -181,66 +181,6 @@ services:
     assert!(service.environment.contains(&"SERVICE_NAME=myservice".to_string()));
 }
 
-/// Test: !lua_file loads and executes external Lua file
-#[test]
-fn test_lua_file_tag() {
-    let temp_dir = TempDir::new().unwrap();
-
-    // Create an external Lua file
-    let lua_file_path = temp_dir.path().join("get_command.lua");
-    std::fs::write(&lua_file_path, r#"return {"sh", "-c", "echo hello"}"#).unwrap();
-
-    let yaml = format!(
-        r#"
-services:
-  test:
-    command: !lua_file {}
-"#,
-        lua_file_path.display()
-    );
-
-    let config = load_config_from_string(&yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
-
-    assert_eq!(service.command, vec!["sh", "-c", "echo hello"]);
-}
-
-/// Test: require() loads external Lua files
-#[test]
-fn test_lua_require() {
-    let temp_dir = TempDir::new().unwrap();
-
-    // Create an external Lua module
-    let lua_file_path = temp_dir.path().join("helpers.lua");
-    std::fs::write(
-        &lua_file_path,
-        r#"
-local M = {}
-function M.get_default_port()
-  return "3000"
-end
-return M
-"#,
-    )
-    .unwrap();
-
-    let yaml = r#"
-lua: |
-  local helpers = require("helpers")
-  global.port = helpers.get_default_port()
-
-services:
-  test:
-    command: ["echo", "hello"]
-    environment: !lua |
-      return {"PORT=" .. global.port}
-"#;
-
-    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
-
-    assert!(service.environment.contains(&"PORT=3000".to_string()));
-}
 
 /// Test: environment array format from Lua
 #[test]
@@ -476,27 +416,6 @@ services:
     // The error should mention it's a Lua error
     let err = result.unwrap_err();
     assert!(err.contains("Lua") || err.contains("lua"), "Error: {}", err);
-}
-
-/// Test: error handling for missing !lua_file
-#[test]
-fn test_lua_file_not_found() {
-    let temp_dir = TempDir::new().unwrap();
-
-    let yaml = r#"
-services:
-  test:
-    command: !lua_file /nonexistent/file.lua
-"#;
-
-    let result = load_config_from_string(yaml, temp_dir.path());
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("Failed to read") || err.contains("not found") || err.contains("No such file"),
-        "Error: {}",
-        err
-    );
 }
 
 /// Test: nil values are handled correctly

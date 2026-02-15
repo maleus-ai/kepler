@@ -47,13 +47,13 @@ kepler:
       on_start: clear
 
   hooks:
-    on_init:
-      run: echo "Global on_init — initializing platform"
-      environment:
-        - KEPLER_PHASE=init
-      working_dir: /tmp
     pre_start:
-      command: ["sh", "-c", "echo 'Global pre_start — preparing services'"]
+      - if: "not ctx.initialized"
+        run: echo "Global on_init — initializing platform"
+        environment:
+          - KEPLER_PHASE=init
+        working_dir: /tmp
+      - command: ["sh", "-c", "echo 'Global pre_start — preparing services'"]
     post_start:
       run: echo "Global post_start — all services triggered"
     pre_stop:
@@ -100,10 +100,10 @@ services:
         on_restart: retain
         on_exit: retain
     hooks:
-      on_init:
-        run: echo "postgres on_init — creating data directory"
       pre_start:
-        command: ["sh", "-c", "echo 'postgres pre_start — checking config'"]
+        - if: "not ctx.initialized"
+          run: echo "postgres on_init — creating data directory"
+        - command: ["sh", "-c", "echo 'postgres pre_start — checking config'"]
       post_start:
         command:
           ["sh", "-c", "echo 'postgres post_start — accepting connections'"]
@@ -311,10 +311,10 @@ services:
       retries: 3
       start_period: 2s
     hooks:
-      on_init:
-        run: echo "auth-service on_init — loading JWT keys"
       pre_start:
-        run: echo "auth-service pre_start — validating config"
+        - if: "not ctx.initialized"
+          run: echo "auth-service on_init — loading JWT keys"
+        - run: echo "auth-service pre_start — validating config"
       post_start:
         command: ["sh", "-c", "echo 'auth-service post_start — listening'"]
       pre_stop:
@@ -1098,10 +1098,10 @@ services:
           condition: service_failed
           wait: false
     hooks:
-      on_init:
-        run: echo "emergency-shutdown on_init — loading runbook"
       pre_start:
-        run: echo "emergency-shutdown pre_start — notifying oncall"
+        - if: "not ctx.initialized"
+          run: echo "emergency-shutdown on_init — loading runbook"
+        - run: echo "emergency-shutdown pre_start — notifying oncall"
       post_exit:
         run: echo "emergency-shutdown post_exit — incident report filed"
 

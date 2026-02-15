@@ -7,7 +7,7 @@
 //!
 //! Tests run inside Docker as root with kepler group and test users available.
 
-use kepler_daemon::config::{GlobalHooks, HookCommand, HookCommon, ServiceHooks};
+use kepler_daemon::config::{GlobalHooks, HookCommand, HookCommon, HookList, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::{TestDaemonHarness, UMASK_LOCK};
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -151,7 +151,7 @@ async fn test_hook_inherits_service_user() {
 
     // Hook writes its UID to a marker file
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::script(format!("id -u > {}", uid_marker_path.display()))),
+        pre_start: Some(HookList(vec![HookCommand::script(format!("id -u > {}", uid_marker_path.display()))])),
         ..Default::default()
     };
 
@@ -223,13 +223,13 @@ async fn test_hook_user_override() {
 
     // Hook overrides the user with a different UID
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
+        pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!("id -u > {}", uid_marker_path.display()),
             common: HookCommon {
                 user: Some(hook_user.to_string()), // Override service user with different UID
                 ..Default::default()
             },
-        }),
+        }])),
         ..Default::default()
     };
 
@@ -741,9 +741,8 @@ fn test_memory_limit_parsing_whitespace() {
 #[test]
 fn test_lua_io_library_blocked() {
     use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
-    use std::path::PathBuf;
 
-    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
 
     // Attempt to use io.open
@@ -758,9 +757,8 @@ fn test_lua_io_library_blocked() {
 #[test]
 fn test_lua_os_execute_blocked() {
     use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
-    use std::path::PathBuf;
 
-    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
 
     // Attempt to use os.execute
@@ -775,9 +773,8 @@ fn test_lua_os_execute_blocked() {
 #[test]
 fn test_lua_loadfile_blocked() {
     use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
-    use std::path::PathBuf;
 
-    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
 
     // Attempt to use loadfile
@@ -792,9 +789,8 @@ fn test_lua_loadfile_blocked() {
 #[test]
 fn test_lua_dofile_blocked() {
     use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
-    use std::path::PathBuf;
 
-    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
 
     // Attempt to use dofile
@@ -809,9 +805,8 @@ fn test_lua_dofile_blocked() {
 #[test]
 fn test_lua_debug_library_blocked() {
     use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
-    use std::path::PathBuf;
 
-    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
 
     // Attempt to use debug library
@@ -832,7 +827,7 @@ fn test_lua_rawset_cannot_modify_env() {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let eval = LuaEvaluator::new().unwrap();
     let mut ctx = EvalContext::default();
     ctx.env = HashMap::from([("SECRET".into(), "original".into())]);
 
@@ -869,7 +864,7 @@ fn test_lua_getmetatable_frozen() {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let eval = LuaEvaluator::new().unwrap();
     let mut ctx = EvalContext::default();
     ctx.env = HashMap::from([("FOO".into(), "bar".into())]);
 
@@ -888,9 +883,8 @@ fn test_lua_getmetatable_frozen() {
 #[test]
 fn test_lua_ctx_table_frozen() {
     use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
-    use std::path::PathBuf;
 
-    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
 
     // Writing to ctx should raise an error
@@ -901,18 +895,17 @@ fn test_lua_ctx_table_frozen() {
     );
 }
 
-/// Verify that require() can load files (trusted behavior — document, don't block)
+/// Verify that require() is blocked in Lua evaluation
 #[test]
-fn test_lua_require_accessible() {
+fn test_lua_require_blocked() {
     use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
-    use std::path::PathBuf;
 
-    let eval = LuaEvaluator::new(&PathBuf::from("/tmp")).unwrap();
+    let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
 
-    // require should be a function (accessible through the global fallback)
+    // require should be nil (blocked through the __index filter)
     let result: String = eval.eval(r#"return type(require)"#, &ctx, "test").unwrap();
-    assert_eq!(result, "function", "require should be available as a function");
+    assert_eq!(result, "nil", "require should be blocked");
 }
 
 // ============================================================================
@@ -1442,7 +1435,7 @@ async fn test_default_user_service_hook_inherits() {
 
     // Service has NO user field; hook writes its UID to marker
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::script(format!("id -u > {}", uid_marker_path.display()))),
+        pre_start: Some(HookList(vec![HookCommand::script(format!("id -u > {}", uid_marker_path.display()))])),
         ..Default::default()
     };
 
@@ -1496,7 +1489,7 @@ async fn test_default_user_global_hook() {
 
     // Global hook with no user: field
     let global_hooks = GlobalHooks {
-        pre_start: Some(HookCommand::script("echo global")),
+        pre_start: Some(HookList(vec![HookCommand::script("echo global")])),
         ..Default::default()
     };
 
@@ -1523,7 +1516,7 @@ async fn test_default_user_global_hook() {
         .and_then(|h| h.pre_start.as_ref());
 
     assert!(global_hook.is_some(), "Global pre_start hook should exist");
-    let hook_user = global_hook.unwrap().user();
+    let hook_user = global_hook.unwrap().0.first().unwrap().user();
     assert_eq!(
         hook_user,
         Some("65534:65534"),
@@ -1546,13 +1539,13 @@ async fn test_default_user_hook_explicit_override() {
 
     // Hook explicitly sets user: "0" (root)
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
+        pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!("id -u > {}", uid_marker_path.display()),
             common: HookCommon {
                 user: Some("0".to_string()),
                 ..Default::default()
             },
-        }),
+        }])),
         ..Default::default()
     };
 

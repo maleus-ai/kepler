@@ -870,6 +870,7 @@ fn status_to_phase(status: Option<ServiceStatus>, target: ServiceTarget) -> Serv
         Some(ServiceStatus::Healthy) => ServicePhase::Healthy,
         Some(ServiceStatus::Stopping) => ServicePhase::Stopping,
         Some(ServiceStatus::Stopped) | Some(ServiceStatus::Exited) | Some(ServiceStatus::Killed) => ServicePhase::Stopped,
+        Some(ServiceStatus::Skipped) => ServicePhase::Skipped,
         Some(ServiceStatus::Failed) => ServicePhase::Failed { message: "failed".to_string() },
         Some(ServiceStatus::Unhealthy) => ServicePhase::Failed { message: "unhealthy".to_string() },
     }

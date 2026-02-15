@@ -129,6 +129,7 @@ See [Environment Variables](environment-variables.md) for details.
 Kepler's Lua scripting uses a sandboxed Luau runtime with restricted capabilities:
 
 **Restricted:**
+- No module loading (`require` blocked)
 - No filesystem access (`io` library removed)
 - No command execution (`os.execute` removed)
 - No network access

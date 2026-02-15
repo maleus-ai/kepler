@@ -1,6 +1,6 @@
 //! Full lifecycle integration tests
 
-use kepler_daemon::config::ServiceHooks;
+use kepler_daemon::config::{HookList, ServiceHooks};
 use kepler_daemon::state::ServiceStatus;
 use kepler_tests::helpers::config_builder::{
     TestConfigBuilder, TestHealthCheckBuilder, TestServiceBuilder,
@@ -21,11 +21,10 @@ async fn test_full_lifecycle_with_healthcheck_hooks() {
     let health_marker_path = marker.marker_path("health_status");
 
     let hooks = ServiceHooks {
-        on_init: Some(marker.create_timestamped_marker_hook("on_init")),
-        pre_start: Some(marker.create_timestamped_marker_hook("on_start")),
-        pre_stop: Some(marker.create_timestamped_marker_hook("on_stop")),
-        post_healthcheck_success: Some(marker.create_timestamped_marker_hook("on_healthy")),
-        post_healthcheck_fail: Some(marker.create_timestamped_marker_hook("on_unhealthy")),
+        pre_start: Some(HookList(vec![marker.create_timestamped_marker_hook("on_init"), marker.create_timestamped_marker_hook("on_start")])),
+        pre_stop: Some(HookList(vec![marker.create_timestamped_marker_hook("on_stop")])),
+        post_healthcheck_success: Some(HookList(vec![marker.create_timestamped_marker_hook("on_healthy")])),
+        post_healthcheck_fail: Some(HookList(vec![marker.create_timestamped_marker_hook("on_unhealthy")])),
         ..Default::default()
     };
 
@@ -118,17 +117,17 @@ async fn test_service_dependencies_order() {
 
     // Create services with dependencies: frontend -> backend -> database
     let frontend_hooks = ServiceHooks {
-        pre_start: Some(kepler_daemon::config::HookCommand::script(format!("echo 'frontend' >> {}", order_file.display()))),
+        pre_start: Some(HookList(vec![kepler_daemon::config::HookCommand::script(format!("echo 'frontend' >> {}", order_file.display()))])),
         ..Default::default()
     };
 
     let backend_hooks = ServiceHooks {
-        pre_start: Some(kepler_daemon::config::HookCommand::script(format!("echo 'backend' >> {}", order_file.display()))),
+        pre_start: Some(HookList(vec![kepler_daemon::config::HookCommand::script(format!("echo 'backend' >> {}", order_file.display()))])),
         ..Default::default()
     };
 
     let database_hooks = ServiceHooks {
-        pre_start: Some(kepler_daemon::config::HookCommand::script(format!("echo 'database' >> {}", order_file.display()))),
+        pre_start: Some(HookList(vec![kepler_daemon::config::HookCommand::script(format!("echo 'database' >> {}", order_file.display()))])),
         ..Default::default()
     };
 
@@ -192,8 +191,8 @@ async fn test_multiple_health_transitions() {
     let health_marker_path = marker.marker_path("health_status");
 
     let hooks = ServiceHooks {
-        post_healthcheck_success: Some(marker.create_timestamped_marker_hook("healthy")),
-        post_healthcheck_fail: Some(marker.create_timestamped_marker_hook("unhealthy")),
+        post_healthcheck_success: Some(HookList(vec![marker.create_timestamped_marker_hook("healthy")])),
+        post_healthcheck_fail: Some(HookList(vec![marker.create_timestamped_marker_hook("unhealthy")])),
         ..Default::default()
     };
 
@@ -284,9 +283,8 @@ async fn test_service_stop_restart_cycle() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        on_init: Some(marker.create_timestamped_marker_hook("init")),
-        pre_start: Some(marker.create_timestamped_marker_hook("start")),
-        pre_stop: Some(marker.create_timestamped_marker_hook("stop")),
+        pre_start: Some(HookList(vec![marker.create_timestamped_marker_hook("init"), marker.create_timestamped_marker_hook("start")])),
+        pre_stop: Some(HookList(vec![marker.create_timestamped_marker_hook("stop")])),
         ..Default::default()
     };
 
@@ -325,8 +323,8 @@ async fn test_service_stop_restart_cycle() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Verify counts
-    assert_eq!(marker.count_marker_lines("init"), 1, "on_init only fires once");
-    assert_eq!(marker.count_marker_lines("start"), 3, "on_start fires each start");
+    assert_eq!(marker.count_marker_lines("init"), 3, "pre_start fires each start");
+    assert_eq!(marker.count_marker_lines("start"), 3, "pre_start fires each start");
     assert_eq!(marker.count_marker_lines("stop"), 3, "on_stop fires each stop");
 }
 

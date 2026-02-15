@@ -39,8 +39,10 @@ pub fn expand_global_hooks(
     context: &HashMap<String, String>,
     sys_env: &HashMap<String, String>,
 ) {
-    for hook in hooks.all_hooks_mut().flatten() {
-        expand_hook_command(hook, context, sys_env);
+    for hook_list in hooks.all_hooks_mut().flatten() {
+        for hook in &mut hook_list.0 {
+            expand_hook_command(hook, context, sys_env);
+        }
     }
 }
 
@@ -164,8 +166,10 @@ pub fn expand_service_hooks(
     context: &HashMap<String, String>,
     sys_env: &HashMap<String, String>,
 ) {
-    for hook in hooks.all_hooks_mut().flatten() {
-        expand_hook_command(hook, context, sys_env);
+    for hook_list in hooks.all_hooks_mut().flatten() {
+        for hook in &mut hook_list.0 {
+            expand_hook_command(hook, context, sys_env);
+        }
     }
 }
 

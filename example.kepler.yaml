@@ -14,10 +14,10 @@ kepler:
     buffer_size: 0 # Flush logs immediately (good for demos)
 
   hooks:
-    on_init:
-      run: echo "Initializing services for the first time..."
     pre_start:
-      run: echo "Starting all services"
+      - if: "not ctx.initialized"
+        run: echo "Initializing services for the first time..."
+      - run: echo "Starting all services"
     pre_stop:
       run: echo "Stopping all services"
     pre_cleanup:
@@ -51,10 +51,10 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     hooks:
-      on_init:
-        run: echo "First-time setup for web server"
       pre_start:
-        run: echo "Web server starting on port 8089"
+        - if: "not ctx.initialized"
+          run: echo "First-time setup for web server"
+        - run: echo "Web server starting on port 8089"
       post_healthcheck_success:
         command: ["echo", "Web server is healthy"]
 

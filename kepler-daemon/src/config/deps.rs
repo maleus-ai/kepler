@@ -164,6 +164,11 @@ pub struct DependencyConfig {
     /// None = use condition default (startup conditions = true, deferred = false)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<bool>,
+    /// Whether to allow this dependency to be in `Skipped` status.
+    /// When true, a skipped dependency is treated as satisfied.
+    /// When false (default), a skipped dependency cascades the skip to this service.
+    #[serde(default)]
+    pub allow_skipped: bool,
 }
 
 impl DependencyCondition {

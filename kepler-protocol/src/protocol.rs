@@ -439,6 +439,7 @@ pub enum ServicePhase {
     Stopped,
     Cleaning,
     Cleaned,
+    Skipped,
     Failed { message: String },
     /// A lifecycle hook started execution
     HookStarted { hook: String },

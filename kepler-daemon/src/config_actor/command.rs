@@ -10,6 +10,7 @@ use super::context::{HealthCheckUpdate, ServiceContext, TaskHandleType};
 use crate::config::{KeplerConfig, LogConfig, ServiceConfig, SysEnvPolicy};
 use crate::errors::Result;
 use crate::events::{ServiceEvent, ServiceEventReceiver};
+use crate::lua_eval::EvalContext;
 use crate::logs::LogWriterConfig;
 use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
@@ -214,4 +215,10 @@ pub enum ConfigCommand {
     },
     /// Mark event handler as spawned
     SetEventHandlerSpawned,
+    /// Evaluate a runtime `if` condition using the Lua evaluator
+    EvalIfCondition {
+        condition: String,
+        context: EvalContext,
+        reply: oneshot::Sender<Result<bool>>,
+    },
 }
