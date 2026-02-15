@@ -358,6 +358,12 @@ pub struct ServiceInfo {
     /// Signal that killed the process (e.g., 9 for SIGKILL)
     #[serde(default)]
     pub signal: Option<i32>,
+    /// Reason for being skipped (when status is "skipped")
+    #[serde(default)]
+    pub skip_reason: Option<String>,
+    /// Reason for failure (when status is "failed")
+    #[serde(default)]
+    pub fail_reason: Option<String>,
 }
 
 /// A log entry
@@ -411,6 +417,21 @@ pub enum ServerEvent {
         request_id: u64,
         event: ProgressEvent,
     },
+    /// All services reached their target state (for --wait)
+    Ready { request_id: u64 },
+    /// All services settled — nothing more will change (for foreground mode exit)
+    Quiescent { request_id: u64 },
+}
+
+impl ServerEvent {
+    /// Get the request_id for this event
+    pub fn request_id(&self) -> u64 {
+        match self {
+            ServerEvent::Progress { request_id, .. } => *request_id,
+            ServerEvent::Ready { request_id } => *request_id,
+            ServerEvent::Quiescent { request_id } => *request_id,
+        }
+    }
 }
 
 /// A progress event for a single service during a lifecycle operation
@@ -439,7 +460,7 @@ pub enum ServicePhase {
     Stopped,
     Cleaning,
     Cleaned,
-    Skipped,
+    Skipped { reason: String },
     Failed { message: String },
     /// A lifecycle hook started execution
     HookStarted { hook: String },
@@ -727,6 +748,8 @@ mod tests {
             health_check_failures: 0,
             exit_code: None,
             signal: None,
+            skip_reason: None,
+            fail_reason: None,
         });
         services.insert("api".into(), ServiceInfo {
             status: "exited".into(),
@@ -736,6 +759,8 @@ mod tests {
             health_check_failures: 0,
             exit_code: Some(0),
             signal: None,
+            skip_reason: None,
+            fail_reason: None,
         });
         services.insert("worker".into(), ServiceInfo {
             status: "killed".into(),
@@ -745,6 +770,8 @@ mod tests {
             health_check_failures: 0,
             exit_code: None,
             signal: Some(9),
+            skip_reason: None,
+            fail_reason: None,
         });
 
         let msg = ServerMessage::Response {

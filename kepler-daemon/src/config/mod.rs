@@ -213,11 +213,6 @@ pub struct ServiceConfig {
     /// Resource limits for the process
     #[serde(default)]
     pub limits: Option<ResourceLimits>,
-    /// Whether to wait for this service during startup (--wait mode).
-    /// None in YAML = auto-compute from dependencies (propagation algorithm).
-    /// After resolve_effective_wait(), always Some(bool).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wait: Option<bool>,
 }
 
 impl KeplerConfig {
@@ -294,9 +289,6 @@ impl KeplerConfig {
 
         // Validate the config
         config.validate(path)?;
-
-        // Resolve effective_wait for each service based on dependency graph
-        crate::deps::resolve_effective_wait(&mut config.services)?;
 
         Ok(config)
     }
@@ -817,8 +809,8 @@ services:
         assert_eq!(deps.len(), 2);
 
         // Find db and cache in the iteration
-        let db_entry = deps.iter().find(|(name, _)| name == "db");
-        let cache_entry = deps.iter().find(|(name, _)| name == "cache");
+        let db_entry = deps.iter().find(|(name, _)| *name == "db");
+        let cache_entry = deps.iter().find(|(name, _)| *name == "cache");
 
         assert!(db_entry.is_some());
         assert!(cache_entry.is_some());

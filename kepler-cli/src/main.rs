@@ -2,7 +2,7 @@ mod commands;
 mod config;
 mod errors;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::{BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use kepler_daemon::Daemon;
 use kepler_protocol::{
     client::Client,
     errors::ClientError,
-    protocol::{ConfigStatus, CursorLogEntry, LogCursorData, LogEntry, LogMode, ProgressEvent, Response, ResponseData, ServiceInfo, ServicePhase, ServiceTarget},
+    protocol::{ConfigStatus, CursorLogEntry, LogCursorData, LogEntry, LogMode, Response, ResponseData, ServerEvent, ServiceInfo, ServicePhase, ServiceTarget},
 };
 use tokio::sync::{mpsc, oneshot};
 use tabled::{Table, Tabled};
@@ -275,7 +275,7 @@ async fn run() -> Result<()> {
 /// updates the corresponding line. When the response future completes, finishes all bars.
 /// Falls back to plain text when stdout is not a TTY (indicatif hides itself automatically).
 async fn run_with_progress(
-    mut progress_rx: tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>,
+    mut progress_rx: tokio::sync::mpsc::UnboundedReceiver<ServerEvent>,
     response_future: impl std::future::Future<Output = std::result::Result<Response, ClientError>>,
 ) -> std::result::Result<Response, ClientError> {
     let mp = MultiProgress::new();
@@ -300,9 +300,9 @@ async fn run_with_progress(
     loop {
         tokio::select! {
             biased;
-            event = progress_rx.recv() => {
-                match event {
-                    Some(event) => {
+            server_event = progress_rx.recv() => {
+                match server_event {
+                    Some(ServerEvent::Progress { event, .. }) => {
                         let pb = bars.entry(event.service.clone()).or_insert_with(|| {
                             let pb = mp.add(ProgressBar::new_spinner());
                             pb.set_style(style_active.clone());
@@ -350,9 +350,9 @@ async fn run_with_progress(
                                 pb.set_style(style_done.clone());
                                 pb.finish_with_message("Cleaned");
                             }
-                            ServicePhase::Skipped => {
+                            ServicePhase::Skipped { reason } => {
                                 pb.set_style(style_skip.clone());
-                                pb.finish_with_message("Skipped");
+                                pb.finish_with_message(format!("Skipped: {}", reason));
                             }
                             ServicePhase::Failed { message } => {
                                 pb.set_style(style_fail.clone());
@@ -369,6 +369,9 @@ async fn run_with_progress(
                                 pb.finish_with_message(format!("Hook {} failed: {}", hook, message));
                             }
                         }
+                    }
+                    Some(ServerEvent::Ready { .. } | ServerEvent::Quiescent { .. }) => {
+                        // Ignored in run_with_progress (used by start -d / foreground mode)
                     }
                     None => {
                         // Progress channel closed (PendingRequest removed from map).
@@ -388,21 +391,23 @@ async fn run_with_progress(
     }
 
     // Drain any remaining progress events
-    while let Ok(event) = progress_rx.try_recv() {
-        let pb = bars.entry(event.service.clone()).or_insert_with(|| {
-            let pb = mp.add(ProgressBar::new_spinner());
-            pb.set_style(style_active.clone());
-            pb.set_prefix(event.service.clone());
-            pb
-        });
-        match &event.phase {
-            ServicePhase::Started => { pb.set_style(style_done.clone()); pb.finish_with_message("Started"); }
-            ServicePhase::Healthy => { pb.set_style(style_done.clone()); pb.finish_with_message("Healthy"); }
-            ServicePhase::Stopped => { pb.set_style(style_done.clone()); pb.finish_with_message("Stopped"); }
-            ServicePhase::Cleaned => { pb.set_style(style_done.clone()); pb.finish_with_message("Cleaned"); }
-            ServicePhase::Skipped => { pb.set_style(style_skip.clone()); pb.finish_with_message("Skipped"); }
-            ServicePhase::Failed { message } => { pb.set_style(style_fail.clone()); pb.finish_with_message(format!("Failed: {}", message)); }
-            _ => {}
+    while let Ok(server_event) = progress_rx.try_recv() {
+        if let ServerEvent::Progress { event, .. } = server_event {
+            let pb = bars.entry(event.service.clone()).or_insert_with(|| {
+                let pb = mp.add(ProgressBar::new_spinner());
+                pb.set_style(style_active.clone());
+                pb.set_prefix(event.service.clone());
+                pb
+            });
+            match &event.phase {
+                ServicePhase::Started => { pb.set_style(style_done.clone()); pb.finish_with_message("Started"); }
+                ServicePhase::Healthy => { pb.set_style(style_done.clone()); pb.finish_with_message("Healthy"); }
+                ServicePhase::Stopped => { pb.set_style(style_done.clone()); pb.finish_with_message("Stopped"); }
+                ServicePhase::Cleaned => { pb.set_style(style_done.clone()); pb.finish_with_message("Cleaned"); }
+                ServicePhase::Skipped { reason } => { pb.set_style(style_skip.clone()); pb.finish_with_message(format!("Skipped: {}", reason)); }
+                ServicePhase::Failed { message } => { pb.set_style(style_fail.clone()); pb.finish_with_message(format!("Failed: {}", message)); }
+                _ => {}
+            }
         }
     }
 
@@ -457,7 +462,7 @@ async fn foreground_with_logs(
 /// so the daemon processes the request while we watch for status changes.
 /// Exits when all services have reached their target state or a terminal state (Failed/Stopped).
 async fn wait_until_ready_with_start(
-    mut progress_rx: mpsc::UnboundedReceiver<ProgressEvent>,
+    mut progress_rx: mpsc::UnboundedReceiver<ServerEvent>,
     sub_future: impl Future<Output = std::result::Result<Response, ClientError>>,
     start_future: impl Future<Output = std::result::Result<Response, ClientError>>,
 ) -> Result<()> {
@@ -480,13 +485,14 @@ async fn wait_until_ready_with_start(
     tokio::pin!(sub_future);
     tokio::pin!(start_future);
     let mut sub_done = false;
+    let mut start_done = false;
 
     loop {
         tokio::select! {
             biased;
-            event = progress_rx.recv() => {
-                match event {
-                    Some(event) => {
+            server_event = progress_rx.recv() => {
+                match server_event {
+                    Some(ServerEvent::Progress { event, .. }) => {
                         let pb = bars.entry(event.service.clone()).or_insert_with(|| {
                             let pb = mp.add(ProgressBar::new_spinner());
                             pb.set_style(style_active.clone());
@@ -537,9 +543,9 @@ async fn wait_until_ready_with_start(
                                 pb.finish_with_message("Cleaned");
                                 finished.insert(event.service.clone(), true);
                             }
-                            ServicePhase::Skipped => {
+                            ServicePhase::Skipped { reason } => {
                                 pb.set_style(style_skip.clone());
-                                pb.finish_with_message("Skipped");
+                                pb.finish_with_message(format!("Skipped: {}", reason));
                                 finished.insert(event.service.clone(), true);
                             }
                             ServicePhase::Failed { message } => {
@@ -565,24 +571,35 @@ async fn wait_until_ready_with_start(
                             break;
                         }
                     }
+                    Some(ServerEvent::Ready { .. }) => {
+                        // Daemon says all services are ready — exit wait mode
+                        break;
+                    }
+                    Some(ServerEvent::Quiescent { .. }) => {
+                        // Ignored in --wait mode
+                    }
                     None => {
-                        // Subscribe channel closed (e.g. config not loaded yet).
-                        // Fall back to waiting for the start/restart response.
-                        let result = start_future.await;
-                        if let Ok(response) = result {
-                            handle_response(response);
+                        // Subscribe channel closed — wait for start response as fallback
+                        if !start_done {
+                            let result = start_future.await;
+                            if let Ok(response) = result {
+                                handle_response(response);
+                            }
                         }
                         break;
                     }
                 }
             }
-            result = &mut start_future => {
-                // Start/restart completed — this is the authoritative "done" signal.
-                // Print the response and exit.
-                if let Ok(response) = result {
-                    handle_response(response);
+            result = &mut start_future, if !start_done => {
+                start_done = true;
+                // Start request acknowledged by daemon.
+                // With spawn-all, this returns immediately — keep waiting for the Ready signal.
+                // If the response is an error, handle it and exit.
+                if let Ok(Response::Error { message }) = &result {
+                    eprintln!("Error: {}", message);
+                    std::process::exit(1);
                 }
-                break;
+                // Continue listening for Ready signal or progress events
             }
             _ = &mut sub_future, if !sub_done => {
                 sub_done = true;
@@ -961,10 +978,13 @@ fn format_status(info: &ServiceInfo) -> String {
         }
         "failed" => {
             let ago = info.stopped_at.map(format_duration_since).unwrap_or_default();
+            let reason_suffix = info.fail_reason.as_ref()
+                .map(|r| format!(" ({})", r))
+                .unwrap_or_default();
             if ago.is_empty() {
-                "Failed".to_string()
+                format!("Failed{}", reason_suffix)
             } else {
-                format!("Failed {}", ago)
+                format!("Failed {}{}", ago, reason_suffix)
             }
         }
         "killed" => {
@@ -977,7 +997,13 @@ fn format_status(info: &ServiceInfo) -> String {
                 (false, false) => format!("Killed {} {}", exit_info, ago),
             }
         }
-        "skipped" => "Skipped".to_string(),
+        "skipped" => {
+            if let Some(ref reason) = info.skip_reason {
+                format!("Skipped ({})", reason)
+            } else {
+                "Skipped".to_string()
+            }
+        }
         other => other.to_string(),
     }
 }
@@ -1280,31 +1306,11 @@ fn write_cursor_batch(
 /// positives from deferred services that appear as Stopped in the initial
 /// snapshot.
 async fn quiescence_monitor(
-    mut progress_rx: mpsc::UnboundedReceiver<ProgressEvent>,
+    mut progress_rx: mpsc::UnboundedReceiver<ServerEvent>,
     quiescent_tx: oneshot::Sender<()>,
 ) {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut terminal_now: HashSet<String> = HashSet::new();
-    let mut any_non_terminal_seen = false;
-
     while let Some(event) = progress_rx.recv().await {
-        match &event.phase {
-            ServicePhase::Stopped | ServicePhase::Failed { .. } => {
-                seen.insert(event.service.clone());
-                terminal_now.insert(event.service.clone());
-            }
-            _ => {
-                seen.insert(event.service.clone());
-                terminal_now.remove(&event.service);
-                any_non_terminal_seen = true;
-            }
-        }
-        // Only check quiescence once we've seen at least one non-terminal service
-        // (prevents false positive from initial snapshot of never-started deferred services)
-        if any_non_terminal_seen
-            && !seen.is_empty()
-            && seen.iter().all(|s| terminal_now.contains(s))
-        {
+        if matches!(event, ServerEvent::Quiescent { .. }) {
             let _ = quiescent_tx.send(());
             return;
         }
@@ -1361,7 +1367,7 @@ async fn follow_logs_until_quiescent(
                         if let Ok((_, resp_future)) = client.status(Some(config_path.clone())) {
                             if let Ok(Response::Ok { data: Some(ResponseData::ServiceStatus(services)), .. }) = resp_future.await {
                                 let all_terminal = services.values().all(|info| {
-                                    matches!(info.status.as_str(), "stopped" | "exited" | "killed" | "failed")
+                                    matches!(info.status.as_str(), "stopped" | "exited" | "killed" | "failed" | "skipped")
                                 });
                                 if all_terminal {
                                     return;
@@ -1630,7 +1636,7 @@ fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    use kepler_protocol::protocol::{CursorLogEntry, StreamType};
+    use kepler_protocol::protocol::{CursorLogEntry, ProgressEvent, StreamType};
 
     type ClientResult = std::result::Result<Response, ClientError>;
 
@@ -2055,6 +2061,8 @@ mod tests {
             health_check_failures: 0,
             exit_code: None,
             signal: None,
+            skip_reason: None,
+            fail_reason: None,
         }
     }
 
@@ -2347,25 +2355,22 @@ mod tests {
     // Quiescence monitor unit tests
     // ========================================================================
 
-    fn progress_event(service: &str, phase: ServicePhase) -> ProgressEvent {
-        ProgressEvent { service: service.to_string(), phase }
-    }
-
-    /// Normal quiescence: services go Running → Stopped, monitor fires.
+    /// Quiescence monitor fires when it receives ServerEvent::Quiescent.
     #[tokio::test]
-    async fn test_quiescence_monitor_normal_lifecycle() {
+    async fn test_quiescence_monitor_fires_on_quiescent_event() {
         let (tx, rx) = mpsc::unbounded_channel();
         let (quiescent_tx, quiescent_rx) = oneshot::channel();
 
         let handle = tokio::spawn(quiescence_monitor(rx, quiescent_tx));
 
-        // Snapshot: two services running
-        tx.send(progress_event("web", ServicePhase::Started)).unwrap();
-        tx.send(progress_event("db", ServicePhase::Started)).unwrap();
+        // Send some progress events (should be ignored)
+        tx.send(ServerEvent::Progress {
+            request_id: 1,
+            event: ProgressEvent { service: "web".to_string(), phase: ServicePhase::Started },
+        }).unwrap();
 
-        // Both stop
-        tx.send(progress_event("web", ServicePhase::Stopped)).unwrap();
-        tx.send(progress_event("db", ServicePhase::Stopped)).unwrap();
+        // Send Quiescent signal from daemon
+        tx.send(ServerEvent::Quiescent { request_id: 1 }).unwrap();
 
         // Monitor should fire quiescence
         tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
@@ -2373,84 +2378,6 @@ mod tests {
             .expect("quiescence should fire within 1s")
             .expect("oneshot should not be dropped");
         handle.await.unwrap();
-    }
-
-    /// False positive prevention: snapshot with only terminal (deferred) services
-    /// must NOT trigger quiescence. The monitor should wait for a non-terminal
-    /// event before it can declare quiescence.
-    #[tokio::test]
-    async fn test_quiescence_monitor_all_terminal_snapshot_no_false_positive() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (quiescent_tx, quiescent_rx) = oneshot::channel();
-
-        let handle = tokio::spawn(quiescence_monitor(rx, quiescent_tx));
-
-        // Snapshot: deferred service already stopped, another already failed
-        tx.send(progress_event("deferred-svc", ServicePhase::Stopped)).unwrap();
-        tx.send(progress_event("broken-svc", ServicePhase::Failed { message: "unsatisfied".into() })).unwrap();
-
-        // Monitor must NOT fire — only terminal events were seen
-        let result = tokio::time::timeout(Duration::from_millis(100), quiescent_rx).await;
-        assert!(result.is_err(), "quiescence should NOT fire when only terminal events seen");
-
-        // Cleanup: drop sender to unblock the monitor
-        drop(tx);
-        handle.await.unwrap();
-    }
-
-    /// Regression: with 50 services, if the first snapshot event is a deferred
-    /// service (Stopped), quiescence must not fire prematurely. It should only
-    /// fire after non-terminal activity is observed and all services become terminal.
-    #[tokio::test]
-    async fn test_quiescence_monitor_deferred_first_in_snapshot() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (quiescent_tx, quiescent_rx) = oneshot::channel();
-
-        tokio::spawn(quiescence_monitor(rx, quiescent_tx));
-
-        // First event: deferred service already stopped (HashMap random order)
-        // Without the any_non_terminal_seen gate, this alone would trigger quiescence.
-        tx.send(progress_event("postgres-failover", ServicePhase::Stopped)).unwrap();
-
-        // Remaining services arrive as Running
-        tx.send(progress_event("web", ServicePhase::Started)).unwrap();
-        tx.send(progress_event("api", ServicePhase::Started)).unwrap();
-        tx.send(progress_event("worker", ServicePhase::Started)).unwrap();
-
-        // All services stop
-        tx.send(progress_event("web", ServicePhase::Stopped)).unwrap();
-        tx.send(progress_event("api", ServicePhase::Stopped)).unwrap();
-        tx.send(progress_event("worker", ServicePhase::Stopped)).unwrap();
-
-        // Quiescence fires correctly after all services are terminal
-        tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
-            .await
-            .expect("quiescence should fire after all services stop")
-            .expect("oneshot should not be dropped");
-    }
-
-    /// Variant of deferred-first test that properly checks quiescence fires.
-    #[tokio::test]
-    async fn test_quiescence_monitor_deferred_then_running_then_stopped() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (quiescent_tx, quiescent_rx) = oneshot::channel();
-
-        tokio::spawn(quiescence_monitor(rx, quiescent_tx));
-
-        // Snapshot: deferred stopped + two running services
-        tx.send(progress_event("deferred", ServicePhase::Stopped)).unwrap();
-        tx.send(progress_event("web", ServicePhase::Started)).unwrap();
-        tx.send(progress_event("api", ServicePhase::Started)).unwrap();
-
-        // Both running services stop
-        tx.send(progress_event("web", ServicePhase::Stopped)).unwrap();
-        tx.send(progress_event("api", ServicePhase::Stopped)).unwrap();
-
-        // Quiescence fires: all 3 seen, all terminal, and non-terminal was observed
-        tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
-            .await
-            .expect("quiescence should fire within 1s")
-            .expect("oneshot should not be dropped");
     }
 
     /// Channel close (subscription ended) always fires quiescence.
@@ -2470,52 +2397,22 @@ mod tests {
             .expect("oneshot should not be dropped");
     }
 
-    /// Service that fails after running (Starting → Failed) triggers quiescence
-    /// when it's the only service.
+    /// Ready events are ignored by quiescence monitor (not the same signal).
     #[tokio::test]
-    async fn test_quiescence_monitor_starting_then_failed() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (quiescent_tx, quiescent_rx) = oneshot::channel();
-
-        tokio::spawn(quiescence_monitor(rx, quiescent_tx));
-
-        tx.send(progress_event("svc", ServicePhase::Starting)).unwrap();
-        tx.send(progress_event("svc", ServicePhase::Failed { message: "crash".into() })).unwrap();
-
-        tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
-            .await
-            .expect("quiescence should fire when sole service fails after starting")
-            .expect("oneshot should not be dropped");
-    }
-
-    /// Mixed terminal and non-terminal: quiescence only fires once the last
-    /// non-terminal service transitions to terminal.
-    #[tokio::test]
-    async fn test_quiescence_monitor_waits_for_last_service() {
+    async fn test_quiescence_monitor_ignores_ready() {
         let (tx, rx) = mpsc::unbounded_channel();
         let (quiescent_tx, mut quiescent_rx) = oneshot::channel();
 
         tokio::spawn(quiescence_monitor(rx, quiescent_tx));
 
-        // Three services, one already stopped, two running
-        tx.send(progress_event("init", ServicePhase::Stopped)).unwrap();
-        tx.send(progress_event("web", ServicePhase::Started)).unwrap();
-        tx.send(progress_event("worker", ServicePhase::Started)).unwrap();
+        // Send Ready (should not trigger quiescence)
+        tx.send(ServerEvent::Ready { request_id: 1 }).unwrap();
 
-        // Stop web but not worker yet
-        tx.send(progress_event("web", ServicePhase::Stopped)).unwrap();
+        // Should NOT fire
+        let result = tokio::time::timeout(Duration::from_millis(100), &mut quiescent_rx).await;
+        assert!(result.is_err(), "quiescence should NOT fire on Ready event");
 
-        // Should NOT fire yet — worker is still running
-        let result = tokio::time::timeout(Duration::from_millis(50), &mut quiescent_rx).await;
-        assert!(result.is_err(), "quiescence must not fire while worker is still running");
-
-        // Worker stops
-        tx.send(progress_event("worker", ServicePhase::Stopped)).unwrap();
-
-        // Now quiescence fires
-        tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
-            .await
-            .expect("quiescence should fire after last service stops")
-            .expect("oneshot should not be dropped");
+        // Cleanup: drop sender to unblock the monitor
+        drop(tx);
     }
 }

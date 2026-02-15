@@ -1,0 +1,25 @@
+# Test transient exit filtering: when a dep exits but will restart,
+# terminal-state conditions (service_failed, service_stopped) should NOT
+# be considered satisfied. The dependent should be Skipped (structurally
+# unreachable) rather than starting on every crash/restart cycle.
+#
+# "worker" exits with code 1 after 0.2s, restart: always (will keep restarting).
+# "watcher" depends on "worker" with condition: service_failed.
+# Since worker has restart:always, service_failed is structurally unreachable.
+# The transient exit filter prevents watcher from briefly starting during
+# the window between worker exiting and being restarted.
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  worker:
+    command: ["sh", "-c", "sleep 0.2; exit 1"]
+    restart: always
+
+  watcher:
+    command: ["sh", "-c", "echo WATCHER_SHOULD_NOT_RUN; sleep 300"]
+    depends_on:
+      worker:
+        condition: service_failed

@@ -1,11 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use tracing::warn;
-
-use crate::config::{DependencyCondition, DependencyConfig, ServiceConfig};
+use crate::config::{DependencyCondition, DependencyConfig, RestartPolicy, ServiceConfig};
 use crate::config_actor::ConfigActorHandle;
 use crate::errors::{DaemonError, Result};
-use crate::state::ServiceStatus;
+use crate::state::{ServiceState, ServiceStatus};
 
 /// Get the order in which services should be started (respecting dependencies)
 /// Returns services in topological order (dependencies first)
@@ -250,98 +248,18 @@ fn collect_deps(
     Ok(())
 }
 
-/// Resolve effective_wait for each service, modifying the configs in place.
+/// Check if a dependency condition is met based on service state.
 ///
-/// Processes services in topological order. For each service S:
-/// 1. `S.wait = Some(true)` → `effective_wait = true`
-/// 2. `S.wait = Some(false)` → `effective_wait = false`
-/// 3. `S.wait = None` + no dependencies → `effective_wait = true`
-/// 4. `S.wait = None` + has dependencies → `effective_wait = AND` over all deps of:
-///    `[dep.wait.unwrap() AND edge_wait]`
-///    where `edge_wait = dep_config.wait.unwrap_or(condition.is_startup_condition())`
+/// This is the shared condition-matching logic used by both async `check_dependency_satisfied`
+/// and the synchronous `is_condition_satisfied_sync` inside the actor.
 ///
-/// When a service gets `effective_wait=false` without explicitly setting `wait: false`
-/// (inherited from deps), emits a warning with the specific reasons.
-pub fn resolve_effective_wait(
-    services: &mut HashMap<String, ServiceConfig>,
-) -> Result<()> {
-    let topo_order = topological_sort(services)?;
-
-    // Store computed effective_wait values as we go
-    let mut effective_map: HashMap<String, bool> = HashMap::new();
-
-    for name in &topo_order {
-        let config = services.get(name).ok_or_else(|| {
-            DaemonError::ServiceNotFound(name.clone())
-        })?;
-
-        let effective_wait = match config.wait {
-            Some(true) => true,
-            Some(false) => false,
-            None => {
-                if config.depends_on.is_empty() {
-                    true
-                } else {
-                    // AND over all deps: dep.wait.unwrap() AND edge_wait
-                    config.depends_on.iter().all(|(dep_name, dep_config)| {
-                        let dep_effective = effective_map.get(&dep_name).copied().unwrap_or(true);
-                        let edge_wait = dep_config.wait.unwrap_or_else(|| dep_config.condition.is_startup_condition());
-                        dep_effective && edge_wait
-                    })
-                }
-            }
-        };
-
-        // Emit warning if service gets effective_wait=false without explicit wait: false
-        if !effective_wait && config.wait.is_none() {
-            let mut reasons = Vec::new();
-            for (dep_name, dep_config) in config.depends_on.iter() {
-                let dep_effective = effective_map.get(&dep_name).copied().unwrap_or(true);
-                let edge_wait = dep_config.wait.unwrap_or_else(|| dep_config.condition.is_startup_condition());
-                if !dep_effective {
-                    reasons.push(format!(
-                        "dependency '{}' has effective_wait=false",
-                        dep_name
-                    ));
-                }
-                if !edge_wait {
-                    reasons.push(format!(
-                        "edge to '{}' (condition: {:?}) has wait=false",
-                        dep_name, dep_config.condition
-                    ));
-                }
-            }
-            warn!(
-                "Service '{}' will be deferred (effective_wait=false) because: {}. Add `wait: true` to override.",
-                name,
-                reasons.join("; ")
-            );
-        }
-
-        effective_map.insert(name.clone(), effective_wait);
-    }
-
-    // Apply computed values back into wait field
-    for (name, effective_wait) in &effective_map {
-        if let Some(config) = services.get_mut(name) {
-            config.wait = Some(*effective_wait);
-        }
-    }
-
-    Ok(())
-}
-
-/// Check if a dependency condition is satisfied based on current service status
-pub async fn check_dependency_satisfied(
-    dep_name: &str,
+/// When `dep_service_config` is `Some`, applies transient exit filtering: if the dep exited
+/// but its restart policy will restart it, terminal-state conditions are NOT considered met.
+pub fn is_condition_met(
+    state: &ServiceState,
     dep_config: &DependencyConfig,
-    handle: &ConfigActorHandle,
+    dep_service_config: Option<&ServiceConfig>,
 ) -> bool {
-    let state = match handle.get_service_state(dep_name).await {
-        Some(s) => s,
-        None => return false,
-    };
-
     // If the dependency is Skipped and allow_skipped is true, treat as satisfied
     if state.status == ServiceStatus::Skipped && dep_config.allow_skipped {
         return true;
@@ -351,31 +269,23 @@ pub async fn check_dependency_satisfied(
         return false;
     }
 
-    match &dep_config.condition {
+    let satisfied = match &dep_config.condition {
         DependencyCondition::ServiceStarted => {
-            // Service is considered "started" if it's running (in any running state)
             matches!(
                 state.status,
                 ServiceStatus::Running | ServiceStatus::Healthy | ServiceStatus::Unhealthy
             )
         }
         DependencyCondition::ServiceHealthy => {
-            // Service must be in the Healthy state
             state.status == ServiceStatus::Healthy
         }
         DependencyCondition::ServiceCompletedSuccessfully => {
-            // Service must have exited/stopped with exit code 0
             matches!(state.status, ServiceStatus::Stopped | ServiceStatus::Exited) && state.exit_code == Some(0)
         }
         DependencyCondition::ServiceUnhealthy => {
-            // Service must be unhealthy and must have been healthy before
             state.status == ServiceStatus::Unhealthy && state.was_healthy
         }
         DependencyCondition::ServiceFailed => {
-            // Service must have failed: Failed (spawn failure), Killed (signal),
-            // or Exited with non-zero exit code. Optionally matching exit code filter.
-            // exit_code is None when the process was killed by a signal (no exit status),
-            // mapped to -1 so signal-killed processes can be matched with exit_code: [-1].
             let is_failure = match state.status {
                 ServiceStatus::Failed | ServiceStatus::Killed => true,
                 ServiceStatus::Exited => state.exit_code != Some(0),
@@ -387,9 +297,6 @@ pub async fn check_dependency_satisfied(
                     .matches(state.exit_code.unwrap_or(-1))
         }
         DependencyCondition::ServiceStopped => {
-            // Service must have stopped/exited/killed or failed, optionally matching exit code filter.
-            // exit_code is None when the process was killed by a signal (no exit status),
-            // mapped to -1 so signal-killed processes can be matched with exit_code: [-1].
             matches!(
                 state.status,
                 ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed | ServiceStatus::Killed
@@ -397,7 +304,38 @@ pub async fn check_dependency_satisfied(
                 .exit_code
                 .matches(state.exit_code.unwrap_or(-1))
         }
+    };
+
+    if !satisfied {
+        return false;
     }
+
+    // Filter transient exits: if dep exited but will restart, the condition is only
+    // transiently satisfied. Stopped is excluded (explicitly stopped = won't restart).
+    if let Some(dep_svc_config) = dep_service_config {
+        if is_transient_satisfaction(state, dep_svc_config) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Check if a dependency condition is satisfied based on current service status.
+///
+/// This is the async version for use outside the actor (no transient filter —
+/// callers handle transient exits separately).
+pub async fn check_dependency_satisfied(
+    dep_name: &str,
+    dep_config: &DependencyConfig,
+    handle: &ConfigActorHandle,
+) -> bool {
+    let state = match handle.get_service_state(dep_name).await {
+        Some(s) => s,
+        None => return false,
+    };
+
+    is_condition_met(&state, dep_config, None)
 }
 
 /// Check if a dependency is permanently unsatisfied.
@@ -436,6 +374,69 @@ pub async fn is_dependency_permanently_unsatisfied(
     !dep_service_config.restart.should_restart_on_exit(state.exit_code)
 }
 
+/// Check if a dependency condition is structurally unreachable given the dep's restart policy.
+///
+/// For example, `service_failed` can never be permanently met when the dep has `restart: always`,
+/// because the dep will always restart after any exit — it never stays in a terminal failure state.
+///
+/// Returns `Some(reason)` if unreachable, `None` if the condition could potentially be met.
+pub fn is_condition_unreachable_by_policy(
+    dep_name: &str,
+    condition: &DependencyCondition,
+    dep_restart_policy: &RestartPolicy,
+) -> Option<String> {
+    match (condition, dep_restart_policy) {
+        // restart: always → service always restarts on any exit, so it can never
+        // permanently reach a failed/stopped/exited state
+        (DependencyCondition::ServiceFailed, RestartPolicy::Always) => {
+            Some(format!(
+                "`{}` has restart policy `always` — it will always restart, \
+                 so `service_failed` can never be met",
+                dep_name
+            ))
+        }
+        (DependencyCondition::ServiceStopped, RestartPolicy::Always) => {
+            Some(format!(
+                "`{}` has restart policy `always` — it will always restart, \
+                 so `service_stopped` can never be met",
+                dep_name
+            ))
+        }
+        (DependencyCondition::ServiceCompletedSuccessfully, RestartPolicy::Always) => {
+            Some(format!(
+                "`{}` has restart policy `always` — it will always restart, \
+                 so `service_completed_successfully` can never be met",
+                dep_name
+            ))
+        }
+        // restart: on-failure → service restarts on non-zero exit, so service_failed
+        // (which requires non-zero exit) can never be permanently met
+        (DependencyCondition::ServiceFailed, RestartPolicy::OnFailure) => {
+            Some(format!(
+                "`{}` has restart policy `on-failure` — it will always restart on failure, \
+                 so `service_failed` can never be met",
+                dep_name
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Check if a dependency's satisfied condition is only transient because the dep will restart.
+///
+/// When a dependency exits but its restart policy will restart it, terminal-state conditions
+/// (service_stopped, service_failed, service_completed_successfully) are only transiently
+/// satisfied — the dep will restart and the condition will no longer hold.
+///
+/// `Stopped` status is excluded because it means the service was explicitly stopped by the
+/// user and will NOT be restarted by the restart policy.
+///
+/// Returns true if the condition satisfaction is transient and should be ignored.
+pub fn is_transient_satisfaction(dep_state: &ServiceState, dep_service_config: &ServiceConfig) -> bool {
+    matches!(dep_state.status, ServiceStatus::Exited | ServiceStatus::Killed | ServiceStatus::Failed)
+        && dep_service_config.restart.should_restart_on_exit(dep_state.exit_code)
+}
+
 /// Detect dependency cycles in the service configuration
 pub fn detect_cycles(services: &HashMap<String, ServiceConfig>) -> Result<()> {
     // Validate all dependencies exist first
@@ -459,7 +460,7 @@ pub fn detect_cycles(services: &HashMap<String, ServiceConfig>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DependencyCondition, DependencyConfig, DependencyEntry, DependsOn, RestartConfig, RestartPolicy};
+    use crate::config::{DependsOn, RestartConfig, RestartPolicy};
 
     fn make_service(deps: Vec<&str>) -> ServiceConfig {
         ServiceConfig {
@@ -477,55 +478,7 @@ mod tests {
             user: None,
             groups: Vec::new(),
             limits: None,
-            wait: None,
         }
-    }
-
-    /// Make a service with explicit wait field
-    fn make_service_with_wait(deps: Vec<&str>, wait: Option<bool>) -> ServiceConfig {
-        let mut svc = make_service(deps);
-        svc.wait = wait;
-        svc
-    }
-
-    /// Make a service with extended dependency configs
-    fn make_service_with_deps(deps: Vec<(&str, DependencyCondition, Option<bool>)>) -> ServiceConfig {
-        let mut map = std::collections::HashMap::new();
-        for (name, condition, wait) in deps {
-            map.insert(name.to_string(), DependencyConfig {
-                condition,
-                wait,
-                ..Default::default()
-            });
-        }
-        ServiceConfig {
-            condition: None,
-            command: vec!["test".to_string()],
-            working_dir: None,
-            environment: vec![],
-            env_file: None,
-            sys_env: Default::default(),
-            restart: RestartConfig::default(),
-            depends_on: DependsOn(if map.is_empty() {
-                vec![]
-            } else {
-                vec![DependencyEntry::Extended(map)]
-            }),
-            healthcheck: None,
-            hooks: None,
-            logs: None,
-            user: None,
-            groups: Vec::new(),
-            limits: None,
-            wait: None,
-        }
-    }
-
-    /// Make a service with extended deps and explicit service-level wait
-    fn make_service_with_deps_and_wait(deps: Vec<(&str, DependencyCondition, Option<bool>)>, wait: Option<bool>) -> ServiceConfig {
-        let mut svc = make_service_with_deps(deps);
-        svc.wait = wait;
-        svc
     }
 
     #[test]
@@ -576,180 +529,6 @@ mod tests {
 
         let result = get_start_order(&services);
         assert!(matches!(result, Err(DaemonError::MissingDependency { .. })));
-    }
-
-    // --- resolve_effective_wait tests ---
-
-    #[test]
-    fn test_all_startup() {
-        // All services with startup conditions → all effective_wait = true
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceStarted, None),
-        ]));
-        services.insert("c".to_string(), make_service_with_deps(vec![
-            ("b", DependencyCondition::ServiceHealthy, None),
-        ]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(services["b"].wait.unwrap());
-        assert!(services["c"].wait.unwrap());
-    }
-
-    #[test]
-    fn test_deferred_propagation() {
-        // E depends on D with service_failed (deferred), F depends on E with service_started
-        // E should be deferred, F should also be deferred (target is deferred)
-        let mut services = HashMap::new();
-        services.insert("d".to_string(), make_service(vec![]));
-        services.insert("e".to_string(), make_service_with_deps(vec![
-            ("d", DependencyCondition::ServiceFailed, None),
-        ]));
-        services.insert("f".to_string(), make_service_with_deps(vec![
-            ("e", DependencyCondition::ServiceStarted, None),
-        ]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["d"].wait.unwrap(), "D should be startup");
-        assert!(!services["e"].wait.unwrap(), "E should be deferred (service_failed condition)");
-        assert!(!services["f"].wait.unwrap(), "F should be deferred (depends on deferred E)");
-    }
-
-    #[test]
-    fn test_mixed_startup_deferred() {
-        // A, B, C, D are startup; E depends on D with service_failed; F, G depend on E
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceStarted, None),
-        ]));
-        services.insert("c".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceHealthy, None),
-        ]));
-        services.insert("d".to_string(), make_service_with_deps(vec![
-            ("b", DependencyCondition::ServiceStarted, None),
-            ("c", DependencyCondition::ServiceStarted, None),
-        ]));
-        // E has deferred condition
-        services.insert("e".to_string(), make_service_with_deps(vec![
-            ("d", DependencyCondition::ServiceFailed, None),
-        ]));
-        services.insert("f".to_string(), make_service_with_deps(vec![
-            ("e", DependencyCondition::ServiceStarted, None),
-        ]));
-        services.insert("g".to_string(), make_service_with_deps(vec![
-            ("e", DependencyCondition::ServiceStarted, None),
-        ]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(services["b"].wait.unwrap());
-        assert!(services["c"].wait.unwrap());
-        assert!(services["d"].wait.unwrap());
-        assert!(!services["e"].wait.unwrap());
-        assert!(!services["f"].wait.unwrap());
-        assert!(!services["g"].wait.unwrap());
-    }
-
-    #[test]
-    fn test_all_deferred() {
-        // Single service with no deps is startup; service depending on it with deferred condition
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service_with_deps(vec![
-            ("b", DependencyCondition::ServiceFailed, None),
-        ]));
-        services.insert("b".to_string(), make_service(vec![]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["b"].wait.unwrap(), "B (no deps) should be startup");
-        assert!(!services["a"].wait.unwrap(), "A (deferred dep) should be deferred");
-    }
-
-    #[test]
-    fn test_service_wait_true_overrides_deferred_deps() {
-        // Service-level wait: true overrides deferred propagation from deps
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceFailed, None),
-        ]));
-        // C depends on deferred B, but has wait: true
-        services.insert("c".to_string(), make_service_with_deps_and_wait(vec![
-            ("b", DependencyCondition::ServiceStarted, None),
-        ], Some(true)));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(!services["b"].wait.unwrap(), "B should be deferred");
-        assert!(services["c"].wait.unwrap(), "C should be startup due to wait: true override");
-    }
-
-    #[test]
-    fn test_service_wait_false_overrides_startup_deps() {
-        // Service-level wait: false overrides startup propagation
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service_with_wait(vec!["a"], Some(false)));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(!services["b"].wait.unwrap(), "B should be deferred due to wait: false");
-    }
-
-    #[test]
-    fn test_edge_wait_true_on_service_failed() {
-        // Edge wait: true on service_failed makes it startup
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceFailed, Some(true)),
-        ]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(services["b"].wait.unwrap(), "B should be startup due to edge wait: true");
-    }
-
-    #[test]
-    fn test_edge_wait_false_on_startup_condition() {
-        // Edge wait: false on service_started makes it deferred
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceStarted, Some(false)),
-        ]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(!services["b"].wait.unwrap(), "B should be deferred due to edge wait: false");
-    }
-
-    #[test]
-    fn test_no_deps_all_startup() {
-        // Services with no dependencies always have effective_wait = true
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service(vec![]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(services["b"].wait.unwrap());
-    }
-
-    #[test]
-    fn test_service_stopped_defaults_to_deferred() {
-        // service_stopped is a deferred condition
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceStopped, None),
-        ]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(!services["b"].wait.unwrap(), "B should be deferred (service_stopped is a deferred condition)");
     }
 
     // --- Topological sort tests ---
@@ -928,172 +707,6 @@ mod tests {
         assert!(matches!(result, Err(DaemonError::ServiceNotFound(_))));
     }
 
-    // --- resolve_effective_wait: additional edge cases ---
-
-    #[test]
-    fn test_resolve_mixed_edges_one_startup_one_deferred() {
-        // Service with two deps: one startup edge, one deferred edge → deferred (AND is false)
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service(vec![]));
-        services.insert("c".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceStarted, None),  // startup
-            ("b", DependencyCondition::ServiceFailed, None),    // deferred
-        ]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(services["b"].wait.unwrap());
-        assert!(!services["c"].wait.unwrap(), "C should be deferred (one deferred edge makes AND false)");
-    }
-
-    #[test]
-    fn test_resolve_all_six_conditions_default_wait() {
-        // Test each condition type as the sole dependency
-        let conditions = vec![
-            ("started", DependencyCondition::ServiceStarted, true),
-            ("healthy", DependencyCondition::ServiceHealthy, true),
-            ("completed", DependencyCondition::ServiceCompletedSuccessfully, true),
-            ("stopped", DependencyCondition::ServiceStopped, false),
-            ("unhealthy", DependencyCondition::ServiceUnhealthy, false),
-            ("failed", DependencyCondition::ServiceFailed, false),
-        ];
-
-        for (label, condition, expected) in conditions {
-            let mut services = HashMap::new();
-            services.insert("dep".to_string(), make_service(vec![]));
-            services.insert("svc".to_string(), make_service_with_deps(vec![
-                ("dep", condition, None),
-            ]));
-
-            resolve_effective_wait(&mut services).unwrap();
-            assert_eq!(
-                services["svc"].wait.unwrap(), expected,
-                "Condition {:?} should produce effective_wait={}", label, expected
-            );
-        }
-    }
-
-    #[test]
-    fn test_resolve_diamond_with_one_deferred_path() {
-        // Diamond: a → b (startup), a → c (deferred), b+c → d
-        // d depends on both b (startup) and c (deferred) → d is deferred
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceHealthy, None),
-        ]));
-        services.insert("c".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceFailed, None),
-        ]));
-        services.insert("d".to_string(), make_service_with_deps(vec![
-            ("b", DependencyCondition::ServiceStarted, None),
-            ("c", DependencyCondition::ServiceStarted, None),
-        ]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(services["b"].wait.unwrap(), "B startup path");
-        assert!(!services["c"].wait.unwrap(), "C deferred path");
-        assert!(!services["d"].wait.unwrap(), "D deferred because C (one dep) is deferred");
-    }
-
-    #[test]
-    fn test_resolve_deep_chain_propagation() {
-        // a → b(failed) → c → d → e: deferred propagates through the entire chain
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceFailed, None),
-        ]));
-        services.insert("c".to_string(), make_service_with_deps(vec![
-            ("b", DependencyCondition::ServiceStarted, None),
-        ]));
-        services.insert("d".to_string(), make_service_with_deps(vec![
-            ("c", DependencyCondition::ServiceStarted, None),
-        ]));
-        services.insert("e".to_string(), make_service_with_deps(vec![
-            ("d", DependencyCondition::ServiceStarted, None),
-        ]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(!services["b"].wait.unwrap());
-        assert!(!services["c"].wait.unwrap());
-        assert!(!services["d"].wait.unwrap());
-        assert!(!services["e"].wait.unwrap(), "Deferred should propagate through 4-deep chain");
-    }
-
-    #[test]
-    fn test_resolve_wait_true_stops_propagation() {
-        // a → b(failed) → c(wait:true) → d: propagation stops at c
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceFailed, None),
-        ]));
-        services.insert("c".to_string(), make_service_with_deps_and_wait(vec![
-            ("b", DependencyCondition::ServiceStarted, None),
-        ], Some(true)));
-        services.insert("d".to_string(), make_service_with_deps(vec![
-            ("c", DependencyCondition::ServiceStarted, None),
-        ]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["a"].wait.unwrap());
-        assert!(!services["b"].wait.unwrap(), "B deferred from service_failed");
-        assert!(services["c"].wait.unwrap(), "C forced startup by wait: true");
-        assert!(services["d"].wait.unwrap(), "D startup because C is startup");
-    }
-
-    #[test]
-    fn test_resolve_edge_wait_overrides_per_edge() {
-        // Two edges from same dep: one default, one with wait override
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec![]));
-        services.insert("b".to_string(), make_service(vec![]));
-        // c depends on a(service_failed, edge wait: true) and b(service_started, no override)
-        services.insert("c".to_string(), make_service_with_deps(vec![
-            ("a", DependencyCondition::ServiceFailed, Some(true)),
-            ("b", DependencyCondition::ServiceStarted, None),
-        ]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        // Both edges are startup (edge override makes service_failed edge startup, service_started is default startup)
-        assert!(services["c"].wait.unwrap(), "C startup because both edges are wait=true");
-    }
-
-    #[test]
-    fn test_resolve_single_service_no_deps() {
-        // Single service with no deps should always be startup
-        let mut services = HashMap::new();
-        services.insert("lonely".to_string(), make_service(vec![]));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(services["lonely"].wait.unwrap());
-    }
-
-    #[test]
-    fn test_resolve_effective_wait_preserves_explicit_wait_false_no_deps() {
-        // Service with no deps but wait: false → deferred
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service_with_wait(vec![], Some(false)));
-
-        resolve_effective_wait(&mut services).unwrap();
-        assert!(!services["a"].wait.unwrap(), "Explicit wait: false should override even with no deps");
-    }
-
-    #[test]
-    fn test_resolve_cycle_detection() {
-        // Cycles should be detected by topological_sort inside resolve_effective_wait
-        let mut services = HashMap::new();
-        services.insert("a".to_string(), make_service(vec!["b"]));
-        services.insert("b".to_string(), make_service(vec!["a"]));
-
-        let result = resolve_effective_wait(&mut services);
-        assert!(matches!(result, Err(DaemonError::DependencyCycle(_))));
-    }
-
     // --- Multi-node topology: start_levels ---
 
     #[test]
@@ -1231,5 +844,92 @@ mod tests {
         assert!(!svc.restart.should_restart_on_exit(Some(0)), "Exit 0 should not restart");
         assert!(svc.restart.should_restart_on_exit(Some(1)), "Exit 1 should restart");
         assert!(svc.restart.should_restart_on_exit(None), "Signal kill (None) should restart");
+    }
+
+    // --- Transient exit satisfaction tests ---
+
+    fn make_state_with_status(status: ServiceStatus, exit_code: Option<i32>) -> ServiceState {
+        ServiceState {
+            status,
+            exit_code,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_transient_exited_restart_always() {
+        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let state = make_state_with_status(ServiceStatus::Exited, Some(0));
+        assert!(is_transient_satisfaction(&state, &svc), "Exited(0) + restart:always should be transient");
+
+        let state = make_state_with_status(ServiceStatus::Exited, Some(1));
+        assert!(is_transient_satisfaction(&state, &svc), "Exited(1) + restart:always should be transient");
+    }
+
+    #[test]
+    fn test_transient_exited_restart_no() {
+        let svc = make_service_with_restart(vec![], RestartPolicy::No);
+        let state = make_state_with_status(ServiceStatus::Exited, Some(0));
+        assert!(!is_transient_satisfaction(&state, &svc), "Exited(0) + restart:no should NOT be transient");
+
+        let state = make_state_with_status(ServiceStatus::Exited, Some(1));
+        assert!(!is_transient_satisfaction(&state, &svc), "Exited(1) + restart:no should NOT be transient");
+    }
+
+    #[test]
+    fn test_transient_exited_restart_on_failure() {
+        let svc = make_service_with_restart(vec![], RestartPolicy::OnFailure);
+
+        // Exit 1 → will restart → transient
+        let state = make_state_with_status(ServiceStatus::Exited, Some(1));
+        assert!(is_transient_satisfaction(&state, &svc), "Exited(1) + restart:on-failure should be transient");
+
+        // Exit 0 → won't restart → permanent
+        let state = make_state_with_status(ServiceStatus::Exited, Some(0));
+        assert!(!is_transient_satisfaction(&state, &svc), "Exited(0) + restart:on-failure should NOT be transient");
+    }
+
+    #[test]
+    fn test_transient_killed_restart_always() {
+        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let state = make_state_with_status(ServiceStatus::Killed, None);
+        assert!(is_transient_satisfaction(&state, &svc), "Killed + restart:always should be transient");
+    }
+
+    #[test]
+    fn test_transient_failed_restart_always() {
+        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let state = make_state_with_status(ServiceStatus::Failed, None);
+        assert!(is_transient_satisfaction(&state, &svc), "Failed + restart:always should be transient");
+    }
+
+    #[test]
+    fn test_transient_stopped_never_transient() {
+        // Stopped means explicitly stopped by user — never transient regardless of restart policy
+        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let state = make_state_with_status(ServiceStatus::Stopped, Some(0));
+        assert!(!is_transient_satisfaction(&state, &svc), "Stopped + restart:always should NOT be transient");
+    }
+
+    #[test]
+    fn test_transient_running_not_transient() {
+        // Running is not a terminal state — transient filter doesn't apply
+        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let state = make_state_with_status(ServiceStatus::Running, None);
+        assert!(!is_transient_satisfaction(&state, &svc), "Running should NOT be transient");
+    }
+
+    #[test]
+    fn test_transient_waiting_not_transient() {
+        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let state = make_state_with_status(ServiceStatus::Waiting, None);
+        assert!(!is_transient_satisfaction(&state, &svc), "Waiting should NOT be transient");
+    }
+
+    #[test]
+    fn test_transient_skipped_not_transient() {
+        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let state = make_state_with_status(ServiceStatus::Skipped, None);
+        assert!(!is_transient_satisfaction(&state, &svc), "Skipped should NOT be transient");
     }
 }

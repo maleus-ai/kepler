@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceStatus {
     Stopped,
+    Waiting,   // Spawned but waiting for dependencies to be satisfied
     Starting,
     Running,
     Stopping,
@@ -24,6 +25,7 @@ impl ServiceStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             ServiceStatus::Stopped => "stopped",
+            ServiceStatus::Waiting => "waiting",
             ServiceStatus::Starting => "starting",
             ServiceStatus::Running => "running",
             ServiceStatus::Stopping => "stopping",
@@ -44,7 +46,7 @@ impl ServiceStatus {
     }
 
     /// Returns true for any non-terminal state (service is actively doing something).
-    /// Terminal states: Stopped, Failed, Exited, Killed
+    /// Terminal states: Stopped, Failed, Exited, Killed, Skipped
     pub fn is_active(&self) -> bool {
         !matches!(
             self,
@@ -82,6 +84,10 @@ pub struct ServiceState {
     pub working_dir: PathBuf,
     /// Whether the service was healthy at some point (for service_unhealthy condition)
     pub was_healthy: bool,
+    /// Reason for being skipped (set when status is Skipped)
+    pub skip_reason: Option<String>,
+    /// Reason for failure (set when status is Failed)
+    pub fail_reason: Option<String>,
 }
 
 impl Default for ServiceState {
@@ -99,6 +105,8 @@ impl Default for ServiceState {
             computed_env: HashMap::new(),
             working_dir: PathBuf::new(),
             was_healthy: false,
+            skip_reason: None,
+            fail_reason: None,
         }
     }
 }
@@ -119,6 +127,8 @@ impl From<&ServiceState> for ServiceInfo {
             health_check_failures: state.health_check_failures,
             exit_code: state.exit_code,
             signal: state.signal,
+            skip_reason: state.skip_reason.clone(),
+            fail_reason: state.fail_reason.clone(),
         }
     }
 }
@@ -151,6 +161,7 @@ impl std::fmt::Debug for ProcessHandle {
 #[serde(rename_all = "snake_case")]
 pub enum PersistedServiceStatus {
     Stopped,
+    Waiting,
     Starting,
     Running,
     Stopping,
@@ -166,6 +177,7 @@ impl From<ServiceStatus> for PersistedServiceStatus {
     fn from(status: ServiceStatus) -> Self {
         match status {
             ServiceStatus::Stopped => PersistedServiceStatus::Stopped,
+            ServiceStatus::Waiting => PersistedServiceStatus::Waiting,
             ServiceStatus::Starting => PersistedServiceStatus::Starting,
             ServiceStatus::Running => PersistedServiceStatus::Running,
             ServiceStatus::Stopping => PersistedServiceStatus::Stopping,
@@ -183,6 +195,7 @@ impl From<PersistedServiceStatus> for ServiceStatus {
     fn from(status: PersistedServiceStatus) -> Self {
         match status {
             PersistedServiceStatus::Stopped => ServiceStatus::Stopped,
+            PersistedServiceStatus::Waiting => ServiceStatus::Waiting,
             PersistedServiceStatus::Starting => ServiceStatus::Starting,
             PersistedServiceStatus::Running => ServiceStatus::Running,
             PersistedServiceStatus::Stopping => ServiceStatus::Stopping,
@@ -257,6 +270,8 @@ impl PersistedServiceState {
             computed_env,
             working_dir,
             was_healthy: self.was_healthy,
+            skip_reason: None,
+            fail_reason: None,
         }
     }
 }
@@ -326,6 +341,7 @@ mod tests {
     fn test_persisted_status_all_variants_roundtrip() {
         let variants = [
             ServiceStatus::Stopped,
+            ServiceStatus::Waiting,
             ServiceStatus::Starting,
             ServiceStatus::Running,
             ServiceStatus::Stopping,
@@ -359,6 +375,8 @@ mod tests {
             computed_env: HashMap::new(),
             working_dir: PathBuf::from("/tmp"),
             was_healthy: false,
+            skip_reason: None,
+            fail_reason: None,
         };
 
         let persisted = PersistedServiceState::from(&state);
@@ -390,6 +408,8 @@ mod tests {
             computed_env: HashMap::new(),
             working_dir: PathBuf::new(),
             was_healthy: false,
+            skip_reason: None,
+            fail_reason: None,
         };
 
         let persisted = PersistedServiceState::from(&state);
@@ -479,6 +499,8 @@ mod tests {
             computed_env: HashMap::new(),
             working_dir: PathBuf::new(),
             was_healthy: false,
+            skip_reason: None,
+            fail_reason: None,
         };
 
         let info = state.to_service_info();
@@ -505,6 +527,8 @@ mod tests {
             computed_env: HashMap::new(),
             working_dir: PathBuf::new(),
             was_healthy: false,
+            skip_reason: None,
+            fail_reason: None,
         };
 
         let info = state.to_service_info();
@@ -525,6 +549,7 @@ mod tests {
 
     #[test]
     fn test_is_active_non_terminal_states() {
+        assert!(ServiceStatus::Waiting.is_active());
         assert!(ServiceStatus::Starting.is_active());
         assert!(ServiceStatus::Running.is_active());
         assert!(ServiceStatus::Stopping.is_active());

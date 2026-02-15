@@ -27,7 +27,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{resolve_log_retention, GlobalHooks, KeplerConfig, LogConfig, LogRetention, ServiceConfig};
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
-use crate::deps::{check_dependency_satisfied, get_start_levels, get_start_order, get_stop_order, is_dependency_permanently_unsatisfied};
+use crate::deps::{check_dependency_satisfied, get_start_order, get_stop_order, is_condition_unreachable_by_policy, is_dependency_permanently_unsatisfied, is_transient_satisfaction};
 use crate::events::{RestartReason, ServiceEvent};
 use crate::health::spawn_health_checker;
 use crate::hooks::{
@@ -189,7 +189,7 @@ impl ServiceOrchestrator {
         }
 
         // Start services
-        let (started, deferred_services) = if is_specific_service {
+        if is_specific_service {
             // Start only the named service (no transitive deps)
             let mut started = Vec::new();
             for service_name in &services_to_start {
@@ -209,65 +209,8 @@ impl ServiceOrchestrator {
                     }
                 }
             }
-            (started, Vec::new())
-        } else {
-            // Use wait field to partition services (always resolved after config load)
-            let startup_services: Vec<String> = services_to_start.iter()
-                .filter(|s| config.services.get(*s).is_none_or(|c| c.wait.unwrap_or(true)))
-                .cloned()
-                .collect();
-            let deferred_services: Vec<String> = services_to_start.iter()
-                .filter(|s| config.services.get(*s).is_some_and(|c| !c.wait.unwrap_or(true)))
-                .cloned()
-                .collect();
 
-            // Start startup cluster services
-            let started = if !startup_services.is_empty() {
-                self.start_services_by_level(&startup_services, &config, &handle, true, &progress).await?
-            } else {
-                Vec::new()
-            };
-
-            // Post-startup work (snapshot, event handler, global post_start)
-            self.post_startup_work(StartupContext {
-                config_path,
-                config: &config,
-                handle: &handle,
-                started: &started,
-                initialized,
-                global_hooks: &global_hooks,
-                global_log_config: global_log_config.as_ref(),
-                config_dir: &config_dir,
-                stored_env: &stored_env,
-                log_config: &log_config,
-                run_global_hooks: true,
-                progress: &progress,
-            }).await?;
-
-            // Spawn deferred services in background (don't block the response)
-            if !deferred_services.is_empty() {
-                let self_clone = self.clone();
-                let config_clone = config.clone();
-                let handle_clone = handle.clone();
-                let deferred = deferred_services.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = self_clone.start_services_by_level(
-                        &deferred,
-                        &config_clone,
-                        &handle_clone,
-                        false,
-                        &None, // No progress for deferred (background) services
-                    ).await {
-                        warn!("Error starting deferred services: {}", e);
-                    }
-                });
-            }
-
-            (started, deferred_services)
-        };
-
-        // Run post-startup work for specific service start
-        if is_specific_service {
+            // Run post-startup work for specific service start
             self.post_startup_work(StartupContext {
                 config_path,
                 config: &config,
@@ -282,22 +225,63 @@ impl ServiceOrchestrator {
                 run_global_hooks: false, // no global hooks for specific service
                 progress: &progress,
             }).await?;
-        }
 
-        if started.is_empty() && deferred_services.is_empty() {
-            Ok("All services already running".to_string())
+            if started.is_empty() {
+                Ok("All services already running".to_string())
+            } else {
+                Ok(format!("Started services: {}", started.join(", ")))
+            }
         } else {
-            let mut msg = String::new();
-            if !started.is_empty() {
-                msg.push_str(&format!("Started services: {}", started.join(", ")));
-            }
-            if !deferred_services.is_empty() {
-                if !msg.is_empty() {
-                    msg.push_str(" | ");
+            // Raise startup fence to suppress premature Ready/Quiescent signals
+            handle.set_startup_in_progress(true).await;
+
+            // Mark non-active services as Waiting upfront
+            for service_name in &services_to_start {
+                let state = handle.get_service_state(service_name).await;
+                if state.as_ref().map(|s| s.status.is_active()).unwrap_or(false) {
+                    debug!("Service {} is already active, skipping", service_name);
+                    continue;
                 }
-                msg.push_str(&format!("deferred: {}", deferred_services.join(", ")));
+                if let Err(e) = handle.set_service_status(service_name, ServiceStatus::Waiting).await {
+                    warn!("Failed to set {} to Waiting: {}", service_name, e);
+                }
             }
-            Ok(msg)
+
+            // Lower startup fence — all services are now in Waiting state
+            handle.set_startup_in_progress(false).await;
+
+            // Spawn ALL services. Each independently waits for its deps.
+            for service_name in &services_to_start {
+                let self_clone = self.clone();
+                let handle_clone = handle.clone();
+                let progress_clone = progress.clone();
+                let service_name_clone = service_name.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = self_clone.start_single_service(
+                        &handle_clone, &service_name_clone, &progress_clone,
+                    ).await {
+                        warn!("Failed to start service {}: {}", service_name_clone, e);
+                    }
+                });
+            }
+
+            // Post-startup work (snapshot, event handler, global post_start hook)
+            self.post_startup_work(StartupContext {
+                config_path,
+                config: &config,
+                handle: &handle,
+                started: &services_to_start,
+                initialized,
+                global_hooks: &global_hooks,
+                global_log_config: global_log_config.as_ref(),
+                config_dir: &config_dir,
+                stored_env: &stored_env,
+                log_config: &log_config,
+                run_global_hooks: true,
+                progress: &progress,
+            }).await?;
+
+            Ok(format!("Services starting: {}", services_to_start.join(", ")))
         }
     }
 
@@ -363,23 +347,46 @@ impl ServiceOrchestrator {
         service_name: &str,
         progress: &Option<ProgressSender>,
     ) -> Result<(), OrchestratorError> {
-        // Atomically claim this service for starting. If another concurrent
-        // request already claimed it (or it's already running), skip.
+        // Atomically claim the service for startup
         if !handle.claim_service_start(service_name).await {
-            debug!("Service {} already being started or running, skipping", service_name);
+            debug!("Service {} already active, skipping", service_name);
             return Ok(());
         }
 
-        // Run the actual startup. If anything fails after claiming, reset
-        // status to Failed so the service isn't stuck in Starting forever.
+        // Run the actual startup. If anything fails, mark as Skipped or Failed.
         match self.execute_service_startup(handle, service_name, progress).await {
             Ok(()) => Ok(()),
-            Err(OrchestratorError::DependencySkipped { .. }) => {
-                let _ = handle.set_service_status(service_name, ServiceStatus::Skipped).await;
+            Err(ref e @ OrchestratorError::DependencySkipped { ref dependency, .. }) => {
+                let reason = format!("dependency `{}` was skipped", dependency);
+                if let Err(err) = handle.set_service_status_with_reason(
+                    service_name, ServiceStatus::Skipped, Some(reason.clone()), None,
+                ).await {
+                    warn!("Failed to set {} to Skipped: {}", service_name, err);
+                }
+                info!("Service {} skipped: {}", service_name, e);
+                Ok(())
+            }
+            Err(ref e @ OrchestratorError::DependencyUnsatisfied { ref reason, .. }) => {
+                if let Err(err) = handle.set_service_status_with_reason(
+                    service_name, ServiceStatus::Skipped, Some(reason.clone()), None,
+                ).await {
+                    warn!("Failed to set {} to Skipped: {}", service_name, err);
+                }
+                info!("Service {} skipped: {}", service_name, e);
+                Ok(())
+            }
+            Err(OrchestratorError::StartupCancelled(_)) => {
+                // Startup was cancelled (e.g., stop called during dep wait).
+                // Don't override the status — stop_service already set it.
+                debug!("Service {} startup was cancelled", service_name);
                 Ok(())
             }
             Err(e) => {
-                let _ = handle.set_service_status(service_name, ServiceStatus::Failed).await;
+                if let Err(err) = handle.set_service_status_with_reason(
+                    service_name, ServiceStatus::Failed, None, Some(e.to_string()),
+                ).await {
+                    warn!("Failed to set {} to Failed: {}", service_name, err);
+                }
                 Err(e)
             }
         }
@@ -398,15 +405,18 @@ impl ServiceOrchestrator {
             .await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
-        // Wait for dependencies to satisfy their conditions
+        // Wait for dependencies to satisfy their conditions (blocks while in Waiting state)
         self.wait_for_dependencies(handle, service_name, &ctx.service_config)
             .await?;
+
+        // Transition: Waiting → Starting (dependencies satisfied)
+        handle.set_service_status(service_name, ServiceStatus::Starting).await?;
 
         // Build dependency state map for if-conditions and hooks
         let mut dep_infos = HashMap::new();
         for (dep_name, _) in ctx.service_config.depends_on.iter() {
-            if let Some(dep_state) = handle.get_service_state(&dep_name).await {
-                dep_infos.insert(dep_name.clone(), DepInfo {
+            if let Some(dep_state) = handle.get_service_state(dep_name).await {
+                dep_infos.insert(dep_name.to_string(), DepInfo {
                     status: dep_state.status.as_str().to_string(),
                     exit_code: dep_state.exit_code,
                     initialized: dep_state.initialized,
@@ -431,8 +441,13 @@ impl ServiceOrchestrator {
             match handle.eval_if_condition(condition, eval_ctx).await {
                 Ok(true) => {} // condition passed, proceed
                 Ok(false) => {
-                    tracing::info!("Service {} skipped: if condition '{}' is falsy", service_name, condition);
-                    handle.set_service_status(service_name, ServiceStatus::Skipped).await?;
+                    let reason = format!("`if` condition evaluated to false: `{}`", condition);
+                    tracing::info!("Service {} skipped: {}", service_name, reason);
+                    if let Err(err) = handle.set_service_status_with_reason(
+                        service_name, ServiceStatus::Skipped, Some(reason), None,
+                    ).await {
+                        warn!("Failed to set {} to Skipped: {}", service_name, err);
+                    }
                     return Ok(());
                 }
                 Err(e) => {
@@ -441,8 +456,6 @@ impl ServiceOrchestrator {
                 }
             }
         }
-
-        // Status already set to Starting by claim_service_start()
 
         // Run on_init hook if first time for this service
         let service_initialized = handle.is_service_initialized(service_name).await;
@@ -498,11 +511,6 @@ impl ServiceOrchestrator {
         // Get the full config for looking up dependency service configs
         let config = handle.get_config().await;
 
-        // Get global timeout from config
-        let global_timeout = config.as_ref()
-            .and_then(|c| c.kepler.as_ref())
-            .and_then(|k| k.timeout);
-
         for (dep_name, dep_config) in service_config.depends_on.iter() {
             let start = Instant::now();
 
@@ -511,69 +519,120 @@ impl ServiceOrchestrator {
                 service_name, dep_name, dep_config.condition
             );
 
-            // Use per-dependency timeout, falling back to global timeout
-            let effective_timeout = dep_config.timeout.or(global_timeout);
-            let deadline = effective_timeout.map(|t| start + t);
+            // Only use per-dependency timeout (no global fallback — wait indefinitely if unset)
+            let deadline = dep_config.timeout.map(|t| start + t);
 
-            // Subscribe to state changes for instant notification
-            let mut status_rx = handle.subscribe_state_changes();
+            // Subscribe to state changes of this specific dependency for instant notification
+            let mut status_rx = handle.watch_dep(dep_name);
 
             loop {
-                if check_dependency_satisfied(&dep_name, &dep_config, handle).await {
-                    debug!(
-                        "Dependency {} satisfied for service {} (took {:?})",
-                        dep_name,
-                        service_name,
-                        start.elapsed()
-                    );
-                    break;
-                }
+                let dep_satisfied = check_dependency_satisfied(dep_name, &dep_config, handle).await;
+                if dep_satisfied {
+                    // Check if this is a transient satisfaction (dep exited but will restart).
+                    // If so, fall through to recv() — the dep will restart and the condition will no longer hold.
+                    let is_transient = if let Some(ref cfg) = config
+                        && let Some(dep_svc_config) = cfg.services.get(dep_name)
+                        && let Some(dep_state) = handle.get_service_state(dep_name).await
+                    {
+                        is_transient_satisfaction(&dep_state, dep_svc_config)
+                    } else {
+                        false
+                    };
 
-                // Check if dependency was skipped (cascade skip)
-                if let Some(ref cfg) = config {
-                    if let Some(dep_state) = handle.get_service_state(&dep_name).await {
-                        if dep_state.status == ServiceStatus::Skipped {
-                            let dep_config_entry = cfg.services.get(&dep_name)
-                                .and_then(|_| service_config.depends_on.get(&dep_name));
-                            let allow = dep_config_entry.map(|d| d.allow_skipped).unwrap_or(false);
-                            if !allow {
-                                return Err(OrchestratorError::DependencySkipped {
+                    if !is_transient {
+                        debug!(
+                            "Dependency {} satisfied for service {} (took {:?})",
+                            dep_name,
+                            service_name,
+                            start.elapsed()
+                        );
+                        break;
+                    }
+
+                    debug!(
+                        "Dependency {} for {} is transiently satisfied (will restart), continuing to wait",
+                        dep_name, service_name
+                    );
+                    // Fall through to recv() below
+                } else {
+                    // Check if dependency was skipped (cascade skip)
+                    if let Some(ref cfg) = config {
+                        if let Some(dep_state) = handle.get_service_state(dep_name).await {
+                            if dep_state.status == ServiceStatus::Skipped {
+                                let dep_config_entry = cfg.services.get(dep_name)
+                                    .and_then(|_| service_config.depends_on.get(dep_name));
+                                let allow = dep_config_entry.map(|d| d.allow_skipped).unwrap_or(false);
+                                if !allow {
+                                    return Err(OrchestratorError::DependencySkipped {
+                                        service: service_name.to_string(),
+                                        dependency: dep_name.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Check if dependency is permanently unsatisfied (terminal state, won't restart)
+                    if let Some(ref cfg) = config
+                        && let Some(dep_svc_config) = cfg.services.get(dep_name)
+                        && is_dependency_permanently_unsatisfied(
+                            dep_name,
+                            &dep_config,
+                            handle,
+                            dep_svc_config,
+                        ).await
+                    {
+                        let state = handle.get_service_state(dep_name).await;
+                        let dep_status = state.as_ref().map(|s| s.status.as_str()).unwrap_or("unknown");
+                        let exit_code_str = match state.as_ref().and_then(|s| s.exit_code) {
+                            Some(code) => format!(" (exit code {})", code),
+                            None => String::new(),
+                        };
+                        let condition_str = dep_config.condition.as_str();
+                        let reason = format!(
+                            "dependency `{}` {}{} and won't restart, condition `{}` can never be met",
+                            dep_name,
+                            dep_status,
+                            exit_code_str,
+                            condition_str,
+                        );
+                        return Err(OrchestratorError::DependencyUnsatisfied {
+                            service: service_name.to_string(),
+                            dependency: dep_name.to_string(),
+                            condition: dep_config.condition.clone(),
+                            reason,
+                        });
+                    }
+
+                    // Check if condition is structurally unreachable given dep's restart policy
+                    if let Some(ref cfg) = config
+                        && let Some(dep_svc_config) = cfg.services.get(dep_name)
+                    {
+                        let dep_state = handle.get_service_state(dep_name).await;
+                        let dep_running = dep_state.as_ref().is_some_and(|s| s.status.is_running());
+                        if dep_running {
+                            if let Some(reason) = is_condition_unreachable_by_policy(
+                                dep_name,
+                                &dep_config.condition,
+                                dep_svc_config.restart.policy(),
+                            ) {
+                                return Err(OrchestratorError::DependencyUnsatisfied {
                                     service: service_name.to_string(),
-                                    dependency: dep_name.clone(),
+                                    dependency: dep_name.to_string(),
+                                    condition: dep_config.condition.clone(),
+                                    reason,
                                 });
                             }
                         }
                     }
                 }
 
-                // Check if dependency is permanently unsatisfied
-                if let Some(ref cfg) = config
-                    && let Some(dep_svc_config) = cfg.services.get(&dep_name)
-                    && is_dependency_permanently_unsatisfied(
-                        &dep_name,
-                        &dep_config,
-                        handle,
-                        dep_svc_config,
-                    ).await
-                {
-                    let state = handle.get_service_state(&dep_name).await;
-                    let reason = format!(
-                        "dependency {} with exit code {:?}, won't restart (policy: {:?})",
-                        state.as_ref().map(|s| s.status.as_str()).unwrap_or("unknown"),
-                        state.as_ref().and_then(|s| s.exit_code),
-                        dep_svc_config.restart.policy(),
-                    );
-                    return Err(OrchestratorError::DependencyUnsatisfied {
-                        service: service_name.to_string(),
-                        dependency: dep_name.clone(),
-                        condition: dep_config.condition.clone(),
-                        reason,
-                    });
-                }
-
                 // Check if startup was cancelled during dependency wait
                 let state = handle.get_service_state(service_name).await;
-                if state.as_ref().map(|s| s.status) != Some(ServiceStatus::Starting) {
+                if !matches!(
+                    state.as_ref().map(|s| s.status),
+                    Some(ServiceStatus::Starting) | Some(ServiceStatus::Waiting)
+                ) {
                     return Err(OrchestratorError::StartupCancelled(
                         service_name.to_string(),
                     ));
@@ -585,7 +644,7 @@ impl ServiceOrchestrator {
                     if remaining.is_zero() {
                         return Err(OrchestratorError::DependencyTimeout {
                             service: service_name.to_string(),
-                            dependency: dep_name.clone(),
+                            dependency: dep_name.to_string(),
                             condition: dep_config.condition.clone(),
                         });
                     }
@@ -594,7 +653,7 @@ impl ServiceOrchestrator {
                         Err(_) => {
                             return Err(OrchestratorError::DependencyTimeout {
                                 service: service_name.to_string(),
-                                dependency: dep_name.clone(),
+                                dependency: dep_name.to_string(),
                                 condition: dep_config.condition.clone(),
                             });
                         }
@@ -792,13 +851,25 @@ impl ServiceOrchestrator {
         if service_filter.is_none() && clean {
             info!("Running cleanup hooks");
 
-            // Emit Cleanup event for all services
-            for service_name in &services_to_stop {
+            // Filter out services that never ran (Skipped/Waiting)
+            let cleanable_services: Vec<&String> = {
+                let mut result = Vec::new();
+                for svc in &services_to_stop {
+                    let status = handle.get_service_state(svc).await.map(|s| s.status);
+                    if !matches!(status, Some(ServiceStatus::Skipped) | Some(ServiceStatus::Waiting)) {
+                        result.push(svc);
+                    }
+                }
+                result
+            };
+
+            // Emit Cleanup event for cleanable services only
+            for service_name in &cleanable_services {
                 handle.emit_event(service_name, ServiceEvent::Cleanup).await;
             }
 
             // Run service-level pre_cleanup hooks
-            for service_name in &services_to_stop {
+            for service_name in &cleanable_services {
                 let ctx = handle.get_service_context(service_name).await;
                 if let Some(ref ctx) = ctx {
                     if let Err(e) = self.run_service_hook(ctx, service_name, ServiceHookType::PreCleanup, &None, Some(&handle)).await {
@@ -1120,11 +1191,15 @@ impl ServiceOrchestrator {
                     self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
 
                     // Increment restart count
-                    let _ = handle.increment_restart_count(service_name).await;
+                    if let Err(e) = handle.increment_restart_count(service_name).await {
+                        warn!("Failed to increment restart count for {}: {}", service_name, e);
+                    }
                 }
                 Err(e) => {
                     error!("Failed to spawn service {}: {}", service_name, e);
-                    let _ = handle.set_service_status(service_name, ServiceStatus::Failed).await;
+                    if let Err(err) = handle.set_service_status(service_name, ServiceStatus::Failed).await {
+                        warn!("Failed to set {} to Failed: {}", service_name, err);
+                    }
                 }
             }
         }
@@ -1320,7 +1395,9 @@ impl ServiceOrchestrator {
         // Spawn auxiliary tasks (health checker, file watcher)
         self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
 
-        let _ = handle.increment_restart_count(service_name).await;
+        if let Err(e) = handle.increment_restart_count(service_name).await {
+            warn!("Failed to increment restart count for {}: {}", service_name, e);
+        }
 
         Ok(())
     }
@@ -1357,7 +1434,9 @@ impl ServiceOrchestrator {
             .await;
 
         // Record process exit in state
-        let _ = handle.record_process_exit(service_name, exit_code, signal).await;
+        if let Err(e) = handle.record_process_exit(service_name, exit_code, signal).await {
+            warn!("Failed to record process exit for {}: {}", service_name, e);
+        }
 
         // Run post_exit hook
         if let Err(e) = self
@@ -1386,10 +1465,15 @@ impl ServiceOrchestrator {
                 .await;
 
             // Increment restart count and set status to starting
-            let _ = handle.increment_restart_count(service_name).await;
-            let _ = handle
+            if let Err(e) = handle.increment_restart_count(service_name).await {
+                warn!("Failed to increment restart count for {}: {}", service_name, e);
+            }
+            if let Err(e) = handle
                 .set_service_status(service_name, ServiceStatus::Starting)
-                .await;
+                .await
+            {
+                warn!("Failed to set {} to Starting: {}", service_name, e);
+            }
 
             // Small delay before restart
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -1454,13 +1538,32 @@ impl ServiceOrchestrator {
                 }
             }
         } else {
+            // Wait for stdout/stderr capture tasks to finish flushing logs to disk.
+            // The process has exited but the capture tasks may still be reading
+            // remaining pipe data and writing it to log files.
+            let (stdout_task, stderr_task) = handle.take_output_tasks(service_name).await;
+            if let Some(task) = stdout_task {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    task,
+                ).await;
+            }
+            if let Some(task) = stderr_task {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    task,
+                ).await;
+            }
+
             // Mark as killed (signal) or exited (any exit code)
             let status = if signal.is_some() {
                 ServiceStatus::Killed
             } else {
                 ServiceStatus::Exited
             };
-            let _ = handle.set_service_status(service_name, status).await;
+            if let Err(e) = handle.set_service_status(service_name, status).await {
+                warn!("Failed to set {} to {:?}: {}", service_name, status, e);
+            }
         }
 
         Ok(())
@@ -1484,14 +1587,17 @@ impl ServiceOrchestrator {
         }
     }
 
-    /// Spawn a task to handle file change events from a receiver
+    /// Spawn a task to handle file change events from a receiver (each change handled concurrently)
     pub fn spawn_file_change_handler(
         self: std::sync::Arc<Self>,
         mut restart_rx: mpsc::Receiver<FileChangeEvent>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(event) = restart_rx.recv().await {
-                self.handle_file_change(event).await;
+                let orch = Arc::clone(&self);
+                tokio::spawn(async move {
+                    orch.handle_file_change(event).await;
+                });
             }
         })
     }
@@ -1499,80 +1605,6 @@ impl ServiceOrchestrator {
     /// Start services level-by-level in parallel within each level.
     ///
     /// If `fail_fast` is true, returns `Err` on the first service failure.
-    /// If `fail_fast` is false, logs errors and continues (used for deferred/background startup).
-    ///
-    /// Returns the list of successfully started service names.
-    async fn start_services_by_level(
-        &self,
-        services_to_start: &[String],
-        config: &KeplerConfig,
-        handle: &ConfigActorHandle,
-        fail_fast: bool,
-        progress: &Option<ProgressSender>,
-    ) -> Result<Vec<String>, OrchestratorError> {
-        let levels = get_start_levels(&config.services)?;
-        let mut started = Vec::new();
-
-        for level in levels {
-            let to_start: Vec<_> = level
-                .into_iter()
-                .filter(|name| services_to_start.contains(name))
-                .collect();
-
-            if to_start.is_empty() {
-                continue;
-            }
-
-            let mut tasks = Vec::new();
-            for service_name in to_start {
-                if handle.is_service_running(&service_name).await {
-                    debug!("Service {} is already running", service_name);
-                    continue;
-                }
-
-                let handle_clone = handle.clone();
-                let service_name_clone = service_name.clone();
-                let self_ref = self;
-                let progress_ref = progress;
-                tasks.push(async move {
-                    let result = self_ref.start_single_service(&handle_clone, &service_name_clone, progress_ref).await;
-                    (service_name_clone, result)
-                });
-            }
-
-            let results = futures::future::join_all(tasks).await;
-
-            for (service_name, result) in results {
-                match result {
-                    Ok(()) => started.push(service_name),
-                    Err(OrchestratorError::StartupCancelled(_)) => {
-                        debug!("Service {} startup was cancelled, skipping", service_name);
-                    }
-                    Err(OrchestratorError::DependencySkipped { .. }) => {
-                        debug!("Service {} skipped due to dependency skip cascade", service_name);
-                        let _ = handle.set_service_status(&service_name, ServiceStatus::Skipped).await;
-                    }
-                    Err(e) => {
-                        if fail_fast {
-                            error!("Failed to start service {}: {}", service_name, e);
-                            return Err(e);
-                        } else {
-                            // For deferred services, mark as failed and continue
-                            if matches!(e, OrchestratorError::DependencyUnsatisfied { .. }) {
-                                warn!("{}", e);
-                                let _ = handle.set_service_status(&service_name, ServiceStatus::Failed).await;
-                            } else {
-                                error!("Failed to start deferred service {}: {}", service_name, e);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(started)
-    }
-
     // --- Internal helpers ---
 
     /// Run a service hook, forwarding the progress sender for event emission.
@@ -1595,8 +1627,8 @@ impl ServiceOrchestrator {
         // Populate dependency state for hook conditions
         if let Some(h) = handle {
             for (dep_name, _) in ctx.service_config.depends_on.iter() {
-                if let Some(dep_state) = h.get_service_state(&dep_name).await {
-                    hook_params.deps.insert(dep_name.clone(), DepInfo {
+                if let Some(dep_state) = h.get_service_state(dep_name).await {
+                    hook_params.deps.insert(dep_name.to_string(), DepInfo {
                         status: dep_state.status.as_str().to_string(),
                         exit_code: dep_state.exit_code,
                         initialized: dep_state.initialized,

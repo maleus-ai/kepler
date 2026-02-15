@@ -11,8 +11,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::config::{resolve_log_buffer_size, resolve_log_max_size, KeplerConfig};
-use crate::lua_eval::{EvalContext, LuaEvaluator};
+use crate::config::{resolve_log_buffer_size, resolve_log_max_size, DependencyConfig, KeplerConfig};
+use crate::deps::{get_start_order, is_condition_met};
+use crate::lua_eval::EvalContext;
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
 use crate::events::{service_event_channel, ServiceEventMessage, ServiceEventSender};
@@ -24,8 +25,15 @@ use crate::state::{
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
 
 use super::command::ConfigCommand;
-use super::context::{HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
+use super::context::{ConfigEvent, HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
 use super::handle::ConfigActorHandle;
+
+/// Request sent to the dedicated Lua worker thread.
+struct LuaEvalRequest {
+    condition: String,
+    context: EvalContext,
+    reply: tokio::sync::oneshot::Sender<Result<bool>>,
+}
 
 /// Per-config actor state
 pub struct ConfigActor {
@@ -58,11 +66,25 @@ pub struct ConfigActor {
     /// UID of the CLI user who loaded this config
     owner_uid: Option<u32>,
 
-    /// Subscriber registry for service status changes (used by Subscribe handler)
-    subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>,
+    /// Subscriber registry for config events (used by Subscribe handler)
+    subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ConfigEvent>>>>,
 
-    /// Lua evaluator for runtime `if` conditions (lazily initialized)
-    lua_evaluator: Option<LuaEvaluator>,
+    /// Per-service dependency watchers.
+    /// Maps service_name -> list of channels to notify when that service's state changes.
+    dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>>,
+
+    /// Channel to the dedicated Lua worker thread (lazily spawned)
+    lua_eval_tx: Option<mpsc::UnboundedSender<LuaEvalRequest>>,
+
+    /// Whether the Ready signal has been emitted for the current cycle
+    last_ready: bool,
+    /// Whether the Quiescent signal has been emitted for the current cycle
+    last_quiescent: bool,
+    /// Startup fence: when true, Ready/Quiescent signals are suppressed.
+    /// Set to true before marking services as Waiting, set to false after all are marked.
+    startup_in_progress: bool,
+    /// Cached topological order for quiescence computation (dep graph is immutable)
+    cached_topo_order: Option<Vec<String>>,
 
     rx: mpsc::Receiver<ConfigCommand>,
 }
@@ -179,9 +201,7 @@ impl ConfigActor {
                 let restored_sys_env = snapshot.sys_env;
                 let owner_uid = snapshot.owner_uid;
 
-                // Recompute wait values (safety net for old snapshots missing resolved wait)
-                let mut config = snapshot.config;
-                crate::deps::resolve_effective_wait(&mut config.services)?;
+                let config = snapshot.config;
 
                 (
                     config,
@@ -297,10 +317,12 @@ impl ConfigActor {
 
         // Create channels
         let (tx, rx) = mpsc::channel(256);
-        let subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>> =
+        let subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ConfigEvent>>>> =
             Arc::new(Mutex::new(Vec::new()));
+        let dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
-        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), owner_uid);
+        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), dep_watchers.clone(), owner_uid);
 
         let actor = ConfigActor {
             config_path: canonical_path,
@@ -321,7 +343,12 @@ impl ConfigActor {
             sys_env: resolved_sys_env,
             owner_uid,
             subscribers,
-            lua_evaluator: None,
+            dep_watchers,
+            lua_eval_tx: None,
+            last_ready: false,
+            last_quiescent: false,
+            startup_in_progress: false,
+            cached_topo_order: None,
             rx,
         };
 
@@ -346,12 +373,83 @@ impl ConfigActor {
     pub async fn run(mut self) {
         info!("ConfigActor started for {:?}", self.config_path);
         while let Some(cmd) = self.rx.recv().await {
+            // Handle EvalIfCondition directly — forwards to the worker, never blocks
+            if let ConfigCommand::EvalIfCondition { condition, context, reply } = cmd {
+                self.handle_lua_eval(condition, context, reply);
+                continue;
+            }
             if self.process_command(cmd) {
                 break;
             }
         }
         info!("ConfigActor stopped for {:?}", self.config_path);
         self.cleanup();
+    }
+
+    /// Forward a Lua eval request to the dedicated worker thread.
+    /// Lazily spawns the worker on first call.
+    fn handle_lua_eval(
+        &mut self,
+        condition: String,
+        context: EvalContext,
+        reply: tokio::sync::oneshot::Sender<Result<bool>>,
+    ) {
+        if self.lua_eval_tx.is_none() {
+            let (tx, mut rx) = mpsc::unbounded_channel::<LuaEvalRequest>();
+            let config_lua = self.config.lua.clone();
+            tokio::task::spawn_blocking(move || {
+                use crate::lua_eval::LuaEvaluator;
+
+                let evaluator = match LuaEvaluator::new() {
+                    Ok(e) => e,
+                    Err(e) => {
+                        // Drain and fail all pending requests
+                        let err_msg = format!("Failed to create Lua evaluator: {}", e);
+                        let _ = rx; // drop rx after draining
+                        // Can't drain an already-moved rx, so just log the error.
+                        // The channel will be dropped, causing all future sends to fail.
+                        tracing::error!("{}", err_msg);
+                        return;
+                    }
+                };
+
+                if let Some(ref code) = config_lua {
+                    if let Err(e) = evaluator.load_inline(code) {
+                        tracing::error!("Failed to load Lua code: {}", e);
+                        // Drain remaining requests with error
+                        while let Ok(req) = rx.try_recv() {
+                            let _ = req.reply.send(Err(DaemonError::Internal(
+                                format!("Lua initialization failed: {}", e),
+                            )));
+                        }
+                        return;
+                    }
+                }
+
+                while let Some(req) = rx.blocking_recv() {
+                    // Set 10s interrupt watchdog for runtime conditions
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    evaluator.set_interrupt(move |_| {
+                        if std::time::Instant::now() > deadline {
+                            Err(mlua::Error::RuntimeError(
+                                "Lua condition timed out (10s limit)".into(),
+                            ))
+                        } else {
+                            Ok(mlua::VmState::Continue)
+                        }
+                    });
+                    let result = evaluator.eval_condition(&req.condition, &req.context)
+                        .map_err(|e| DaemonError::Internal(format!("Lua eval failed: {}", e)));
+                    evaluator.remove_interrupt();
+                    let _ = req.reply.send(result);
+                }
+            });
+            self.lua_eval_tx = Some(tx);
+        }
+
+        if let Some(ref tx) = self.lua_eval_tx {
+            let _ = tx.send(LuaEvalRequest { condition, context, reply });
+        }
     }
 
     /// Process a single command. Returns true if shutdown was requested.
@@ -486,16 +584,65 @@ impl ConfigActor {
                 let _ = reply.send(all_stopped);
             }
 
+            ConfigCommand::RecheckReadyQuiescent => {
+                // Reset flags and re-check — ensures new subscribers get the signal
+                // if the system is already in a ready/quiescent state.
+                self.last_ready = false;
+                self.last_quiescent = false;
+                self.check_and_notify_ready();
+                self.check_and_notify_quiescent();
+            }
+            ConfigCommand::SetStartupInProgress { in_progress, reply } => {
+                self.startup_in_progress = in_progress;
+                if !in_progress {
+                    // Fence lifted — immediately check signals
+                    self.check_and_notify_ready();
+                    self.check_and_notify_quiescent();
+                }
+                let _ = reply.send(());
+            }
+
             // === Mutation Commands ===
-            ConfigCommand::ClaimServiceStart { service_name, reply } => {
-                let claimed = self.services.get(&service_name)
-                    .map(|s| !s.status.is_active())
-                    .unwrap_or(false);
-                if claimed {
-                    let _ = self.set_service_status(&service_name, ServiceStatus::Starting);
+            ConfigCommand::ClaimServiceStart {
+                service_name,
+                reply,
+            } => {
+                let claimed = if let Some(state) = self.services.get(&service_name) {
+                    match state.status {
+                        ServiceStatus::Waiting => true, // Already Waiting (set by spawn-all)
+                        s if !s.is_active() => {
+                            // Terminal state — set to Waiting atomically
+                            let _ = self.set_service_status(&service_name, ServiceStatus::Waiting);
+                            true
+                        }
+                        _ => false, // Already active — skip
+                    }
+                } else {
+                    false
+                };
+                let _ = reply.send(claimed);
+            }
+            ConfigCommand::SetServiceStatusWithReason {
+                service_name,
+                status,
+                skip_reason,
+                fail_reason,
+                reply,
+            } => {
+                // Set reason(s) first, then status — all in one atomic operation
+                if let Some(state) = self.services.get_mut(&service_name) {
+                    if let Some(reason) = skip_reason {
+                        state.skip_reason = Some(reason);
+                    }
+                    if let Some(reason) = fail_reason {
+                        state.fail_reason = Some(reason);
+                    }
+                }
+                let result = self.set_service_status(&service_name, status);
+                if result.is_ok() {
                     let _ = self.save_state();
                 }
-                let _ = reply.send(claimed);
+                let _ = reply.send(result);
             }
             ConfigCommand::SetServiceStatus {
                 service_name,
@@ -507,6 +654,22 @@ impl ConfigActor {
                     let _ = self.save_state();
                 }
                 let _ = reply.send(result);
+            }
+            ConfigCommand::SetSkipReason {
+                service_name,
+                reason,
+            } => {
+                if let Some(state) = self.services.get_mut(&service_name) {
+                    state.skip_reason = Some(reason);
+                }
+            }
+            ConfigCommand::SetFailReason {
+                service_name,
+                reason,
+            } => {
+                if let Some(state) = self.services.get_mut(&service_name) {
+                    state.fail_reason = Some(reason);
+                }
             }
             ConfigCommand::SetServicePid {
                 service_name,
@@ -603,6 +766,17 @@ impl ConfigActor {
             } => {
                 let handle = self.processes.remove(&service_name);
                 let _ = reply.send(handle);
+            }
+            ConfigCommand::TakeOutputTasks {
+                service_name,
+                reply,
+            } => {
+                let tasks = if let Some(ph) = self.processes.get_mut(&service_name) {
+                    (ph.stdout_task.take(), ph.stderr_task.take())
+                } else {
+                    (None, None)
+                };
+                let _ = reply.send(tasks);
             }
 
             // === Task Handle Commands ===
@@ -707,38 +881,12 @@ impl ConfigActor {
             ConfigCommand::SetEventHandlerSpawned => {
                 self.event_handler_spawned = true;
             }
-            ConfigCommand::EvalIfCondition {
-                condition,
-                context,
-                reply,
-            } => {
-                let result = self.eval_if_condition(&condition, &context);
-                let _ = reply.send(result);
+            ConfigCommand::EvalIfCondition { .. } => {
+                // Handled in run() before process_command — should never reach here
+                unreachable!("EvalIfCondition handled in run() loop");
             }
         }
         false
-    }
-
-    /// Evaluate a runtime `if` condition using the Lua evaluator.
-    /// Lazily initializes the evaluator on first call.
-    fn eval_if_condition(&mut self, condition: &str, ctx: &EvalContext) -> Result<bool> {
-        // Lazily initialize the Lua evaluator
-        if self.lua_evaluator.is_none() {
-            let evaluator = LuaEvaluator::new()
-                .map_err(|e| DaemonError::Internal(format!("Failed to create Lua evaluator: {}", e)))?;
-
-            // Load the global lua: block if present
-            if let Some(ref lua_code) = self.config.lua {
-                evaluator.load_inline(lua_code)
-                    .map_err(|e| DaemonError::Internal(format!("Failed to load Lua code: {}", e)))?;
-            }
-
-            self.lua_evaluator = Some(evaluator);
-        }
-
-        let evaluator = self.lua_evaluator.as_ref().unwrap();
-        evaluator.eval_condition(condition, ctx)
-            .map_err(|e| DaemonError::Internal(format!("Lua condition evaluation failed: {}", e)))
     }
 
     /// Take a snapshot of the expanded config if not already taken.
@@ -903,6 +1051,12 @@ impl ConfigActor {
             .services
             .get_mut(service_name)
             .ok_or_else(|| DaemonError::ServiceNotFound(service_name.to_string()))?;
+
+        if status == ServiceStatus::Waiting || status == ServiceStatus::Starting {
+            // Clear stale reasons from previous cycles
+            service_state.fail_reason = None;
+            service_state.skip_reason = None;
+        }
         if status == ServiceStatus::Starting || status == ServiceStatus::Running {
             service_state.was_healthy = false;
             service_state.health_check_failures = 0;
@@ -917,11 +1071,34 @@ impl ConfigActor {
         }
         service_state.status = status;
 
-        // Notify subscribers of status change
-        self.notify_subscribers(ServiceStatusChange {
+        let change = ServiceStatusChange {
             service: service_name.to_string(),
             status,
-        });
+        };
+
+        // Notify per-dep watchers (targeted — only dependents of this service)
+        self.notify_dep_watchers(service_name, &change);
+
+        // Notify global subscribers (CLI progress bars / Subscribe handler)
+        self.notify_subscribers(ConfigEvent::StatusChange(change));
+
+        // Reset Ready signal when a service enters Starting (no longer at target state)
+        if status == ServiceStatus::Starting {
+            self.last_ready = false;
+        }
+
+        // Reset Quiescent signal when a service enters an active non-Waiting state
+        if status.is_active() && status != ServiceStatus::Waiting {
+            self.last_quiescent = false;
+        }
+
+        // Check Ready (can trigger on any state change)
+        self.check_and_notify_ready();
+
+        // Check Quiescent (on terminal transitions and Waiting services that may be settled)
+        if !status.is_active() || status == ServiceStatus::Waiting {
+            self.check_and_notify_quiescent();
+        }
 
         Ok(())
     }
@@ -990,10 +1167,15 @@ impl ConfigActor {
 
         // Notify subscribers of status change (only if status actually changed)
         if previous_status != new_status {
-            self.notify_subscribers(ServiceStatusChange {
+            let change = ServiceStatusChange {
                 service: service_name.to_string(),
                 status: new_status,
-            });
+            };
+            self.notify_dep_watchers(service_name, &change);
+            self.notify_subscribers(ConfigEvent::StatusChange(change));
+
+            // Health status changes affect readiness (Running→Healthy means ready)
+            self.check_and_notify_ready();
         }
 
         Ok(HealthCheckUpdate {
@@ -1003,10 +1185,218 @@ impl ConfigActor {
         })
     }
 
-    /// Notify all subscribers of a status change, auto-pruning dead senders.
-    fn notify_subscribers(&self, change: ServiceStatusChange) {
-        let mut subs = self.subscribers.lock().unwrap();
-        subs.retain(|tx| tx.send(change.clone()).is_ok());
+    /// Notify all global subscribers of a config event, auto-pruning dead senders.
+    fn notify_subscribers(&self, event: ConfigEvent) {
+        let mut subs = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+        subs.retain(|tx| tx.send(event.clone()).is_ok());
+    }
+
+    /// Notify per-dep watchers for a specific service, auto-pruning dead senders.
+    fn notify_dep_watchers(&self, service_name: &str, change: &ServiceStatusChange) {
+        let mut watchers = self.dep_watchers.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(txs) = watchers.get_mut(service_name) {
+            txs.retain(|tx| tx.send(change.clone()).is_ok());
+        }
+    }
+
+    // ========================================================================
+    // Ready / Quiescent computation
+    // ========================================================================
+
+    /// Check and emit Ready signal if all services reached their target state.
+    fn check_and_notify_ready(&mut self) {
+        if self.startup_in_progress { return; }
+        let ready = self.compute_ready();
+        if ready && !self.last_ready {
+            self.last_ready = true;
+            self.notify_subscribers(ConfigEvent::Ready);
+        }
+    }
+
+    /// Check and emit Quiescent signal if all services are settled.
+    fn check_and_notify_quiescent(&mut self) {
+        if self.startup_in_progress { return; }
+        let q = self.compute_quiescence();
+        if q && !self.last_quiescent {
+            self.last_quiescent = true;
+            self.notify_subscribers(ConfigEvent::Quiescent);
+        }
+    }
+
+    /// Returns true when all services have reached their target state or are permanently blocked.
+    /// This implements the `--wait` semantic (like `docker compose up -d --wait`).
+    fn compute_ready(&self) -> bool {
+        self.config.services.keys().all(|s| self.is_service_ready(s))
+    }
+
+    /// A service is "ready" when it reached its target state, completed, or is a deferred wait.
+    /// `Stopped` is NOT ready — it means explicitly stopped by the user, not completed.
+    fn is_service_ready(&self, service_name: &str) -> bool {
+        let status = match self.services.get(service_name) {
+            Some(s) => s.status,
+            None => return true,
+        };
+
+        // Stopped = explicitly stopped (not completed) → not ready
+        // This prevents stale Ready signals after `kepler stop`.
+        if status == ServiceStatus::Stopped { return false; }
+
+        // Other terminal states (Exited, Failed, Killed, Skipped) → ready
+        if !status.is_active() { return true; }
+
+        // Running states: check if healthcheck resolved (if applicable)
+        if status.is_running() {
+            if let Some(svc_config) = self.config.services.get(service_name) {
+                if svc_config.healthcheck.is_some() {
+                    // Healthy or Unhealthy means the healthcheck has resolved
+                    return status == ServiceStatus::Healthy || status == ServiceStatus::Unhealthy;
+                }
+            }
+            return true; // no healthcheck, Running is enough
+        }
+
+        // Starting → actively starting up (deps already satisfied) → NOT ready yet
+        if status == ServiceStatus::Starting { return false; }
+
+        // Waiting → check if this is a deferred wait (unsatisfied deps that are all stable)
+        // vs "about to start" (all deps satisfied or no deps — will transition to Starting momentarily)
+        if status == ServiceStatus::Waiting {
+            if let Some(svc_config) = self.config.services.get(service_name) {
+                let mut has_unsatisfied_stable_dep = false;
+                for (dep_name, dep_config) in svc_config.depends_on.iter() {
+                    if self.is_condition_satisfied_sync(dep_name, &dep_config) { continue; }
+                    // Condition not met. Is dep still settling?
+                    let dep_state = self.services.get(dep_name);
+                    let dep_status = dep_state.map(|s| s.status);
+                    if matches!(dep_status, Some(ServiceStatus::Starting) | Some(ServiceStatus::Waiting) | Some(ServiceStatus::Stopping)) {
+                        return false; // dep still settling → not ready yet
+                    }
+                    // Check if dep is terminal but will restart — still settling
+                    if let Some(ds) = dep_state {
+                        if matches!(ds.status, ServiceStatus::Exited | ServiceStatus::Killed | ServiceStatus::Failed) {
+                            if let Some(dep_svc_config) = self.config.services.get(dep_name) {
+                                if dep_svc_config.restart.should_restart_on_exit(ds.exit_code) {
+                                    return false; // dep will restart → still settling
+                                }
+                            }
+                        }
+                    }
+                    // dep is in a stable state (Running/Healthy/Unhealthy/terminal-no-restart)
+                    has_unsatisfied_stable_dep = true;
+                }
+                if has_unsatisfied_stable_dep {
+                    return true; // deferred wait → ready
+                }
+            }
+            // All deps satisfied (or no deps) → about to start → not ready yet
+            return false;
+        }
+
+        // Stopping → not ready
+        false
+    }
+
+    /// Returns true when all services are settled — nothing more will change.
+    /// Uses topological traversal so deps are evaluated before dependents.
+    fn compute_quiescence(&mut self) -> bool {
+        // Lazily compute and cache topological order (dep graph is immutable)
+        if self.cached_topo_order.is_none() {
+            self.cached_topo_order = get_start_order(&self.config.services).ok();
+        }
+        let topo_order = match self.cached_topo_order {
+            Some(ref order) => order,
+            None => return false,
+        };
+
+        let mut settled: HashMap<String, bool> = HashMap::new();
+        for service_name in topo_order {
+            let is_settled = self.is_service_settled(service_name, &settled);
+            settled.insert(service_name.to_string(), is_settled);
+        }
+
+        settled.values().all(|&s| s)
+    }
+
+    /// A service is "settled" when it's in a permanent terminal state or permanently blocked.
+    fn is_service_settled(&self, service_name: &str, settled_cache: &HashMap<String, bool>) -> bool {
+        let state = match self.services.get(service_name) {
+            Some(s) => s,
+            None => return true,
+        };
+        let status = state.status;
+
+        if status == ServiceStatus::Skipped { return true; }
+
+        // Waiting → check if this has unsatisfied deps that are all settled (condition will never be met)
+        // vs "about to start" (all deps satisfied or no deps — will transition to Starting momentarily)
+        if status == ServiceStatus::Waiting {
+            if let Some(svc_config) = self.config.services.get(service_name) {
+                let mut has_unsatisfied_settled_dep = false;
+                for (dep_name, dep_config) in svc_config.depends_on.iter() {
+                    if self.is_condition_satisfied_sync(dep_name, &dep_config) { continue; }
+                    // Condition not met. Is dep settled?
+                    if !settled_cache.get(dep_name).copied().unwrap_or(false) {
+                        return false; // dep still settling
+                    }
+                    has_unsatisfied_settled_dep = true;
+                }
+                if has_unsatisfied_settled_dep {
+                    return true; // condition will never be met → settled
+                }
+            }
+            // All deps satisfied (or no deps) → about to start → not settled
+            return false;
+        }
+
+        // Any other active state (Starting, Running, Stopping, Healthy, Unhealthy) → not settled
+        if status.is_active() { return false; }
+
+        // Terminal (Stopped, Failed, Exited, Killed)
+        let would_restart = self.config.services.get(service_name)
+            .map(|svc| svc.restart.should_restart_on_exit(state.exit_code))
+            .unwrap_or(false);
+
+        if !would_restart { return true; }
+
+        // Would restart — but only if deps are still satisfiable
+        !self.are_deps_satisfiable(service_name, settled_cache)
+    }
+
+    /// Check if all dependencies for a service can still be satisfied.
+    /// Returns false if any dep is settled but its condition is not met.
+    fn are_deps_satisfiable(&self, service_name: &str, settled_cache: &HashMap<String, bool>) -> bool {
+        let svc_config = match self.config.services.get(service_name) {
+            Some(c) => c,
+            None => return false,
+        };
+
+        for (dep_name, dep_config) in svc_config.depends_on.iter() {
+            if self.is_condition_satisfied_sync(dep_name, &dep_config) { continue; }
+            // Condition not met. If dep is settled, it can never reach the required state.
+            let dep_state = match self.services.get(dep_name) {
+                Some(s) => s,
+                None => return false,
+            };
+            if dep_state.status == ServiceStatus::Skipped && !dep_config.allow_skipped {
+                return false;
+            }
+            if settled_cache.get(dep_name).copied().unwrap_or(false) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Synchronous version of `check_dependency_satisfied` for use inside the actor.
+    /// Checks whether a dependency condition is currently satisfied, including transient exit filtering.
+    fn is_condition_satisfied_sync(&self, dep_name: &str, dep_config: &DependencyConfig) -> bool {
+        let state = match self.services.get(dep_name) {
+            Some(s) => s,
+            None => return false,
+        };
+
+        let dep_svc_config = self.config.services.get(dep_name);
+        is_condition_met(state, dep_config, dep_svc_config)
     }
 
     /// Cleanup all resources when shutting down
@@ -1028,5 +1418,8 @@ impl ConfigActor {
 
         // Clear processes (they should have been stopped already)
         self.processes.clear();
+
+        // Clear dep watchers to avoid dead sender accumulation
+        self.dep_watchers.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }

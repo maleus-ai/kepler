@@ -25,6 +25,20 @@ pub enum DependencyCondition {
     ServiceStopped,
 }
 
+impl DependencyCondition {
+    /// Return the snake_case string representation matching the serde serialization.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DependencyCondition::ServiceStarted => "service_started",
+            DependencyCondition::ServiceHealthy => "service_healthy",
+            DependencyCondition::ServiceCompletedSuccessfully => "service_completed_successfully",
+            DependencyCondition::ServiceUnhealthy => "service_unhealthy",
+            DependencyCondition::ServiceFailed => "service_failed",
+            DependencyCondition::ServiceStopped => "service_stopped",
+        }
+    }
+}
+
 /// A single entry in an exit code filter — either a range string or a single integer
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(untagged)]
@@ -160,29 +174,11 @@ pub struct DependencyConfig {
     /// Optional exit code filter for service_failed and service_stopped conditions
     #[serde(default, skip_serializing_if = "ExitCodeFilter::is_empty")]
     pub exit_code: ExitCodeFilter,
-    /// Whether to wait for this dependency during --wait/startup.
-    /// None = use condition default (startup conditions = true, deferred = false)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wait: Option<bool>,
     /// Whether to allow this dependency to be in `Skipped` status.
     /// When true, a skipped dependency is treated as satisfied.
     /// When false (default), a skipped dependency cascades the skip to this service.
     #[serde(default)]
     pub allow_skipped: bool,
-}
-
-impl DependencyCondition {
-    /// Whether this condition naturally resolves during startup.
-    /// Startup conditions: service_started, service_healthy, service_completed_successfully
-    /// Deferred conditions: service_unhealthy, service_failed, service_stopped
-    pub fn is_startup_condition(&self) -> bool {
-        matches!(
-            self,
-            DependencyCondition::ServiceStarted
-                | DependencyCondition::ServiceHealthy
-                | DependencyCondition::ServiceCompletedSuccessfully
-        )
-    }
 }
 
 /// A dependency entry - either simple (just a name) or extended (with config)
@@ -261,17 +257,18 @@ impl DependsOn {
         self.0.is_empty()
     }
 
-    /// Iterate over (name, config) pairs
-    pub fn iter(&self) -> impl Iterator<Item = (String, DependencyConfig)> + '_ {
-        self.0.iter().flat_map(|entry| match entry {
-            DependencyEntry::Simple(name) => {
-                vec![(name.clone(), DependencyConfig::default())].into_iter()
+    /// Iterate over (name, config) pairs, returning references where possible.
+    /// Uses `Cow` for `DependencyConfig` because `Simple` entries synthesize a default.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, std::borrow::Cow<'_, DependencyConfig>)> + Send + '_ {
+        self.0.iter().flat_map(|entry| -> Box<dyn Iterator<Item = (&str, std::borrow::Cow<'_, DependencyConfig>)> + Send + '_> {
+            match entry {
+                DependencyEntry::Simple(name) => {
+                    Box::new(std::iter::once((name.as_str(), std::borrow::Cow::Owned(DependencyConfig::default()))))
+                }
+                DependencyEntry::Extended(map) => {
+                    Box::new(map.iter().map(|(k, v)| (k.as_str(), std::borrow::Cow::Borrowed(v))))
+                }
             }
-            DependencyEntry::Extended(map) => map
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<Vec<_>>()
-                .into_iter(),
         })
     }
 
@@ -287,7 +284,7 @@ impl DependsOn {
     pub fn dependencies_with_restart(&self) -> Vec<String> {
         self.iter()
             .filter(|(_, config)| config.restart)
-            .map(|(name, _)| name)
+            .map(|(name, _)| name.to_string())
             .collect()
     }
 }

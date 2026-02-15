@@ -16,7 +16,7 @@ use tracing::debug;
 use crate::{
     errors::ClientError,
     protocol::{
-        LogMode, MAX_MESSAGE_SIZE, ProgressEvent, Request, RequestEnvelope, Response,
+        LogMode, MAX_MESSAGE_SIZE, Request, RequestEnvelope, Response,
         ServerEvent, ServerMessage, decode_server_message, encode_envelope,
     },
 };
@@ -28,7 +28,7 @@ const WRITER_CHANNEL_CAPACITY: usize = 64;
 
 struct PendingRequest {
     response_tx: oneshot::Sender<Response>,
-    progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
+    progress_tx: Option<mpsc::UnboundedSender<ServerEvent>>,
 }
 
 pub struct Client {
@@ -107,7 +107,8 @@ impl Client {
                             debug!("Received response for unknown request id={}", id);
                         }
                     }
-                    Ok(ServerMessage::Event { event: ServerEvent::Progress { request_id, event } }) => {
+                    Ok(ServerMessage::Event { event }) => {
+                        let request_id = event.request_id();
                         if let Some(pending_req) = reader_pending.get(&request_id)
                             && let Some(ref progress_tx) = pending_req.progress_tx
                         {
@@ -147,15 +148,15 @@ impl Client {
         }
     }
 
-    /// Send a request and receive both progress events and a response.
+    /// Send a request and receive both server events and a response.
     /// Takes `&self` - multiple requests can be in-flight concurrently.
     ///
-    /// Returns a progress receiver and a future that resolves to the final response.
-    /// Progress events are emitted as the server processes each service.
+    /// Returns an event receiver and a future that resolves to the final response.
+    /// Events include progress updates, Ready, and Quiescent signals.
     pub fn send_request(
         &self,
         request: Request,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let (response_tx, response_rx) = oneshot::channel();
@@ -187,7 +188,7 @@ impl Client {
         config_path: PathBuf,
         service: Option<String>,
         sys_env: Option<HashMap<String, String>>,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Start {
             config_path,
             service,
@@ -202,7 +203,7 @@ impl Client {
         service: Option<String>,
         clean: bool,
         signal: Option<String>,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Stop {
             config_path,
             service,
@@ -217,7 +218,7 @@ impl Client {
         config_path: PathBuf,
         services: Vec<String>,
         sys_env: Option<HashMap<String, String>>,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Restart {
             config_path,
             services,
@@ -230,7 +231,7 @@ impl Client {
         &self,
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Recreate {
             config_path,
             sys_env,
@@ -241,14 +242,14 @@ impl Client {
     pub fn status(
         &self,
         config_path: Option<PathBuf>,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Status { config_path })
     }
 
     /// List all loaded configs
     pub fn list_configs(
         &self,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::ListConfigs)
     }
 
@@ -256,7 +257,7 @@ impl Client {
     pub fn unload_config(
         &self,
         config_path: PathBuf,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::UnloadConfig { config_path })
     }
 
@@ -269,7 +270,7 @@ impl Client {
         lines: usize,
         mode: LogMode,
         no_hooks: bool,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Logs {
             config_path,
             service,
@@ -289,7 +290,7 @@ impl Client {
         offset: usize,
         limit: usize,
         no_hooks: bool,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::LogsChunk {
             config_path,
             service,
@@ -302,7 +303,7 @@ impl Client {
     /// Shutdown the daemon
     pub fn shutdown(
         &self,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Shutdown)
     }
 
@@ -311,7 +312,7 @@ impl Client {
         &self,
         force: bool,
         dry_run: bool,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Prune { force, dry_run })
     }
 
@@ -323,7 +324,7 @@ impl Client {
         cursor_id: Option<&str>,
         from_start: bool,
         no_hooks: bool,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::LogsCursor {
             config_path: config_path.to_path_buf(),
             service: service.map(String::from),
@@ -341,7 +342,7 @@ impl Client {
         &self,
         config_path: PathBuf,
         services: Option<Vec<String>>,
-    ) -> Result<(mpsc::UnboundedReceiver<ProgressEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Subscribe {
             config_path,
             services,
@@ -356,7 +357,7 @@ impl Client {
         &self,
         config_path: PathBuf,
         services: Option<Vec<String>>,
-    ) -> Result<mpsc::UnboundedReceiver<ProgressEvent>> {
+    ) -> Result<mpsc::UnboundedReceiver<ServerEvent>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let (response_tx, _response_rx) = oneshot::channel();

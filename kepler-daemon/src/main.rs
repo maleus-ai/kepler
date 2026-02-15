@@ -1,11 +1,12 @@
 use kepler_daemon::auth;
+use kepler_daemon::config_actor::context::ConfigEvent;
 use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
 use kepler_daemon::cursor::CursorManager;
 use kepler_daemon::errors::DaemonError;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::persistence::ConfigPersistence;
 use kepler_daemon::process::{kill_process_by_pid, parse_signal_name, validate_running_process, ProcessExitEvent};
-use kepler_daemon::state::ServiceStatus;
+use kepler_daemon::state::{ServiceState, ServiceStatus};
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_daemon::Daemon;
 use kepler_protocol::protocol::{ProgressEvent, Request, Response, ResponseData, ServicePhase, ServiceTarget};
@@ -205,19 +206,22 @@ async fn main() -> anyhow::Result<()> {
     // Clone orchestrator for event handlers
     let exit_orchestrator = orchestrator.clone();
 
-    // Spawn process exit handler
+    // Spawn process exit handler (each exit handled concurrently)
     tokio::spawn(async move {
         while let Some(event) = exit_rx.recv().await {
             debug!(
                 "Process exit event: {} in {:?}",
                 event.service_name, event.config_path
             );
-            if let Err(e) = exit_orchestrator
-                .handle_exit(&event.config_path, &event.service_name, event.exit_code, event.signal)
-                .await
-            {
-                error!("Failed to handle exit for {}: {}", event.service_name, e);
-            }
+            let orch = exit_orchestrator.clone();
+            tokio::spawn(async move {
+                if let Err(e) = orch
+                    .handle_exit(&event.config_path, &event.service_name, event.exit_code, event.signal)
+                    .await
+                {
+                    error!("Failed to handle exit for {}: {}", event.service_name, e);
+                }
+            });
         }
     });
 
@@ -387,7 +391,18 @@ async fn handle_request(
                                     active.push(svc.clone());
                                 }
                             }
-                            let clean_targets = if clean { all_services } else { Vec::new() };
+                            let clean_targets = if clean {
+                                let mut targets = Vec::new();
+                                for svc in &all_services {
+                                    let status = handle.get_service_state(svc).await.map(|s| s.status);
+                                    if !matches!(status, Some(ServiceStatus::Skipped) | Some(ServiceStatus::Waiting)) {
+                                        targets.push(svc.clone());
+                                    }
+                                }
+                                targets
+                            } else {
+                                Vec::new()
+                            };
                             (active, clean_targets, Some(rx))
                         }
                         None => (Vec::new(), Vec::new(), Some(rx)),
@@ -410,7 +425,11 @@ async fn handle_request(
                 let fwd_services = tracked_services.clone();
                 let fwd_clean = clean;
                 Some(tokio::spawn(async move {
-                    while let Some(change) = state_rx.recv().await {
+                    while let Some(event) = state_rx.recv().await {
+                        let change = match event {
+                            ConfigEvent::StatusChange(c) => c,
+                            _ => continue,
+                        };
                         if !fwd_services.contains(&change.service) {
                             continue;
                         }
@@ -526,7 +545,11 @@ async fn handle_request(
                 let fwd_progress = progress.clone();
                 let fwd_services = tracked_services.clone();
                 Some(tokio::spawn(async move {
-                    while let Some(change) = state_rx.recv().await {
+                    while let Some(event) = state_rx.recv().await {
+                        let change = match event {
+                            ConfigEvent::StatusChange(c) => c,
+                            _ => continue,
+                        };
                         if !fwd_services.contains(&change.service) {
                             continue;
                         }
@@ -827,7 +850,7 @@ async fn handle_request(
                     let state = handle.get_service_state(name).await;
                     let has_hc = svc_config.healthcheck.is_some();
                     let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
-                    let phase = status_to_phase(state.as_ref().map(|s| s.status), target);
+                    let phase = status_to_phase(state.as_ref(), target);
                     progress.send(ProgressEvent {
                         service: name.clone(),
                         phase,
@@ -835,21 +858,34 @@ async fn handle_request(
                 }
             }
 
-            // Stream state changes until client disconnects or channel closes
+            // Re-check Ready/Quiescent in case the signals fired before we subscribed
+            handle.recheck_ready_quiescent().await;
+
+            // Stream config events until client disconnects or channel closes
             loop {
                 tokio::select! {
                     event = rx.recv() => {
                         match event {
-                            Some(change) if services.as_ref().is_none_or(|s| s.contains(&change.service)) => {
+                            Some(ConfigEvent::StatusChange(change))
+                                if services.as_ref().is_none_or(|s| s.contains(&change.service)) =>
+                            {
                                 let has_hc = config.services.get(&change.service)
                                     .is_some_and(|s| s.healthcheck.is_some());
                                 let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
+                                // Fetch full state for skip_reason on Skipped status
+                                let state = handle.get_service_state(&change.service).await;
                                 progress.send(ProgressEvent {
                                     service: change.service,
-                                    phase: status_to_phase(Some(change.status), target),
+                                    phase: status_to_phase(state.as_ref(), target),
                                 }).await;
                             }
-                            Some(_) => {} // filtered out
+                            Some(ConfigEvent::StatusChange(_)) => {} // filtered out
+                            Some(ConfigEvent::Ready) => {
+                                progress.send_ready().await;
+                            }
+                            Some(ConfigEvent::Quiescent) => {
+                                progress.send_quiescent().await;
+                            }
                             None => break, // Channel closed (config unloaded)
                         }
                     }
@@ -862,16 +898,29 @@ async fn handle_request(
 }
 
 /// Map ServiceStatus to ServicePhase for Subscribe events
-fn status_to_phase(status: Option<ServiceStatus>, target: ServiceTarget) -> ServicePhase {
-    match status {
+fn status_to_phase(state: Option<&ServiceState>, target: ServiceTarget) -> ServicePhase {
+    match state.map(|s| s.status) {
         None => ServicePhase::Pending { target },
+        Some(ServiceStatus::Waiting) => ServicePhase::Waiting,
         Some(ServiceStatus::Starting) => ServicePhase::Starting,
         Some(ServiceStatus::Running) => ServicePhase::Started,
         Some(ServiceStatus::Healthy) => ServicePhase::Healthy,
         Some(ServiceStatus::Stopping) => ServicePhase::Stopping,
         Some(ServiceStatus::Stopped) | Some(ServiceStatus::Exited) | Some(ServiceStatus::Killed) => ServicePhase::Stopped,
-        Some(ServiceStatus::Skipped) => ServicePhase::Skipped,
-        Some(ServiceStatus::Failed) => ServicePhase::Failed { message: "failed".to_string() },
+        Some(ServiceStatus::Skipped) => {
+            let reason = state
+                .and_then(|s| s.skip_reason.as_deref())
+                .unwrap_or("skipped")
+                .to_string();
+            ServicePhase::Skipped { reason }
+        }
+        Some(ServiceStatus::Failed) => {
+            let message = state
+                .and_then(|s| s.fail_reason.as_deref())
+                .unwrap_or("failed")
+                .to_string();
+            ServicePhase::Failed { message }
+        }
         Some(ServiceStatus::Unhealthy) => ServicePhase::Failed { message: "unhealthy".to_string() },
     }
 }

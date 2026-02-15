@@ -236,7 +236,6 @@ fn test_dependency_levels() {
             user: None,
             groups: Vec::new(),
             limits: None,
-            wait: None,
             condition: None,
         }
     }
