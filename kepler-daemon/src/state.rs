@@ -17,6 +17,7 @@ pub enum ServiceStatus {
     Unhealthy, // Running but health checks failing
     Exited,    // Process exited naturally (any exit code)
     Killed,    // Process killed by signal
+    Skipped,   // Service skipped due to `if` condition or dependency skip cascade
 }
 
 impl ServiceStatus {
@@ -31,6 +32,7 @@ impl ServiceStatus {
             ServiceStatus::Unhealthy => "unhealthy",
             ServiceStatus::Exited => "exited",
             ServiceStatus::Killed => "killed",
+            ServiceStatus::Skipped => "skipped",
         }
     }
 
@@ -50,6 +52,7 @@ impl ServiceStatus {
                 | ServiceStatus::Failed
                 | ServiceStatus::Exited
                 | ServiceStatus::Killed
+                | ServiceStatus::Skipped
         )
     }
 }
@@ -156,6 +159,7 @@ pub enum PersistedServiceStatus {
     Unhealthy,
     Exited,
     Killed,
+    Skipped,
 }
 
 impl From<ServiceStatus> for PersistedServiceStatus {
@@ -170,6 +174,7 @@ impl From<ServiceStatus> for PersistedServiceStatus {
             ServiceStatus::Unhealthy => PersistedServiceStatus::Unhealthy,
             ServiceStatus::Exited => PersistedServiceStatus::Exited,
             ServiceStatus::Killed => PersistedServiceStatus::Killed,
+            ServiceStatus::Skipped => PersistedServiceStatus::Skipped,
         }
     }
 }
@@ -186,6 +191,7 @@ impl From<PersistedServiceStatus> for ServiceStatus {
             PersistedServiceStatus::Unhealthy => ServiceStatus::Unhealthy,
             PersistedServiceStatus::Exited => ServiceStatus::Exited,
             PersistedServiceStatus::Killed => ServiceStatus::Killed,
+            PersistedServiceStatus::Skipped => ServiceStatus::Skipped,
         }
     }
 }
@@ -328,6 +334,7 @@ mod tests {
             ServiceStatus::Unhealthy,
             ServiceStatus::Exited,
             ServiceStatus::Killed,
+            ServiceStatus::Skipped,
         ];
         for status in variants {
             let persisted: PersistedServiceStatus = status.into();
@@ -513,6 +520,7 @@ mod tests {
         assert!(!ServiceStatus::Failed.is_active());
         assert!(!ServiceStatus::Exited.is_active());
         assert!(!ServiceStatus::Killed.is_active());
+        assert!(!ServiceStatus::Skipped.is_active());
     }
 
     #[test]

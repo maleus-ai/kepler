@@ -1,6 +1,6 @@
 //! Health check transition tests
 
-use kepler_daemon::config::ServiceHooks;
+use kepler_daemon::config::{HookList, ServiceHooks};
 use kepler_daemon::state::ServiceStatus;
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestHealthCheckBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
@@ -315,7 +315,7 @@ async fn test_on_healthcheck_success_hook() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        post_healthcheck_success: Some(marker.create_marker_hook("success")),
+        post_healthcheck_success: Some(HookList(vec![marker.create_marker_hook("success")])),
         ..Default::default()
     };
 
@@ -358,7 +358,7 @@ async fn test_on_healthcheck_fail_hook() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        post_healthcheck_fail: Some(marker.create_marker_hook("fail")),
+        post_healthcheck_fail: Some(HookList(vec![marker.create_marker_hook("fail")])),
         ..Default::default()
     };
 
@@ -401,7 +401,7 @@ async fn test_healthcheck_hook_fires_once_per_transition() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        post_healthcheck_success: Some(marker.create_timestamped_marker_hook("success")),
+        post_healthcheck_success: Some(HookList(vec![marker.create_timestamped_marker_hook("success")])),
         ..Default::default()
     };
 

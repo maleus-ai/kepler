@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::{debug, error, info};
 
-use crate::config::{resolve_log_store, GlobalHooks, HookCommand, LogConfig, ServiceHooks};
+use crate::config::{resolve_log_store, GlobalHooks, HookCommand, HookList, LogConfig, ServiceHooks};
+use crate::config_actor::ConfigActorHandle;
 use crate::env::build_hook_env;
 use crate::errors::{DaemonError, Result};
 use crate::logs::LogWriterConfig;
+use crate::lua_eval::{DepInfo, EvalContext};
 use crate::process::{spawn_blocking, BlockingMode, CommandSpec};
 use kepler_protocol::protocol::{ProgressEvent, ServicePhase};
 use kepler_protocol::server::ProgressSender;
@@ -45,6 +47,8 @@ pub struct ServiceHookParams<'a> {
     pub service_groups: &'a [String],
     pub service_log_config: Option<&'a LogConfig>,
     pub global_log_config: Option<&'a LogConfig>,
+    /// Dependency service states (keyed by dep service name)
+    pub deps: HashMap<String, DepInfo>,
 }
 
 impl<'a> ServiceHookParams<'a> {
@@ -67,6 +71,7 @@ impl<'a> ServiceHookParams<'a> {
             service_groups: &service_config.groups,
             service_log_config: service_config.logs.as_ref(),
             global_log_config,
+            deps: HashMap::new(),
         }
     }
 }
@@ -74,7 +79,6 @@ impl<'a> ServiceHookParams<'a> {
 /// Types of global hooks
 #[derive(Debug, Clone, Copy)]
 pub enum GlobalHookType {
-    OnInit,
     PreStart,
     PostStart,
     PreStop,
@@ -87,7 +91,6 @@ pub enum GlobalHookType {
 impl GlobalHookType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            GlobalHookType::OnInit => "on_init",
             GlobalHookType::PreStart => "pre_start",
             GlobalHookType::PostStart => "post_start",
             GlobalHookType::PreStop => "pre_stop",
@@ -107,9 +110,8 @@ impl std::fmt::Display for GlobalHookType {
 
 impl GlobalHookType {
     /// Get the hook slot for this type from a GlobalHooks struct.
-    pub fn get(self, hooks: &GlobalHooks) -> &Option<HookCommand> {
+    pub fn get(self, hooks: &GlobalHooks) -> &Option<HookList> {
         match self {
-            Self::OnInit => &hooks.on_init,
             Self::PreStart => &hooks.pre_start,
             Self::PostStart => &hooks.post_start,
             Self::PreStop => &hooks.pre_stop,
@@ -124,7 +126,6 @@ impl GlobalHookType {
 /// Types of service hooks
 #[derive(Debug, Clone, Copy)]
 pub enum ServiceHookType {
-    OnInit,
     PreStart,
     PostStart,
     PreStop,
@@ -140,7 +141,6 @@ pub enum ServiceHookType {
 impl ServiceHookType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ServiceHookType::OnInit => "on_init",
             ServiceHookType::PreStart => "pre_start",
             ServiceHookType::PostStart => "post_start",
             ServiceHookType::PreStop => "pre_stop",
@@ -163,9 +163,8 @@ impl std::fmt::Display for ServiceHookType {
 
 impl ServiceHookType {
     /// Get the hook slot for this type from a ServiceHooks struct.
-    pub fn get(self, hooks: &ServiceHooks) -> &Option<HookCommand> {
+    pub fn get(self, hooks: &ServiceHooks) -> &Option<HookList> {
         match self {
-            Self::OnInit => &hooks.on_init,
             Self::PreStart => &hooks.pre_start,
             Self::PostStart => &hooks.post_start,
             Self::PreStop => &hooks.pre_stop,
@@ -281,6 +280,11 @@ pub fn global_hook_service_name(hook_type: GlobalHookType) -> String {
 /// `HookCompleted`/`HookFailed` after execution. Skipped when the hook
 /// is not defined.
 ///
+/// Hooks without an `if` condition are implicitly `success()` — they are
+/// skipped when a previous hook in the list has failed. Hooks with
+/// `if: "always()"` or `if: "failure()"` still run after a failure.
+/// The first error is propagated after all eligible hooks have run.
+///
 /// Note: Global hooks always run as the daemon user (no service user to inherit).
 pub async fn run_global_hook(
     hooks: &Option<GlobalHooks>,
@@ -290,13 +294,53 @@ pub async fn run_global_hook(
     log_config: Option<&LogWriterConfig>,
     global_log_config: Option<&LogConfig>,
     progress: &Option<ProgressSender>,
+    handle: Option<&ConfigActorHandle>,
 ) -> Result<()> {
     let hooks = match hooks {
         Some(h) => h,
         None => return Ok(()),
     };
 
-    if let Some(hook) = hook_type.get(hooks) {
+    let hook_list = match hook_type.get(hooks) {
+        Some(list) if !list.0.is_empty() => list,
+        _ => return Ok(()),
+    };
+
+    let mut had_failure = false;
+    let mut first_error: Option<DaemonError> = None;
+
+    for hook in &hook_list.0 {
+        // If a previous hook failed and this hook has no `if` condition,
+        // skip it (implicit success() semantics)
+        if had_failure && hook.condition().is_none() {
+            debug!("Global hook {} skipped: previous hook failed (implicit success())", hook_type.as_str());
+            continue;
+        }
+
+        // Evaluate runtime `if` condition if present
+        if let Some(condition) = hook.condition() {
+            if let Some(h) = handle {
+                let initialized = h.is_config_initialized().await;
+                let eval_ctx = EvalContext {
+                    env: env.clone(),
+                    initialized: Some(initialized),
+                    hook_had_failure: Some(had_failure),
+                    ..Default::default()
+                };
+                match h.eval_if_condition(condition, eval_ctx).await {
+                    Ok(true) => {} // condition passed, run the hook
+                    Ok(false) => {
+                        debug!("Global hook {} skipped: if condition '{}' is falsy", hook_type.as_str(), condition);
+                        continue;
+                    }
+                    Err(e) => {
+                        error!("Global hook {} if-condition error: {}", hook_type.as_str(), e);
+                        continue;
+                    }
+                }
+            }
+        }
+
         info!("Running global {} hook", hook_type.as_str());
         let hook_name = hook_type.as_str().to_string();
         emit_hook_event(progress, "global", ServicePhase::HookStarted { hook: hook_name.clone() }).await;
@@ -320,12 +364,18 @@ pub async fn run_global_hook(
                 emit_hook_event(progress, "global", ServicePhase::HookCompleted { hook: hook_name }).await;
             }
             Err(e) => {
+                had_failure = true;
                 emit_hook_event(progress, "global", ServicePhase::HookFailed { hook: hook_name, message: e.to_string() }).await;
-                return Err(e);
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
             }
         }
     }
 
+    if let Some(err) = first_error {
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -339,19 +389,71 @@ pub fn service_hook_log_name(service_name: &str, hook_type: ServiceHookType) -> 
 /// When `progress` is `Some`, emits `HookStarted` before and
 /// `HookCompleted`/`HookFailed` after execution. Skipped when the hook
 /// is not defined.
+///
+/// Hooks without an `if` condition are implicitly `success()` — they are
+/// skipped when a previous hook in the list has failed. Hooks with
+/// `if: "always()"` or `if: "failure()"` still run after a failure.
+/// The first error is propagated after all eligible hooks have run.
 pub async fn run_service_hook(
     hooks: &Option<ServiceHooks>,
     hook_type: ServiceHookType,
     service_name: &str,
     params: &ServiceHookParams<'_>,
     progress: &Option<ProgressSender>,
+    handle: Option<&ConfigActorHandle>,
 ) -> Result<()> {
     let hooks = match hooks {
         Some(h) => h,
         None => return Ok(()),
     };
 
-    if let Some(hook) = hook_type.get(hooks) {
+    let hook_list = match hook_type.get(hooks) {
+        Some(list) if !list.0.is_empty() => list,
+        _ => return Ok(()),
+    };
+
+    let mut had_failure = false;
+    let mut first_error: Option<DaemonError> = None;
+
+    for hook in &hook_list.0 {
+        // If a previous hook failed and this hook has no `if` condition,
+        // skip it (implicit success() semantics)
+        if had_failure && hook.condition().is_none() {
+            debug!("Hook {} for {} skipped: previous hook failed (implicit success())", hook_type.as_str(), service_name);
+            continue;
+        }
+
+        // Evaluate runtime `if` condition if present
+        if let Some(condition) = hook.condition() {
+            if let Some(h) = handle {
+                // Build runtime eval context from service state
+                let state = h.get_service_state(service_name).await;
+                let eval_ctx = EvalContext {
+                    env: params.env.clone(),
+                    service_name: Some(service_name.to_string()),
+                    hook_name: Some(hook_type.as_str().to_string()),
+                    initialized: state.as_ref().map(|s| s.initialized),
+                    restart_count: state.as_ref().map(|s| s.restart_count),
+                    exit_code: state.as_ref().and_then(|s| s.exit_code),
+                    status: state.as_ref().map(|s| s.status.as_str().to_string()),
+                    hook_had_failure: Some(had_failure),
+                    deps: params.deps.clone(),
+                    ..Default::default()
+                };
+                match h.eval_if_condition(condition, eval_ctx).await {
+                    Ok(true) => {} // condition passed, run the hook
+                    Ok(false) => {
+                        debug!("Hook {} for {} skipped: if condition '{}' is falsy", hook_type.as_str(), service_name, condition);
+                        continue;
+                    }
+                    Err(e) => {
+                        error!("Hook {} for {} if-condition error: {}", hook_type.as_str(), service_name, e);
+                        continue;
+                    }
+                }
+            }
+        }
+
         info!(
             "Running {} hook for service {}",
             hook_type.as_str(),
@@ -378,6 +480,7 @@ pub async fn run_service_hook(
                 emit_hook_event(progress, service_name, ServicePhase::HookCompleted { hook: hook_name }).await;
             }
             Err(e) => {
+                had_failure = true;
                 error!(
                     "Hook {} failed for service {}: {}",
                     hook_type.as_str(),
@@ -385,10 +488,15 @@ pub async fn run_service_hook(
                     e
                 );
                 emit_hook_event(progress, service_name, ServicePhase::HookFailed { hook: hook_name, message: e.to_string() }).await;
-                return Err(e);
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
             }
         }
     }
 
+    if let Some(err) = first_error {
+        return Err(err);
+    }
     Ok(())
 }

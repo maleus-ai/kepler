@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use crate::config::{KeplerConfig, LogConfig, ServiceConfig, SysEnvPolicy};
 use crate::errors::{DaemonError, Result};
 use crate::events::{ServiceEvent, ServiceEventReceiver};
+use crate::lua_eval::EvalContext;
 use crate::logs::LogWriterConfig;
 use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
@@ -775,6 +776,24 @@ impl ConfigActorHandle {
         if self.tx.send(ConfigCommand::SetEventHandlerSpawned).await.is_err() {
             warn!("Config actor closed, cannot send SetEventHandlerSpawned");
         }
+    }
+
+    // === Lua Evaluation ===
+
+    /// Evaluate a runtime `if` condition using the Lua evaluator.
+    pub async fn eval_if_condition(&self, condition: &str, ctx: EvalContext) -> Result<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(ConfigCommand::EvalIfCondition {
+                condition: condition.to_string(),
+                context: ctx,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor closed".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
     }
 
     // === Lifecycle ===

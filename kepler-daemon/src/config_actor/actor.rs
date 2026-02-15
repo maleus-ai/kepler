@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::config::{resolve_log_buffer_size, resolve_log_max_size, KeplerConfig};
+use crate::lua_eval::{EvalContext, LuaEvaluator};
 use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
 use crate::events::{service_event_channel, ServiceEventMessage, ServiceEventSender};
@@ -59,6 +60,9 @@ pub struct ConfigActor {
 
     /// Subscriber registry for service status changes (used by Subscribe handler)
     subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>,
+
+    /// Lua evaluator for runtime `if` conditions (lazily initialized)
+    lua_evaluator: Option<LuaEvaluator>,
 
     rx: mpsc::Receiver<ConfigCommand>,
 }
@@ -317,6 +321,7 @@ impl ConfigActor {
             sys_env: resolved_sys_env,
             owner_uid,
             subscribers,
+            lua_evaluator: None,
             rx,
         };
 
@@ -702,8 +707,38 @@ impl ConfigActor {
             ConfigCommand::SetEventHandlerSpawned => {
                 self.event_handler_spawned = true;
             }
+            ConfigCommand::EvalIfCondition {
+                condition,
+                context,
+                reply,
+            } => {
+                let result = self.eval_if_condition(&condition, &context);
+                let _ = reply.send(result);
+            }
         }
         false
+    }
+
+    /// Evaluate a runtime `if` condition using the Lua evaluator.
+    /// Lazily initializes the evaluator on first call.
+    fn eval_if_condition(&mut self, condition: &str, ctx: &EvalContext) -> Result<bool> {
+        // Lazily initialize the Lua evaluator
+        if self.lua_evaluator.is_none() {
+            let evaluator = LuaEvaluator::new()
+                .map_err(|e| DaemonError::Internal(format!("Failed to create Lua evaluator: {}", e)))?;
+
+            // Load the global lua: block if present
+            if let Some(ref lua_code) = self.config.lua {
+                evaluator.load_inline(lua_code)
+                    .map_err(|e| DaemonError::Internal(format!("Failed to load Lua code: {}", e)))?;
+            }
+
+            self.lua_evaluator = Some(evaluator);
+        }
+
+        let evaluator = self.lua_evaluator.as_ref().unwrap();
+        evaluator.eval_condition(condition, ctx)
+            .map_err(|e| DaemonError::Internal(format!("Lua condition evaluation failed: {}", e)))
     }
 
     /// Take a snapshot of the expanded config if not already taken.
@@ -875,7 +910,7 @@ impl ConfigActor {
             service_state.signal = None;
             service_state.exit_code = None;
         }
-        if matches!(status, ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed | ServiceStatus::Killed) {
+        if matches!(status, ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed | ServiceStatus::Killed | ServiceStatus::Skipped) {
             service_state.pid = None;
             service_state.started_at = None;
             service_state.stopped_at = Some(Utc::now());

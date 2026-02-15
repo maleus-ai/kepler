@@ -106,12 +106,12 @@ services:
     assert!(hooks.post_healthcheck_success.is_some());
     assert!(hooks.post_healthcheck_fail.is_some());
 
-    match hooks.post_healthcheck_success.as_ref().unwrap() {
+    match &hooks.post_healthcheck_success.as_ref().unwrap().0[0] {
         HookCommand::Script { run, .. } => assert_eq!(run, "echo healthy"),
         _ => panic!("Expected Script hook"),
     }
 
-    match hooks.post_healthcheck_fail.as_ref().unwrap() {
+    match &hooks.post_healthcheck_fail.as_ref().unwrap().0[0] {
         HookCommand::Script { run, .. } => assert_eq!(run, "echo unhealthy"),
         _ => panic!("Expected Script hook"),
     }
@@ -186,7 +186,7 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
-    match hooks.pre_start.as_ref().unwrap() {
+    match &hooks.pre_start.as_ref().unwrap().0[0] {
         HookCommand::Script { run, .. } => {
             assert_eq!(run, "echo hello && echo world");
         }
@@ -213,7 +213,7 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
-    match hooks.pre_start.as_ref().unwrap() {
+    match &hooks.pre_start.as_ref().unwrap().0[0] {
         HookCommand::Command { command, .. } => {
             assert_eq!(command, &vec!["echo", "hello", "world"]);
         }
@@ -230,8 +230,6 @@ fn test_global_hooks_parsing() {
     let yaml = r#"
 kepler:
   hooks:
-    on_init:
-      run: echo global init
     pre_start:
       run: echo global start
     pre_stop:
@@ -247,7 +245,6 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.global_hooks().unwrap();
-    assert!(hooks.on_init.is_some());
     assert!(hooks.pre_start.is_some());
     assert!(hooks.pre_stop.is_some());
     assert!(hooks.pre_cleanup.is_some());
@@ -523,8 +520,6 @@ services:
   test:
     command: ["sleep", "3600"]
     hooks:
-      on_init:
-        run: echo init
       pre_start:
         run: echo start
       pre_stop:
@@ -543,7 +538,6 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     let hooks = config.services["test"].hooks.as_ref().unwrap();
-    assert!(hooks.on_init.is_some());
     assert!(hooks.pre_start.is_some());
     assert!(hooks.pre_stop.is_some());
     assert!(hooks.pre_restart.is_some());
@@ -629,17 +623,17 @@ services:
     let hooks = config.services["test"].hooks.as_ref().unwrap();
 
     // on_start has no user override (inherits from service)
-    let hook = hooks.pre_start.as_ref().unwrap();
+    let hook = &hooks.pre_start.as_ref().unwrap().0[0];
     assert!(matches!(hook, HookCommand::Script { .. }), "Expected Script hook");
     assert!(hook.user().is_none());
 
     // on_stop has user: daemon
-    let hook = hooks.pre_stop.as_ref().unwrap();
+    let hook = &hooks.pre_stop.as_ref().unwrap().0[0];
     assert!(matches!(hook, HookCommand::Script { .. }), "Expected Script hook");
     assert_eq!(hook.user(), Some("daemon"));
 
     // on_restart has user: root
-    let hook = hooks.pre_restart.as_ref().unwrap();
+    let hook = &hooks.pre_restart.as_ref().unwrap().0[0];
     assert!(matches!(hook, HookCommand::Command { .. }), "Expected Command hook");
     assert_eq!(hook.user(), Some("root"));
 }
@@ -673,7 +667,7 @@ services:
     let hooks = config.services["test"].hooks.as_ref().unwrap();
 
     // on_start has environment and env_file
-    let hook = hooks.pre_start.as_ref().unwrap();
+    let hook = &hooks.pre_start.as_ref().unwrap().0[0];
     assert!(matches!(hook, HookCommand::Script { .. }), "Expected Script hook");
     assert_eq!(hook.environment().len(), 2);
     assert_eq!(hook.environment()[0], "HOOK_VAR=hook_value");
@@ -681,7 +675,7 @@ services:
     assert_eq!(hook.env_file().unwrap().to_str().unwrap(), ".env.hooks");
 
     // on_stop has environment but no env_file
-    let hook = hooks.pre_stop.as_ref().unwrap();
+    let hook = &hooks.pre_stop.as_ref().unwrap().0[0];
     assert!(matches!(hook, HookCommand::Command { .. }), "Expected Command hook");
     assert_eq!(hook.environment().len(), 1);
     assert_eq!(hook.environment()[0], "CLEANUP=deep");

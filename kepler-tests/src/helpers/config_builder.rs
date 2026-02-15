@@ -286,6 +286,7 @@ impl TestServiceBuilder {
             groups: self.groups,
             limits: self.limits,
             wait: self.wait,
+            condition: None,
         }
     }
 }

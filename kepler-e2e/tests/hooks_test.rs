@@ -7,7 +7,7 @@ use std::time::Duration;
 
 const TEST_MODULE: &str = "hooks_test";
 
-/// Test that global on_init runs once at first start
+/// Test that global pre_start with `if: "not ctx.initialized"` runs once at first start
 #[tokio::test]
 async fn test_global_on_init_runs_once() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -38,7 +38,7 @@ async fn test_global_on_init_runs_once() -> E2eResult<()> {
 
     assert!(
         init_count_1 >= 1,
-        "on_init should have run. Content: {}",
+        "pre_start with if condition should have run on first start. Content: {}",
         marker_content
     );
 
@@ -55,13 +55,13 @@ async fn test_global_on_init_runs_once() -> E2eResult<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // on_init should NOT run again (only runs once)
+    // Hook should NOT run again (if condition prevents it after initialization)
     let marker_content_2 = std::fs::read_to_string(&marker_file)?;
     let init_count_2 = marker_content_2.matches("ON_INIT_RAN").count();
 
     assert_eq!(
         init_count_1, init_count_2,
-        "on_init should only run once. First: {}, Second: {}",
+        "pre_start with if condition should only run once. First: {}, Second: {}",
         init_count_1, init_count_2
     );
 

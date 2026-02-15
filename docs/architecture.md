@@ -191,7 +191,7 @@ When no snapshot exists (or after `recreate`), the config goes through a baking 
 
 1. **Copy files**: Config and env_files copied to state directory
 2. **Shell expansion**: Environment variables expanded (see [Environment Variables](environment-variables.md))
-3. **Lua evaluation**: `!lua` and `!lua_file` tags executed, return values substituted (see [Lua Scripting](lua-scripting.md))
+3. **Lua evaluation**: `!lua` tags executed, return values substituted (see [Lua Scripting](lua-scripting.md))
 4. **Snapshot creation**: Final expanded config saved as `expanded_config.yaml`
 
 Once baked, the snapshot is immutable. Services always run using the baked snapshot, never the original config file.
@@ -727,17 +727,13 @@ The Lua environment provides a **restricted subset** of the standard library:
 | `ctx.service_name` | Current service name (nil if global) |
 | `ctx.hook_name` | Current hook name (nil outside hooks) |
 | `global` | Mutable shared table for cross-block state |
-| `require()` | Load Lua modules from config directory (checked first) or system Lua paths |
 
 ### Security Measures
 
 - **Environment tables frozen** via metatable proxy pattern
 - **Writes to `ctx.*` tables raise runtime errors**
 - **Metatables protected** from removal
-- **`require()` path includes config directory** (prepended to system Lua paths for convenient module loading). This is safe because:
-  - Lua is evaluated **once** during config baking, not at runtime
-  - Users running configs must have the same access as the Daemon
-  - Luau's sandbox prevents filesystem and network access regardless of loaded modules
+- **`require()` is blocked** to prevent loading external modules
 
 ### Single Evaluation
 

@@ -1,7 +1,8 @@
-# Test that recreate runs on_init hooks (because state is cleared)
+# Test that recreate runs pre_start hooks with if condition (because state is cleared)
 services:
   init-service:
     command: ["sh", "-c", "echo STARTED >> MARKER_FILE && sleep 3600"]
     hooks:
-      on_init:
+      pre_start:
+        if: "not ctx.initialized"
         run: "echo ON_INIT >> MARKER_FILE"

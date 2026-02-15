@@ -1,6 +1,6 @@
 //! Hook execution tests
 
-use kepler_daemon::config::{HookCommand, HookCommon, ServiceHooks};
+use kepler_daemon::config::{HookCommand, HookCommon, HookList, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -14,7 +14,7 @@ async fn test_script_format_hook() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::script(format!("touch {}", marker.marker_path("script").display()))),
+        pre_start: Some(HookList(vec![HookCommand::script(format!("touch {}", marker.marker_path("script").display()))])),
         ..Default::default()
     };
 
@@ -51,13 +51,13 @@ async fn test_command_format_hook() {
     let marker_path = marker.marker_path("command");
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Command {
+        pre_start: Some(HookList(vec![HookCommand::Command {
             command: vec![
                 "touch".to_string(),
                 marker_path.to_string_lossy().to_string(),
             ],
             common: HookCommon::default(),
-        }),
+        }])),
         ..Default::default()
     };
 
@@ -94,7 +94,7 @@ async fn test_hook_environment_variables() {
     let marker_path = marker.marker_path("env");
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::script(format!("echo \"TEST_VAR=$TEST_VAR\" >> {}", marker_path.display()))),
+        pre_start: Some(HookList(vec![HookCommand::script(format!("echo \"TEST_VAR=$TEST_VAR\" >> {}", marker_path.display()))])),
         ..Default::default()
     };
 
@@ -141,7 +141,7 @@ async fn test_hook_working_directory() {
     let marker_path = marker.marker_path("pwd");
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::script(format!("pwd >> {}", marker_path.display()))),
+        pre_start: Some(HookList(vec![HookCommand::script(format!("pwd >> {}", marker_path.display()))])),
         ..Default::default()
     };
 
@@ -179,17 +179,16 @@ async fn test_hook_working_directory() {
     harness.stop_service("test").await.unwrap();
 }
 
-/// on_init, on_start, on_stop, on_exit all fire
+/// pre_start, pre_stop, post_exit all fire
 #[tokio::test]
 async fn test_all_service_hook_types() {
     let temp_dir = TempDir::new().unwrap();
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        on_init: Some(marker.create_timestamped_marker_hook("on_init")),
-        pre_start: Some(marker.create_timestamped_marker_hook("on_start")),
-        pre_stop: Some(marker.create_timestamped_marker_hook("on_stop")),
-        post_exit: Some(marker.create_timestamped_marker_hook("on_exit")),
+        pre_start: Some(HookList(vec![marker.create_timestamped_marker_hook("on_start")])),
+        pre_stop: Some(HookList(vec![marker.create_timestamped_marker_hook("on_stop")])),
+        post_exit: Some(HookList(vec![marker.create_timestamped_marker_hook("on_exit")])),
         ..Default::default()
     };
 
@@ -206,41 +205,36 @@ async fn test_all_service_hook_types() {
         .await
         .unwrap();
 
-    // Start service - should trigger on_init and on_start
+    // Start service - should trigger pre_start
     harness.start_service("test").await.unwrap();
 
-    // Wait for init and start markers
-    assert!(
-        marker.wait_for_marker("on_init", Duration::from_secs(2)).await,
-        "on_init hook should fire"
-    );
+    // Wait for start marker
     assert!(
         marker.wait_for_marker("on_start", Duration::from_secs(2)).await,
-        "on_start hook should fire"
+        "pre_start hook should fire"
     );
 
-    // Stop service - should trigger on_stop
+    // Stop service - should trigger pre_stop
     harness.stop_service("test").await.unwrap();
 
-    // on_stop is called during stop_service
+    // pre_stop is called during stop_service
     assert!(
         marker.wait_for_marker("on_stop", Duration::from_secs(2)).await,
-        "on_stop hook should fire"
+        "pre_stop hook should fire"
     );
 
-    // Note: on_exit is triggered by the process exit handler,
+    // Note: post_exit is triggered by the process exit handler,
     // which may require additional setup in tests
 }
 
-/// on_init fires only once per service (not on restart)
+/// pre_start fires each time the service starts
 #[tokio::test]
-async fn test_on_init_fires_once() {
+async fn test_pre_start_fires_each_time() {
     let temp_dir = TempDir::new().unwrap();
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        on_init: Some(marker.create_timestamped_marker_hook("on_init")),
-        pre_start: Some(marker.create_timestamped_marker_hook("on_start")),
+        pre_start: Some(HookList(vec![marker.create_timestamped_marker_hook("on_start")])),
         ..Default::default()
     };
 
@@ -259,10 +253,8 @@ async fn test_on_init_fires_once() {
 
     // Start service first time
     harness.start_service("test").await.unwrap();
-    marker.wait_for_marker("on_init", Duration::from_secs(2)).await;
     marker.wait_for_marker("on_start", Duration::from_secs(2)).await;
 
-    let init_count_1 = marker.count_marker_lines("on_init");
     let start_count_1 = marker.count_marker_lines("on_start");
 
     // Stop and start again
@@ -276,24 +268,15 @@ async fn test_on_init_fires_once() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let init_count_2 = marker.count_marker_lines("on_init");
     let start_count_2 = marker.count_marker_lines("on_start");
 
     assert_eq!(
-        init_count_1, 1,
-        "on_init should fire once on first start"
-    );
-    assert_eq!(
-        init_count_2, 1,
-        "on_init should not fire again on restart"
-    );
-    assert_eq!(
         start_count_1, 1,
-        "on_start should fire once on first start"
+        "pre_start should fire once on first start"
     );
     assert_eq!(
         start_count_2, 2,
-        "on_start should fire again on second start"
+        "pre_start should fire again on second start"
     );
 
     harness.stop_service("test").await.unwrap();
@@ -305,7 +288,7 @@ async fn test_hook_failure_doesnt_block_service() {
     let temp_dir = TempDir::new().unwrap();
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::script("exit 1")), // Always fails
+        pre_start: Some(HookList(vec![HookCommand::script("exit 1")])), // Always fails
         ..Default::default()
     };
 
@@ -338,8 +321,10 @@ async fn test_hook_execution_order() {
     let order_file = temp_dir.path().join("order.txt");
 
     let hooks = ServiceHooks {
-        on_init: Some(HookCommand::script(format!("echo 'init' >> {}", order_file.display()))),
-        pre_start: Some(HookCommand::script(format!("echo 'start' >> {}", order_file.display()))),
+        pre_start: Some(HookList(vec![
+            HookCommand::script(format!("echo 'first' >> {}", order_file.display())),
+            HookCommand::script(format!("echo 'second' >> {}", order_file.display())),
+        ])),
         ..Default::default()
     };
 
@@ -365,8 +350,8 @@ async fn test_hook_execution_order() {
     let lines: Vec<&str> = content.lines().collect();
 
     assert!(lines.len() >= 2, "Both hooks should have executed");
-    assert_eq!(lines[0], "init", "on_init should run first");
-    assert_eq!(lines[1], "start", "on_start should run second");
+    assert_eq!(lines[0], "first", "First hook in list should run first");
+    assert_eq!(lines[1], "second", "Second hook in list should run second");
 
     harness.stop_service("test").await.unwrap();
 }
@@ -379,13 +364,13 @@ async fn test_hook_own_environment_variables() {
     let marker_path = marker.marker_path("hook_env");
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
+        pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!("echo \"HOOK_VAR=$HOOK_VAR\" >> {}", marker_path.display()),
             common: HookCommon {
                 environment: vec!["HOOK_VAR=from_hook".to_string()],
                 ..Default::default()
             },
-        }),
+        }])),
         ..Default::default()
     };
 
@@ -432,13 +417,13 @@ async fn test_hook_env_file() {
     std::fs::write(&env_file_path, "HOOK_FILE_VAR=from_env_file\n").unwrap();
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
+        pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!("echo \"HOOK_FILE_VAR=$HOOK_FILE_VAR\" >> {}", marker_path.display()),
             common: HookCommon {
                 env_file: Some(env_file_path),
                 ..Default::default()
             },
-        }),
+        }])),
         ..Default::default()
     };
 
@@ -485,13 +470,13 @@ async fn test_hook_env_overrides_service_env() {
     let marker_path = marker.marker_path("override_test");
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
+        pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!("echo SHARED_VAR=$(printenv SHARED_VAR) >> {}", marker_path.display()),
             common: HookCommon {
                 environment: vec!["SHARED_VAR=from_hook".to_string()],
                 ..Default::default()
             },
-        }),
+        }])),
         ..Default::default()
     };
 
@@ -535,13 +520,13 @@ async fn test_hook_env_expansion_with_service_env() {
     let marker_path = marker.marker_path("expansion_test");
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
+        pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!("echo \"COMBINED=$COMBINED\" >> {}", marker_path.display()),
             common: HookCommon {
                 environment: vec!["COMBINED=${SERVICE_VAR}_plus_hook".to_string()],
                 ..Default::default()
             },
-        }),
+        }])),
         ..Default::default()
     };
 
@@ -597,7 +582,7 @@ async fn test_hook_env_priority() {
     std::fs::write(&hook_env_file, "VAR2=hook_file\nVAR3=hook_file\n").unwrap();
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::Script {
+        pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!(
                 "echo VAR1=$(printenv VAR1) >> {} && echo VAR2=$(printenv VAR2) >> {} && echo VAR3=$(printenv VAR3) >> {}",
                 marker_path.display(),
@@ -609,7 +594,7 @@ async fn test_hook_env_priority() {
                 env_file: Some(hook_env_file),
                 ..Default::default()
             },
-        }),
+        }])),
         ..Default::default()
     };
 
@@ -674,10 +659,10 @@ async fn test_log_output_disabled() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::script(format!(
+        pre_start: Some(HookList(vec![HookCommand::script(format!(
             "echo 'HOOK_SECRET_OUTPUT' && touch {}",
             marker.marker_path("hook_done").display()
-        ))),
+        ))])),
         ..Default::default()
     };
 
@@ -730,10 +715,10 @@ async fn test_log_output_enabled() {
     let marker = MarkerFileHelper::new(temp_dir.path());
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookCommand::script(format!(
+        pre_start: Some(HookList(vec![HookCommand::script(format!(
             "echo 'HOOK_VISIBLE_OUTPUT' && touch {}",
             marker.marker_path("hook_done").display()
-        ))),
+        ))])),
         ..Default::default()
     };
 
@@ -778,4 +763,223 @@ async fn test_log_output_enabled() {
     }
 
     harness.stop_service("test").await.unwrap();
+}
+
+// --- Hook status function integration tests ---
+
+/// When a hook fails, subsequent hooks without `if` are skipped (implicit success())
+#[tokio::test]
+async fn test_hook_failure_skips_subsequent() {
+    let temp_dir = TempDir::new().unwrap();
+    let order_file = temp_dir.path().join("order.txt");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![
+            HookCommand::script(format!("echo 'first' >> {} && exit 1", order_file.display())),
+            HookCommand::script(format!("echo 'second' >> {}", order_file.display())), // no `if`, should be skipped
+        ])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    let result = harness.start_service("test").await;
+    assert!(result.is_err(), "Hook failure should propagate as error");
+
+    let content = std::fs::read_to_string(&order_file).unwrap_or_default();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 1, "Only the first hook should have run");
+    assert_eq!(lines[0], "first");
+
+    harness.stop_all().await.unwrap();
+}
+
+/// Hook with `if: "always()"` runs even after a previous failure
+#[tokio::test]
+async fn test_hook_always_runs_after_failure() {
+    let temp_dir = TempDir::new().unwrap();
+    let order_file = temp_dir.path().join("order.txt");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![
+            HookCommand::script(format!("echo 'first' >> {} && exit 1", order_file.display())),
+            HookCommand::Script {
+                run: format!("echo 'always' >> {}", order_file.display()),
+                common: HookCommon {
+                    condition: Some("always()".to_string()),
+                    ..Default::default()
+                },
+            },
+        ])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    let result = harness.start_service("test").await;
+    assert!(result.is_err(), "Hook failure should still propagate");
+
+    let content = std::fs::read_to_string(&order_file).unwrap_or_default();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 2, "Both hooks should have run");
+    assert_eq!(lines[0], "first");
+    assert_eq!(lines[1], "always");
+
+    harness.stop_all().await.unwrap();
+}
+
+/// Hook with `if: "failure()"` runs only after a previous failure
+#[tokio::test]
+async fn test_hook_failure_condition_runs() {
+    let temp_dir = TempDir::new().unwrap();
+    let order_file = temp_dir.path().join("order.txt");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![
+            HookCommand::script(format!("echo 'first' >> {} && exit 1", order_file.display())),
+            HookCommand::Script {
+                run: format!("echo 'on_failure' >> {}", order_file.display()),
+                common: HookCommon {
+                    condition: Some("failure()".to_string()),
+                    ..Default::default()
+                },
+            },
+        ])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    let result = harness.start_service("test").await;
+    assert!(result.is_err(), "Hook failure should still propagate");
+
+    let content = std::fs::read_to_string(&order_file).unwrap_or_default();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 2, "Both hooks should have run");
+    assert_eq!(lines[0], "first");
+    assert_eq!(lines[1], "on_failure");
+
+    harness.stop_all().await.unwrap();
+}
+
+/// Hook with `if: "success()"` is skipped after a failure
+#[tokio::test]
+async fn test_hook_success_condition_skips_after_failure() {
+    let temp_dir = TempDir::new().unwrap();
+    let order_file = temp_dir.path().join("order.txt");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![
+            HookCommand::script(format!("echo 'first' >> {} && exit 1", order_file.display())),
+            HookCommand::Script {
+                run: format!("echo 'on_success' >> {}", order_file.display()),
+                common: HookCommon {
+                    condition: Some("success()".to_string()),
+                    ..Default::default()
+                },
+            },
+        ])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    let result = harness.start_service("test").await;
+    assert!(result.is_err(), "Hook failure should propagate");
+
+    let content = std::fs::read_to_string(&order_file).unwrap_or_default();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 1, "Only the first hook should have run");
+    assert_eq!(lines[0], "first");
+
+    harness.stop_all().await.unwrap();
+}
+
+/// Hook error still propagates even when later hooks succeed
+#[tokio::test]
+async fn test_hook_error_still_propagates() {
+    let temp_dir = TempDir::new().unwrap();
+    let order_file = temp_dir.path().join("order.txt");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![
+            HookCommand::script(format!("echo 'first' >> {} && exit 1", order_file.display())),
+            HookCommand::Script {
+                run: format!("echo 'cleanup' >> {}", order_file.display()),
+                common: HookCommon {
+                    condition: Some("always()".to_string()),
+                    ..Default::default()
+                },
+            },
+        ])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    let result = harness.start_service("test").await;
+    // Error should still propagate even though the always() hook succeeded
+    assert!(result.is_err(), "Original error should still propagate after all hooks run");
+
+    // But both hooks should have run
+    let content = std::fs::read_to_string(&order_file).unwrap_or_default();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 2, "Both hooks should have run");
+
+    harness.stop_all().await.unwrap();
 }

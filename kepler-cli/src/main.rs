@@ -287,6 +287,8 @@ async fn run_with_progress(
         .unwrap();
     let style_fail = ProgressStyle::with_template("  Service {prefix:.bold}  {msg:.red}")
         .unwrap();
+    let style_skip = ProgressStyle::with_template("  Service {prefix:.bold}  {msg:.dim}")
+        .unwrap();
 
     let mut bars: HashMap<String, ProgressBar> = HashMap::new();
     let mut targets: HashMap<String, ServiceTarget> = HashMap::new();
@@ -348,6 +350,10 @@ async fn run_with_progress(
                                 pb.set_style(style_done.clone());
                                 pb.finish_with_message("Cleaned");
                             }
+                            ServicePhase::Skipped => {
+                                pb.set_style(style_skip.clone());
+                                pb.finish_with_message("Skipped");
+                            }
                             ServicePhase::Failed { message } => {
                                 pb.set_style(style_fail.clone());
                                 pb.finish_with_message(format!("Failed: {}", message));
@@ -394,6 +400,7 @@ async fn run_with_progress(
             ServicePhase::Healthy => { pb.set_style(style_done.clone()); pb.finish_with_message("Healthy"); }
             ServicePhase::Stopped => { pb.set_style(style_done.clone()); pb.finish_with_message("Stopped"); }
             ServicePhase::Cleaned => { pb.set_style(style_done.clone()); pb.finish_with_message("Cleaned"); }
+            ServicePhase::Skipped => { pb.set_style(style_skip.clone()); pb.finish_with_message("Skipped"); }
             ServicePhase::Failed { message } => { pb.set_style(style_fail.clone()); pb.finish_with_message(format!("Failed: {}", message)); }
             _ => {}
         }
@@ -463,6 +470,8 @@ async fn wait_until_ready_with_start(
         .unwrap();
     let style_fail = ProgressStyle::with_template("  Service {prefix:.bold}  {msg:.red}")
         .unwrap();
+    let style_skip = ProgressStyle::with_template("  Service {prefix:.bold}  {msg:.dim}")
+        .unwrap();
 
     let mut bars: HashMap<String, ProgressBar> = HashMap::new();
     let mut targets: HashMap<String, ServiceTarget> = HashMap::new();
@@ -526,6 +535,11 @@ async fn wait_until_ready_with_start(
                             ServicePhase::Cleaned => {
                                 pb.set_style(style_done.clone());
                                 pb.finish_with_message("Cleaned");
+                                finished.insert(event.service.clone(), true);
+                            }
+                            ServicePhase::Skipped => {
+                                pb.set_style(style_skip.clone());
+                                pb.finish_with_message("Skipped");
                                 finished.insert(event.service.clone(), true);
                             }
                             ServicePhase::Failed { message } => {
@@ -963,6 +977,7 @@ fn format_status(info: &ServiceInfo) -> String {
                 (false, false) => format!("Killed {} {}", exit_info, ago),
             }
         }
+        "skipped" => "Skipped".to_string(),
         other => other.to_string(),
     }
 }

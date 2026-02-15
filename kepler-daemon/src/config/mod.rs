@@ -22,7 +22,7 @@ pub use deps::{
 pub use duration::{format_duration, parse_duration};
 pub use expand::resolve_sys_env;
 pub use health::HealthCheck;
-pub use hooks::{GlobalHooks, HookCommand, HookCommon, ServiceHooks};
+pub use hooks::{GlobalHooks, HookCommand, HookCommon, HookList, ServiceHooks};
 pub use logs::{LogConfig, LogRetention, LogRetentionConfig, LogStoreConfig};
 pub use resources::{ResourceLimits, SysEnvPolicy, parse_memory_limit};
 pub use restart::{RestartConfig, RestartPolicy};
@@ -175,6 +175,10 @@ pub struct KeplerConfig {
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
+    /// Runtime Lua condition. When present, the service is only started if this
+    /// expression evaluates to a truthy value. Otherwise the service is Skipped.
+    #[serde(default, rename = "if")]
+    pub condition: Option<String>,
     pub command: Vec<String>,
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
@@ -258,7 +262,7 @@ impl KeplerConfig {
         // Get the config file's directory for resolving relative paths
         let config_dir = path.parent().unwrap_or(Path::new("."));
 
-        // Check if there are any !lua or !lua_file tags in the content
+        // Check if there are any !lua tags in the content
         let has_lua_tags = contents.contains("!lua");
 
         let mut config: KeplerConfig = if has_lua_tags {
@@ -451,8 +455,8 @@ impl KeplerConfig {
         // Bake into global hooks (they don't inherit from any service)
         if let Some(ref mut kepler) = self.kepler {
             if let Some(ref mut hooks) = kepler.hooks {
-                for hook_slot in hooks.all_hooks_mut() {
-                    if let Some(hook) = hook_slot {
+                for hook_list in hooks.all_hooks_mut().flatten() {
+                    for hook in &mut hook_list.0 {
                         if hook.user().is_none() {
                             hook.common_mut().user = Some(user_str.clone());
                         }
@@ -533,7 +537,7 @@ mod tests {
 kepler:
   sys_env: inherit
   hooks:
-    on_init:
+    pre_start:
       run: echo "init"
 
 services:
@@ -551,7 +555,7 @@ services:
 
         // Check hooks
         assert!(kepler.hooks.is_some());
-        assert!(kepler.hooks.as_ref().unwrap().on_init.is_some());
+        assert!(kepler.hooks.as_ref().unwrap().pre_start.is_some());
 
         // Check accessor methods
         assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));
@@ -1160,9 +1164,9 @@ services:
 
         let hooks = config.kepler.as_ref().unwrap().hooks.as_ref().unwrap();
         // pre_start had no user → should be baked
-        assert_eq!(hooks.pre_start.as_ref().unwrap().user(), Some("1000:1000"));
+        assert_eq!(hooks.pre_start.as_ref().unwrap().0[0].user(), Some("1000:1000"));
         // post_start had explicit user → should NOT be overwritten
-        assert_eq!(hooks.post_start.as_ref().unwrap().user(), Some("root"));
+        assert_eq!(hooks.post_start.as_ref().unwrap().0[0].user(), Some("root"));
     }
 
     #[test]
@@ -1170,8 +1174,8 @@ services:
         let yaml = r#"
 kepler:
   hooks:
-    on_init:
-      run: echo "init"
+    pre_cleanup:
+      run: echo "cleanup"
       user: "daemon"
 
 services:
@@ -1182,8 +1186,9 @@ services:
         config.resolve_default_user(1000, 1000);
 
         let hooks = config.kepler.as_ref().unwrap().hooks.as_ref().unwrap();
-        // on_init had explicit user "daemon" → should NOT be overwritten
-        assert_eq!(hooks.on_init.as_ref().unwrap().user(), Some("daemon"));
+        // pre_cleanup had explicit user "daemon" → should NOT be overwritten
+        let hook_list = hooks.pre_cleanup.as_ref().unwrap();
+        assert_eq!(hook_list.0[0].user(), Some("daemon"));
     }
 
     #[test]

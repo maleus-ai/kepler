@@ -1,6 +1,6 @@
 //! Lua script processing for configuration files
 //!
-//! This module handles !lua and !lua_file tags in YAML configuration,
+//! This module handles `!lua` tags in YAML configuration,
 //! evaluating Lua code and converting results back to YAML values.
 
 use std::collections::HashMap;
@@ -15,7 +15,7 @@ use super::try_load_env_file;
 ///
 /// This function:
 /// 1. Extracts and loads the `lua:` block
-/// 2. Walks the value tree to find and evaluate `!lua` and `!lua_file` tags
+/// 2. Walks the value tree to find and evaluate `!lua` tags
 /// 3. Replaces tagged values with their Lua evaluation results
 pub fn process_lua_scripts(
     value: &mut serde_yaml::Value,
@@ -35,7 +35,7 @@ pub fn process_lua_scripts(
     };
 
     // Create Lua evaluator and load the code
-    let evaluator = LuaEvaluator::new(config_dir).map_err(|e| DaemonError::LuaError {
+    let evaluator = LuaEvaluator::new().map_err(|e| DaemonError::LuaError {
         path: config_path.to_path_buf(),
         message: e.to_string(),
     })?;
@@ -81,6 +81,7 @@ pub fn process_lua_scripts(
                     env: sys_env.clone(),
                     service_name: None,
                     hook_name: None,
+                    ..Default::default()
                 };
                 process_lua_tags_recursive(logs_value, &evaluator, &ctx, config_dir, config_path, "kepler.logs")?;
             }
@@ -125,6 +126,7 @@ fn process_service_lua(
             env: sys_env.clone(), // At this point, only sys_env is available
             service_name: Some(service_name.to_string()),
             hook_name: None,
+            ..Default::default()
         };
         let field_path = format!("{}.env_file", service_name);
         process_single_lua_tag(env_file_value, evaluator, &ctx, config_dir, config_path, &field_path)?;
@@ -158,6 +160,7 @@ fn process_service_lua(
             env: env_for_environment.clone(),
             service_name: Some(service_name.to_string()),
             hook_name: None,
+            ..Default::default()
         };
         let field_path = format!("{}.environment", service_name);
         process_single_lua_tag(environment_value, evaluator, &ctx, config_dir, config_path, &field_path)?;
@@ -183,6 +186,7 @@ fn process_service_lua(
         env: full_env,
         service_name: Some(service_name.to_string()),
         hook_name: None,
+        ..Default::default()
     };
 
     // Process all fields except env_file and environment (already done)
@@ -240,6 +244,7 @@ fn process_service_hooks_lua(
                 env: base_ctx.env.clone(),
                 service_name: Some(service_name.to_string()),
                 hook_name: Some(hook_name),
+                ..Default::default()
             };
             process_lua_tags_recursive(hook_value, evaluator, &ctx, config_dir, config_path, &field_path)?;
         }
@@ -278,6 +283,7 @@ fn process_global_hooks_lua(
                 env: sys_env.clone(),
                 service_name: None, // Global hooks have no service
                 hook_name: Some(hook_name),
+                ..Default::default()
             };
             process_lua_tags_recursive(hook_value, evaluator, &ctx, config_dir, config_path, &field_path)?;
         }
@@ -299,7 +305,7 @@ fn process_single_lua_tag(
 
     if let Value::Tagged(tagged) = &*value {
         let tag = tagged.tag.to_string();
-        if tag == "!lua" || tag == "!lua_file" {
+        if tag == "!lua" {
             let result =
                 evaluate_lua_tag(&tag, &tagged.value, evaluator, ctx, config_dir, config_path, field_path)?;
             *value = result;
@@ -323,7 +329,7 @@ fn process_lua_tags_recursive(
     match &*value {
         Value::Tagged(tagged) => {
             let tag = tagged.tag.to_string();
-            if tag == "!lua" || tag == "!lua_file" {
+            if tag == "!lua" {
                 let result = evaluate_lua_tag(
                     &tag,
                     &tagged.value,
@@ -369,46 +375,25 @@ fn process_lua_tags_recursive(
     Ok(())
 }
 
-/// Evaluate a Lua tag and return the resulting YAML value.
+/// Evaluate a `!lua` tag and return the resulting YAML value.
 fn evaluate_lua_tag(
-    tag: &str,
+    _tag: &str,
     code_value: &serde_yaml::Value,
     evaluator: &LuaEvaluator,
     ctx: &EvalContext,
-    config_dir: &Path,
+    _config_dir: &Path,
     config_path: &Path,
     field_path: &str,
 ) -> Result<serde_yaml::Value> {
-    let code = if tag == "!lua_file" {
-        // For !lua_file, the value is a path to a Lua file
-        let file_path = code_value.as_str().ok_or_else(|| DaemonError::LuaError {
+    let code = code_value
+        .as_str()
+        .ok_or_else(|| DaemonError::LuaError {
             path: config_path.to_path_buf(),
-            message: "!lua_file value must be a string path".to_string(),
+            message: "!lua value must be a string".to_string(),
         })?;
 
-        let full_path = if PathBuf::from(file_path).is_relative() {
-            config_dir.join(file_path)
-        } else {
-            PathBuf::from(file_path)
-        };
-
-        std::fs::read_to_string(&full_path).map_err(|e| DaemonError::LuaError {
-            path: config_path.to_path_buf(),
-            message: format!("Failed to read {}: {}", full_path.display(), e),
-        })?
-    } else {
-        // For !lua, the value is inline Lua code
-        code_value
-            .as_str()
-            .ok_or_else(|| DaemonError::LuaError {
-                path: config_path.to_path_buf(),
-                message: "!lua value must be a string".to_string(),
-            })?
-            .to_string()
-    };
-
     // Evaluate the Lua code
-    let result: mlua::Value = evaluator.eval(&code, ctx, field_path).map_err(|e| DaemonError::LuaError {
+    let result: mlua::Value = evaluator.eval(code, ctx, field_path).map_err(|e| DaemonError::LuaError {
         path: config_path.to_path_buf(),
         message: format!("Lua error: {}", e),
     })?;

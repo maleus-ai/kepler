@@ -9,6 +9,9 @@ Lifecycle hooks allow you to run commands at various stages of service and confi
 - [Hook Format](#hook-format)
 - [Hook Inheritance](#hook-inheritance)
 - [Execution Order](#execution-order)
+- [Failure Handling](#failure-handling)
+- [Status Functions](#status-functions)
+- [Dependency State Access](#dependency-state-access)
 - [Hook Logging](#hook-logging)
 - [Cleanup Hooks](#cleanup-hooks)
 - [Detached Mode Behavior](#detached-mode-behavior)
@@ -125,6 +128,7 @@ hooks:
 |--------|------|-------------|
 | `run` | `string` | Shell command to execute |
 | `command` | `string[]` | Command array to execute (mutually exclusive with `run`) |
+| `if` | `string` | Lua condition expression. Hook only runs if truthy. See [Status Functions](#status-functions) |
 | `user` | `string` | User to run hook as (overrides service default) |
 | `working_dir` | `string` | Working directory (overrides service default) |
 | `environment` | `string[]` | Additional environment variables |
@@ -194,6 +198,115 @@ For a service restarting:
 
 On process exit (not manual stop):
 1. `post_exit`
+
+---
+
+## Failure Handling
+
+When a hook in a list fails, subsequent hooks follow **implicit `success()`** semantics:
+
+- Hooks **without** an `if` condition are skipped after a failure
+- Hooks **with** `if: "always()"` or `if: "failure()"` still run after a failure
+- The first error is propagated after all eligible hooks have run
+
+```yaml
+hooks:
+  pre_start:
+    - run: echo "step 1" && false          # This fails
+    - run: echo "step 2"                   # Skipped (implicit success())
+    - if: "always()"
+      run: echo "cleanup always runs"      # Runs
+    - if: "failure()"
+      run: echo "error handler"            # Runs (previous hook failed)
+    - if: "success()"
+      run: echo "only on success"          # Skipped (same as no `if`)
+```
+
+After all eligible hooks run, the first error is still returned to the caller.
+
+---
+
+## Status Functions
+
+Status functions are available in hook `if` conditions for controlling execution based on prior hook results and dependency state.
+
+### `always()`
+
+Always returns `true`. Use for cleanup hooks that must run regardless of prior failures.
+
+### `success(name?)`
+
+- **No args**: Returns `true` if no previous hook in the list has failed. This is the implicit default for hooks without an `if` condition.
+- **With arg**: Returns `true` if dependency `name` is in a successful state (not failed, killed, or skipped, and exit code is 0 or nil).
+
+### `failure(name?)`
+
+- **No args**: Returns `true` if any previous hook in the list has failed.
+- **With arg**: Returns `true` if dependency `name` is in a failed or killed state, or exited with a non-zero code.
+
+### `skipped(name)`
+
+Requires a string argument. Returns `true` if dependency `name` was skipped (e.g., due to an `if` condition on the service).
+
+### Examples
+
+```yaml
+services:
+  app:
+    depends_on:
+      db:
+        condition: service_healthy
+    if: "success('db')"
+    hooks:
+      pre_start:
+        - run: ./setup.sh
+        - if: "always()"
+          run: echo "runs even if setup failed"
+        - if: "failure()"
+          run: ./notify-failure.sh
+      post_exit:
+        - if: "failure('db')"
+          run: echo "db was in a failed state when app exited"
+```
+
+---
+
+## Dependency State Access
+
+Service hook conditions can access dependency state via the `deps` table. Each dependency listed in `depends_on` is available as a frozen sub-table.
+
+### Available Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `deps.<name>.status` | `string` | Current status (`"running"`, `"healthy"`, `"failed"`, `"stopped"`, etc.) |
+| `deps.<name>.exit_code` | `int\|nil` | Last exit code (`nil` if process hasn't exited) |
+| `deps.<name>.initialized` | `bool` | Whether the service has been initialized (`on_init` run) |
+| `deps.<name>.restart_count` | `int` | Number of times the service has restarted |
+
+### Example
+
+```yaml
+services:
+  db:
+    command: ["postgres"]
+    healthcheck:
+      test: ["pg_isready"]
+
+  app:
+    command: ["./server"]
+    depends_on:
+      db:
+        condition: service_healthy
+    hooks:
+      post_exit:
+        - if: "deps.db.status == 'healthy'"
+          run: echo "db was healthy when app exited"
+        - if: "deps.db.restart_count > 0"
+          run: echo "db had restarted at least once"
+```
+
+The `deps` table is read-only. Attempting to modify it raises a runtime error.
 
 ---
 

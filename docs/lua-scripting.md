@@ -1,6 +1,6 @@
 # Lua Scripting
 
-Kepler supports dynamic config generation with sandboxed Luau scripts via `!lua` and `!lua_file` YAML tags.
+Kepler supports dynamic config generation with sandboxed Luau scripts via the `!lua` YAML tag.
 
 ## Table of Contents
 
@@ -12,7 +12,6 @@ Kepler supports dynamic config generation with sandboxed Luau scripts via `!lua`
 - [The lua Directive](#the-lua-directive)
 - [Execution Order](#execution-order)
 - [Type Conversion](#type-conversion)
-- [External Modules](#external-modules)
 - [Sandbox Restrictions](#sandbox-restrictions)
 - [Security Model](#security-model)
 - [Examples](#examples)
@@ -21,7 +20,7 @@ Kepler supports dynamic config generation with sandboxed Luau scripts via `!lua`
 
 ## Overview
 
-Kepler uses Luau (a sandboxed Lua 5.1 derivative) for dynamic config generation. You can embed Lua code directly in YAML using the `!lua` tag or reference external files with `!lua_file`.
+Kepler uses Luau (a sandboxed Lua 5.1 derivative) for dynamic config generation. You can embed Lua code directly in YAML using the `!lua` tag.
 
 Lua scripts can return:
 - **Strings** -- for scalar values
@@ -66,16 +65,6 @@ services:
       return result
 ```
 
-### External File (`!lua_file`)
-
-```yaml
-services:
-  backend:
-    command: !lua_file scripts/generate_command.lua
-```
-
-The file path is relative to the config file's directory.
-
 ---
 
 ## Available Context
@@ -90,7 +79,6 @@ Every `!lua` block receives a `ctx` table and a `global` table:
 | `ctx.service_name` | Current service name (`nil` if in global context) |
 | `ctx.hook_name` | Current hook name (`nil` outside hooks) |
 | `global` | Shared mutable table for cross-block state |
-| `require()` | Load Lua modules from config directory or system paths |
 
 ---
 
@@ -173,34 +161,18 @@ Without `tostring()`, numbers in string arrays will cause errors.
 
 ---
 
-## External Modules
-
-Use `require()` to load Lua modules. The config directory is checked first, then system Lua paths:
-
-```yaml
-# If config is at /opt/app/kepler.yaml
-# This loads /opt/app/helpers.lua
-services:
-  app:
-    command: !lua |
-      local helpers = require("helpers")
-      return helpers.build_command()
-```
-
----
-
 ## Sandbox Restrictions
 
 The Lua environment provides a **restricted subset** of the standard library:
 
 | Available | NOT Available |
 |-----------|---------------|
-| `string` -- String manipulation | `io` -- File I/O operations |
-| `math` -- Mathematical functions | `os.execute` -- Shell command execution |
-| `table` -- Table manipulation | `os.remove`, `os.rename` -- File operations |
-| `tonumber`, `tostring` | `loadfile`, `dofile` -- Arbitrary file loading |
-| `pairs`, `ipairs` | `debug` -- Debug library |
-| `type`, `select`, `unpack` | `package.loadlib` -- Native library loading |
+| `string` -- String manipulation | `require` -- Module loading |
+| `math` -- Mathematical functions | `io` -- File I/O operations |
+| `table` -- Table manipulation | `os.execute` -- Shell command execution |
+| `tonumber`, `tostring` | `os.remove`, `os.rename` -- File operations |
+| `pairs`, `ipairs` | `loadfile`, `dofile` -- Arbitrary file loading |
+| `type`, `select`, `unpack` | `debug` -- Debug library |
 
 **No filesystem access**: Scripts cannot read, write, or modify files on disk.
 
@@ -215,8 +187,7 @@ The Lua environment provides a **restricted subset** of the standard library:
 - **Environment tables are frozen** -- `ctx.env`, `ctx.sys_env`, `ctx.env_file` are read-only via metatable proxies
 - **Writes to `ctx.*` raise runtime errors**
 - **Metatables are protected** from removal
-- **`require()` path includes config directory** -- safe because Lua evaluates once during baking, and users must have access to run configs
-- **`!lua_file` can load any file readable by the daemon process** (typically root). This is trusted behavior since only users with kepler group access can submit configs
+- **`require()` is blocked** -- external module loading is not permitted
 
 ---
 

@@ -192,15 +192,6 @@ impl TestDaemonHarness {
         );
 
         if should_run_init {
-            run_service_hook(
-                &ctx.service_config.hooks,
-                ServiceHookType::OnInit,
-                service_name,
-                &hook_params,
-                &None,
-            )
-            .await?;
-
             // Mark as initialized
             let _ = self.handle
                 .mark_service_initialized(service_name)
@@ -214,6 +205,7 @@ impl TestDaemonHarness {
             service_name,
             &hook_params,
             &None,
+            Some(&self.handle),
         )
         .await?;
 
@@ -317,6 +309,7 @@ impl TestDaemonHarness {
             service_name,
             &hook_params,
             &None,
+            Some(&self.handle),
         )
         .await?;
 
@@ -349,6 +342,7 @@ impl TestDaemonHarness {
             service_name,
             &hook_params,
             &None,
+            Some(&self.handle),
         )
         .await?;
 
@@ -423,6 +417,7 @@ impl TestDaemonHarness {
                     &event.service_name,
                     &hook_params,
                     &None,
+                    Some(&handle),
                 )
                 .await;
 
@@ -522,6 +517,7 @@ impl TestDaemonHarness {
                     &event.service_name,
                     &hook_params,
                     &None,
+                    Some(&handle),
                 )
                 .await;
 
@@ -560,6 +556,7 @@ impl TestDaemonHarness {
                         &event.service_name,
                         &hook_params,
                         &None,
+                        Some(&handle),
                     )
                     .await;
 

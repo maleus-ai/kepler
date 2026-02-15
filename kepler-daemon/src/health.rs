@@ -192,6 +192,7 @@ async fn run_status_change_hook(
             service_name,
             &hook_params,
             &None,
+            Some(handle),
         )
         .await
         {

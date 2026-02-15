@@ -41,6 +41,12 @@ pub enum OrchestratorError {
         reason: String,
     },
 
+    #[error("Service {service} skipped because dependency {dependency} was skipped")]
+    DependencySkipped {
+        service: String,
+        dependency: String,
+    },
+
     #[error("Startup cancelled for service {0}")]
     StartupCancelled(String),
 

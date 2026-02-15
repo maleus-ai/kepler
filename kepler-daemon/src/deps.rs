@@ -342,6 +342,15 @@ pub async fn check_dependency_satisfied(
         None => return false,
     };
 
+    // If the dependency is Skipped and allow_skipped is true, treat as satisfied
+    if state.status == ServiceStatus::Skipped && dep_config.allow_skipped {
+        return true;
+    }
+    // If the dependency is Skipped and allow_skipped is false, never satisfied
+    if state.status == ServiceStatus::Skipped {
+        return false;
+    }
+
     match &dep_config.condition {
         DependencyCondition::ServiceStarted => {
             // Service is considered "started" if it's running (in any running state)
@@ -408,6 +417,11 @@ pub async fn is_dependency_permanently_unsatisfied(
         None => return false,
     };
 
+    // Skipped is always permanently unsatisfied (unless allow_skipped, handled by check_dependency_satisfied)
+    if state.status == ServiceStatus::Skipped {
+        return !dep_config.allow_skipped;
+    }
+
     // Only check terminal states
     if !matches!(state.status, ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed | ServiceStatus::Killed) {
         return false;
@@ -449,6 +463,7 @@ mod tests {
 
     fn make_service(deps: Vec<&str>) -> ServiceConfig {
         ServiceConfig {
+            condition: None,
             command: vec!["test".to_string()],
             working_dir: None,
             environment: vec![],
@@ -484,6 +499,7 @@ mod tests {
             });
         }
         ServiceConfig {
+            condition: None,
             command: vec!["test".to_string()],
             working_dir: None,
             environment: vec![],

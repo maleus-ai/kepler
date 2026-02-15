@@ -3,7 +3,7 @@
 //! restart: Preserves baked config, runs restart hooks
 //! recreate: Re-bakes config, clears state, starts fresh
 
-use kepler_daemon::config::{HookCommand, RestartPolicy, ServiceHooks};
+use kepler_daemon::config::{HookCommand, HookList, RestartPolicy, ServiceHooks};
 use kepler_daemon::config_registry::ConfigRegistry;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::process::ProcessExitEvent;
@@ -67,8 +67,8 @@ async fn test_restart_calls_restart_hooks() {
     let started_path = marker.marker_path("started");
 
     let hooks = ServiceHooks {
-        pre_restart: Some(HookCommand::script(format!("echo 'PRE_RESTART' >> {}", pre_restart_path.display()))),
-        post_restart: Some(HookCommand::script(format!("echo 'POST_RESTART' >> {}", post_restart_path.display()))),
+        pre_restart: Some(HookList(vec![HookCommand::script(format!("echo 'PRE_RESTART' >> {}", pre_restart_path.display()))])),
+        post_restart: Some(HookList(vec![HookCommand::script(format!("echo 'POST_RESTART' >> {}", post_restart_path.display()))])),
         ..Default::default()
     };
 
@@ -370,17 +370,17 @@ async fn test_recreate_rebakes_config() {
     }
 }
 
-/// recreate clears state so on_init fires again on next start
-/// Flow: start → stop → recreate → start → verify on_init fires again
+/// recreate clears state so pre_start fires again on next start
+/// Flow: start → stop → recreate → start → verify pre_start fires again
 #[tokio::test]
-async fn test_recreate_runs_init_hooks() {
+async fn test_recreate_runs_pre_start_hooks() {
     let temp_dir = TempDir::new().unwrap();
     let marker = MarkerFileHelper::new(temp_dir.path());
     let on_init_path = marker.marker_path("on_init");
     let started_path = marker.marker_path("started");
 
     let hooks = ServiceHooks {
-        on_init: Some(HookCommand::script(format!("echo 'PRE_INIT' >> {}", on_init_path.display()))),
+        pre_start: Some(HookList(vec![HookCommand::script(format!("echo 'PRE_INIT' >> {}", on_init_path.display()))])),
         ..Default::default()
     };
 
@@ -417,9 +417,9 @@ async fn test_recreate_runs_init_hooks() {
         .wait_for_marker("started", Duration::from_secs(2))
         .await;
 
-    // Count initial on_init calls
+    // Count initial pre_start calls
     let init_count_1 = marker.count_marker_lines("on_init");
-    assert_eq!(init_count_1, 1, "on_init should fire once on first start");
+    assert_eq!(init_count_1, 1, "pre_start should fire once on first start");
 
     // Stop services before recreate
     orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
@@ -434,7 +434,7 @@ async fn test_recreate_runs_init_hooks() {
     // Clear started marker to detect next start
     std::fs::remove_file(&started_path).ok();
 
-    // Start services again — on_init should fire because state was cleared by recreate
+    // Start services again — pre_start should fire because state was cleared by recreate
     orchestrator
         .start_services(&config_path, None, Some(sys_env), None, None)
         .await
@@ -445,11 +445,11 @@ async fn test_recreate_runs_init_hooks() {
         .wait_for_marker("started", Duration::from_secs(2))
         .await;
 
-    // Count on_init calls after recreate + start
+    // Count pre_start calls after recreate + start
     let init_count_2 = marker.count_marker_lines("on_init");
     assert_eq!(
         init_count_2, 2,
-        "on_init should fire again after recreate (state cleared)"
+        "pre_start should fire again after recreate (state cleared)"
     );
 
     // Cleanup
@@ -469,12 +469,12 @@ async fn test_restart_specific_service_hooks() {
     let svc2_restart_path = marker.marker_path("svc2_restart");
 
     let hooks1 = ServiceHooks {
-        pre_restart: Some(HookCommand::script(format!("echo 'SVC1_RESTART' >> {}", svc1_restart_path.display()))),
+        pre_restart: Some(HookList(vec![HookCommand::script(format!("echo 'SVC1_RESTART' >> {}", svc1_restart_path.display()))])),
         ..Default::default()
     };
 
     let hooks2 = ServiceHooks {
-        pre_restart: Some(HookCommand::script(format!("echo 'SVC2_RESTART' >> {}", svc2_restart_path.display()))),
+        pre_restart: Some(HookList(vec![HookCommand::script(format!("echo 'SVC2_RESTART' >> {}", svc2_restart_path.display()))])),
         ..Default::default()
     };
 
@@ -546,14 +546,14 @@ async fn test_restart_respects_dependency_order() {
     let order_path = marker.marker_path("order");
 
     let frontend_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::script(format!("echo 'STOP_FRONTEND' >> {}", order_path.display()))),
-        pre_start: Some(HookCommand::script(format!("echo 'START_FRONTEND' >> {}", order_path.display()))),
+        pre_stop: Some(HookList(vec![HookCommand::script(format!("echo 'STOP_FRONTEND' >> {}", order_path.display()))])),
+        pre_start: Some(HookList(vec![HookCommand::script(format!("echo 'START_FRONTEND' >> {}", order_path.display()))])),
         ..Default::default()
     };
 
     let backend_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::script(format!("echo 'STOP_BACKEND' >> {}", order_path.display()))),
-        pre_start: Some(HookCommand::script(format!("echo 'START_BACKEND' >> {}", order_path.display()))),
+        pre_stop: Some(HookList(vec![HookCommand::script(format!("echo 'STOP_BACKEND' >> {}", order_path.display()))])),
+        pre_start: Some(HookList(vec![HookCommand::script(format!("echo 'START_BACKEND' >> {}", order_path.display()))])),
         ..Default::default()
     };
 
@@ -660,17 +660,17 @@ async fn test_stop_respects_reverse_dependency_order() {
     let order_path = marker.marker_path("stop_order");
 
     let db_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::script(format!("echo 'STOP_DB' >> {}", order_path.display()))),
+        pre_stop: Some(HookList(vec![HookCommand::script(format!("echo 'STOP_DB' >> {}", order_path.display()))])),
         ..Default::default()
     };
 
     let api_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::script(format!("echo 'STOP_API' >> {}", order_path.display()))),
+        pre_stop: Some(HookList(vec![HookCommand::script(format!("echo 'STOP_API' >> {}", order_path.display()))])),
         ..Default::default()
     };
 
     let web_hooks = ServiceHooks {
-        pre_stop: Some(HookCommand::script(format!("echo 'STOP_WEB' >> {}", order_path.display()))),
+        pre_stop: Some(HookList(vec![HookCommand::script(format!("echo 'STOP_WEB' >> {}", order_path.display()))])),
         ..Default::default()
     };
 
@@ -816,7 +816,7 @@ async fn test_recreate_respects_dependency_order() {
     assert!(result.is_ok(), "Recreate should succeed after stopping services: {:?}", result.err());
 }
 
-/// recreate does not fire any hooks; on_init fires on next start
+/// recreate does not fire any hooks; pre_start fires on next start
 #[tokio::test]
 async fn test_recreate_calls_all_lifecycle_hooks() {
     let temp_dir = TempDir::new().unwrap();
@@ -824,11 +824,10 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     let hooks_path = marker.marker_path("hooks");
 
     let hooks = ServiceHooks {
-        on_init: Some(HookCommand::script(format!("echo 'PRE_INIT' >> {}", hooks_path.display()))),
-        pre_start: Some(HookCommand::script(format!("echo 'PRE_START' >> {}", hooks_path.display()))),
-        post_start: Some(HookCommand::script(format!("echo 'POST_START' >> {}", hooks_path.display()))),
-        pre_stop: Some(HookCommand::script(format!("echo 'PRE_STOP' >> {}", hooks_path.display()))),
-        post_stop: Some(HookCommand::script(format!("echo 'POST_STOP' >> {}", hooks_path.display()))),
+        pre_start: Some(HookList(vec![HookCommand::script(format!("echo 'PRE_START' >> {}", hooks_path.display()))])),
+        post_start: Some(HookList(vec![HookCommand::script(format!("echo 'POST_START' >> {}", hooks_path.display()))])),
+        pre_stop: Some(HookList(vec![HookCommand::script(format!("echo 'PRE_STOP' >> {}", hooks_path.display()))])),
+        post_stop: Some(HookList(vec![HookCommand::script(format!("echo 'POST_STOP' >> {}", hooks_path.display()))])),
         ..Default::default()
     };
 
@@ -859,7 +858,6 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
 
     // Count hooks from first start
     let content = std::fs::read_to_string(&hooks_path).unwrap_or_default();
-    assert!(content.contains("PRE_INIT"), "First start should call PRE_INIT");
     assert!(content.contains("PRE_START"), "First start should call PRE_START");
     assert!(content.contains("POST_START"), "First start should call POST_START");
 
@@ -884,7 +882,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
         content
     );
 
-    // Start services again — on_init should fire because state was cleared
+    // Start services again — pre_start should fire because state was cleared
     orchestrator
         .start_services(&config_path, None, Some(sys_env), None, None)
         .await
@@ -897,12 +895,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     let content = std::fs::read_to_string(&hooks_path).unwrap_or_default();
     let lines: Vec<&str> = content.lines().collect();
 
-    // on_init should fire again (state was cleared by recreate)
-    assert!(
-        lines.iter().any(|l| *l == "PRE_INIT"),
-        "on_init should fire on start after recreate. Lines: {:?}",
-        lines
-    );
+    // pre_start should fire again (state was cleared by recreate)
     assert!(
         lines.iter().any(|l| *l == "PRE_START"),
         "pre_start should fire on start after recreate. Lines: {:?}",
@@ -971,12 +964,12 @@ async fn test_restart_calls_all_restart_hooks_in_order() {
     let hooks_path = marker.marker_path("restart_hooks");
 
     let hooks = ServiceHooks {
-        pre_restart: Some(HookCommand::script(format!("echo 'PRE_RESTART' >> {}", hooks_path.display()))),
-        pre_stop: Some(HookCommand::script(format!("echo 'PRE_STOP' >> {}", hooks_path.display()))),
-        post_stop: Some(HookCommand::script(format!("echo 'POST_STOP' >> {}", hooks_path.display()))),
-        pre_start: Some(HookCommand::script(format!("echo 'PRE_START' >> {}", hooks_path.display()))),
-        post_start: Some(HookCommand::script(format!("echo 'POST_START' >> {}", hooks_path.display()))),
-        post_restart: Some(HookCommand::script(format!("echo 'POST_RESTART' >> {}", hooks_path.display()))),
+        pre_restart: Some(HookList(vec![HookCommand::script(format!("echo 'PRE_RESTART' >> {}", hooks_path.display()))])),
+        pre_stop: Some(HookList(vec![HookCommand::script(format!("echo 'PRE_STOP' >> {}", hooks_path.display()))])),
+        post_stop: Some(HookList(vec![HookCommand::script(format!("echo 'POST_STOP' >> {}", hooks_path.display()))])),
+        pre_start: Some(HookList(vec![HookCommand::script(format!("echo 'PRE_START' >> {}", hooks_path.display()))])),
+        post_start: Some(HookList(vec![HookCommand::script(format!("echo 'POST_START' >> {}", hooks_path.display()))])),
+        post_restart: Some(HookList(vec![HookCommand::script(format!("echo 'POST_RESTART' >> {}", hooks_path.display()))])),
         ..Default::default()
     };
 
