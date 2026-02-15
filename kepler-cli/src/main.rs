@@ -94,8 +94,16 @@ async fn run() -> Result<()> {
     }
 
     // Resolve config path for service commands
-    let config_path = Config::resolve_config_path(&cli.file)
-        .map_err(|_| CliError::ConfigNotFound(PathBuf::from(cli.file.as_deref().unwrap_or("kepler.yaml"))))?;
+    let config_path = match Config::resolve_config_path(&cli.file) {
+        Ok(p) => p,
+        Err(_) => {
+            let path = PathBuf::from(cli.file.as_deref().unwrap_or("kepler.yaml"));
+            if matches!(cli.command, Commands::PS { .. }) {
+                eprintln!("{} use 'kepler ps --all' to list services from all loaded configs", "Hint:".yellow().bold());
+            }
+            return Err(CliError::ConfigNotFound(path));
+        }
+    };
     let canonical_path = config_path
         .canonicalize()
         .map_err(|_| CliError::ConfigNotFound(config_path.clone()))?;
