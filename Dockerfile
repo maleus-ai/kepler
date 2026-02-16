@@ -1,7 +1,7 @@
 FROM rust:1.93-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev sudo g++ linux-perf && rm -rf /var/lib/apt/lists/*
+    pkg-config libssl-dev sudo g++ linux-perf make && rm -rf /var/lib/apt/lists/*
 
 # Install clippy and cargo-flamegraph (inferno-based)
 RUN rustup component add clippy \

@@ -1,3 +1,11 @@
+#[cfg(all(feature = "jemalloc", not(feature = "dhat-heap")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 use kepler_daemon::auth;
 use kepler_daemon::config_actor::context::ConfigEvent;
 use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
@@ -40,6 +48,9 @@ fn canonicalize_config_path(path: PathBuf) -> std::result::Result<PathBuf, Daemo
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -47,6 +58,9 @@ async fn main() -> anyhow::Result<()> {
                 .add_directive(tracing::Level::INFO.into()),
         )
         .init();
+
+    // Configure allocator for aggressive memory return (jemalloc decay rates)
+    kepler_daemon::allocator::configure();
 
     info!("Starting Kepler daemon");
 

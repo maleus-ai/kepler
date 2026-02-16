@@ -136,17 +136,15 @@ impl ServiceOrchestrator {
             None => get_start_order(&config.services)?,
         };
 
-        // Check if any services need starting (are in a terminal state).
-        // If all are already active, skip global hooks and return early.
+        // Check if any services need starting.
+        // A service needs starting if it's in a non-active state AND either:
+        // - Its restart policy says it should restart on its exit code, OR
+        // - It has never run (no exit code recorded)
+        // Completed one-shots (Exited + restart:no) and Skipped services are "done".
         let any_need_starting = {
             let mut found = false;
             for svc in &services_to_start {
-                let is_active = handle
-                    .get_service_state(svc)
-                    .await
-                    .map(|s| s.status.is_active())
-                    .unwrap_or(false);
-                if !is_active {
+                if self.service_needs_starting(svc, &config, &handle).await {
                     found = true;
                     break;
                 }
@@ -235,23 +233,26 @@ impl ServiceOrchestrator {
             // Raise startup fence to suppress premature Ready/Quiescent signals
             handle.set_startup_in_progress(true).await;
 
-            // Mark non-active services as Waiting upfront
+            // Mark services that need starting as Waiting.
+            // Skip: already-active services, completed one-shots, skipped services.
+            let mut newly_waiting = Vec::new();
             for service_name in &services_to_start {
-                let state = handle.get_service_state(service_name).await;
-                if state.as_ref().map(|s| s.status.is_active()).unwrap_or(false) {
-                    debug!("Service {} is already active, skipping", service_name);
+                if !self.service_needs_starting(service_name, &config, &handle).await {
+                    debug!("Service {} does not need starting, skipping", service_name);
                     continue;
                 }
                 if let Err(e) = handle.set_service_status(service_name, ServiceStatus::Waiting).await {
                     warn!("Failed to set {} to Waiting: {}", service_name, e);
                 }
+                newly_waiting.push(service_name.clone());
             }
 
             // Lower startup fence — all services are now in Waiting state
             handle.set_startup_in_progress(false).await;
 
-            // Spawn ALL services. Each independently waits for its deps.
-            for service_name in &services_to_start {
+            // Spawn only newly-waiting services (not already-active ones or
+            // services with an existing blocked task from a previous start call).
+            for service_name in &newly_waiting {
                 let self_clone = self.clone();
                 let handle_clone = handle.clone();
                 let progress_clone = progress.clone();
@@ -976,22 +977,21 @@ impl ServiceOrchestrator {
                 }
             };
 
-            // Remove entire state directory (logs, config snapshots, env_files, etc.)
-            let _cleaned = if state_dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&state_dir) {
-                    warn!("Failed to remove state directory {:?}: {}", state_dir, e);
-                    false
-                } else {
-                    info!("Removed state directory: {:?}", state_dir);
-                    true
-                }
-            } else {
-                false
-            };
-
-            // Unload config from registry
+            // Unload config from registry (triggers actor cleanup + save_state)
             self.registry.unload(&config_path.to_path_buf()).await;
 
+            // Remove entire state directory (logs, config snapshots, env_files, etc.)
+            // Done AFTER unload so save_state in cleanup() doesn't fail
+            if state_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&state_dir) {
+                    warn!("Failed to remove state directory {:?}: {}", state_dir, e);
+                } else {
+                    info!("Removed state directory: {:?}", state_dir);
+                }
+            }
+
+            // Purge allocator caches to return freed pages to the OS
+            crate::allocator::purge_caches();
         }
 
         if stopped.is_empty() && !clean {
@@ -1465,8 +1465,31 @@ impl ServiceOrchestrator {
         self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Exit)
             .await;
 
+        // Guard against stale exit events.
+        //
+        // Exit events arrive asynchronously. By the time we process one, the service
+        // may have already been:
+        //   - Stopped/Stopping: explicit `kepler stop` — don't restart
+        //   - Waiting: a new start cycle re-queued the service — don't interfere
+        //   - Exited/Failed/Killed/Skipped: already handled — don't restart again
+        //
+        // Only restart if the service is still in an actively-running state
+        // (Running, Healthy, Unhealthy, Starting) — these are the states where
+        // a process exit is expected to trigger the restart policy.
+        let current_state = handle.get_service_state(service_name).await;
+        let was_actively_running = current_state
+            .as_ref()
+            .is_some_and(|s| matches!(
+                s.status,
+                ServiceStatus::Running
+                | ServiceStatus::Healthy
+                | ServiceStatus::Unhealthy
+                | ServiceStatus::Starting
+            ));
+
         // Determine if we should restart
-        let should_restart = ctx.service_config.restart.should_restart_on_exit(exit_code);
+        let should_restart = was_actively_running
+            && ctx.service_config.restart.should_restart_on_exit(exit_code);
 
         if should_restart {
             // Emit Restart event with Failure reason
@@ -1570,14 +1593,17 @@ impl ServiceOrchestrator {
                 ).await;
             }
 
-            // Mark as killed (signal) or exited (any exit code)
-            let status = if signal.is_some() {
-                ServiceStatus::Killed
-            } else {
-                ServiceStatus::Exited
-            };
-            if let Err(e) = handle.set_service_status(service_name, status).await {
-                warn!("Failed to set {} to {:?}: {}", service_name, status, e);
+            // Only update status if the service was actively running.
+            // Don't override Stopped, Waiting, or other states set by stop/start cycles.
+            if was_actively_running {
+                let status = if signal.is_some() {
+                    ServiceStatus::Killed
+                } else {
+                    ServiceStatus::Exited
+                };
+                if let Err(e) = handle.set_service_status(service_name, status).await {
+                    warn!("Failed to set {} to {:?}: {}", service_name, status, e);
+                }
             }
         }
 
@@ -1617,10 +1643,54 @@ impl ServiceOrchestrator {
         })
     }
 
-    /// Start services level-by-level in parallel within each level.
-    ///
-    /// If `fail_fast` is true, returns `Err` on the first service failure.
     // --- Internal helpers ---
+
+    /// Check if a service needs starting.
+    ///
+    /// Returns false for:
+    /// - Already active services (Running, Healthy, Waiting, Starting, etc.)
+    /// - Completed one-shots: Exited/Failed/Killed where restart policy says don't restart
+    /// - Skipped services
+    ///
+    /// Returns true for:
+    /// - Stopped services (user explicitly stopped → always re-start on `kepler start`)
+    /// - Services whose restart policy says they should restart on their exit code
+    async fn service_needs_starting(
+        &self,
+        service_name: &str,
+        config: &KeplerConfig,
+        handle: &ConfigActorHandle,
+    ) -> bool {
+        let state = match handle.get_service_state(service_name).await {
+            Some(s) => s,
+            None => return false,
+        };
+
+        // Already active (Running, Healthy, Waiting, Starting, Stopping, etc.)
+        if state.status.is_active() {
+            return false;
+        }
+
+        // Skipped services are "done"
+        if state.status == ServiceStatus::Skipped {
+            return false;
+        }
+
+        // Stopped by user — always re-start on `kepler start`
+        if state.status == ServiceStatus::Stopped {
+            return true;
+        }
+
+        // Exited/Failed/Killed — check restart policy
+        if let Some(svc_config) = config.services.get(service_name) {
+            if !svc_config.restart.should_restart_on_exit(state.exit_code) {
+                // Restart policy says don't restart → service is "done"
+                return false;
+            }
+        }
+
+        true
+    }
 
     /// Run a service hook, forwarding the progress sender for event emission.
     async fn run_service_hook(
@@ -1938,23 +2008,26 @@ impl ServiceOrchestrator {
         self: &Arc<Self>,
         config_path: PathBuf,
         handle: ConfigActorHandle,
-    ) -> tokio::task::JoinHandle<()> {
+    ) {
         // Create an aggregate channel for all service events
         let (aggregate_tx, aggregate_rx) = mpsc::channel(1000);
 
-        // Spawn forwarders for each service
-        spawn_event_forwarders(&handle, aggregate_tx).await;
+        // Spawn forwarders for each service (returns tracked JoinHandles)
+        let forwarder_handles = spawn_event_forwarders(&handle, aggregate_tx).await;
 
         let event_handler = ServiceEventHandler::new(
             aggregate_rx,
             Arc::clone(self),
             config_path,
-            handle,
+            handle.clone(),
         );
 
-        tokio::spawn(async move {
+        let handler_handle = tokio::spawn(async move {
             event_handler.run().await;
-        })
+        });
+
+        // Store task handles in ConfigActor for cleanup tracking
+        handle.store_event_handler_tasks(handler_handle, forwarder_handles).await;
     }
 }
 

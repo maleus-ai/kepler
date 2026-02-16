@@ -35,6 +35,11 @@ base64 = "0.22"
 sysinfo = "0.37"
 tempfile = "3.10"
 
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemalloc-ctl = { version = "0.6", optional = true }
+tikv-jemalloc-sys = { version = "0.6", optional = true }
+
 [target.'cfg(unix)'.dependencies]
 kepler-unix = { path = "../kepler-unix" }
 libc = "0.2"
@@ -45,5 +50,12 @@ nix = { version = "0.31.1", features = [
     "process",
     "fs",
 ] }
+
+dhat = { version = "0.3", optional = true }
+
+[features]
+default = ["jemalloc"]
+jemalloc = ["tikv-jemallocator", "tikv-jemalloc-ctl", "tikv-jemalloc-sys"]
+dhat-heap = ["dhat"]
 
 [dev-dependencies]

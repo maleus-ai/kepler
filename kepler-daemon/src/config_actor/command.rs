@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use super::context::{HealthCheckUpdate, ServiceContext, TaskHandleType};
+use super::context::{DiagnosticCounts, HealthCheckUpdate, ServiceContext, TaskHandleType};
 use crate::config::{KeplerConfig, LogConfig, ServiceConfig, SysEnvPolicy};
 use crate::errors::Result;
 use crate::events::{ServiceEvent, ServiceEventReceiver};
@@ -248,6 +248,15 @@ pub enum ConfigCommand {
     },
     /// Mark event handler as spawned
     SetEventHandlerSpawned,
+    /// Store event handler and forwarder task handles for cleanup
+    StoreEventHandlerTasks {
+        handler: JoinHandle<()>,
+        forwarders: Vec<JoinHandle<()>>,
+    },
+    /// Get diagnostic counts for resource cleanup verification
+    GetDiagnosticCounts {
+        reply: oneshot::Sender<DiagnosticCounts>,
+    },
     /// Evaluate a runtime `if` condition using the Lua evaluator
     EvalIfCondition {
         condition: String,

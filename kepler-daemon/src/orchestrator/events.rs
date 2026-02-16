@@ -220,18 +220,20 @@ impl ServiceEventHandler {
     }
 }
 
-/// Spawn forwarders that receive events from service channels and forward them to the aggregator
+/// Spawn forwarders that receive events from service channels and forward them to the aggregator.
+/// Returns JoinHandles for all forwarder tasks so they can be tracked and aborted during cleanup.
 pub async fn spawn_event_forwarders(
     handle: &ConfigActorHandle,
     aggregate_tx: mpsc::Sender<TaggedEventMessage>,
-) {
+) -> Vec<tokio::task::JoinHandle<()>> {
     let receivers = handle.get_all_event_receivers().await;
+    let mut handles = Vec::with_capacity(receivers.len());
 
     for (service_name, mut rx) in receivers {
         let tx = aggregate_tx.clone();
         let name = service_name.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 let tagged = TaggedEventMessage {
                     service_name: name.clone(),
@@ -242,5 +244,8 @@ pub async fn spawn_event_forwarders(
                 }
             }
         });
+        handles.push(handle);
     }
+
+    handles
 }

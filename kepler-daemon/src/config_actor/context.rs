@@ -29,6 +29,16 @@ pub struct ServiceContext {
     pub working_dir: PathBuf,
 }
 
+/// Diagnostic counts for resource cleanup verification.
+/// Used by tests to assert that all resources are properly cleaned up.
+#[derive(Debug, Default)]
+pub struct DiagnosticCounts {
+    pub process_handles: usize,
+    pub health_checks: usize,
+    pub file_watchers: usize,
+    pub event_senders: usize,
+}
+
 /// Result from updating health check
 pub struct HealthCheckUpdate {
     pub previous_status: ServiceStatus,

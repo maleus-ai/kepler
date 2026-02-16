@@ -88,6 +88,7 @@ Options:
   --no-service      Skip service installation (systemd on Linux, launchd on macOS)
   --no-systemd      Alias for --no-service (backwards compatibility)
   --no-build        Skip cargo build (use existing target/release binaries)
+  --features LIST   Extra cargo features (comma-separated, e.g. "jemalloc,dhat-heap")
   --uninstall       Remove Kepler binaries and service
   -h, --help        Show this help
 EOF
@@ -97,6 +98,7 @@ EOF
 OPT_SERVICE="yes"
 OPT_UNINSTALL=false
 OPT_BUILD=true
+OPT_FEATURES=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -107,6 +109,10 @@ while [[ $# -gt 0 ]]; do
         --no-build)
             OPT_BUILD=false
             shift
+            ;;
+        --features)
+            OPT_FEATURES="$2"
+            shift 2
             ;;
         --uninstall)
             OPT_UNINSTALL=true
@@ -200,8 +206,15 @@ if $OPT_BUILD; then
         error "cargo not found. Install Rust via https://rustup.rs/"
         exit 1
     fi
-    info "Building release binaries"
-    cargo build --release --manifest-path "${SCRIPT_DIR}/Cargo.toml"
+    CARGO_ARGS=(build --release --manifest-path "${SCRIPT_DIR}/Cargo.toml")
+    if [[ -n "$OPT_FEATURES" ]]; then
+        # Features are scoped to kepler-daemon (where jemalloc/dhat-heap live)
+        CARGO_ARGS+=(--features "kepler-daemon/${OPT_FEATURES//,/,kepler-daemon/}")
+        info "Building release binaries (features: ${OPT_FEATURES})"
+    else
+        info "Building release binaries"
+    fi
+    cargo "${CARGO_ARGS[@]}"
 fi
 
 # Verify binaries exist
