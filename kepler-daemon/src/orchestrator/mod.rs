@@ -1229,34 +1229,34 @@ impl ServiceOrchestrator {
         }
     }
 
-    /// Recreate services for a config (re-bake config only, no start/stop)
+    /// Recreate services for a config: stop --clean, re-bake, then start.
     ///
-    /// This method only rebakes the config and persists the snapshot:
-    /// - Requires all services to be stopped (or config not loaded)
-    /// - Clears the config snapshot (forcing re-expansion)
-    /// - Unloads the config actor
-    /// - Re-loads the config with new sys_env
-    /// - Persists the new snapshot
-    /// - Does NOT start any services or run any hooks
+    /// This method performs a full recreate cycle:
+    /// 1. Stop all running services with cleanup
+    /// 2. Clear the config snapshot (forcing re-expansion)
+    /// 3. Unload the config actor
+    /// 4. Re-load the config with new sys_env
+    /// 5. Persist the new snapshot
+    /// 6. Start all services
     ///
     /// The `config_owner` parameter provides the UID/GID of the new CLI user.
     ///
     /// Use this when the config file has changed or you want to pick up
-    /// new environment variables without starting services.
+    /// new environment variables.
     pub async fn recreate_services(
         &self,
         config_path: &Path,
         sys_env: Option<HashMap<String, String>>,
         config_owner: Option<(u32, u32)>,
+        progress: Option<ProgressSender>,
     ) -> Result<String, OrchestratorError> {
-        info!("Recreating config for {:?} (rebake only)", config_path);
+        info!("Recreating config for {:?}", config_path);
 
-        // If config is loaded, check that all services are stopped
+        // Stop all running services with cleanup if config is loaded
         if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
             if !handle.all_services_stopped().await {
-                return Err(OrchestratorError::RecreateWhileRunning(
-                    config_path.display().to_string(),
-                ));
+                info!("Stopping all services before recreate for {:?}", config_path);
+                self.stop_services(config_path, None, true, None).await?;
             }
 
             // Clear snapshot to force re-expansion with new env
@@ -1271,7 +1271,7 @@ impl ServiceOrchestrator {
         // Re-load config with new sys_env (re-reads source, re-expands env vars)
         let handle = self
             .registry
-            .get_or_create(config_path.to_path_buf(), sys_env, config_owner)
+            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner)
             .await?;
 
         // Persist the rebaked config snapshot
@@ -1279,7 +1279,10 @@ impl ServiceOrchestrator {
             warn!("Failed to take config snapshot: {}", e);
         }
 
-        Ok("Config recreated successfully".to_string())
+        // Start all services
+        self.start_services(config_path, None, sys_env, config_owner, progress).await?;
+
+        Ok(String::new())
     }
 
 

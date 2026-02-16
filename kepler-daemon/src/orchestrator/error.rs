@@ -50,9 +50,6 @@ pub enum OrchestratorError {
     #[error("Startup cancelled for service {0}")]
     StartupCancelled(String),
 
-    #[error("Cannot recreate while services are running for {0}. Stop all services first.")]
-    RecreateWhileRunning(String),
-
     #[error(transparent)]
     DaemonError(#[from] crate::errors::DaemonError),
 }

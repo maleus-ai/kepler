@@ -317,10 +317,6 @@ async fn test_recreate_rebakes_config() {
         "First run should have original value"
     );
 
-    // Stop services before recreate
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     // Change the environment variable
     {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -332,17 +328,11 @@ async fn test_recreate_rebakes_config() {
     // Clear the marker file to see new output
     std::fs::remove_file(&env_output_path).ok();
 
-    // Recreate config (only rebakes, does not start services)
+    // Recreate config (stops services, rebakes with new env, starts again)
     let mut new_sys_env: HashMap<String, String> = std::env::vars().collect();
     new_sys_env.insert(env_var_name.clone(), "changed_value".to_string());
     orchestrator
-        .recreate_services(&config_path, Some(new_sys_env.clone()), None)
-        .await
-        .unwrap();
-
-    // Start services again with new baked config
-    orchestrator
-        .start_services(&config_path, None, Some(new_sys_env), None, None)
+        .recreate_services(&config_path, Some(new_sys_env.clone()), None, None)
         .await
         .unwrap();
 
@@ -422,21 +412,12 @@ async fn test_recreate_runs_pre_start_hooks() {
     assert_eq!(init_count_1, 1, "pre_start should fire once on first start");
 
     // Stop services before recreate
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Recreate config (only rebakes, clears state)
-    orchestrator
-        .recreate_services(&config_path, Some(sys_env.clone()), None)
-        .await
-        .unwrap();
-
     // Clear started marker to detect next start
     std::fs::remove_file(&started_path).ok();
 
-    // Start services again — pre_start should fire because state was cleared by recreate
+    // Recreate config (stops services, rebakes/clears state, starts again)
     orchestrator
-        .start_services(&config_path, None, Some(sys_env), None, None)
+        .recreate_services(&config_path, Some(sys_env.clone()), None, None)
         .await
         .unwrap();
 
@@ -757,9 +738,9 @@ async fn test_stop_respects_reverse_dependency_order() {
 // Recreate Order and Hooks Tests
 // ============================================================================
 
-/// recreate rejects while services are running, succeeds after stop
+/// recreate stops running services, rebakes config, and starts them again
 #[tokio::test]
-async fn test_recreate_respects_dependency_order() {
+async fn test_recreate_stops_and_restarts_services() {
     let temp_dir = TempDir::new().unwrap();
 
     // frontend depends on backend
@@ -793,30 +774,26 @@ async fn test_recreate_respects_dependency_order() {
     // Wait for services to start
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Recreate should fail while services are running
+    // Recreate should succeed even while services are running (stops them first)
     let result = orchestrator
-        .recreate_services(&config_path, Some(sys_env.clone()), None)
+        .recreate_services(&config_path, Some(sys_env.clone()), None, None)
         .await;
-    assert!(result.is_err(), "Recreate should fail while services are running");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("Cannot recreate while services are running"),
-        "Error should mention running services: {}",
-        err_msg
-    );
+    assert!(result.is_ok(), "Recreate should succeed: {:?}", result.err());
 
-    // Stop all services
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    // Wait for services to come back up
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Recreate should succeed after stop
-    let result = orchestrator
-        .recreate_services(&config_path, Some(sys_env), None)
-        .await;
-    assert!(result.is_ok(), "Recreate should succeed after stopping services: {:?}", result.err());
+    // Services should be running again after recreate
+    let handle = orchestrator.registry().get(&config_path).unwrap();
+    let running = handle.get_running_services().await;
+    assert!(running.contains(&"backend".to_string()), "backend should be running after recreate");
+    assert!(running.contains(&"frontend".to_string()), "frontend should be running after recreate");
+
+    // Cleanup
+    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
 }
 
-/// recreate does not fire any hooks; pre_start fires on next start
+/// recreate fires stop hooks, then start hooks on the new config
 #[tokio::test]
 async fn test_recreate_calls_all_lifecycle_hooks() {
     let temp_dir = TempDir::new().unwrap();
@@ -861,49 +838,31 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     assert!(content.contains("PRE_START"), "First start should call PRE_START");
     assert!(content.contains("POST_START"), "First start should call POST_START");
 
-    // Stop services
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     // Clear the hooks file before recreate
     std::fs::remove_file(&hooks_path).ok();
 
-    // Recreate config (only rebakes, no hooks should fire)
+    // Recreate config (stops services, rebakes, starts again — all hooks fire)
     orchestrator
-        .recreate_services(&config_path, Some(sys_env.clone()), None)
+        .recreate_services(&config_path, Some(sys_env.clone()), None, None)
         .await
         .unwrap();
 
-    // No hooks should have been called during recreate
-    let content = std::fs::read_to_string(&hooks_path).unwrap_or_default();
-    assert!(
-        content.is_empty(),
-        "No hooks should fire during recreate. Content: {:?}",
-        content
-    );
-
-    // Start services again — pre_start should fire because state was cleared
-    orchestrator
-        .start_services(&config_path, None, Some(sys_env), None, None)
-        .await
-        .unwrap();
-
-    // Wait for service to start
+    // Wait for service to come back up
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Check hooks fired on the subsequent start
+    // Check that lifecycle hooks fired during recreate
     let content = std::fs::read_to_string(&hooks_path).unwrap_or_default();
     let lines: Vec<&str> = content.lines().collect();
 
-    // pre_start should fire again (state was cleared by recreate)
+    // pre_start + post_start should fire for the new start
     assert!(
         lines.iter().any(|l| *l == "PRE_START"),
-        "pre_start should fire on start after recreate. Lines: {:?}",
+        "pre_start should fire during recreate. Lines: {:?}",
         lines
     );
     assert!(
         lines.iter().any(|l| *l == "POST_START"),
-        "post_start should fire on start after recreate. Lines: {:?}",
+        "post_start should fire during recreate. Lines: {:?}",
         lines
     );
 
@@ -911,9 +870,9 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
 }
 
-/// recreate fails while services are running
+/// recreate succeeds while services are running (stops them first)
 #[tokio::test]
-async fn test_recreate_fails_while_services_running() {
+async fn test_recreate_stops_running_services_automatically() {
     let temp_dir = TempDir::new().unwrap();
 
     let config = TestConfigBuilder::new()
@@ -940,17 +899,19 @@ async fn test_recreate_fails_while_services_running() {
     // Wait for service to start
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Attempt recreate while running — should fail
+    // Recreate while running — should succeed (stops services automatically)
     let result = orchestrator
-        .recreate_services(&config_path, Some(sys_env), None)
+        .recreate_services(&config_path, Some(sys_env), None, None)
         .await;
-    assert!(result.is_err(), "Recreate should fail while services are running");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("Cannot recreate while services are running"),
-        "Error should indicate services are running: {}",
-        err_msg
-    );
+    assert!(result.is_ok(), "Recreate should succeed: {:?}", result.err());
+
+    // Wait for service to come back up
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Service should be running again
+    let handle = orchestrator.registry().get(&config_path).unwrap();
+    let running = handle.get_running_services().await;
+    assert!(running.contains(&"test".to_string()), "test should be running after recreate");
 
     // Cleanup
     orchestrator.stop_services(&config_path, None, false, None).await.unwrap();

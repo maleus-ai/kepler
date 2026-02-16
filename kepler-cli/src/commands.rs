@@ -48,7 +48,7 @@ pub enum Commands {
         #[arg(long, requires = "wait")]
         timeout: Option<String>,
     },
-    /// Recreate config (re-bake config snapshot, no start/stop)
+    /// Recreate config (stop, re-bake config snapshot, start)
     Recreate,
     /// View service logs
     Logs {

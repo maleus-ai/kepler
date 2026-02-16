@@ -87,7 +87,7 @@ pub enum Request {
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
     },
-    /// Recreate config - re-bake config snapshot (no start/stop)
+    /// Recreate config - stop, re-bake config snapshot, start
     Recreate {
         /// Path to the config file
         config_path: PathBuf,

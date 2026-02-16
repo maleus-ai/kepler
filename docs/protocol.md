@@ -68,7 +68,7 @@ ServerMessage::Event {
 | `Start` | `config_path`, `service?`, `sys_env?` | Start service(s) for a config |
 | `Stop` | `config_path`, `service?`, `clean`, `signal?` | Stop service(s) with optional signal |
 | `Restart` | `config_path`, `services[]`, `sys_env?` | Restart service(s) |
-| `Recreate` | `config_path`, `sys_env?` | Re-bake config snapshot (no start/stop) |
+| `Recreate` | `config_path`, `sys_env?` | Stop, re-bake config snapshot, start |
 | `Status` | `config_path?` | Get service status (None = all configs) |
 | `Logs` | `config_path`, `service?`, `follow`, `lines`, `max_bytes?`, `mode`, `no_hooks` | Get logs (one-shot or follow) |
 | `LogsChunk` | `config_path`, `service?`, `offset`, `limit`, `no_hooks` | Get log entries with offset/limit pagination |

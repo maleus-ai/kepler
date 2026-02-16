@@ -18,7 +18,7 @@ Complete reference for Kepler's YAML configuration format.
 
 Kepler uses YAML configuration files (default: `kepler.yaml` or `kepler.yml`). Configs are **baked** on first use -- environment variables are expanded, Lua scripts are evaluated, and the result is stored as an immutable snapshot.
 
-To apply changes after baking, use `kepler recreate` (requires all services to be stopped).
+To apply changes after baking, use `kepler recreate` (stops services, re-bakes, starts again).
 
 For a ready-to-run example, see [`example.kepler.yaml`](../example.kepler.yaml).
 
@@ -246,17 +246,16 @@ Once a config is baked (on first `kepler start`), the snapshot is immutable. Ser
 To apply config changes:
 
 ```bash
-kepler stop        # Stop all services
-kepler recreate    # Re-bake the config
-kepler start       # Start with new config
+kepler recreate
 ```
 
 The `recreate` command:
-- Requires all services to be stopped
+- Stops all running services with cleanup
 - Re-reads the original config file
 - Re-expands environment variables
 - Re-evaluates Lua scripts
 - Creates a new baked snapshot
+- Starts all services again
 
 ---
 
