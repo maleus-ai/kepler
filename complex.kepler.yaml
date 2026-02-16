@@ -1,7 +1,7 @@
 # complex.kepler.yaml — Stress-test config exercising every Kepler feature
 #
-# 50 services across 8 tiers: Infrastructure → Setup → Core → Business →
-# Workers → Monitoring → Deferred/Reactive
+# 52 services across 8 tiers: Infrastructure → Setup → Core → Business →
+# Workers → Monitoring → Deferred/Reactive → Optional/Conditional
 #
 # All commands use sh -c with basic unix tools only (echo, sleep, touch, test, date, exit).
 # No real databases, servers, or network services are needed.
@@ -45,6 +45,8 @@ kepler:
     retention:
       on_stop: clear
       on_start: clear
+      on_restart: clear
+      on_exit: clear
 
   hooks:
     pre_start:
@@ -81,6 +83,8 @@ services:
         "echo 'PostgreSQL starting'; touch /tmp/pg_ready; while true; do sleep 5; done",
       ]
     restart: always
+    user: root
+    groups: ["kepler"]
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/pg_ready"]
       interval: 2s
@@ -111,6 +115,9 @@ services:
         run: echo "postgres healthcheck passed"
       post_healthcheck_fail:
         run: echo "postgres healthcheck FAILED"
+      pre_cleanup:
+        run: echo "postgres pre_cleanup — archiving WAL files"
+        user: root
 
   # 2. redis — With sys_env override and hook environment
   redis:
@@ -136,6 +143,7 @@ services:
         run: echo "redis post_start — server ready"
         environment:
           - REDIS_MODE=standalone
+        env_file: .env
 
   # 3. rabbitmq — Lua environment, service-level wait
   rabbitmq:
@@ -171,7 +179,7 @@ services:
       - MINIO_PORT=${MINIO_PORT:-9000}
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/minio_ready"]
-      interval: 2s
+      interval: 1500ms
       timeout: 3s
       retries: 3
       start_period: 2s
@@ -198,6 +206,7 @@ services:
       pre_start:
         run: echo "consul pre_start — checking bind address"
         working_dir: /tmp
+        groups: ["kepler"]
 
   # ═══════════════════════════════════════════════════════════════════════════
   # TIER 2: One-Shot Setup (5 services, service_completed_successfully / service_healthy deps)
@@ -361,7 +370,7 @@ services:
     depends_on:
       - auth-service:
           condition: service_healthy
-          timeout: 120s
+          timeout: 2m
       - config-service:
           condition: service_healthy
     healthcheck:
@@ -943,8 +952,9 @@ services:
       retries: 3
       start_period: 2s
 
-  # 41. uptime-checker — Lua global table usage
+  # 41. uptime-checker — Lua global table usage, conditional startup
   uptime-checker:
+    if: "true"
     command:
       [
         "sh",
@@ -1062,7 +1072,7 @@ services:
       - health-monitor:
           condition: service_unhealthy
 
-  # 48. cascade-handler — Deferred chain (depends on deferred service completing)
+  # 48. cascade-handler — Deferred chain (depends on deferred service completing), allow_skipped
   cascade-handler:
     command:
       [
@@ -1074,6 +1084,7 @@ services:
     depends_on:
       - postgres-failover:
           condition: service_completed_successfully
+          allow_skipped: true
 
   # 49. emergency-shutdown — 3x service_failed fan-in
   emergency-shutdown:
@@ -1111,10 +1122,51 @@ services:
     depends_on:
       - emergency-shutdown:
           condition: service_completed_successfully
-          timeout: 300s
+          timeout: 5m
     environment:
       - REPORT_DIR=${REPORT_DIR:-/tmp/reports}
       - INCIDENT_ID=${INCIDENT_ID:-unknown}
     hooks:
       post_exit:
         command: ["sh", "-c", "echo 'post-mortem post_exit — archiving report'"]
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 8: Optional/Conditional (2 services)
+  # Demonstrates conditional startup (if), allow_skipped, skip cascading
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 51. profiler — Conditional service, only starts when ENABLE_PROFILING is set
+  profiler:
+    if: "ctx.env.ENABLE_PROFILING ~= nil"
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Profiler starting'; touch /tmp/profiler_ready; while true; do sleep 5; done",
+      ]
+    restart: on-failure
+    depends_on:
+      - gateway:
+          condition: service_started
+    healthcheck:
+      test: ["sh", "-c", "test -f /tmp/profiler_ready"]
+      interval: 3s
+      timeout: 5s
+      retries: 3
+      start_period: 2s
+
+  # 52. profiler-dashboard — Depends on profiler with allow_skipped (starts even if profiler is skipped)
+  profiler-dashboard:
+    command:
+      [
+        "sh",
+        "-c",
+        "echo 'Profiler dashboard starting'; while true; do sleep 5; done",
+      ]
+    restart: on-failure
+    depends_on:
+      - profiler:
+          condition: service_healthy
+          allow_skipped: true
+      - dashboard:
+          condition: service_started
