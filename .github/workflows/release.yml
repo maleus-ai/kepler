@@ -171,7 +171,7 @@ jobs:
       - name: Create release branch
         run: |
           git checkout -b "${{ github.ref_name }}"
-          git push origin "${{ github.ref_name }}"
+          git push origin "refs/heads/${{ github.ref_name }}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
