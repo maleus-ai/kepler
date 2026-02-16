@@ -154,6 +154,14 @@ jobs:
     if: github.ref_type == 'tag'
     runs-on: blacksmith-4vcpu-ubuntu-2204
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create release branch
+        run: |
+          git checkout -b "${{ github.ref_name }}"
+          git push origin "refs/heads/${{ github.ref_name }}"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -162,14 +170,6 @@ jobs:
 
       - name: List tarballs
         run: ls -lh release/
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Create release branch
-        run: |
-          git checkout -b "${{ github.ref_name }}"
-          git push origin "refs/heads/${{ github.ref_name }}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
