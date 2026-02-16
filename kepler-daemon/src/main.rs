@@ -584,6 +584,7 @@ async fn handle_request(
             }
 
             match result {
+                Ok(msg) if msg.is_empty() => Response::Ok { message: None, data: None },
                 Ok(msg) => Response::ok_with_message(msg),
                 Err(e) => Response::error(e.to_string()),
             }

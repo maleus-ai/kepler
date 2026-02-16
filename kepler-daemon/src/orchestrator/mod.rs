@@ -1225,7 +1225,7 @@ impl ServiceOrchestrator {
         if restarted.is_empty() {
             Ok("No services were restarted".to_string())
         } else {
-            Ok(format!("Restarted services: {}", restarted.join(", ")))
+            Ok(String::new())
         }
     }
 
