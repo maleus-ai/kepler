@@ -230,8 +230,8 @@ async fn run() -> Result<()> {
         }
 
         Commands::Recreate => {
-            let (_progress_rx, response_future) = client.recreate(canonical_path.clone(), Some(sys_env))?;
-            let response = response_future.await?;
+            let (progress_rx, response_future) = client.recreate(canonical_path.clone(), Some(sys_env))?;
+            let response = run_with_progress(progress_rx, response_future).await?;
             handle_response(response);
         }
 

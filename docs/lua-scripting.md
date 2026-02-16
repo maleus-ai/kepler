@@ -38,12 +38,10 @@ Scripts do **not** re-run on:
 - Daemon restart
 - Service stop/start
 
-To re-evaluate Lua scripts, stop all services and use `kepler recreate`:
+To re-evaluate Lua scripts, use `kepler recreate`:
 
 ```bash
-kepler stop
-kepler recreate    # Re-bakes config, re-evaluates Lua
-kepler start
+kepler recreate    # Stops services, re-bakes config, re-evaluates Lua, starts services
 ```
 
 ---

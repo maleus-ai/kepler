@@ -600,9 +600,10 @@ async fn handle_request(
             };
 
             match orchestrator
-                .recreate_services(&config_path, sys_env, Some((peer.uid, peer.gid)))
+                .recreate_services(&config_path, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()))
                 .await
             {
+                Ok(msg) if msg.is_empty() => Response::Ok { message: None, data: None },
                 Ok(msg) => Response::ok_with_message(msg),
                 Err(e) => Response::error(e.to_string()),
             }

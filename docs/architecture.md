@@ -142,29 +142,28 @@ See [Configuration](configuration.md) for the user-facing config reference, and 
 
 ### CLI Recreate Command
 
-The `recreate` command forces a full re-bake, discarding the existing snapshot. It only rebakes the config — it does **not** start or stop any services. All services must be stopped (or the config must not be loaded) before running `recreate`.
+The `recreate` command performs a full stop, re-bake, and start cycle. It stops all running services with cleanup, discards the existing snapshot, re-bakes the config from source, and starts all services again.
 
 ```mermaid
 flowchart TD
     A[CLI: recreate] --> B[Daemon]
-    B --> C{Services stopped?}
-    C -->|No| X[Error: stop services first]
-    C -->|Yes| D[Delete existing snapshot]
-    D --> E[Unload config actor]
-    E --> F[Copy config to state dir]
-    F --> G[Copy env_files to state dir]
-    G --> H[Apply shell expansion]
-    H --> I[Evaluate Lua scripts]
-    I --> J[Bake into new snapshot]
-    J --> K[Done - run 'kepler start' to use new config]
+    B --> C{Services running?}
+    C -->|Yes| D[Stop all services with cleanup]
+    C -->|No| E[Delete existing snapshot]
+    D --> E
+    E --> F[Unload config actor]
+    F --> G[Copy config to state dir]
+    G --> H[Copy env_files to state dir]
+    H --> I[Apply shell expansion]
+    I --> J[Evaluate Lua scripts]
+    J --> K[Bake into new snapshot]
+    K --> L[Start all services]
 ```
 
 Use `recreate` when:
 - The original config file has changed
 - Environment variables have changed
 - env_files have been modified
-
-Typical workflow: `kepler stop` → `kepler recreate` → `kepler start`
 
 ### CLI PS Command
 

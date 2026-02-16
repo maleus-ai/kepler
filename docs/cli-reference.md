@@ -130,19 +130,13 @@ kepler restart backend worker            # Restart specific services
 
 ### `kepler recreate`
 
-Re-bake the config snapshot. This re-evaluates environment variables and Lua scripts. Does **not** start or stop services -- all services must be stopped first.
+Stop all services, re-bake the config snapshot, and start all services again. This re-evaluates environment variables and Lua scripts with the latest config file.
 
 ```bash
 kepler recreate
 ```
 
-Typical workflow:
-
-```bash
-kepler stop
-kepler recreate
-kepler start
-```
+This is equivalent to running `kepler stop --clean` followed by `kepler start`, but also re-bakes the config snapshot in between.
 
 See [Configuration](configuration.md#config-immutability) for details on the baking process.
 

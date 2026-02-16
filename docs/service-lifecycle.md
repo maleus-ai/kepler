@@ -168,15 +168,13 @@ The `--clean` flag runs the `pre_cleanup` hook after services are stopped. See [
 
 ## Recreate
 
-The `recreate` command re-bakes the config snapshot without starting or stopping services:
+The `recreate` command stops all running services, re-bakes the config snapshot, and starts all services again:
 
 ```bash
-kepler stop        # Must stop first
-kepler recreate    # Re-bake config
-kepler start       # Start with new config
+kepler recreate
 ```
 
-This is necessary when:
+This is equivalent to `kepler stop --clean` + `kepler start`, but also re-bakes the config snapshot in between. Use it when:
 - The original config file has changed
 - Environment variables have changed
 - `.env` files have been modified
