@@ -157,13 +157,11 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: release
+          merge-multiple: true
 
-      - name: Collect tarballs
-        run: |
-          mkdir -p release
-          find artifacts -type f -name '*.tar.gz' -exec mv {} release/ \;
-          ls -lh release/
+      - name: List tarballs
+        run: ls -lh release/
 
       - name: Checkout
         uses: actions/checkout@v4
