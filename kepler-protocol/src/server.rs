@@ -280,7 +280,9 @@ where
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 debug!("Client disconnected (EOF)");
                 drop(write_tx);
-                let _ = writer_task.await;
+                // Abort the writer task so write_rx is dropped immediately.
+                // This unblocks any handler task waiting on progress.closed().
+                writer_task.abort();
                 return Ok(());
             }
             return Err(ServerError::Receive(e));

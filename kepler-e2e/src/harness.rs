@@ -83,6 +83,8 @@ pub struct E2eHarness {
     daemon_bin: PathBuf,
     /// Running daemon process (if any)
     daemon_process: Option<Child>,
+    /// Background tasks draining daemon stdout/stderr to prevent pipe deadlocks
+    _drain_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl E2eHarness {
@@ -97,6 +99,7 @@ impl E2eHarness {
             kepler_bin,
             daemon_bin,
             daemon_process: None,
+            _drain_tasks: Vec::new(),
         })
     }
 
@@ -173,11 +176,30 @@ impl E2eHarness {
             return Ok(()); // Already running
         }
 
-        let child = Command::new(&self.daemon_bin)
+        let mut child = Command::new(&self.daemon_bin)
             .env("KEPLER_DAEMON_PATH", self.temp_dir.path())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+
+        // Drain stdout/stderr in background to prevent pipe buffer deadlocks.
+        // Without this, the daemon blocks once the pipe buffer fills (~64KB on Linux).
+        if let Some(stdout) = child.stdout.take() {
+            self._drain_tasks.push(tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut stdout = stdout;
+                let mut buf = [0u8; 4096];
+                while stdout.read(&mut buf).await.unwrap_or(0) > 0 {}
+            }));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            self._drain_tasks.push(tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut stderr = stderr;
+                let mut buf = [0u8; 4096];
+                while stderr.read(&mut buf).await.unwrap_or(0) > 0 {}
+            }));
+        }
 
         self.daemon_process = Some(child);
 
@@ -219,10 +241,28 @@ impl E2eHarness {
             }
         }
 
-        let child = cmd
+        let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+
+        // Drain stdout/stderr in background (same as start_daemon)
+        if let Some(stdout) = child.stdout.take() {
+            self._drain_tasks.push(tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut stdout = stdout;
+                let mut buf = [0u8; 4096];
+                while stdout.read(&mut buf).await.unwrap_or(0) > 0 {}
+            }));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            self._drain_tasks.push(tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut stderr = stderr;
+                let mut buf = [0u8; 4096];
+                while stderr.read(&mut buf).await.unwrap_or(0) > 0 {}
+            }));
+        }
 
         self.daemon_process = Some(child);
 
@@ -613,6 +653,38 @@ impl E2eHarness {
     ) -> E2eResult<CommandOutput> {
         // Note: timestamps come from the logs config (timestamp: true), not a CLI flag
         self.get_logs(config_path, service, lines).await
+    }
+
+    /// Get the daemon process PID (if running).
+    pub fn daemon_pid(&self) -> Option<u32> {
+        self.daemon_process.as_ref().and_then(|c| c.id())
+    }
+
+    /// Get the daemon process RSS (resident set size) in kilobytes.
+    /// Uses /proc/{pid}/status on Linux, `ps` on macOS.
+    pub fn daemon_rss_kb(&self) -> Option<u64> {
+        let pid = self.daemon_pid()?;
+
+        // Try /proc (Linux)
+        if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", pid)) {
+            for line in status.lines() {
+                if line.starts_with("VmRSS:") {
+                    // Format: "VmRSS:    12345 kB"
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        return parts[1].parse().ok();
+                    }
+                }
+            }
+        }
+
+        // Fallback: use ps (macOS / other Unix)
+        let output = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let rss_str = String::from_utf8_lossy(&output.stdout);
+        rss_str.trim().parse().ok()
     }
 
     /// Extract PID from ps output for a service.

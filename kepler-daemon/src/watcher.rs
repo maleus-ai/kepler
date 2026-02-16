@@ -183,11 +183,14 @@ impl FileWatcherActor {
         // Create a channel for receiving file events in async context
         let (async_event_tx, mut async_event_rx) = mpsc::channel::<Vec<notify_debouncer_mini::DebouncedEvent>>(32);
 
-        // Spawn blocking task to receive from std channel and forward to tokio channel
+        // Spawn blocking task to receive from std channel and forward to tokio channel.
+        // Uses recv_timeout so the thread can detect when the async side is cancelled
+        // (abort() on the JoinHandle drops the async_event_rx, but spawn_blocking
+        // threads cannot be cancelled — they must exit on their own).
         let working_dir = self.working_dir.clone();
         tokio::task::spawn_blocking(move || {
             loop {
-                match watcher_rx.recv() {
+                match watcher_rx.recv_timeout(Duration::from_secs(1)) {
                     Ok(Ok(events)) => {
                         if async_event_tx.blocking_send(events).is_err() {
                             debug!("Async event channel closed, stopping file watcher");
@@ -197,7 +200,14 @@ impl FileWatcherActor {
                     Ok(Err(error)) => {
                         warn!("File watcher error: {:?}", error);
                     }
-                    Err(_) => {
+                    Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                        // Check if the async side is still alive
+                        if async_event_tx.is_closed() {
+                            debug!("Async receiver dropped, stopping file watcher");
+                            break;
+                        }
+                    }
+                    Err(std_mpsc::RecvTimeoutError::Disconnected) => {
                         debug!("Watcher channel closed");
                         break;
                     }

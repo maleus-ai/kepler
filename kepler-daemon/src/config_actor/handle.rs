@@ -20,7 +20,7 @@ use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
 
 use super::command::ConfigCommand;
-use super::context::{ConfigEvent, HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
+use super::context::{ConfigEvent, DiagnosticCounts, HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
 
 /// Handle for sending commands to a config actor.
 /// This is cheap to clone (just clones the channel sender and path).
@@ -75,7 +75,10 @@ impl ConfigActorHandle {
     /// Returns an unbounded receiver that is guaranteed to receive all events.
     pub fn subscribe_state_changes(&self) -> mpsc::UnboundedReceiver<ConfigEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).push(tx);
+        let mut subs = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+        // Prune dead subscribers before adding a new one
+        subs.retain(|tx| !tx.is_closed());
+        subs.push(tx);
         rx
     }
 
@@ -83,11 +86,48 @@ impl ConfigActorHandle {
     /// Only notified when the named service's status changes.
     pub fn watch_dep(&self, dep_name: &str) -> mpsc::UnboundedReceiver<ServiceStatusChange> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.dep_watchers.lock().unwrap_or_else(|e| e.into_inner())
-            .entry(dep_name.to_string())
-            .or_default()
-            .push(tx);
+        let mut watchers = self.dep_watchers.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = watchers.entry(dep_name.to_string()).or_default();
+        // Prune dead watchers before adding new one (prevents leak)
+        entry.retain(|tx| !tx.is_closed());
+        entry.push(tx);
         rx
+    }
+
+    /// Get current subscriber count (for diagnostics)
+    pub fn subscriber_count(&self) -> usize {
+        self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Get total dep watcher count across all services (for diagnostics)
+    pub fn dep_watcher_count(&self) -> usize {
+        self.dep_watchers.lock().unwrap_or_else(|e| e.into_inner())
+            .values().map(|v| v.len()).sum()
+    }
+
+    /// Get per-service dep watcher counts (for diagnostics)
+    pub fn dep_watcher_details(&self) -> String {
+        let watchers = self.dep_watchers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut parts: Vec<String> = watchers.iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| format!("{}:{}", k, v.len()))
+            .collect();
+        parts.sort();
+        parts.join(",")
+    }
+
+    /// Get diagnostic counts for resource cleanup verification.
+    pub async fn diagnostic_counts(&self) -> DiagnosticCounts {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ConfigCommand::GetDiagnosticCounts { reply: reply_tx })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetDiagnosticCounts");
+        }
+        reply_rx.await.unwrap_or_default()
     }
 
     // === Query Methods ===
@@ -886,6 +926,17 @@ impl ConfigActorHandle {
     pub async fn set_event_handler_spawned(&self) {
         if self.tx.send(ConfigCommand::SetEventHandlerSpawned).await.is_err() {
             warn!("Config actor closed, cannot send SetEventHandlerSpawned");
+        }
+    }
+
+    /// Store event handler and forwarder task handles for cleanup tracking
+    pub async fn store_event_handler_tasks(
+        &self,
+        handler: tokio::task::JoinHandle<()>,
+        forwarders: Vec<tokio::task::JoinHandle<()>>,
+    ) {
+        if self.tx.send(ConfigCommand::StoreEventHandlerTasks { handler, forwarders }).await.is_err() {
+            warn!("Config actor closed, cannot send StoreEventHandlerTasks");
         }
     }
 

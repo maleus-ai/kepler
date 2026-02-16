@@ -50,16 +50,16 @@ jobs:
           add() { TARGETS=$(echo "$TARGETS" | jq -c ". + [$1]"); }
 
           if [[ "${{ github.event_name }}" == "push" || "${{ inputs.linux-gnu-x86_64 }}" == "true" ]]; then
-            add '{"target":"x86_64-unknown-linux-gnu","runner":"blacksmith-4vcpu-ubuntu-2204","packages":"pkg-config g++","musl-toolchain":"","env":{}}'
+            add '{"target":"x86_64-unknown-linux-gnu","runner":"blacksmith-4vcpu-ubuntu-2204","packages":"pkg-config g++ make","musl-toolchain":"","env":{}}'
           fi
           if [[ "${{ github.event_name }}" == "push" || "${{ inputs.linux-gnu-aarch64 }}" == "true" ]]; then
-            add '{"target":"aarch64-unknown-linux-gnu","runner":"blacksmith-4vcpu-ubuntu-2204-arm","packages":"pkg-config g++","musl-toolchain":"","env":{}}'
+            add '{"target":"aarch64-unknown-linux-gnu","runner":"blacksmith-4vcpu-ubuntu-2204-arm","packages":"pkg-config g++ make","musl-toolchain":"","env":{}}'
           fi
           if [[ "${{ github.event_name }}" == "push" || "${{ inputs.linux-musl-x86_64 }}" == "true" ]]; then
-            add '{"target":"x86_64-unknown-linux-musl","runner":"blacksmith-4vcpu-ubuntu-2204","packages":"pkg-config","musl-toolchain":"x86_64-linux-musl-cross","env":{"CC_x86_64_unknown_linux_musl":"/opt/musl-cross/bin/x86_64-linux-musl-gcc","CXX_x86_64_unknown_linux_musl":"/opt/musl-cross/bin/x86_64-linux-musl-g++","CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER":"/opt/musl-cross/bin/x86_64-linux-musl-gcc"}}'
+            add '{"target":"x86_64-unknown-linux-musl","runner":"blacksmith-4vcpu-ubuntu-2204","packages":"pkg-config make","musl-toolchain":"x86_64-linux-musl-cross","env":{"CC_x86_64_unknown_linux_musl":"/opt/musl-cross/bin/x86_64-linux-musl-gcc","CXX_x86_64_unknown_linux_musl":"/opt/musl-cross/bin/x86_64-linux-musl-g++","CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER":"/opt/musl-cross/bin/x86_64-linux-musl-gcc"}}'
           fi
           if [[ "${{ github.event_name }}" == "push" || "${{ inputs.linux-musl-aarch64 }}" == "true" ]]; then
-            add '{"target":"aarch64-unknown-linux-musl","runner":"blacksmith-4vcpu-ubuntu-2204","packages":"pkg-config","musl-toolchain":"aarch64-linux-musl-cross","env":{"CC_aarch64_unknown_linux_musl":"/opt/musl-cross/bin/aarch64-linux-musl-gcc","CXX_aarch64_unknown_linux_musl":"/opt/musl-cross/bin/aarch64-linux-musl-g++","CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER":"/opt/musl-cross/bin/aarch64-linux-musl-gcc"}}'
+            add '{"target":"aarch64-unknown-linux-musl","runner":"blacksmith-4vcpu-ubuntu-2204","packages":"pkg-config make","musl-toolchain":"aarch64-linux-musl-cross","env":{"CC_aarch64_unknown_linux_musl":"/opt/musl-cross/bin/aarch64-linux-musl-gcc","CXX_aarch64_unknown_linux_musl":"/opt/musl-cross/bin/aarch64-linux-musl-g++","CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER":"/opt/musl-cross/bin/aarch64-linux-musl-gcc"}}'
           fi
           if [[ "${{ github.event_name }}" == "push" || "${{ inputs.macos-x86_64 }}" == "true" ]]; then
             add '{"target":"x86_64-apple-darwin","runner":"macos-15-intel","packages":"","musl-toolchain":"","env":{}}'

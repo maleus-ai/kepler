@@ -1,0 +1,86 @@
+# Minimal 20-service config for memory leak bisection
+# NO Lua, NO hooks, NO healthchecks, NO limits, NO complex deps
+# Just 20 plain services running sleep 300
+# If this leaks, the issue is in the protocol/server layer.
+# If it doesn't, the issue is in Lua/hooks/healthchecks/etc.
+
+services:
+  svc-01:
+    command: ["sh", "-c", "echo svc-01 starting; exec sleep 300"]
+    restart: always
+
+  svc-02:
+    command: ["sh", "-c", "echo svc-02 starting; exec sleep 300"]
+    restart: always
+
+  svc-03:
+    command: ["sh", "-c", "echo svc-03 starting; exec sleep 300"]
+    restart: always
+
+  svc-04:
+    command: ["sh", "-c", "echo svc-04 starting; exec sleep 300"]
+    restart: always
+
+  svc-05:
+    command: ["sh", "-c", "echo svc-05 starting; exec sleep 300"]
+    restart: always
+
+  svc-06:
+    command: ["sh", "-c", "echo svc-06 starting; exec sleep 300"]
+    restart: always
+
+  svc-07:
+    command: ["sh", "-c", "echo svc-07 starting; exec sleep 300"]
+    restart: always
+
+  svc-08:
+    command: ["sh", "-c", "echo svc-08 starting; exec sleep 300"]
+    restart: always
+
+  svc-09:
+    command: ["sh", "-c", "echo svc-09 starting; exec sleep 300"]
+    restart: always
+
+  svc-10:
+    command: ["sh", "-c", "echo svc-10 starting; exec sleep 300"]
+    restart: always
+
+  svc-11:
+    command: ["sh", "-c", "echo svc-11 starting; exec sleep 300"]
+    restart: always
+
+  svc-12:
+    command: ["sh", "-c", "echo svc-12 starting; exec sleep 300"]
+    restart: always
+
+  svc-13:
+    command: ["sh", "-c", "echo svc-13 starting; exec sleep 300"]
+    restart: always
+
+  svc-14:
+    command: ["sh", "-c", "echo svc-14 starting; exec sleep 300"]
+    restart: always
+
+  svc-15:
+    command: ["sh", "-c", "echo svc-15 starting; exec sleep 300"]
+    restart: always
+
+  svc-16:
+    command: ["sh", "-c", "echo svc-16 starting; exec sleep 300"]
+    restart: always
+
+  svc-17:
+    command: ["sh", "-c", "echo svc-17 starting; exec sleep 300"]
+    restart: always
+
+  svc-18:
+    command: ["sh", "-c", "echo svc-18 starting; exec sleep 300"]
+    restart: always
+
+  svc-19:
+    command: ["sh", "-c", "echo svc-19 starting; exec sleep 300"]
+    restart: always
+
+  svc-20:
+    command: ["sh", "-c", "echo svc-20 starting; exec sleep 300"]
+    restart: always

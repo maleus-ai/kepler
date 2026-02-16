@@ -25,7 +25,7 @@ use crate::state::{
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
 
 use super::command::ConfigCommand;
-use super::context::{ConfigEvent, HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
+use super::context::{ConfigEvent, DiagnosticCounts, HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
 use super::handle::ConfigActorHandle;
 
 /// Request sent to the dedicated Lua worker thread.
@@ -75,6 +75,11 @@ pub struct ConfigActor {
 
     /// Channel to the dedicated Lua worker thread (lazily spawned)
     lua_eval_tx: Option<mpsc::UnboundedSender<LuaEvalRequest>>,
+
+    /// JoinHandle for the event handler task (for cleanup)
+    event_handler_task: Option<JoinHandle<()>>,
+    /// JoinHandles for event forwarder tasks (for cleanup)
+    event_forwarder_tasks: Vec<JoinHandle<()>>,
 
     /// Whether the Ready signal has been emitted for the current cycle
     last_ready: bool,
@@ -345,6 +350,8 @@ impl ConfigActor {
             subscribers,
             dep_watchers,
             lua_eval_tx: None,
+            event_handler_task: None,
+            event_forwarder_tasks: Vec::new(),
             last_ready: false,
             last_quiescent: false,
             startup_in_progress: false,
@@ -880,6 +887,25 @@ impl ConfigActor {
             }
             ConfigCommand::SetEventHandlerSpawned => {
                 self.event_handler_spawned = true;
+            }
+            ConfigCommand::StoreEventHandlerTasks { handler, forwarders } => {
+                // Abort previous event handler/forwarders if any
+                if let Some(old) = self.event_handler_task.take() {
+                    old.abort();
+                }
+                for old in self.event_forwarder_tasks.drain(..) {
+                    old.abort();
+                }
+                self.event_handler_task = Some(handler);
+                self.event_forwarder_tasks = forwarders;
+            }
+            ConfigCommand::GetDiagnosticCounts { reply } => {
+                let _ = reply.send(DiagnosticCounts {
+                    process_handles: self.processes.len(),
+                    health_checks: self.health_checks.len(),
+                    file_watchers: self.watchers.len(),
+                    event_senders: self.event_senders.len(),
+                });
             }
             ConfigCommand::EvalIfCondition { .. } => {
                 // Handled in run() before process_command — should never reach here
@@ -1419,7 +1445,21 @@ impl ConfigActor {
         // Clear processes (they should have been stopped already)
         self.processes.clear();
 
-        // Clear dep watchers to avoid dead sender accumulation
+        // Clear all channel-based resources to avoid dead sender accumulation
+        self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.dep_watchers.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.event_senders.clear();
+
+        // Drop Lua worker channel sender so the spawn_blocking thread exits promptly
+        // (otherwise it only exits when the entire ConfigActor struct drops)
+        self.lua_eval_tx = None;
+
+        // Abort event handler and forwarder tasks
+        if let Some(handler) = self.event_handler_task.take() {
+            handler.abort();
+        }
+        for task in self.event_forwarder_tasks.drain(..) {
+            task.abort();
+        }
     }
 }

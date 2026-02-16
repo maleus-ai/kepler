@@ -1,0 +1,411 @@
+# Memory leak test config — exercises every Kepler feature
+# Based on complex.kepler.yaml patterns: Lua, hooks, healthchecks, file watchers,
+# log buffers, limits, various dep conditions, deep dependency chains.
+#
+# 20 services across 5 tiers to cover all code paths.
+
+lua: |
+  _port = 7000
+  function next_port()
+    _port = _port + 1
+    return tostring(_port)
+  end
+  _services = {}
+  function register_service(name)
+    _services[name] = true
+    return name
+  end
+  function svc_env(name, extras)
+    local env = {
+      "SERVICE_NAME=" .. name,
+      "SERVICE_PORT=" .. next_port()
+    }
+    if extras then
+      for _, e in ipairs(extras) do
+        table.insert(env, e)
+      end
+    end
+    return env
+  end
+
+kepler:
+  sys_env: inherit
+  timeout: 30s
+  logs:
+    max_size: "1M"
+    buffer_size: 4096
+    retention:
+      on_stop: clear
+      on_start: clear
+  hooks:
+    pre_start:
+      - if: "not ctx.initialized"
+        run: echo "global on_init"
+        environment:
+          - KEPLER_PHASE=init
+        working_dir: /tmp
+      - command: ["sh", "-c", "echo global pre_start"]
+    post_start:
+      run: echo "global post_start"
+    pre_stop:
+      command: ["sh", "-c", "echo global pre_stop"]
+    post_stop:
+      run: echo "global post_stop"
+    pre_restart:
+      command: ["sh", "-c", "echo global pre_restart"]
+    post_restart:
+      run: echo "global post_restart"
+    pre_cleanup:
+      command: ["sh", "-c", "echo global pre_cleanup"]
+
+services:
+  # ═══════════════════════════════════════════════════════════════════
+  # TIER 1: Infrastructure (3 services, no deps, healthchecks)
+  # ═══════════════════════════════════════════════════════════════════
+
+  postgres:
+    command: ["sh", "-c", "echo PostgreSQL starting; exec sleep 300"]
+    restart: always
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 5s
+      retries: 3
+      start_period: 1s
+    limits:
+      memory: "512M"
+      cpu_time: 300
+      max_fds: 1024
+    logs:
+      max_size: "2M"
+      buffer_size: 8192
+      retention:
+        on_stop: retain
+        on_start: clear
+        on_restart: retain
+        on_exit: retain
+    hooks:
+      pre_start:
+        - if: "not ctx.initialized"
+          run: echo "postgres on_init"
+        - command: ["sh", "-c", "echo postgres pre_start"]
+      post_start:
+        command: ["sh", "-c", "echo postgres post_start"]
+      post_healthcheck_success:
+        run: echo "postgres healthcheck passed"
+      post_healthcheck_fail:
+        run: echo "postgres healthcheck FAILED"
+
+  redis:
+    command: ["sh", "-c", "echo Redis starting; exec sleep 300"]
+    restart: always
+    sys_env: clear
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 2s
+      retries: 3
+      start_period: 1s
+    limits:
+      memory: "256M"
+      max_fds: 512
+    hooks:
+      post_start:
+        run: echo "redis post_start"
+        environment:
+          - REDIS_MODE=standalone
+
+  rabbitmq:
+    command: ["sh", "-c", "echo RabbitMQ starting; exec sleep 300"]
+    restart: always
+    environment: !lua |
+      return svc_env(ctx.service_name, {"AMQP_PORT=" .. next_port()})
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 5s
+      retries: 3
+      start_period: 1s
+
+  # ═══════════════════════════════════════════════════════════════════
+  # TIER 2: Setup (3 one-shot services, service_completed_successfully)
+  # ═══════════════════════════════════════════════════════════════════
+
+  db-migration:
+    command: ["sh", "-c", "echo Running migrations; exit 0"]
+    restart: no
+    depends_on:
+      postgres:
+        condition: service_healthy
+        timeout: 60s
+    hooks:
+      pre_start:
+        run: echo "db-migration pre_start"
+      post_exit:
+        run: echo "db-migration post_exit"
+
+  redis-init:
+    command: ["sh", "-c", "echo Initializing Redis; exit 0"]
+    restart: no
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  consul-register:
+    command: ["sh", "-c", "echo Registering services; exit 0"]
+    restart: no
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment: !lua |
+      return svc_env(ctx.service_name, nil)
+
+  # ═══════════════════════════════════════════════════════════════════
+  # TIER 3: Core (4 services, mixed deps, hooks, Lua)
+  # ═══════════════════════════════════════════════════════════════════
+
+  auth-service:
+    command: ["sh", "-c", "echo Auth service starting; exec sleep 300"]
+    restart: always
+    depends_on:
+      - postgres:
+          condition: service_healthy
+          restart: true
+      - redis:
+          condition: service_healthy
+      - db-migration:
+          condition: service_completed_successfully
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 1s
+    hooks:
+      pre_start:
+        - if: "not ctx.initialized"
+          run: echo "auth on_init"
+        - run: echo "auth pre_start"
+      post_start:
+        command: ["sh", "-c", "echo auth post_start"]
+      pre_stop:
+        run: echo "auth pre_stop"
+      post_stop:
+        command: ["sh", "-c", "echo auth post_stop"]
+      pre_restart:
+        run: echo "auth pre_restart"
+      post_restart:
+        run: echo "auth post_restart"
+
+  config-service:
+    command: ["sh", "-c", "echo Config service starting; exec sleep 300"]
+    restart: on-failure
+    depends_on:
+      - rabbitmq:
+          condition: service_healthy
+          restart: true
+      - consul-register:
+          condition: service_completed_successfully
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 0s
+
+  event-bus:
+    command: ["sh", "-c", "echo Event bus starting; exec sleep 300"]
+    restart: always
+    depends_on:
+      - rabbitmq:
+          condition: service_healthy
+          restart: true
+    healthcheck:
+      test: !lua |
+        return {"true"}
+      interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 1s
+
+  gateway:
+    command: ["sh", "-c", "echo API Gateway starting; exec sleep 300"]
+    restart: always
+    depends_on:
+      - auth-service:
+          condition: service_healthy
+          timeout: 120s
+      - config-service:
+          condition: service_healthy
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 1s
+
+  # ═══════════════════════════════════════════════════════════════════
+  # TIER 4: Business + Workers (7 services, deep chains, fan-ins)
+  # ═══════════════════════════════════════════════════════════════════
+
+  user-service:
+    command: ["sh", "-c", "echo User service starting; exec sleep 300"]
+    restart: always
+    depends_on:
+      - auth-service:
+          condition: service_healthy
+      - postgres:
+          condition: service_healthy
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 1s
+
+  order-service:
+    command: !lua |
+      return {"sh", "-c", "echo Order service on port " .. next_port() .. "; exec sleep 300"}
+    restart: always
+    depends_on:
+      - user-service:
+          condition: service_started
+      - event-bus:
+          condition: service_healthy
+      - redis:
+          condition: service_healthy
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 1s
+    limits:
+      memory: "1G"
+
+  notification-service:
+    command: ["sh", "-c", "echo Notification service starting; exec sleep 300"]
+    restart: always
+    depends_on: !lua |
+      return {
+        {["event-bus"] = {condition = "service_healthy"}},
+        {["rabbitmq"] = {condition = "service_healthy"}}
+      }
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 1s
+
+  order-worker:
+    command: ["sh", "-c", "echo Order worker started; exec sleep 300"]
+    restart: always
+    depends_on:
+      - order-service:
+          condition: service_started
+      - event-bus:
+          condition: service_healthy
+    limits:
+      memory: "256M"
+      max_fds: 256
+    logs:
+      buffer_size: 16384
+      max_size: "500K"
+
+  analytics-service:
+    command: ["sh", "-c", "echo Analytics starting; exec sleep 300"]
+    restart: on-failure
+    depends_on:
+      - postgres:
+          condition: service_healthy
+      - event-bus:
+          condition: service_healthy
+      - redis-init:
+          condition: service_completed_successfully
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 5s
+      retries: 3
+      start_period: 1s
+    logs:
+      store:
+        stdout: true
+        stderr: false
+
+  search-service:
+    command: ["sh", "-c", "echo Search service starting; exec sleep 300"]
+    restart: always
+    depends_on:
+      - postgres:
+          condition: service_healthy
+      - redis:
+          condition: service_healthy
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 1s
+    environment: !lua |
+      register_service(ctx.service_name)
+      return svc_env(ctx.service_name, nil)
+
+  report-service:
+    command: ["sh", "-c", "echo Report generated; exit 0"]
+    restart: no
+    depends_on:
+      - analytics-service:
+          condition: service_healthy
+          timeout: 60s
+    logs:
+      retention:
+        on_exit: retain
+
+  # ═══════════════════════════════════════════════════════════════════
+  # TIER 5: Monitoring + Deferred (3 services)
+  # ═══════════════════════════════════════════════════════════════════
+
+  metrics-collector:
+    command: ["sh", "-c", "echo Metrics collector starting; exec sleep 300"]
+    restart: always
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 1s
+    limits:
+      memory: "128M"
+    hooks:
+      pre_start:
+        run: echo "metrics pre_start"
+        environment: !lua |
+          return {"METRICS_SVC=" .. ctx.service_name, "METRICS_HOOK=" .. ctx.hook_name}
+
+  dashboard:
+    command: !lua |
+      return {"sh", "-c", "echo Dashboard on port " .. next_port() .. "; exec sleep 300"}
+    restart: always
+    depends_on:
+      - metrics-collector:
+          condition: service_started
+      - gateway:
+          condition: service_started
+      - analytics-service:
+          condition: service_started
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 1s
+
+  postgres-failover:
+    command: ["sh", "-c", "echo FAILOVER: Promoting replica; exit 0"]
+    restart: no
+    depends_on:
+      - postgres:
+          condition: service_failed
+          exit_code: ["1:10", 42]
