@@ -265,7 +265,6 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=${BIN_DIR}/kepler-daemon
-ExecStop=${BIN_DIR}/kepler daemon stop
 Restart=on-failure
 
 [Install]

@@ -1,0 +1,11 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  backend:
+    command: ["sh", "-c", "echo BACKEND_STARTED; sleep 300"]
+  frontend:
+    command: ["sh", "-c", "echo FRONTEND_STARTED; sleep 300"]
+    depends_on:
+      - backend

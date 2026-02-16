@@ -392,6 +392,18 @@ impl ServiceOrchestrator {
         }
     }
 
+    /// Respawn a single service during daemon restart recovery.
+    ///
+    /// Like `start_single_service` but public and without progress reporting.
+    /// The caller is responsible for marking the service as Waiting beforehand.
+    pub async fn respawn_single_service(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+    ) -> Result<(), OrchestratorError> {
+        self.start_single_service(handle, service_name, &None).await
+    }
+
     /// Execute the actual service startup sequence (after claiming).
     async fn execute_service_startup(
         &self,
