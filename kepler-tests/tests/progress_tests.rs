@@ -5,7 +5,7 @@
 //! by subscribing to state changes on ConfigActorHandle.
 
 use kepler_daemon::config::{DependencyCondition, DependencyConfig, DependencyEntry, DependsOn, RestartPolicy};
-use kepler_daemon::config_actor::ServiceStatusChange;
+use kepler_daemon::config_actor::ConfigEvent;
 use kepler_daemon::config_registry::ConfigRegistry;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::process::ProcessExitEvent;
@@ -108,7 +108,7 @@ async fn setup_orchestrator_with_exit_handler(
 
 /// Collect status change events from an unbounded receiver, waiting for `expected_count` or timeout.
 async fn collect_status_changes(
-    rx: &mut mpsc::UnboundedReceiver<ServiceStatusChange>,
+    rx: &mut mpsc::UnboundedReceiver<ConfigEvent>,
     expected_count: usize,
     timeout: Duration,
 ) -> Vec<(String, ServiceStatus)> {
@@ -121,9 +121,10 @@ async fn collect_status_changes(
             break;
         }
         match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Some(change)) => {
+            Ok(Some(ConfigEvent::StatusChange(change))) => {
                 events.push((change.service, change.status));
             }
+            Ok(Some(_)) => continue, // Ready/Quiescent signals — skip
             Ok(None) => break, // Channel closed
             Err(_) => break,   // Timeout
         }
@@ -136,7 +137,7 @@ async fn collect_status_changes(
 async fn subscribe_to_config(
     orchestrator: &ServiceOrchestrator,
     config_path: &std::path::Path,
-) -> Option<mpsc::UnboundedReceiver<ServiceStatusChange>> {
+) -> Option<mpsc::UnboundedReceiver<ConfigEvent>> {
     let canonical = std::fs::canonicalize(config_path).ok()?;
     let handle = orchestrator.registry().get(&canonical)?;
     Some(handle.subscribe_state_changes())

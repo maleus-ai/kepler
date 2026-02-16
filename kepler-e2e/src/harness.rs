@@ -1010,6 +1010,8 @@ fn status_to_display_pattern(status: &str) -> &str {
         "killed" => "Killed",
         "starting" => "Starting",
         "stopping" => "Stopping",
+        "skipped" => "Skipped",
+        "waiting" => "Waiting",
         // Fallback: use the status as-is (for forward compatibility)
         other => other,
     }

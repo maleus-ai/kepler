@@ -685,9 +685,9 @@ async fn test_depends_on_service_failed_exit_code() -> E2eResult<()> {
 /// Config: database → backend → frontend (all startup conditions)
 /// All services should be running when start_services_wait returns
 #[tokio::test]
-async fn test_effective_wait_all_startup() -> E2eResult<()> {
+async fn test_wait_all_startup() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
-    let config_path = harness.load_config(TEST_MODULE, "test_effective_wait_all_startup")?;
+    let config_path = harness.load_config(TEST_MODULE, "test_wait_all_startup")?;
 
     harness.start_daemon().await?;
 
@@ -722,189 +722,8 @@ async fn test_effective_wait_all_startup() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that --wait mode returns before deferred services start
-/// Config: database (startup), app (startup), monitor (deferred: service_failed)
-/// database and app should be running; monitor should still be waiting
-#[tokio::test]
-async fn test_effective_wait_deferred_split() -> E2eResult<()> {
-    let mut harness = E2eHarness::new().await?;
-    let config_path = harness.load_config(TEST_MODULE, "test_effective_wait_deferred_split")?;
-
-    harness.start_daemon().await?;
-
-    // Start with --wait mode
-    let output = harness.start_services_wait(&config_path).await?;
-    assert!(
-        output.success(),
-        "start --wait should succeed. exit_code: {}, stdout: {}, stderr: {}",
-        output.exit_code, output.stdout, output.stderr
-    );
-
-    // Output should mention deferred services
-    assert!(
-        output.stdout_contains("deferred"),
-        "Output should mention deferred services. stdout: {}",
-        output.stdout
-    );
-
-    // Startup cluster services should be running
-    let ps = harness.ps(&config_path).await?;
-    assert!(
-        ps.stdout_contains("database"),
-        "database should appear in ps. ps: {}",
-        ps.stdout
-    );
-    assert!(
-        ps.stdout_contains("app") && ps.stdout_contains("Up "),
-        "app should be running after --wait. ps: {}",
-        ps.stdout
-    );
-
-    // Monitor should NOT be running (it's deferred, waiting for database to fail)
-    let monitor_line = ps.stdout.lines()
-        .find(|line| line.contains("monitor"))
-        .unwrap_or("");
-    assert!(
-        !monitor_line.contains("Up "),
-        "monitor should NOT be running (deferred, waiting for service_failed). monitor status: {}",
-        monitor_line
-    );
-
-    harness.stop_daemon().await?;
-
-    Ok(())
-}
-
-/// Test deferred propagation through dependency chain
-/// database = startup, monitor = deferred (service_failed), alerter = deferred (inherits)
-/// Only database should be running after --wait returns
-#[tokio::test]
-async fn test_effective_wait_propagation() -> E2eResult<()> {
-    let mut harness = E2eHarness::new().await?;
-    let config_path = harness.load_config(TEST_MODULE, "test_effective_wait_propagation")?;
-
-    harness.start_daemon().await?;
-
-    // Start with --wait mode
-    let output = harness.start_services_wait(&config_path).await?;
-    assert!(
-        output.success(),
-        "start --wait should succeed. exit_code: {}, stdout: {}, stderr: {}",
-        output.exit_code, output.stdout, output.stderr
-    );
-
-    // Output should mention deferred services
-    assert!(
-        output.stdout_contains("deferred"),
-        "Output should mention deferred services. stdout: {}",
-        output.stdout
-    );
-
-    // Only database should be running (it's the only startup service)
-    let ps = harness.ps(&config_path).await?;
-    assert!(
-        ps.stdout_contains("database") && ps.stdout_contains("Up "),
-        "database should be running. ps: {}",
-        ps.stdout
-    );
-
-    // monitor and alerter should NOT be running (both deferred)
-    let monitor_line = ps.stdout.lines()
-        .find(|line| line.contains("monitor"))
-        .unwrap_or("");
-    assert!(
-        !monitor_line.contains("Up "),
-        "monitor should NOT be running (deferred). status: {}",
-        monitor_line
-    );
-
-    let alerter_line = ps.stdout.lines()
-        .find(|line| line.contains("alerter"))
-        .unwrap_or("");
-    assert!(
-        !alerter_line.contains("Up "),
-        "alerter should NOT be running (deferred via propagation). status: {}",
-        alerter_line
-    );
-
-    harness.stop_daemon().await?;
-
-    Ok(())
-}
-
-/// Test wait: true override forces a deferred-condition service into startup cluster
-/// database = startup, app = startup, monitor = startup (wait: true overrides service_failed)
-/// monitor's dependency on database failing will timeout (3s), but it should be attempted
-#[tokio::test]
-async fn test_effective_wait_override() -> E2eResult<()> {
-    let mut harness = E2eHarness::new().await?;
-    let config_path = harness.load_config(TEST_MODULE, "test_effective_wait_override")?;
-
-    harness.start_daemon().await?;
-
-    // Start with --wait mode — this may fail or succeed depending on
-    // whether the monitor timeout causes an error or just a warning
-    let _output = harness.start_services_wait(&config_path).await?;
-
-    // database and app should be running regardless
-    let ps = harness.ps(&config_path).await?;
-    assert!(
-        ps.stdout_contains("database") && ps.stdout_contains("Up "),
-        "database should be running. ps: {}",
-        ps.stdout
-    );
-    assert!(
-        ps.stdout_contains("app") && ps.stdout_contains("Up "),
-        "app should be running. ps: {}",
-        ps.stdout
-    );
-
-    // monitor should have been attempted (it's in startup cluster due to wait: true)
-    // but its dependency (database service_failed) should timeout after 3s
-    // Check that monitor appears in ps output (regardless of status)
-    assert!(
-        ps.stdout_contains("monitor"),
-        "monitor should appear in ps (wait: true puts it in startup cluster). ps: {}",
-        ps.stdout
-    );
-
-    harness.stop_daemon().await?;
-
-    Ok(())
-}
-
-/// Test global timeout as fallback when per-dependency timeout is not set
-/// The database never becomes healthy, so the global 2s timeout should apply
-#[tokio::test]
-async fn test_global_timeout_fallback() -> E2eResult<()> {
-    let mut harness = E2eHarness::new().await?;
-    let config_path = harness.load_config(TEST_MODULE, "test_global_timeout")?;
-
-    harness.start_daemon().await?;
-
-    let start = std::time::Instant::now();
-    let _output = harness.start_services_wait(&config_path).await?;
-    let elapsed = start.elapsed();
-
-    // Should have waited ~2s (the global timeout), not indefinitely
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "Global timeout should have kicked in around 2s, but waited {:?}",
-        elapsed
-    );
-
-    // database should be running (unhealthy)
-    harness
-        .wait_for_service_status(&config_path, "database", "unhealthy", Duration::from_secs(5))
-        .await?;
-
-    harness.stop_daemon().await?;
-
-    Ok(())
-}
-
-/// Test that per-dependency timeout overrides the global timeout
-/// Global timeout is 30s, per-dep is 2s — should timeout in ~2s, not 30s
+/// Test that per-dependency timeout works
+/// Per-dep timeout is 2s — should timeout in ~2s
 #[tokio::test]
 async fn test_global_timeout_overridden_by_per_dep() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -931,7 +750,7 @@ async fn test_global_timeout_overridden_by_per_dep() -> E2eResult<()> {
 /// Test permanently unsatisfied dependency detection
 /// "setup" exits with code 0, restart: no.
 /// "monitor" depends on "setup" with condition: service_failed.
-/// Since setup exited cleanly and won't restart, monitor should be marked failed.
+/// Since setup exited cleanly and won't restart, monitor should be marked skipped.
 #[tokio::test]
 async fn test_permanently_unsatisfied_dependency() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -946,10 +765,10 @@ async fn test_permanently_unsatisfied_dependency() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "setup", "exited", Duration::from_secs(5))
         .await?;
 
-    // monitor should be marked as failed because its dependency is permanently unsatisfied
+    // monitor should be marked as skipped because its dependency is permanently unsatisfied
     // (setup stopped with exit 0, won't restart, and service_failed condition requires non-zero)
     harness
-        .wait_for_service_status(&config_path, "monitor", "failed", Duration::from_secs(10))
+        .wait_for_service_status(&config_path, "monitor", "skipped", Duration::from_secs(10))
         .await?;
 
     harness.stop_daemon().await?;
@@ -960,7 +779,7 @@ async fn test_permanently_unsatisfied_dependency() -> E2eResult<()> {
 /// Test foreground mode with permanently unsatisfied dependency.
 ///
 /// `kepler start` (no -d) should detect quiescence and exit on its own
-/// when all services reach a terminal state (setup=stopped, monitor=failed).
+/// when all services reach a terminal state (setup=exited, monitor=skipped).
 /// This verifies the CLI doesn't block forever when a deferred service's
 /// dependency is permanently unsatisfied.
 #[tokio::test]
@@ -971,8 +790,8 @@ async fn test_permanently_unsatisfied_foreground_exits() -> E2eResult<()> {
     harness.start_daemon().await?;
 
     // Run `kepler start` in foreground mode (no -d) from scratch.
-    // setup exits immediately (code 0, restart:no) → stopped.
-    // monitor's dependency (service_failed) is permanently unsatisfied → failed.
+    // setup exits immediately (code 0, restart:no) → exited.
+    // monitor's dependency (service_failed) is permanently unsatisfied → skipped.
     // The CLI should detect quiescence and exit within a few seconds.
     let config_str = config_path.to_str().unwrap();
     let result = harness
@@ -994,7 +813,7 @@ async fn test_permanently_unsatisfied_foreground_exits() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "setup", "exited", Duration::from_secs(2))
         .await?;
     harness
-        .wait_for_service_status(&config_path, "monitor", "failed", Duration::from_secs(2))
+        .wait_for_service_status(&config_path, "monitor", "skipped", Duration::from_secs(2))
         .await?;
 
     harness.stop_daemon().await?;
@@ -1100,6 +919,45 @@ async fn test_ps_shows_exit_code() -> E2eResult<()> {
         ps.stdout.contains("Exited (0)"),
         "ps should show exit code for exited service. ps output: {}",
         ps.stdout
+    );
+
+    harness.stop_daemon().await?;
+
+    Ok(())
+}
+
+/// Test transient exit filtering: when a dep has restart:always and exits,
+/// conditions like service_failed should NOT be considered satisfied because
+/// the dep will restart. The dependent should be Skipped (structurally
+/// unreachable) instead of starting on every crash/restart cycle.
+///
+/// "worker" exits with code 1, restart:always (crash-loops).
+/// "watcher" depends on worker with condition: service_failed.
+/// Without transient exit filtering, watcher could briefly start in the
+/// window between worker exiting and being restarted. With the filter,
+/// watcher is properly Skipped.
+#[tokio::test]
+async fn test_transient_exit_not_satisfied() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_transient_exit_not_satisfied")?;
+
+    harness.start_daemon().await?;
+
+    let _output = harness.start_services_wait(&config_path).await?;
+
+    // watcher should be Skipped (structurally unreachable: service_failed + restart:always).
+    // Critically, the transient exit filter prevents watcher from starting during the
+    // brief window between worker crashing and being restarted.
+    harness
+        .wait_for_service_status(&config_path, "watcher", "skipped", Duration::from_secs(10))
+        .await?;
+
+    // Verify watcher never ran by checking logs don't contain its marker
+    let logs = harness.get_logs(&config_path, None, 200).await?;
+    assert!(
+        !logs.stdout.contains("WATCHER_SHOULD_NOT_RUN"),
+        "watcher should never have started (transient exit filter). logs: {}",
+        logs.stdout
     );
 
     harness.stop_daemon().await?;

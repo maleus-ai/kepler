@@ -104,14 +104,41 @@ pub enum ConfigCommand {
         reply: oneshot::Sender<bool>,
     },
 
+    /// Re-check and emit Ready/Quiescent signals if conditions are met.
+    /// Used by Subscribe handler to avoid missing signals due to race conditions.
+    RecheckReadyQuiescent,
+    /// Set the startup fence. When true, Ready/Quiescent signals are suppressed.
+    SetStartupInProgress {
+        in_progress: bool,
+        reply: oneshot::Sender<()>,
+    },
+
     // === Mutation Commands ===
+    SetServiceStatus {
+        service_name: String,
+        status: ServiceStatus,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SetSkipReason {
+        service_name: String,
+        reason: String,
+    },
+    SetFailReason {
+        service_name: String,
+        reason: String,
+    },
+    /// Atomically claim a service for startup: checks if Waiting or terminal, and if so,
+    /// sets it to Waiting. Returns true if claimed, false if already active.
     ClaimServiceStart {
         service_name: String,
         reply: oneshot::Sender<bool>,
     },
-    SetServiceStatus {
+    /// Atomically set a reason (skip/fail) and status in one command.
+    SetServiceStatusWithReason {
         service_name: String,
         status: ServiceStatus,
+        skip_reason: Option<String>,
+        fail_reason: Option<String>,
         reply: oneshot::Sender<Result<()>>,
     },
     SetServicePid {
@@ -158,6 +185,12 @@ pub enum ConfigCommand {
     RemoveProcessHandle {
         service_name: String,
         reply: oneshot::Sender<Option<ProcessHandle>>,
+    },
+    /// Take stdout/stderr capture tasks from the process handle (leaving the rest intact).
+    /// Used by handle_exit() to join output tasks before setting terminal status.
+    TakeOutputTasks {
+        service_name: String,
+        reply: oneshot::Sender<(Option<JoinHandle<()>>, Option<JoinHandle<()>>)>,
     },
 
     // === Task Handle Commands ===

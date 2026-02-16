@@ -316,6 +316,19 @@ impl LuaEvaluator {
         Ok(env_table)
     }
 
+    /// Set an interrupt handler on the Lua VM for watchdog timeouts.
+    pub fn set_interrupt<F>(&self, f: F)
+    where
+        F: Fn(&Lua) -> LuaResult<mlua::VmState> + Send + 'static,
+    {
+        self.lua.set_interrupt(f);
+    }
+
+    /// Remove the interrupt handler from the Lua VM.
+    pub fn remove_interrupt(&self) {
+        self.lua.remove_interrupt();
+    }
+
     /// Create a read-only table of environment variables.
     ///
     /// Uses Luau's native `table.freeze` (set_readonly) which makes the table

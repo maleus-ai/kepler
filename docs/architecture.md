@@ -283,46 +283,45 @@ Services can specify conditions that must be met before starting:
 | `service_failed` | Dependency failed: Exited with non-zero code, Killed by signal, or Failed (spawn error). Optional `exit_code` filter |
 | `service_stopped` | Dependency is Stopped, Exited, Killed, or Failed. Optional `exit_code` filter |
 
+### Spawn-All Architecture
+
+All services are spawned at once. Each service independently waits for its dependencies via per-dependency notification channels (`watch_dep`). Services blocked on unmet dependencies are in the **Waiting** state.
+
+The lifecycle for each spawned service:
+1. **Waiting** — blocked on dependencies
+2. **Starting** — dependencies satisfied, running hooks, spawning process
+3. **Running** — process alive
+4. **Healthy/Unhealthy** — if healthcheck configured
+
 ### Dependency Waiting
 
-When a service starts, it waits for all dependencies to satisfy their conditions. The effective timeout for each dependency is `dep.timeout` falling back to the global `kepler.timeout`:
+When a service starts, it waits for all dependencies to satisfy their conditions. Each dependency can have its own timeout via `depends_on.<dep>.timeout`. If no timeout is set, the wait is indefinite.
 
 ```mermaid
 flowchart TD
-    A[Start Service] --> B[Get Dependencies]
-    B --> C{More deps?}
-    C -->|Yes| D[Check condition]
-    D --> E{Satisfied?}
-    E -->|No| P{Permanently
-    unsatisfied?}
-    P -->|Yes| Q[Error: DependencyUnsatisfied
-    Service marked Failed]
-    P -->|No| F{Timeout?}
-    F -->|No| G[Wait 100ms]
-    G --> D
-    F -->|Yes| H[Error: Timeout]
-    E -->|Yes| C
-    C -->|No| I[Start process]
+    A[Service spawned in Waiting state] --> B[For each dependency]
+    B --> C{Condition satisfied?}
+    C -->|Yes| B2[Next dependency]
+    C -->|No| D{Structurally unreachable?}
+    D -->|Yes| Skip[Skipped with reason]
+    D -->|No| E{Permanently unsatisfied?}
+    E -->|Yes| Skip2[Skipped with reason]
+    E -->|No| F{Timeout expired?}
+    F -->|Yes| Fail[Failed with reason]
+    F -->|No| G[Wait for dep state change notification]
+    G --> C
+    B2 --> H{All deps done?}
+    H -->|No| B
+    H -->|Yes| I[Transition to Starting]
 ```
 
-A dependency is **permanently unsatisfied** when:
-1. The dependency service is in a terminal state (Stopped, Exited, Killed, or Failed)
-2. Its restart policy won't restart it (e.g., `restart: no` or `restart: on-failure` with exit code 0)
-3. The condition is not currently satisfied
+A dependency is **permanently unsatisfied** when the dependency is in a terminal state, its restart policy won't restart it, and the condition is not currently satisfied. The service is marked **Skipped**.
 
-This prevents deferred services from waiting indefinitely for dependencies that will never recover. The dependent service is marked as Failed, which allows foreground mode to detect quiescence and exit cleanly.
-
-### Global Timeout
-
-The `kepler.timeout` field provides a global default timeout for all dependency waits. Individual dependencies can override this with their own `timeout` field. The effective timeout is `dep.timeout ?? kepler.timeout ?? none`.
-
-This applies to:
-- Dependency waiting during service startup (`wait_for_dependencies`)
-- Dependency condition re-satisfaction during restart propagation
+A dependency condition is **structurally unreachable** when the dependency's restart policy makes it impossible for the condition to ever be permanently met (e.g., `service_failed` with `restart: always`). The service is immediately marked **Skipped** once the dependency is running.
 
 ### Restart Propagation
 
-When `restart: true` is set in a dependency configuration, the dependent service restarts when its dependency restarts. The condition wait uses per-dependency timeout falling back to the global `kepler.timeout`:
+When `restart: true` is set in a dependency configuration, the dependent service restarts when its dependency restarts:
 
 ```mermaid
 flowchart TD
@@ -332,289 +331,67 @@ flowchart TD
     D -->|No| E[No action]
     D -->|Yes| F[Stop dependent service]
     F --> G[Wait for dependency condition
-    timeout: dep.timeout ?? kepler.timeout]
+    with per-dep timeout if set]
     G --> H[Restart dependent service]
 ```
 
-**Example:**
-```yaml
-services:
-  database:
-    command: ["postgres"]
-    healthcheck:
-      test: ["pg_isready"]
+### Two Daemon Signals: Ready and Quiescent
 
-  backend:
-    command: ["./server"]
-    depends_on:
-      database:
-        condition: service_healthy
-        restart: true  # Backend restarts when database restarts
-```
+The daemon computes two signals for the CLI:
 
-When the database restarts:
-1. Backend is stopped
-2. System waits for database to become healthy
-3. Backend is restarted
+**Ready** (for `start -d --wait`): All services have reached their target state (Healthy if healthcheck, Running if not), are in a terminal state, or are in a deferred wait (Waiting with all unsatisfied deps in a stable state). Unhealthy counts as ready (healthcheck resolved).
 
-See [Dependencies](dependencies.md) for the full user-facing reference.
+**Quiescent** (for foreground mode): All services are settled — in a permanent terminal state or permanently blocked. Uses topological traversal to determine if any service could still transition.
 
-### Configuration Format
+Both signals are suppressed by a **startup fence** (`startup_in_progress` flag) that is raised before marking services as Waiting and lowered after all are marked, preventing premature signals during batch startup.
 
-Kepler supports both simple and extended dependency formats:
-
-**Simple format:**
-```yaml
-depends_on:
-  - service-a
-  - service-b
-```
-
-**Extended format (Docker Compose compatible):**
-```yaml
-depends_on:
-  service-a:
-    condition: service_healthy
-    timeout: 30s
-    restart: true
-  service-b:
-    condition: service_started
-```
-
-### Effective Wait Resolution
-
-When starting a configuration, Kepler needs to decide which services to wait for (blocking the CLI) and which to start in the background. This is determined by an `effective_wait: bool` field computed at config load time by `resolve_effective_wait()`.
-
-- **Startup cluster** (`effective_wait = true`): Services started level-by-level, blocking the CLI until ready
-- **Deferred cluster** (`effective_wait = false`): Services spawned in background, CLI returns immediately
-
-See [Service Lifecycle](service-lifecycle.md) for how startup/deferred clusters affect start modes.
-
-#### Topological Sort
-
-Before resolving wait behavior, services are sorted in **topological order** using Kahn's algorithm. This ensures every service is processed after all its dependencies, so their `effective_wait` values are already computed.
-
-```mermaid
-flowchart LR
-    subgraph "Dependency Graph"
-        A[db] --> B[backend]
-        A --> C[cache]
-        B --> D[api]
-        C --> D
-        B --> E[monitor]
-    end
-```
-
-Kahn's algorithm processes this into a linear order:
-
-```mermaid
-flowchart LR
-    A["db (level 0)"] --> B["backend (level 1)"]
-    A --> C["cache (level 1)"]
-    B --> D["api (level 2)"]
-    C --> D
-    B --> E["monitor (level 2)"]
-
-    style A fill:#4a9,color:#fff
-    style B fill:#4a9,color:#fff
-    style C fill:#4a9,color:#fff
-    style D fill:#4a9,color:#fff
-    style E fill:#4a9,color:#fff
-```
-
-**Processing order:** `db` → `backend`, `cache` → `api`, `monitor`
-
-Services at the same level have no dependencies on each other and can be started in parallel.
-
-#### Per-Service Resolution
-
-For each service (in topological order), `effective_wait` is computed:
-
-```mermaid
-flowchart TD
-    Start["Process service S"] --> ExplicitCheck{"S.wait explicitly set?"}
-    ExplicitCheck -->|"wait: true"| SetTrue["effective_wait = true"]
-    ExplicitCheck -->|"wait: false"| SetFalse["effective_wait = false"]
-    ExplicitCheck -->|"None (default)"| HasDeps{"Has dependencies?"}
-    HasDeps -->|No| SetTrue
-    HasDeps -->|Yes| ComputeAnd["For each dependency edge:
-    compute dep.effective_wait AND edge_wait"]
-    ComputeAnd --> AndAll{"ALL edges true?"}
-    AndAll -->|Yes| SetTrue
-    AndAll -->|No| SetFalse
-
-    SetTrue --> Done["Done"]
-    SetFalse --> WarnCheck{"S.wait was None?
-    (implicit deferred)"}
-    WarnCheck -->|Yes| Warn["Emit warning with reasons"]
-    WarnCheck -->|No| Done
-    Warn --> Done
-
-    style SetTrue fill:#4a9,color:#fff
-    style SetFalse fill:#e55,color:#fff
-    style Warn fill:#ea3,color:#000
-```
-
-The `edge_wait` for each dependency edge is:
-- `dep_config.wait` if explicitly set on the edge
-- Otherwise, `condition.is_startup_condition()` (see table below)
-
-#### Condition Defaults
-
-Each dependency condition has a natural default for whether it resolves during startup:
-
-| Condition | Default wait | Rationale |
-|-----------|-------------|-----------|
-| `service_started` | `true` | Resolves as soon as the process starts |
-| `service_healthy` | `true` | Resolves after healthcheck passes |
-| `service_completed_successfully` | `true` | Resolves when process exits with code 0 |
-| `service_stopped` | `false` | Requires process to exit (reactive, like service_failed) |
-| `service_unhealthy` | `false` | Requires healthy→unhealthy transition (indefinite) |
-| `service_failed` | `false` | Requires process to fail (indefinite) |
-
-Conditions marked `false` are considered **deferred** because they may never resolve during normal startup — they depend on failure or degradation events.
-
-#### Propagation Example
-
-Consider a monitoring service that watches for application failures:
-
-```yaml
-services:
-  database:
-    command: ["postgres"]
-    healthcheck:
-      test: ["pg_isready"]
-  app:
-    command: ["./server"]
-    depends_on:
-      database:
-        condition: service_healthy
-  monitor:
-    command: ["./alert-on-failure"]
-    depends_on:
-      app:
-        condition: service_failed
-```
-
-```mermaid
-flowchart LR
-    DB["database
-    no deps → startup ✓"] -- "service_healthy
-    edge_wait=true" --> App["app
-    all edges true → startup ✓"]
-    App -- "service_failed
-    edge_wait=false" --> Mon["monitor
-    edge false → deferred ✗"]
-
-    style DB fill:#4a9,color:#fff
-    style App fill:#4a9,color:#fff
-    style Mon fill:#e55,color:#fff
-```
-
-Resolution trace:
-1. **database**: no deps → `effective_wait = true`
-2. **app**: depends on database (`service_healthy`, edge_wait=`true`). `true AND true` → `effective_wait = true`
-3. **monitor**: depends on app (`service_failed`, edge_wait=`false`). `true AND false` → `effective_wait = false` + warning emitted
-
-The deferred status also **propagates downstream**. If another service depends on a deferred service with a startup condition, it still becomes deferred:
-
-```mermaid
-flowchart LR
-    DB["database
-    startup ✓"] -- "service_healthy" --> App["app
-    startup ✓"]
-    App -- "service_failed" --> Mon["monitor
-    deferred ✗"]
-    Mon -- "service_started" --> Alert["alerter
-    deferred ✗"]
-
-    style DB fill:#4a9,color:#fff
-    style App fill:#4a9,color:#fff
-    style Mon fill:#e55,color:#fff
-    style Alert fill:#e55,color:#fff
-```
-
-Even though `alerter → monitor` uses `service_started` (normally startup), the dependency's `effective_wait = false` makes the AND expression `false AND true = false`.
-
-#### The `wait` field
-
-The `wait` field provides explicit control at two levels:
-
-- **Service level** (`services.<name>.wait`): Overrides the computed value entirely — takes precedence over any dependency-based computation
-- **Edge level** (`depends_on.<dep>.wait`): Overrides the condition's default for that specific dependency edge
-
-```yaml
-services:
-  # Force into startup cluster despite deferred dependencies
-  monitor:
-    wait: true
-    depends_on:
-      app:
-        condition: service_failed
-
-  # Force into deferred cluster despite startup dependencies
-  optional-worker:
-    wait: false
-    depends_on:
-      database:
-        condition: service_healthy
-
-  # Override a single edge's default
-  analyzer:
-    depends_on:
-      app:
-        condition: service_failed
-        wait: true  # Treat this edge as startup
-```
-
-#### Startup vs Deferred: How It Affects Start Modes
-
-The effective_wait partition determines behavior in each start mode:
+### Start Modes
 
 ```mermaid
 flowchart TD
     Start["kepler start"] --> Mode{"CLI flags?"}
-    Mode -->|"-d"| Detached["Run global hooks
-    Start ALL services in background
+    Mode -->|"-d"| Detached["Spawn all services
     Return immediately"]
-    Mode -->|"-d --wait"| WS["Run global hooks"]
-    WS --> StartupCluster["Start startup cluster
-    level-by-level (blocking)"]
-    StartupCluster --> DeferredCluster["Spawn deferred cluster
-    in background"]
-    DeferredCluster --> Return["Return to CLI"]
-    Mode -->|"(no flags)"| FG["Run global hooks"]
-    FG --> FGStartup["Start startup cluster
-    level-by-level (blocking)"]
-    FGStartup --> FGDeferred["Spawn deferred cluster
-    in background"]
-    FGDeferred --> FGLogs["Follow logs until quiescent"]
-    FGLogs --> FGExit["Exit when all services
-    are terminal
-    (stopped/exited/killed/failed)"]
+    Mode -->|"-d --wait"| Wait["Spawn all services
+    Wait for Ready signal"]
+    Mode -->|"(no flags)"| FG["Spawn all services
+    Follow logs
+    Exit on Quiescent signal"]
 
     style Detached fill:#69b,color:#fff
-    style StartupCluster fill:#4a9,color:#fff
-    style DeferredCluster fill:#e55,color:#fff
-    style FGLogs fill:#96b,color:#fff
-    style FGExit fill:#96b,color:#fff
+    style Wait fill:#4a9,color:#fff
+    style FG fill:#96b,color:#fff
 ```
 
 | Flags | Behavior |
 |-------|----------|
-| `-d` | Global hooks and all service startup run inside a background task. Returns immediately |
-| `-d --wait` | Startup cluster starts level-by-level (blocking). Deferred cluster spawns in background. Returns after startup cluster is ready |
-| (no flags) | Foreground mode. Starts all services, follows logs, exits when all services reach a terminal state. Ctrl+C sends stop and waits for graceful shutdown |
+| `-d` | All services spawned in background. Returns immediately |
+| `-d --wait` | All services spawned. CLI blocks until daemon sends **Ready** signal |
+| (no flags) | All services spawned. CLI follows logs until daemon sends **Quiescent** signal. Ctrl+C sends stop |
 
-The same flag pattern applies to `restart`. Note: `recreate` does not support these flags — it only rebakes the config snapshot and requires all services to be stopped first.
+### Configuration Format
+
+```yaml
+depends_on:
+  service-a:
+    condition: service_healthy
+    timeout: 30s       # Per-dependency timeout (no global fallback)
+    restart: true
+  service-b:
+    condition: service_started
+    # No timeout — waits indefinitely
+```
 
 ### Relevant Files
 
 | File | Description |
 |------|-------------|
-| `kepler-daemon/src/config.rs` | DependencyCondition, DependencyConfig, DependsOn types, KeplerGlobalConfig (global timeout) |
-| `kepler-daemon/src/deps.rs` | Dependency graph, start/stop ordering, condition checking, startup cluster computation, permanently unsatisfied detection |
-| `kepler-daemon/src/orchestrator.rs` | Dependency waiting (with global timeout fallback), restart propagation, start mode handling |
+| `kepler-daemon/src/config/mod.rs` | DependencyCondition, DependencyConfig, DependsOn types |
+| `kepler-daemon/src/config/deps.rs` | DependencyConfig with timeout, restart, exit_code fields |
+| `kepler-daemon/src/deps.rs` | Dependency graph, topological ordering, condition checking, permanently unsatisfied detection, structurally unreachable detection |
+| `kepler-daemon/src/orchestrator/mod.rs` | Spawn-all startup, per-dep wait_for_dependencies, skip/fail handling |
+| `kepler-daemon/src/orchestrator/events.rs` | Restart propagation with per-dep timeout |
+| `kepler-daemon/src/config_actor/actor.rs` | Ready and Quiescent signal computation, per-dep notification watchers, startup fence |
 
 ---
 

@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use super::{OrchestratorError, ServiceOrchestrator};
 use crate::config_actor::ConfigActorHandle;
-use crate::deps::check_dependency_satisfied;
+use crate::deps::{check_dependency_satisfied, is_transient_satisfaction};
 use crate::events::{RestartReason, ServiceEvent, ServiceEventMessage};
 use crate::process::stop_service;
 
@@ -137,19 +137,33 @@ impl ServiceEventHandler {
                 .get(restarted_service)
                 .unwrap_or_default();
 
-            // Use per-dependency timeout, falling back to global timeout from config
-            let global_timeout = config.kepler.as_ref().and_then(|k| k.timeout);
-            let effective_timeout = dep_config.timeout.or(global_timeout);
-            let deadline = effective_timeout.map(|t| Instant::now() + t);
+            // Only use per-dependency timeout (no global fallback — wait indefinitely if unset)
+            let deadline = dep_config.timeout.map(|t| Instant::now() + t);
 
-            // Subscribe to state changes for instant notification
-            let mut status_rx = self.handle.subscribe_state_changes();
+            // Subscribe to state changes of the restarted dependency for instant notification
+            let mut status_rx = self.handle.watch_dep(restarted_service);
+
+            // Get config for transient exit filtering
+            let config = self.handle.get_config().await;
 
             loop {
-                if check_dependency_satisfied(restarted_service, &dep_config, &self.handle)
-                    .await
-                {
-                    break;
+                let dep_satisfied = check_dependency_satisfied(restarted_service, &dep_config, &self.handle)
+                    .await;
+                if dep_satisfied {
+                    // Check if this is a transient satisfaction (dep exited but will restart)
+                    let is_transient = if let Some(ref cfg) = config
+                        && let Some(dep_svc_config) = cfg.services.get(restarted_service)
+                        && let Some(dep_state) = self.handle.get_service_state(restarted_service).await
+                    {
+                        is_transient_satisfaction(&dep_state, dep_svc_config)
+                    } else {
+                        false
+                    };
+
+                    if !is_transient {
+                        break;
+                    }
+                    // Transient — fall through to recv()
                 }
 
                 // Wait for next status change, with optional deadline

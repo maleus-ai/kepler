@@ -6,13 +6,13 @@ Kepler supports Docker Compose-compatible dependency configuration with conditio
 
 - [Configuration Format](#configuration-format)
 - [Dependency Conditions](#dependency-conditions)
-- [Startup vs Deferred Conditions](#startup-vs-deferred-conditions)
-- [The wait Field](#the-wait-field)
-- [Startup Cluster Computation](#startup-cluster-computation)
 - [Dependency Timeout](#dependency-timeout)
+- [Structurally Unreachable Conditions](#structurally-unreachable-conditions)
+- [Transient Exit Filtering](#transient-exit-filtering)
 - [Restart Propagation](#restart-propagation)
 - [Exit Code Filters](#exit-code-filters)
 - [Permanently Unsatisfied Dependencies](#permanently-unsatisfied-dependencies)
+- [Skipped Services](#skipped-services)
 - [Topological Ordering](#topological-ordering)
 - [Examples](#examples)
 
@@ -49,186 +49,116 @@ depends_on:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `condition` | `string` | `service_started` | When to consider dependency ready |
-| `timeout` | `duration` | global | Max time to wait for condition (falls back to `kepler.timeout`) |
+| `timeout` | `duration` | none | Max time to wait for condition. If unset, waits indefinitely |
 | `restart` | `bool` | `false` | Restart this service when dependency restarts |
 | `exit_code` | `list` | none | Exit code filter for `service_failed`/`service_stopped` |
-| `wait` | `bool` | condition default | Override whether `--wait`/foreground blocks on this dependency |
 
 ---
 
 ## Dependency Conditions
 
-| Condition | Default wait | Description |
-|-----------|-------------|-------------|
-| `service_started` | **startup** | Dependency status is Running, Healthy, or Unhealthy (default) |
-| `service_healthy` | **startup** | Dependency status is Healthy (requires healthcheck) |
-| `service_completed_successfully` | **startup** | Dependency exited with code 0 |
-| `service_unhealthy` | **deferred** | Dependency was Healthy then became Unhealthy (requires healthcheck) |
-| `service_failed` | **deferred** | Dependency failed: Exited with non-zero code, Killed by signal, or Failed (spawn error). Optional `exit_code` filter |
-| `service_stopped` | **deferred** | Dependency is Stopped, Exited, Killed, or Failed. Optional `exit_code` filter |
+| Condition | Description |
+|-----------|-------------|
+| `service_started` | Dependency status is Running, Healthy, or Unhealthy (default) |
+| `service_healthy` | Dependency status is Healthy (requires healthcheck) |
+| `service_completed_successfully` | Dependency exited with code 0 |
+| `service_unhealthy` | Dependency was Healthy then became Unhealthy (requires healthcheck) |
+| `service_failed` | Dependency failed: Exited with non-zero code, Killed by signal, or Failed (spawn error). Optional `exit_code` filter |
+| `service_stopped` | Dependency is Stopped, Exited, Killed, or Failed. Optional `exit_code` filter |
 
----
-
-## Startup vs Deferred Conditions
-
-Conditions are classified as **startup** (naturally resolved during startup) or **deferred** (reactive, waiting for transitions that may not happen during startup). This classification determines how `start`, `start --wait`, and `start -d` behave.
-
-**Startup conditions** (`service_started`, `service_healthy`, `service_completed_successfully`):
-- Resolve naturally as services start up
-- Services waiting on these are part of the **startup cluster**
-- `--wait` blocks until these are satisfied
-
-**Deferred conditions** (`service_unhealthy`, `service_failed`, `service_stopped`):
-- Wait for failure or degradation events that may never happen
-- Services waiting on these are part of the **deferred cluster**
-- `--wait` does NOT block for these (they start in the background)
-
-| Start Mode | Startup cluster | Deferred cluster |
-|------------|----------------|-----------------|
-| `start` (foreground) | Started level-by-level, blocking | Spawned in background |
-| `start -d` | All started in background | All started in background |
-| `start -d --wait` | Started level-by-level, blocks CLI | Spawned in background, CLI returns |
-
----
-
-## The `wait` Field
-
-The `wait` field provides explicit control over startup/deferred classification at two levels:
-
-### Service Level
-
-Override the computed classification entirely:
-
-```yaml
-services:
-  # Force into startup cluster despite deferred dependencies
-  monitor:
-    wait: true
-    depends_on:
-      app:
-        condition: service_failed
-
-  # Force into deferred cluster despite startup dependencies
-  optional-worker:
-    wait: false
-    depends_on:
-      database:
-        condition: service_healthy
-```
-
-### Edge Level
-
-Override a single dependency edge's default classification:
-
-```yaml
-depends_on:
-  long_batch_job:
-    condition: service_completed_successfully
-    wait: false   # Don't block --wait for this edge
-  app:
-    condition: service_failed
-    wait: true    # Treat this edge as startup
-```
-
----
-
-## Startup Cluster Computation
-
-The startup cluster is computed transitively using these rules:
-
-1. Services are sorted in **topological order** (dependencies before dependents)
-2. For each service (in order), compute `effective_wait`:
-   - If `service.wait` is explicitly set → use that value
-   - If the service has no dependencies → `true` (startup)
-   - Otherwise: `AND` of `(dependency.effective_wait AND edge_wait)` for each edge
-3. `edge_wait` for each dependency edge:
-   - `dep_config.wait` if explicitly set on the edge
-   - Otherwise, `condition.is_startup_condition()`
-
-### Algorithm Flowchart
-
-```mermaid
-flowchart TD
-    Start["For each service<br/>(in topological order)"] --> ExplicitCheck{"service.wait<br/>explicitly set?"}
-
-    ExplicitCheck -- "wait: true" --> Startup["effective_wait = true<br/>(startup cluster)"]
-    ExplicitCheck -- "wait: false" --> Deferred["effective_wait = false<br/>(deferred cluster)"]
-    ExplicitCheck -- "not set" --> HasDeps{"Has<br/>dependencies?"}
-
-    HasDeps -- No --> Startup
-    HasDeps -- Yes --> ForEachEdge["For each dependency edge,<br/>compute edge result"]
-
-    ForEachEdge --> EdgeCheck{"edge.wait<br/>explicitly set?"}
-    EdgeCheck -- Yes --> EdgeExplicit["edge_wait = edge.wait"]
-    EdgeCheck -- No --> EdgeCondition["edge_wait =<br/>condition.is_startup?"]
-
-    EdgeExplicit --> Combine
-    EdgeCondition --> Combine
-
-    Combine["edge_result =<br/>dep.effective_wait AND edge_wait"] --> AllEdges{"All edge results<br/>are true?"}
-
-    AllEdges -- Yes --> Startup
-    AllEdges -- No --> Deferred
-```
-
-### Propagation Example
-
-```yaml
-services:
-  database:
-    command: ["postgres"]
-    healthcheck:
-      test: ["pg_isready"]
-  app:
-    command: ["./server"]
-    depends_on:
-      database:
-        condition: service_healthy
-  monitor:
-    command: ["./alert-on-failure"]
-    depends_on:
-      app:
-        condition: service_failed
-  alerter:
-    command: ["./send-alerts"]
-    depends_on:
-      monitor:
-        condition: service_started
-```
-
-Resolution:
-
-| Service | Computation | Result |
-|---------|-------------|--------|
-| `database` | No deps | startup |
-| `app` | `database.effective_wait(true) AND service_healthy.startup(true)` = `true` | startup |
-| `monitor` | `app.effective_wait(true) AND service_failed.startup(false)` = `false` | **deferred** |
-| `alerter` | `monitor.effective_wait(false) AND service_started.startup(true)` = `false` | **deferred** |
-
-Note that deferred status **propagates downstream**: even though `alerter` uses `service_started` (normally startup), its dependency `monitor` is deferred, making `alerter` deferred too.
+All services are spawned at once and independently wait for their dependencies. Services blocked on unmet dependencies are in the **Waiting** state.
 
 ---
 
 ## Dependency Timeout
 
-Each dependency edge has an effective timeout: `dep.timeout ?? kepler.timeout ?? none`.
+Each dependency edge can have its own timeout via `depends_on.<dep>.timeout`. If no timeout is set, the wait is indefinite (the service waits until the condition is met, permanently unsatisfied, or structurally unreachable).
 
 ```yaml
-kepler:
-  timeout: 30s    # Global default
-
 services:
   backend:
     depends_on:
       database:
         condition: service_healthy
-        timeout: 60s    # Override: wait up to 60s for this specific dependency
+        timeout: 60s    # Fail if database isn't healthy within 60s
       cache:
         condition: service_started
-        # Uses global 30s timeout
+        # No timeout — waits indefinitely
 ```
 
-If no timeout is configured at either level, the wait has no timeout (waits indefinitely or until permanently unsatisfied).
+When a timeout expires, the service is marked as **Failed** with a reason (e.g., "Dependency timeout: backend timed out waiting for database to satisfy condition ServiceHealthy").
+
+---
+
+## Structurally Unreachable Conditions
+
+Some dependency conditions are **structurally unreachable** given the dependency's restart policy. Kepler detects these and immediately marks the dependent service as **Skipped** with a reason, rather than waiting for a timeout.
+
+| Condition | `restart: always` | `restart: on-failure` | `restart: no` |
+|-----------|-------------------|----------------------|---------------|
+| `service_failed` | Unreachable | Unreachable | Reachable |
+| `service_stopped` | Unreachable | Reachable | Reachable |
+| `service_completed_successfully` | Unreachable | Reachable | Reachable |
+| `service_unhealthy` | Reachable | Reachable | Reachable |
+| `service_started` | Reachable | Reachable | Reachable |
+| `service_healthy` | Reachable | Reachable | Reachable |
+
+**Why**: With `restart: always`, the dependency always restarts after any exit, so it can never permanently reach a failed or stopped state. With `restart: on-failure`, it restarts on non-zero exit, so `service_failed` (which requires non-zero exit) can never be permanent.
+
+This check only fires once the dependency is actively running (not during startup, where a spawn failure could still occur).
+
+**Example**:
+
+```yaml
+services:
+  redis:
+    command: ["redis-server"]
+    restart: always
+
+  redis-failover:
+    command: ["./failover.sh"]
+    depends_on:
+      redis:
+        condition: service_failed
+    # → Immediately Skipped: `redis` has restart policy `always` —
+    #   it will always restart, so `service_failed` can never be met
+```
+
+---
+
+## Transient Exit Filtering
+
+When a dependency exits but its restart policy will restart it, terminal-state conditions (`service_stopped`, `service_failed`, `service_completed_successfully`) are **not** considered satisfied. The exit is transient — the dependency will restart, and the condition will no longer hold.
+
+This prevents dependent services from starting on every crash/restart cycle of a dependency with `restart: always` or `restart: on-failure`.
+
+| Dep status | Restart policy | Will restart? | Condition satisfied? |
+|------------|----------------|---------------|---------------------|
+| `Exited(1)` | `always` | Yes | No (transient) |
+| `Exited(0)` | `always` | Yes | No (transient) |
+| `Exited(1)` | `on-failure` | Yes | No (transient) |
+| `Exited(0)` | `on-failure` | No | Yes (permanent) |
+| `Exited(*)` | `no` | No | Yes (permanent) |
+| `Stopped` | any | No | Yes (explicitly stopped) |
+
+**Note**: `Stopped` status means the service was explicitly stopped by the user (e.g., `kepler stop`). This is never filtered — explicit stops are always permanent regardless of the restart policy.
+
+**Example**:
+
+```yaml
+services:
+  worker:
+    command: ["./worker"]
+    restart: always
+
+  cleanup:
+    command: ["./cleanup.sh"]
+    depends_on:
+      worker:
+        condition: service_stopped
+```
+
+Without transient exit filtering, `cleanup` would start every time `worker` crashes (briefly enters `Exited` state before restarting). With filtering, `cleanup` only starts when `worker` is permanently stopped (e.g., via `kepler stop`). In practice, combined with [structural unreachability](#structurally-unreachable-conditions), `cleanup` would be Skipped since `service_stopped` with `restart: always` can never be permanently met.
 
 ---
 
@@ -238,7 +168,7 @@ When `restart: true` is set on a dependency edge, the dependent service restarts
 
 1. Dependency restarts (for any reason)
 2. Dependent service is stopped
-3. System waits for the dependency's condition to be met again (with timeout)
+3. System waits for the dependency's condition to be met again (with per-dep timeout if set)
 4. Dependent service is restarted
 
 ```yaml
@@ -292,7 +222,26 @@ A dependency is **permanently unsatisfied** when:
 2. Its restart policy won't restart it (e.g., `restart: no` or `restart: on-failure` with exit code 0)
 3. The condition is not currently satisfied
 
-When this happens, the dependent service is marked as **Failed** instead of waiting indefinitely. This allows foreground mode to detect quiescence and exit cleanly.
+When this happens, the dependent service is marked as **Skipped** with a reason. This allows foreground mode to detect quiescence and exit cleanly.
+
+---
+
+## Skipped Services
+
+A service is marked **Skipped** (instead of Failed) when it never ran due to dependency issues:
+
+| Cause | Example reason |
+|-------|---------------|
+| `if` condition false | `if` condition evaluated to false: `ctx.debug` |
+| Dependency skipped (cascade) | dependency `web` was skipped |
+| Permanently unsatisfied | dependency exited with exit code Some(0), won't restart (policy: No) |
+| Structurally unreachable | `redis` has restart policy `always` — it will always restart, so `service_failed` can never be met |
+
+Skip reasons are visible in:
+- `kepler ps`: `Skipped (reason)`
+- `start -d --wait` progress: `Skipped: reason`
+
+Skipped services are excluded from `stop --clean` cleanup.
 
 ---
 
@@ -347,7 +296,7 @@ services:
 services:
   app:
     command: ["./server"]
-    restart: always
+    restart: no
 
   monitor:
     command: ["./alert-on-failure"]
@@ -356,12 +305,11 @@ services:
         condition: service_failed
 ```
 
-### Mixed Startup and Deferred
+Note: If `app` had `restart: always`, `monitor` would be immediately Skipped since `service_failed` is structurally unreachable.
+
+### Dependency with Timeout
 
 ```yaml
-kepler:
-  timeout: 30s
-
 services:
   database:
     command: ["postgres"]
@@ -373,6 +321,7 @@ services:
     depends_on:
       database:
         condition: service_healthy
+        timeout: 60s    # Fail if database isn't healthy in 60s
 
   # Deferred: waits for app to fail
   error-handler:
@@ -380,14 +329,7 @@ services:
     depends_on:
       app:
         condition: service_failed
-
-  # Force into startup despite deferred dependency
-  critical-monitor:
-    wait: true
-    command: ["./monitor"]
-    depends_on:
-      app:
-        condition: service_failed
+        # No timeout — waits indefinitely (or gets Skipped if unreachable)
 ```
 
 ---

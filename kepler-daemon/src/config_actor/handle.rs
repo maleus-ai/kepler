@@ -20,7 +20,7 @@ use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
 
 use super::command::ConfigCommand;
-use super::context::{HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
+use super::context::{ConfigEvent, HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
 
 /// Handle for sending commands to a config actor.
 /// This is cheap to clone (just clones the channel sender and path).
@@ -29,7 +29,9 @@ pub struct ConfigActorHandle {
     config_path: PathBuf,
     config_hash: String,
     tx: mpsc::Sender<ConfigCommand>,
-    subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>,
+    subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ConfigEvent>>>>,
+    /// Per-service dependency watchers
+    dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>>,
     /// UID of the CLI user who loaded this config (for per-request authorization)
     owner_uid: Option<u32>,
 }
@@ -40,7 +42,8 @@ impl ConfigActorHandle {
         config_path: PathBuf,
         config_hash: String,
         tx: mpsc::Sender<ConfigCommand>,
-        subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>,
+        subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ConfigEvent>>>>,
+        dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>>,
         owner_uid: Option<u32>,
     ) -> Self {
         Self {
@@ -48,6 +51,7 @@ impl ConfigActorHandle {
             config_hash,
             tx,
             subscribers,
+            dep_watchers,
             owner_uid,
         }
     }
@@ -67,11 +71,22 @@ impl ConfigActorHandle {
         self.owner_uid
     }
 
-    /// Subscribe to service status change events.
+    /// Subscribe to config events (status changes, Ready, Quiescent).
     /// Returns an unbounded receiver that is guaranteed to receive all events.
-    pub fn subscribe_state_changes(&self) -> mpsc::UnboundedReceiver<ServiceStatusChange> {
+    pub fn subscribe_state_changes(&self) -> mpsc::UnboundedReceiver<ConfigEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.subscribers.lock().unwrap().push(tx);
+        self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).push(tx);
+        rx
+    }
+
+    /// Subscribe to state changes of a specific dependency service.
+    /// Only notified when the named service's status changes.
+    pub fn watch_dep(&self, dep_name: &str) -> mpsc::UnboundedReceiver<ServiceStatusChange> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.dep_watchers.lock().unwrap_or_else(|e| e.into_inner())
+            .entry(dep_name.to_string())
+            .or_default()
+            .push(tx);
         rx
     }
 
@@ -409,21 +424,46 @@ impl ConfigActorHandle {
 
     // === Mutation Methods ===
 
-    /// Atomically claim a service for starting.
-    ///
-    /// If the service is in a terminal state (Stopped/Failed/Exited/Killed),
-    /// transitions it to Starting and returns true. If already non-terminal
-    /// (Starting/Running/Stopping/Healthy/Unhealthy), returns false.
-    /// Only the first concurrent caller wins.
+    /// Atomically claim a service for startup.
+    /// Returns true if claimed (was Waiting or terminal), false if already active.
     pub async fn claim_service_start(&self, service_name: &str) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self.tx.send(ConfigCommand::ClaimServiceStart {
-            service_name: service_name.to_string(),
-            reply: reply_tx,
-        }).await.is_err() {
+        if self
+            .tx
+            .send(ConfigCommand::ClaimServiceStart {
+                service_name: service_name.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
             warn!("Config actor closed, cannot send ClaimServiceStart");
         }
         reply_rx.await.unwrap_or(false)
+    }
+
+    /// Atomically set reason(s) and status in a single command.
+    pub async fn set_service_status_with_reason(
+        &self,
+        service_name: &str,
+        status: ServiceStatus,
+        skip_reason: Option<String>,
+        fail_reason: Option<String>,
+    ) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(ConfigCommand::SetServiceStatusWithReason {
+                service_name: service_name.to_string(),
+                status,
+                skip_reason,
+                fail_reason,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor closed".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
     }
 
     /// Set service status
@@ -444,6 +484,36 @@ impl ConfigActorHandle {
         reply_rx
             .await
             .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
+    }
+
+    /// Set the reason a service was skipped (must be called before set_service_status(Skipped))
+    pub async fn set_skip_reason(&self, service_name: &str, reason: &str) {
+        if self
+            .tx
+            .send(ConfigCommand::SetSkipReason {
+                service_name: service_name.to_string(),
+                reason: reason.to_string(),
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send SetSkipReason");
+        }
+    }
+
+    /// Set the reason a service failed (must be called before set_service_status(Failed))
+    pub async fn set_fail_reason(&self, service_name: &str, reason: &str) {
+        if self
+            .tx
+            .send(ConfigCommand::SetFailReason {
+                service_name: service_name.to_string(),
+                reason: reason.to_string(),
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send SetFailReason");
+        }
     }
 
     /// Set service PID and started_at
@@ -597,6 +667,28 @@ impl ConfigActorHandle {
         {
             warn!("Config actor closed, cannot send StoreProcessHandle");
         }
+    }
+
+    /// Take stdout/stderr capture tasks from the process handle.
+    /// The tasks are removed from the handle so they can be joined by the caller
+    /// to ensure all log output is flushed before updating service status.
+    pub async fn take_output_tasks(
+        &self,
+        service_name: &str,
+    ) -> (Option<JoinHandle<()>>, Option<JoinHandle<()>>) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ConfigCommand::TakeOutputTasks {
+                service_name: service_name.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send TakeOutputTasks");
+        }
+        reply_rx.await.unwrap_or((None, None))
     }
 
     /// Remove and return a process handle
@@ -769,6 +861,25 @@ impl ConfigActorHandle {
             warn!("Config actor closed, cannot send HasEventHandler");
         }
         reply_rx.await.unwrap_or(false)
+    }
+
+    /// Set the startup fence. When true, Ready/Quiescent signals are suppressed.
+    /// Set to true before marking services as Waiting, false after all are marked.
+    pub async fn set_startup_in_progress(&self, in_progress: bool) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.tx.send(ConfigCommand::SetStartupInProgress { in_progress, reply: reply_tx }).await.is_err() {
+            warn!("Config actor closed, cannot send SetStartupInProgress");
+        }
+        let _ = reply_rx.await;
+    }
+
+    /// Re-check and emit Ready/Quiescent signals if conditions are already met.
+    /// Called by Subscribe handler after subscribing, to avoid missing signals
+    /// that fired before the subscription was established.
+    pub async fn recheck_ready_quiescent(&self) {
+        if self.tx.send(ConfigCommand::RecheckReadyQuiescent).await.is_err() {
+            warn!("Config actor closed, cannot send RecheckReadyQuiescent");
+        }
     }
 
     /// Mark event handler as spawned for this config

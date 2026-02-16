@@ -43,3 +43,15 @@ pub struct ServiceStatusChange {
     pub service: String,
     pub status: ServiceStatus,
 }
+
+/// Events emitted by the config actor to global subscribers.
+/// Per-dep watchers continue to use `ServiceStatusChange` directly.
+#[derive(Debug, Clone)]
+pub enum ConfigEvent {
+    /// A service status changed
+    StatusChange(ServiceStatusChange),
+    /// All services reached their target state (for --wait)
+    Ready,
+    /// All services settled — nothing more will change (for foreground mode exit)
+    Quiescent,
+}

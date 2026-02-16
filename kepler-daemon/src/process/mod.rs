@@ -369,16 +369,18 @@ pub async fn stop_service(
             let _ = shutdown_tx.send(signal.unwrap_or(15));
         }
 
-        // Cancel output tasks
+        // Wait for output tasks to finish flushing remaining pipe data to log files,
+        // then abort if they don't complete in time.
         if let Some(task) = process_handle.stdout_task {
-            task.abort();
+            if tokio::time::timeout(tokio::time::Duration::from_secs(5), task).await.is_err() {
+                warn!("stdout capture task for {} did not finish in time", service_name);
+            }
         }
         if let Some(task) = process_handle.stderr_task {
-            task.abort();
+            if tokio::time::timeout(tokio::time::Duration::from_secs(5), task).await.is_err() {
+                warn!("stderr capture task for {} did not finish in time", service_name);
+            }
         }
-
-        // Give the monitor some time to handle shutdown
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
     // Cancel health check

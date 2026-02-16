@@ -114,7 +114,6 @@ pub struct TestServiceBuilder {
     limits: Option<ResourceLimits>,
     user: Option<String>,
     groups: Vec<String>,
-    wait: Option<bool>,
 }
 
 impl TestServiceBuilder {
@@ -134,7 +133,6 @@ impl TestServiceBuilder {
             limits: None,
             user: None,
             groups: Vec::new(),
-            wait: None,
         }
     }
 
@@ -227,12 +225,6 @@ impl TestServiceBuilder {
         self
     }
 
-    /// Set the service-level wait field
-    pub fn with_wait(mut self, wait: Option<bool>) -> Self {
-        self.wait = wait;
-        self
-    }
-
     pub fn with_healthcheck(mut self, healthcheck: HealthCheck) -> Self {
         self.healthcheck = Some(healthcheck);
         self
@@ -285,7 +277,6 @@ impl TestServiceBuilder {
             user: self.user,
             groups: self.groups,
             limits: self.limits,
-            wait: self.wait,
             condition: None,
         }
     }

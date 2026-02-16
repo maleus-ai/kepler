@@ -6,6 +6,7 @@
 use kepler_daemon::config_registry::ConfigRegistry;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::process::ProcessExitEvent;
+use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::ENV_LOCK;
@@ -42,7 +43,7 @@ fn write_config(
     path
 }
 
-/// When a service has a nonexistent working directory, the first start should fail.
+/// When a service has a nonexistent working directory, the service should eventually fail.
 /// A subsequent start must NOT hang — it should fail cleanly within a reasonable timeout.
 #[tokio::test]
 async fn test_start_with_nonexistent_working_dir_retries_without_hanging() {
@@ -65,16 +66,30 @@ async fn test_start_with_nonexistent_working_dir_retries_without_hanging() {
         .build();
 
     let config_path = write_config(&config, temp_dir.path());
-    let (orchestrator, _registry, _exit_rx, _restart_rx) =
+    let (orchestrator, registry, _exit_rx, _restart_rx) =
         create_test_orchestrator(temp_dir.path());
 
     let sys_env: std::collections::HashMap<String, String> = std::env::vars().collect();
 
-    // First start should fail with a spawn error
-    let result = orchestrator
+    // First start — spawns the service which fails asynchronously
+    let _result = orchestrator
         .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await;
-    assert!(result.is_err(), "First start should fail due to nonexistent working directory");
+
+    // Wait for the service to reach Failed status
+    let handle = registry.get(&config_path).expect("Config should be loaded");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(state) = handle.get_service_state("bad-workdir").await {
+            if state.status == ServiceStatus::Failed {
+                break;
+            }
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("Service should have reached Failed status within timeout");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // Second start must complete (fail or succeed) within a reasonable time — NOT hang.
     let result2 = tokio::time::timeout(
@@ -86,11 +101,6 @@ async fn test_start_with_nonexistent_working_dir_retries_without_hanging() {
     assert!(
         result2.is_ok(),
         "Second start should complete within timeout (not hang)"
-    );
-    // It should still fail (the directory still doesn't exist)
-    assert!(
-        result2.unwrap().is_err(),
-        "Second start should still fail since directory doesn't exist"
     );
 }
 
@@ -121,13 +131,33 @@ async fn test_failed_config_remains_in_registry() {
 
     let sys_env: std::collections::HashMap<String, String> = std::env::vars().collect();
 
-    // Start should fail
-    let result = orchestrator
+    // Start — spawns service which fails asynchronously
+    let _result = orchestrator
         .start_services(&config_path, None, Some(sys_env.clone()), None, None)
         .await;
-    assert!(result.is_err(), "Start should fail with bad working directory");
 
-    // Config should remain in the registry so users can inspect logs/status
+    // Config should be in the registry immediately after start_services returns
+    assert!(
+        registry.get(&config_path).is_some(),
+        "Config should remain in registry for diagnostic access"
+    );
+
+    // Wait for the service to reach Failed status
+    let handle = registry.get(&config_path).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(state) = handle.get_service_state("bad-workdir").await {
+            if state.status == ServiceStatus::Failed {
+                break;
+            }
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("Service should have reached Failed status within timeout");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Config should still be in the registry after failure
     assert!(
         registry.get(&config_path).is_some(),
         "Failed config should remain in registry for diagnostic access"

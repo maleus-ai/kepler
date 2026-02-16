@@ -146,7 +146,6 @@ services:
         "echo 'RabbitMQ starting'; touch /tmp/rmq_ready; while true; do sleep 5; done",
       ]
     restart: always
-    wait: true
     environment: !lua |
       return svc_env(ctx.service_name, {"AMQP_PORT=" .. next_port()})
     healthcheck:
@@ -348,7 +347,7 @@ services:
       retries: 3
       start_period: 0s
 
-  # 13. gateway — File watching, wait:false, long timeout dep
+  # 13. gateway — File watching, long timeout dep
   gateway:
     command:
       [
@@ -356,7 +355,6 @@ services:
         "-c",
         "echo 'API Gateway starting'; touch /tmp/gateway_ready; while true; do sleep 5; done",
       ]
-    wait: false
     restart:
       policy: always
       watch: ["./gateway/**/*.conf"]
@@ -590,12 +588,11 @@ services:
       post_exit:
         run: echo "email-service exited — flushing email queue"
 
-  # 23. search-service — Lua command, wait:false
+  # 23. search-service — Lua command
   search-service:
     command: !lua |
       return {"sh", "-c", "echo Search service starting on port " .. next_port() .. "; touch /tmp/search_ready; while true; do sleep 5; done"}
     restart: always
-    wait: false
     depends_on:
       - postgres:
           condition: service_healthy
@@ -1078,7 +1075,7 @@ services:
       - postgres-failover:
           condition: service_completed_successfully
 
-  # 49. emergency-shutdown — 3x service_failed fan-in, edge-level wait:false
+  # 49. emergency-shutdown — 3x service_failed fan-in
   emergency-shutdown:
     command:
       [
@@ -1090,13 +1087,10 @@ services:
     depends_on:
       - postgres:
           condition: service_failed
-          wait: false
       - redis:
           condition: service_failed
-          wait: false
       - rabbitmq:
           condition: service_failed
-          wait: false
     hooks:
       pre_start:
         - if: "not ctx.initialized"
