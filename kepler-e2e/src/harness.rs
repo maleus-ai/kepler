@@ -267,6 +267,27 @@ impl E2eHarness {
         Ok(())
     }
 
+    /// Kill the daemon process abruptly (simulates systemctl stop / SIGKILL).
+    /// Unlike stop_daemon, this does NOT do a graceful shutdown — the daemon
+    /// process is killed immediately, just like systemd would kill it.
+    pub async fn kill_daemon(&mut self) -> E2eResult<()> {
+        if let Some(mut child) = self.daemon_process.take() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+
+        // Wait for socket to be cleaned up or become stale
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Remove stale socket if it still exists
+        let socket = self.socket_path();
+        if socket.exists() {
+            let _ = std::fs::remove_file(&socket);
+        }
+
+        Ok(())
+    }
+
     /// Run the kepler CLI as a specific OS user via `sudo -u <user>`.
     /// Tests run as root, so no sudoers entry is needed — root can always switch users.
     pub async fn run_cli_as_user(&self, user: &str, args: &[&str]) -> E2eResult<CommandOutput> {
@@ -493,15 +514,12 @@ impl E2eHarness {
         self.run_cli(&["-f", config_str, "restart", "-d", "--wait", service]).await
     }
 
-    /// Recreate all services (stop → re-bake config → start fresh)
+    /// Recreate all services (stop --clean, re-bake config, start)
     pub async fn recreate_services(&self, config_path: &Path) -> E2eResult<CommandOutput> {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        // Stop first, then recreate (re-bake), then start
-        self.run_cli(&["-f", config_str, "stop"]).await?;
-        self.run_cli(&["-f", config_str, "recreate"]).await?;
-        self.run_cli(&["-f", config_str, "start", "-d", "--wait"]).await
+        self.run_cli(&["-f", config_str, "recreate"]).await
     }
 
     /// Recreate services with custom environment variables
@@ -513,10 +531,7 @@ impl E2eHarness {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        // Stop first, then recreate with env (re-bake), then start with env
-        self.run_cli(&["-f", config_str, "stop"]).await?;
-        self.run_cli_with_env(&["-f", config_str, "recreate"], env).await?;
-        self.run_cli_with_env(&["-f", config_str, "start", "-d", "--wait"], env).await
+        self.run_cli_with_env(&["-f", config_str, "recreate"], env).await
     }
 
     /// Start a specific service (detached mode for tests)

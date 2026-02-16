@@ -1,0 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  pidcheck:
+    command: ["sh", "-c", "echo PID=$$; sleep 300"]

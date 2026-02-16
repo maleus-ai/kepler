@@ -1,9 +1,12 @@
 //! E2E tests for daemon lifecycle operations
 //!
-//! Tests basic daemon start/stop/status functionality.
+//! Tests basic daemon start/stop/status functionality
+//! and daemon restart respawn behavior.
 
 use kepler_e2e::{E2eHarness, E2eResult};
 use std::time::Duration;
+
+const TEST_MODULE: &str = "daemon_lifecycle_test";
 
 /// Test that starting the daemon creates a socket file
 #[tokio::test]
@@ -114,6 +117,174 @@ async fn test_daemon_status_when_stopped() -> E2eResult<()> {
         "Daemon status should indicate not running. stdout: {}, stderr: {}",
         output.stdout, output.stderr
     );
+
+    Ok(())
+}
+
+// ============================================================================
+// Daemon restart respawn tests
+// ============================================================================
+
+/// After a daemon kill+restart, a previously running service should be respawned.
+#[tokio::test]
+async fn test_daemon_restart_respawns_services() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_daemon_restart_respawns_services")?;
+
+    harness.start_daemon().await?;
+
+    // Start the service and wait for it to be running
+    harness.start_services(&config_path).await?.assert_success();
+    harness
+        .wait_for_service_status(&config_path, "worker", "running", Duration::from_secs(10))
+        .await?;
+
+    // Kill the daemon abruptly (simulates systemctl stop)
+    harness.kill_daemon().await?;
+
+    // Restart the daemon
+    harness.start_daemon().await?;
+
+    // The service should be respawned and running again
+    harness
+        .wait_for_service_status(&config_path, "worker", "running", Duration::from_secs(15))
+        .await?;
+
+    // Cleanup
+    harness.stop_daemon().await?;
+
+    Ok(())
+}
+
+/// After a daemon kill+restart, multiple services (including those with dependencies)
+/// should all be respawned.
+#[tokio::test]
+async fn test_daemon_restart_respawns_multiple_services() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_daemon_restart_respawns_multiple_services")?;
+
+    harness.start_daemon().await?;
+
+    // Start all services
+    harness.start_services(&config_path).await?.assert_success();
+    harness
+        .wait_for_service_status(&config_path, "backend", "running", Duration::from_secs(10))
+        .await?;
+    harness
+        .wait_for_service_status(&config_path, "frontend", "running", Duration::from_secs(10))
+        .await?;
+
+    // Kill the daemon
+    harness.kill_daemon().await?;
+
+    // Restart the daemon
+    harness.start_daemon().await?;
+
+    // Both services should be respawned (longer timeout for dependency chain)
+    harness
+        .wait_for_service_status(&config_path, "backend", "running", Duration::from_secs(20))
+        .await?;
+    harness
+        .wait_for_service_status(&config_path, "frontend", "running", Duration::from_secs(20))
+        .await?;
+
+    // Cleanup
+    harness.stop_daemon().await?;
+
+    Ok(())
+}
+
+/// After a daemon restart, services should have new PIDs (not reusing old processes).
+#[tokio::test]
+async fn test_daemon_restart_new_pids() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_daemon_restart_new_pids")?;
+
+    harness.start_daemon().await?;
+
+    // Start the service
+    harness.start_services(&config_path).await?.assert_success();
+    harness
+        .wait_for_service_status(&config_path, "pidcheck", "running", Duration::from_secs(10))
+        .await?;
+
+    // Get the PID before restart
+    let ps_before = harness.ps(&config_path).await?;
+    let pid_before = harness.extract_pid_from_ps(&ps_before.stdout, "pidcheck");
+    assert!(pid_before.is_some(), "Should have a PID before restart. ps: {}", ps_before.stdout);
+
+    // Kill and restart daemon
+    harness.kill_daemon().await?;
+    harness.start_daemon().await?;
+
+    // Wait for service to be running again
+    harness
+        .wait_for_service_status(&config_path, "pidcheck", "running", Duration::from_secs(15))
+        .await?;
+
+    // Get the PID after restart
+    let ps_after = harness.ps(&config_path).await?;
+    let pid_after = harness.extract_pid_from_ps(&ps_after.stdout, "pidcheck");
+    assert!(pid_after.is_some(), "Should have a PID after restart. ps: {}", ps_after.stdout);
+
+    // PIDs should be different (new process)
+    assert_ne!(
+        pid_before.unwrap(),
+        pid_after.unwrap(),
+        "Service should have a new PID after daemon restart"
+    );
+
+    // Cleanup
+    harness.stop_daemon().await?;
+
+    Ok(())
+}
+
+/// Services that were stopped before the daemon restart should NOT be respawned.
+#[tokio::test]
+async fn test_daemon_restart_stopped_services_stay_stopped() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_daemon_restart_stopped_services_stay_stopped")?;
+
+    harness.start_daemon().await?;
+
+    // Start both services
+    harness.start_services(&config_path).await?.assert_success();
+    harness
+        .wait_for_service_status(&config_path, "running-service", "running", Duration::from_secs(10))
+        .await?;
+    harness
+        .wait_for_service_status(&config_path, "stopped-service", "running", Duration::from_secs(10))
+        .await?;
+
+    // Stop one service before the daemon restart
+    harness.stop_service(&config_path, "stopped-service").await?.assert_success();
+    harness
+        .wait_for_service_status(&config_path, "stopped-service", "stopped", Duration::from_secs(10))
+        .await?;
+
+    // Kill and restart daemon
+    harness.kill_daemon().await?;
+    harness.start_daemon().await?;
+
+    // The running service should be respawned
+    harness
+        .wait_for_service_status(&config_path, "running-service", "running", Duration::from_secs(15))
+        .await?;
+
+    // The stopped service should remain stopped (not respawned)
+    // Give a moment for any spurious respawn to happen
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let ps_output = harness.ps(&config_path).await?;
+    let stopped_line = ps_output.stdout.lines().find(|l| l.contains("stopped-service"));
+    assert!(
+        stopped_line.is_some_and(|l| !l.contains("Up ")),
+        "stopped-service should NOT be running after daemon restart. ps:\n{}",
+        ps_output.stdout
+    );
+
+    // Cleanup
+    harness.stop_daemon().await?;
 
     Ok(())
 }

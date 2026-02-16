@@ -1,0 +1,9 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  running-service:
+    command: ["sh", "-c", "echo RUNNING; sleep 300"]
+  stopped-service:
+    command: ["sh", "-c", "echo STOPPED; sleep 300"]

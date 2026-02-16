@@ -725,10 +725,36 @@ async fn test_dependency_waiting_reacts_via_broadcast() {
         .await
         .unwrap();
 
+    // start_services spawns service tasks and returns before they complete.
+    // Wait for web to reach Running via state change subscription.
+    let canonical = std::fs::canonicalize(&config_path).unwrap();
+    let handle = orchestrator.registry().get(&canonical).unwrap();
+    let mut rx = handle.subscribe_state_changes();
+
+    // Check if already Running before waiting
+    let mut web_running = handle
+        .get_service_state("web")
+        .await
+        .is_some_and(|s| s.status == ServiceStatus::Running);
+
+    if !web_running {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while let Ok(Some(event)) =
+            tokio::time::timeout(deadline - tokio::time::Instant::now(), rx.recv()).await
+        {
+            if let ConfigEvent::StatusChange(change) = event {
+                if change.service == "web" && change.status == ServiceStatus::Running {
+                    web_running = true;
+                    break;
+                }
+            }
+        }
+    }
+
     let elapsed = start.elapsed();
 
     // With broadcast-based waiting, the entire start (including dependency
-    // resolution) should complete well under 2 seconds. The old polling loop
+    // resolution) should complete well under 5 seconds. The old polling loop
     // would add at least 100ms of latency per check cycle.
     assert!(
         elapsed < Duration::from_secs(5),
@@ -736,13 +762,8 @@ async fn test_dependency_waiting_reacts_via_broadcast() {
         elapsed
     );
 
-    // Verify web actually reached Running
-    let canonical = std::fs::canonicalize(&config_path).unwrap();
-    let handle = orchestrator.registry().get(&canonical).unwrap();
-    let web_state = handle.get_service_state("web").await.unwrap();
-    assert_eq!(
-        web_state.status,
-        ServiceStatus::Running,
+    assert!(
+        web_running,
         "web should be Running after dependency satisfied"
     );
 

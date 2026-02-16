@@ -227,6 +227,10 @@ pub struct PersistedServiceState {
     pub initialized: bool,
     #[serde(default)]
     pub was_healthy: bool,
+    #[serde(default)]
+    pub skip_reason: Option<String>,
+    #[serde(default)]
+    pub fail_reason: Option<String>,
 }
 
 impl From<&ServiceState> for PersistedServiceState {
@@ -242,6 +246,8 @@ impl From<&ServiceState> for PersistedServiceState {
             restart_count: state.restart_count,
             initialized: state.initialized,
             was_healthy: state.was_healthy,
+            skip_reason: state.skip_reason.clone(),
+            fail_reason: state.fail_reason.clone(),
         }
     }
 }
@@ -270,8 +276,8 @@ impl PersistedServiceState {
             computed_env,
             working_dir,
             was_healthy: self.was_healthy,
-            skip_reason: None,
-            fail_reason: None,
+            skip_reason: self.skip_reason.clone(),
+            fail_reason: self.fail_reason.clone(),
         }
     }
 }

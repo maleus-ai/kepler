@@ -228,25 +228,25 @@ async fn main() -> anyhow::Result<()> {
     // Spawn file change handler using ServiceOrchestrator
     orchestrator.clone().spawn_file_change_handler(restart_rx);
 
-    // Run server — race against Ctrl+C (SIGINT)
+    // Set up SIGTERM handler for systemd stop/restart
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+    // Run server — race against signals (SIGINT/SIGTERM)
     tokio::select! {
         result = server.run() => {
             // Server stopped via Request::Shutdown (graceful shutdown already done by handler)
             result?;
         }
         _ = tokio::signal::ctrl_c() => {
-            info!("Received Ctrl+C, shutting down gracefully");
-
-            // Stop all services
-            let config_paths = registry.list_paths();
-            for config_path in config_paths {
-                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
-                    error!("Error stopping services during shutdown: {}", e);
-                }
-            }
-
-            // Shutdown all actors (triggers save_state for each)
-            registry.shutdown_all().await;
+            info!("Received SIGINT, shutting down");
+            // Just exit — state is already persisted with current statuses.
+            // Child processes are killed by systemd cgroup or become orphans
+            // that get cleaned up on next daemon start.
+        }
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM, shutting down");
+            // Just exit — state is already persisted with current statuses.
+            // systemd kills all processes in the cgroup.
         }
     }
 
@@ -303,19 +303,9 @@ async fn handle_request(
 
         Request::Shutdown => {
             info!("Shutdown requested");
-            // Stop all services first
-            let config_paths = registry.list_paths();
 
-            for config_path in config_paths {
-                if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
-                    error!("Error stopping services during shutdown: {}", e);
-                }
-            }
-
-            // Shutdown all actors
-            registry.shutdown_all().await;
-
-            // Signal shutdown
+            // Signal shutdown — just exit. State is already persisted with
+            // current statuses, so services will be respawned on restart.
             let _ = shutdown_tx.send(()).await;
             Response::ok_with_message("Daemon shutting down".to_string())
         }
@@ -1026,21 +1016,36 @@ async fn discover_existing_configs(
                         services_to_respawn
                     );
 
+                    // Mark all respawn services as Waiting first (so dependency
+                    // resolution works correctly when they start concurrently)
                     for service_name in &services_to_respawn {
-                        match orchestrator
-                            .start_services(&source_path, Some(service_name), None, None, None)
+                        if let Err(e) = handle
+                            .set_service_status(service_name, ServiceStatus::Waiting)
                             .await
                         {
-                            Ok(_) => {
-                                info!("Respawned service {} for {:?}", service_name, source_path);
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to respawn service {} for {:?}: {}",
-                                    service_name, source_path, e
-                                );
-                            }
+                            warn!("Failed to set {} to Waiting: {}", service_name, e);
                         }
+                    }
+
+                    // Spawn all services concurrently — each waits for its own deps
+                    for service_name in &services_to_respawn {
+                        let orch = orchestrator.clone();
+                        let handle_clone = handle.clone();
+                        let service_name_clone = service_name.clone();
+                        let source_path_clone = source_path.clone();
+                        tokio::spawn(async move {
+                            match orch.respawn_single_service(&handle_clone, &service_name_clone).await {
+                                Ok(()) => {
+                                    info!("Respawned service {} for {:?}", service_name_clone, source_path_clone);
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to respawn service {} for {:?}: {}",
+                                        service_name_clone, source_path_clone, e
+                                    );
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -1123,3 +1128,4 @@ async fn kill_orphaned_processes_and_get_respawn_list(
 
     services_to_respawn
 }
+
