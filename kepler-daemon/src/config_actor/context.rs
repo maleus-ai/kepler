@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::config::{LogConfig, ServiceConfig};
+use crate::config::{LogConfig, RawServiceConfig, ServiceConfig};
 use crate::logs::LogWriterConfig;
 use crate::state::ServiceStatus;
 
@@ -17,9 +17,16 @@ pub enum TaskHandleType {
 /// Context for a service that bundles commonly fetched together data.
 /// This reduces the pattern of making multiple separate calls for
 /// service_config, config_dir, log_config, and global_log_config.
+///
+/// The `service_config` is the typed raw config before service start time.
+/// The orchestrator resolves it to a typed `ServiceConfig` at service start time
+/// (after dependencies are satisfied and expansion context is available).
 #[derive(Clone)]
 pub struct ServiceContext {
-    pub service_config: ServiceConfig,
+    pub service_config: RawServiceConfig,
+    /// Resolved (expanded + deserialized) service config, cached after first start.
+    /// None before a service has been started for the first time.
+    pub resolved_config: Option<ServiceConfig>,
     pub config_dir: PathBuf,
     pub log_config: LogWriterConfig,
     pub global_log_config: Option<LogConfig>,

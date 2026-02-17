@@ -22,7 +22,7 @@ For a quick overview of the project, see the [main README](../README.md).
 ## Configuration Features
 
 - **[Environment Variables](environment-variables.md)** -- Three-stage expansion, inheritance, and isolation
-- **[Variable Expansion](variable-expansion.md)** -- Shell-style `${VAR}` syntax reference
+- **[Inline Expressions](variable-expansion.md)** -- `${{ expr }}` inline Lua expression syntax
 - **[Lua Scripting](lua-scripting.md)** -- Luau sandbox, context, and examples
 - **[Log Management](log-management.md)** -- Storage, buffering, retention, and streaming
 - **[File Watching](file-watching.md)** -- Auto-restart on file changes

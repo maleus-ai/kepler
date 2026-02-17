@@ -3,6 +3,7 @@
 //! Tests the !lua and !lua_file YAML tags for dynamic config generation.
 
 use kepler_daemon::config::KeplerConfig;
+use kepler_daemon::lua_eval::EvalContext;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,6 +24,41 @@ fn load_config_from_string(yaml: &str, dir: &Path) -> Result<KeplerConfig, Strin
     KeplerConfig::load(&config_path, &sys_env).map_err(|e| e.to_string())
 }
 
+/// Helper to resolve a service config with Lua evaluation and ${{ env.VAR }} expansion.
+/// Uses the current process environment as sys_env.
+fn resolve_svc(config: &KeplerConfig, name: &str, config_path: &Path) -> kepler_daemon::config::ServiceConfig {
+    let sys_env: HashMap<String, String> = std::env::vars().collect();
+    resolve_svc_with_env(config, name, config_path, &sys_env)
+}
+
+/// Helper to resolve a service config with an explicit sys_env.
+fn resolve_svc_with_env(
+    config: &KeplerConfig,
+    name: &str,
+    config_path: &Path,
+    sys_env: &HashMap<String, String>,
+) -> kepler_daemon::config::ServiceConfig {
+    let mut ctx = EvalContext {
+        sys_env: sys_env.clone(),
+        env: sys_env.clone(),
+        ..Default::default()
+    };
+    let evaluator = config.create_lua_evaluator().unwrap();
+    config.resolve_service(name, &mut ctx, &evaluator, config_path, None).unwrap()
+}
+
+/// Helper to attempt resolving a service config, returning an error string on failure.
+fn try_resolve_svc(config: &KeplerConfig, name: &str, config_path: &Path) -> Result<kepler_daemon::config::ServiceConfig, String> {
+    let sys_env: HashMap<String, String> = std::env::vars().collect();
+    let mut ctx = EvalContext {
+        sys_env: sys_env.clone(),
+        env: sys_env,
+        ..Default::default()
+    };
+    let evaluator = config.create_lua_evaluator().map_err(|e| e.to_string())?;
+    config.resolve_service(name, &mut ctx, &evaluator, config_path, None).map_err(|e| e.to_string())
+}
+
 /// Basic test: !lua tag returns a simple string
 #[test]
 fn test_lua_returns_string() {
@@ -37,7 +73,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     assert_eq!(
         service.working_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
@@ -58,7 +94,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     assert_eq!(service.command, vec!["echo", "hello", "world"]);
 }
@@ -83,7 +119,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     // Cleanup
     unsafe {
@@ -107,7 +143,10 @@ services:
       return "/tmp"
 "#;
 
-    let result = load_config_from_string(yaml, temp_dir.path());
+    // With lazy evaluation, load succeeds (raw !lua tag is stored)
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    // The error happens when resolving the service
+    let result = try_resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -135,7 +174,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     assert!(service.environment.contains(&"PORT=8080".to_string()));
 }
@@ -157,7 +196,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     assert!(service.environment.contains(&"SHARED=from_lua_block".to_string()));
 }
@@ -176,7 +215,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("myservice").unwrap();
+    let service = resolve_svc(&config, "myservice", &temp_dir.path().join("kepler.yaml"));
 
     assert!(service.environment.contains(&"SERVICE_NAME=myservice".to_string()));
 }
@@ -197,7 +236,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     assert!(
         service.environment.iter().any(|e| e == "FOO=bar"),
@@ -234,7 +273,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     // Cleanup
     unsafe {
@@ -268,7 +307,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     // Cleanup
     unsafe {
@@ -298,7 +337,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     assert!(service.environment.contains(&"UPPER=HELLO".to_string()));
     assert!(service.environment.contains(&"MAX=5".to_string()));
@@ -323,7 +362,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     // Cleanup
     unsafe {
@@ -372,7 +411,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     // Cleanup
     unsafe {
@@ -411,7 +450,10 @@ services:
       return {"echo" "hello"}  -- missing comma
 "#;
 
-    let result = load_config_from_string(yaml, temp_dir.path());
+    // With lazy evaluation, load succeeds (raw !lua tag is stored)
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    // The error happens when resolving the service
+    let result = try_resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
     assert!(result.is_err());
     // The error should mention it's a Lua error
     let err = result.unwrap_err();
@@ -438,7 +480,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     assert!(service.environment.contains(&"STATUS=not_found".to_string()));
 }
@@ -457,7 +499,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     assert!(service.environment.contains(&"ENABLED=true".to_string()));
     assert!(service.environment.contains(&"DISABLED=false".to_string()));
@@ -478,7 +520,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     assert_eq!(service.command, vec!["sleep", "10"]);
 }
@@ -499,7 +541,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("test").unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
     assert_eq!(service.command, vec!["echo", "hello"]);
     assert!(service.environment.contains(&"FOO=bar".to_string()));
@@ -568,18 +610,20 @@ services:
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
 
-    // Cleanup
+    // Resolve while env var is still set (lazy evaluation happens at resolve time)
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
+
+    // Cleanup after resolve since Lua runs at resolve time
     unsafe {
         std::env::remove_var("KEPLER_SERVICE_MAX_SIZE");
     }
 
-    let service = config.services.get("test").unwrap();
     let logs = service.logs.as_ref().expect("service.logs should exist");
     assert_eq!(logs.max_size, Some("100M".to_string()));
     assert_eq!(logs.buffer_size, Some(0));
 }
 
-/// Test: !lua tag works for depends_on simple list
+/// Test: depends_on simple list with static service names
 #[test]
 fn test_lua_depends_on_simple_list() {
     use kepler_daemon::config::DependencyCondition;
@@ -593,12 +637,11 @@ services:
     command: ["echo", "cache"]
   backend:
     command: ["echo", "backend"]
-    depends_on: !lua |
-      return {"database", "cache"}
+    depends_on: ["database", "cache"]
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("backend").unwrap();
+    let service = resolve_svc(&config, "backend", &temp_dir.path().join("kepler.yaml"));
 
     let deps = service.depends_on.names();
     assert!(deps.contains(&"database".to_string()));
@@ -609,7 +652,7 @@ services:
     assert_eq!(db_config.condition, DependencyCondition::ServiceStarted);
 }
 
-/// Test: !lua tag works for depends_on extended form with conditions
+/// Test: depends_on extended form with static service names and conditions
 #[test]
 fn test_lua_depends_on_extended_form() {
     use kepler_daemon::config::DependencyCondition;
@@ -621,18 +664,15 @@ services:
     command: ["echo", "db"]
   backend:
     command: ["echo", "backend"]
-    depends_on: !lua |
-      return {
-        database = {
-          condition = "service_healthy",
-          timeout = "30s",
-          restart = true
-        }
-      }
+    depends_on:
+      database:
+        condition: service_healthy
+        timeout: "30s"
+        restart: true
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("backend").unwrap();
+    let service = resolve_svc(&config, "backend", &temp_dir.path().join("kepler.yaml"));
 
     let db_config = service.depends_on.get("database").unwrap();
     assert_eq!(db_config.condition, DependencyCondition::ServiceHealthy);
@@ -640,7 +680,7 @@ services:
     assert!(db_config.restart);
 }
 
-/// Test: !lua tag works for depends_on with service_completed_successfully condition
+/// Test: depends_on with service_completed_successfully condition
 #[test]
 fn test_lua_depends_on_completed_successfully() {
     use kepler_daemon::config::DependencyCondition;
@@ -652,16 +692,13 @@ services:
     command: ["echo", "init"]
   app:
     command: ["echo", "app"]
-    depends_on: !lua |
-      return {
-        init = {
-          condition = "service_completed_successfully"
-        }
-      }
+    depends_on:
+      init:
+        condition: service_completed_successfully
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let service = config.services.get("app").unwrap();
+    let service = resolve_svc(&config, "app", &temp_dir.path().join("kepler.yaml"));
 
     let init_config = service.depends_on.get("init").unwrap();
     assert_eq!(init_config.condition, DependencyCondition::ServiceCompletedSuccessfully);
@@ -697,6 +734,7 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let service = resolve_svc(&config, "backend", &temp_dir.path().join("kepler.yaml"));
 
     // Cleanup
     unsafe {
@@ -704,7 +742,6 @@ services:
         std::env::remove_var("KEPLER_DEP_TIMEOUT");
     }
 
-    let service = config.services.get("backend").unwrap();
     let db_config = service.depends_on.get("database").unwrap();
 
     assert_eq!(db_config.condition, DependencyCondition::ServiceHealthy);
@@ -712,13 +749,13 @@ services:
     assert!(db_config.restart);
 }
 
-/// Test: !lua tag works for conditional depends_on based on environment
+/// Test: depends_on with static service names and per-field !lua for conditional config
 #[test]
 fn test_lua_depends_on_conditional() {
     let _guard = ENV_LOCK.lock();
     let temp_dir = TempDir::new().unwrap();
 
-    // Set env var to enable cache dependency
+    // Set env var to control condition
     unsafe {
         std::env::set_var("KEPLER_USE_CACHE", "true");
     }
@@ -731,41 +768,35 @@ services:
     command: ["echo", "cache"]
   backend:
     command: ["echo", "backend"]
-    depends_on: !lua |
-      local deps = {
-        database = {
-          condition = "service_healthy"
-        }
-      }
-      if ctx.env.KEPLER_USE_CACHE == "true" then
-        deps.cache = {
-          condition = "service_started",
-          restart = true
-        }
-      end
-      return deps
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_started
+        restart: !lua |
+          return ctx.env.KEPLER_USE_CACHE == "true"
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let service = resolve_svc(&config, "backend", &temp_dir.path().join("kepler.yaml"));
 
     // Cleanup
     unsafe {
         std::env::remove_var("KEPLER_USE_CACHE");
     }
 
-    let service = config.services.get("backend").unwrap();
     let deps = service.depends_on.names();
 
     assert!(deps.contains(&"database".to_string()));
     assert!(deps.contains(&"cache".to_string()));
 
-    // Cache should have restart: true
+    // Cache should have restart: true (from !lua evaluation)
     assert!(service.depends_on.should_restart_on_dependency("cache"));
     // Database should not have restart (defaults to false)
     assert!(!service.depends_on.should_restart_on_dependency("database"));
 }
 
-/// Test: Lua deserialization of new dependency conditions
+/// Test: Static depends_on with new dependency conditions
 #[test]
 fn test_lua_depends_on_new_conditions() {
     use kepler_daemon::config::DependencyCondition;
@@ -777,46 +808,38 @@ services:
     command: ["echo", "worker"]
   monitor:
     command: ["echo", "monitor"]
-    depends_on: !lua |
-      return {
-        worker = {
-          condition = "service_unhealthy"
-        }
-      }
+    depends_on:
+      worker:
+        condition: service_unhealthy
   handler:
     command: ["echo", "handler"]
-    depends_on: !lua |
-      return {
-        worker = {
-          condition = "service_failed"
-        }
-      }
+    depends_on:
+      worker:
+        condition: service_failed
   cleanup:
     command: ["echo", "cleanup"]
-    depends_on: !lua |
-      return {
-        worker = {
-          condition = "service_stopped"
-        }
-      }
+    depends_on:
+      worker:
+        condition: service_stopped
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
 
-    let monitor = config.services.get("monitor").unwrap();
+    let monitor = resolve_svc(&config, "monitor", &config_path);
     let dep = monitor.depends_on.get("worker").unwrap();
     assert_eq!(dep.condition, DependencyCondition::ServiceUnhealthy);
 
-    let handler = config.services.get("handler").unwrap();
+    let handler = resolve_svc(&config, "handler", &config_path);
     let dep = handler.depends_on.get("worker").unwrap();
     assert_eq!(dep.condition, DependencyCondition::ServiceFailed);
 
-    let cleanup = config.services.get("cleanup").unwrap();
+    let cleanup = resolve_svc(&config, "cleanup", &config_path);
     let dep = cleanup.depends_on.get("worker").unwrap();
     assert_eq!(dep.condition, DependencyCondition::ServiceStopped);
 }
 
-/// Test: Lua exit_code with mixed types (ranges and single values)
+/// Test: Static depends_on with exit_code mixed types (ranges and single values)
 #[test]
 fn test_lua_depends_on_exit_code_mixed() {
     use kepler_daemon::config::DependencyCondition;
@@ -828,17 +851,14 @@ services:
     command: ["echo", "worker"]
   handler:
     command: ["echo", "handler"]
-    depends_on: !lua |
-      return {
-        worker = {
-          condition = "service_failed",
-          exit_code = {"1:10", 42}
-        }
-      }
+    depends_on:
+      worker:
+        condition: service_failed
+        exit_code: ["1:10", 42]
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let handler = config.services.get("handler").unwrap();
+    let handler = resolve_svc(&config, "handler", &temp_dir.path().join("kepler.yaml"));
     let dep = handler.depends_on.get("worker").unwrap();
     assert_eq!(dep.condition, DependencyCondition::ServiceFailed);
     assert!(!dep.exit_code.is_empty());
@@ -869,9 +889,105 @@ services:
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-    let handler = config.services.get("handler").unwrap();
+    let handler = resolve_svc(&config, "handler", &temp_dir.path().join("kepler.yaml"));
     let dep = handler.depends_on.get("worker").unwrap();
     assert!(dep.exit_code.matches(1));
     assert!(dep.exit_code.matches(10));
     assert!(!dep.exit_code.matches(11));
+}
+
+// ============================================================================
+// Service-level `if:` condition tests (boolean ConfigValue)
+// ============================================================================
+
+/// Test: `if: true` resolves to Some(true)
+#[test]
+fn test_service_if_static_true() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  test:
+    if: true
+    command: ["echo", "hello"]
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
+
+    assert_eq!(service.condition, Some(true));
+}
+
+/// Test: `if: false` resolves to Some(false)
+#[test]
+fn test_service_if_static_false() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  test:
+    if: false
+    command: ["echo", "hello"]
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
+
+    assert_eq!(service.condition, Some(false));
+}
+
+/// Test: `if: ${{ 1 == 1 }}` (dynamic expression) resolves to Some(true)
+#[test]
+fn test_service_if_dynamic_expression() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  test:
+    if: ${{ 1 == 1 }}
+    command: ["echo", "hello"]
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    assert!(config.services.get("test").unwrap().condition.is_dynamic());
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
+
+    assert_eq!(service.condition, Some(true));
+}
+
+/// Test: `if: !lua | return true` resolves to Some(true)
+#[test]
+fn test_service_if_lua_block() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  test:
+    if: !lua |
+      return true
+    command: ["echo", "hello"]
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    assert!(config.services.get("test").unwrap().condition.is_dynamic());
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
+
+    assert_eq!(service.condition, Some(true));
+}
+
+/// Test: no `if:` field resolves to None
+#[test]
+fn test_service_if_absent() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  test:
+    command: ["echo", "hello"]
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
+
+    assert_eq!(service.condition, None);
 }

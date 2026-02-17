@@ -10,6 +10,7 @@ use crate::config::HealthCheck;
 use crate::config_actor::ConfigActorHandle;
 use crate::events::{HealthStatus, ServiceEvent};
 use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
+use crate::lua_eval::EvalContext;
 use crate::state::ServiceStatus;
 
 /// Spawn a health check monitoring task for a service
@@ -171,23 +172,73 @@ async fn run_status_change_hook(
             None => return,
         };
 
-        let working_dir = ctx
-            .service_config
+        // Use resolved config (available after service has started)
+        let resolved = match ctx.resolved_config.as_ref() {
+            Some(rc) => rc,
+            None => {
+                warn!("No resolved config for '{}', skipping {:?} hook", service_name, hook_type);
+                return;
+            }
+        };
+
+        let working_dir = resolved
             .working_dir
             .as_ref()
             .map(|wd| ctx.config_dir.join(wd))
             .unwrap_or_else(|| ctx.config_dir.clone());
 
         let hook_params = ServiceHookParams::from_service_context(
-            &ctx.service_config,
+            resolved,
             &working_dir,
             &ctx.env,
             Some(&ctx.log_config),
             ctx.global_log_config.as_ref(),
         );
 
+        // For static hooks, use resolved.hooks. For dynamic hooks, resolve with hook_name.
+        let hooks = if resolved.hooks.is_some() || ctx.service_config.hooks.as_static().is_some() {
+            resolved.hooks.clone()
+        } else {
+            // Dynamic hooks — resolve from raw config with hook_name in context
+            match handle.get_config().await {
+                Some(config) => {
+                    match config.services.get(service_name) {
+                        Some(raw) => {
+                            let evaluator = match config.create_lua_evaluator() {
+                                Ok(e) => e,
+                                Err(e) => {
+                                    warn!("Failed to create Lua evaluator for {}: {}", service_name, e);
+                                    return;
+                                }
+                            };
+                            let state = handle.get_service_state(service_name).await;
+                            let eval_ctx = EvalContext {
+                                env: ctx.env.clone(),
+                                service_name: Some(service_name.to_string()),
+                                hook_name: Some(hook_type.as_str().to_string()),
+                                initialized: state.as_ref().map(|s| s.initialized),
+                                restart_count: state.as_ref().map(|s| s.restart_count),
+                                exit_code: state.as_ref().and_then(|s| s.exit_code),
+                                status: state.as_ref().map(|s| s.status.as_str().to_string()),
+                                ..Default::default()
+                            };
+                            match raw.hooks.resolve(&evaluator, &eval_ctx, handle.config_path(), &format!("{}.hooks", service_name)) {
+                                Ok(h) => h,
+                                Err(e) => {
+                                    warn!("Failed to resolve hooks for {}: {}", service_name, e);
+                                    return;
+                                }
+                            }
+                        }
+                        None => return,
+                    }
+                }
+                None => None,
+            }
+        };
+
         if let Err(e) = run_service_hook(
-            &ctx.service_config.hooks,
+            &hooks,
             hook_type,
             service_name,
             &hook_params,

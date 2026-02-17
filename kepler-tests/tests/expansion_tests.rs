@@ -1,7 +1,7 @@
-//! Tests for ${VAR} expansion in all config values
+//! Tests for ${{ env.VAR }} expansion in all config values
 //!
 //! These tests verify that environment variable expansion works correctly
-//! for all config fields at config load time.
+//! for all config fields at service start time.
 
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestHealthCheckBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
@@ -79,8 +79,8 @@ async fn test_env_file_expansion_in_environment() {
                 ),
             ])
             .with_env_file(env_file_path)
-            // This ${DB_HOST} and ${DB_PORT} should be expanded from the env_file
-            .with_environment(vec!["DATABASE_URL=postgres://${DB_HOST}:${DB_PORT}/mydb".to_string()])
+            // This ${{ env.DB_HOST }} and ${{ env.DB_PORT }} should be expanded from the env_file
+            .with_environment(vec!["DATABASE_URL=postgres://${{ env.DB_HOST }}:${{ env.DB_PORT }}/mydb".to_string()])
             .build(),
         )
         .build();
@@ -99,7 +99,7 @@ async fn test_env_file_expansion_in_environment() {
     let content = content.unwrap();
     assert!(
         content.contains("DATABASE_URL=postgres://localhost:5432/mydb"),
-        "Environment should have ${{VAR}} expanded from env_file. Got: {}",
+        "Environment should have ${{{{ env.VAR }}}} expanded from env_file. Got: {}",
         content
     );
 
@@ -194,7 +194,7 @@ async fn test_user_expansion() {
                 "-c".to_string(),
                 format!("whoami >> {} && sleep 3600", marker_path.display()),
             ])
-            .with_user("${KEPLER_TEST_USER}")
+            .with_user("${{ env.KEPLER_TEST_USER }}")
             .build(),
         )
         .build();
@@ -226,7 +226,7 @@ async fn test_user_expansion() {
     harness.stop_service("test").await.unwrap();
 }
 
-/// Default value syntax ${VAR:-default} works
+/// Default value syntax ${{ env.VAR or "default" }} works
 #[tokio::test]
 async fn test_default_value_syntax() {
     let temp_dir = TempDir::new().unwrap();
@@ -244,8 +244,12 @@ async fn test_default_value_syntax() {
             TestServiceBuilder::new(vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                // ${KEPLER_UNDEFINED_VAR:-default_path} should expand to "default_path"
-                format!("echo '${{KEPLER_UNDEFINED_VAR:-default_path}}' >> {} && sleep 3600", marker_path.display()),
+                // Shell reads $DEFAULT_VAL from the process environment at runtime
+                format!("echo \"$DEFAULT_VAL\" >> {} && sleep 3600", marker_path.display()),
+            ])
+            // ${{ env.KEPLER_UNDEFINED_VAR or "default_path" }} should expand to "default_path"
+            .with_environment(vec![
+                "DEFAULT_VAL=${{ env.KEPLER_UNDEFINED_VAR or \"default_path\" }}".to_string(),
             ])
             .build(),
         )
@@ -301,7 +305,7 @@ async fn test_env_file_overrides_system_for_expansion() {
             ])
             .with_env_file(env_file_path)
             // This should use env_file value (from_envfile), not system (from_system)
-            .with_environment(vec!["EXPANDED=${KEPLER_OVERRIDE_VAR}".to_string()])
+            .with_environment(vec!["EXPANDED=${{ env.KEPLER_OVERRIDE_VAR }}".to_string()])
             .build(),
         )
         .build();
@@ -433,7 +437,7 @@ async fn test_independent_env_files() {
                 ),
             ])
             .with_env_file(env_file_a)
-            .with_environment(vec!["EXPANDED=${SERVICE_NAME}".to_string()])
+            .with_environment(vec!["EXPANDED=${{ env.SERVICE_NAME }}".to_string()])
             .build(),
         )
         .add_service(
@@ -447,7 +451,7 @@ async fn test_independent_env_files() {
                 ),
             ])
             .with_env_file(env_file_b)
-            .with_environment(vec!["EXPANDED=${SERVICE_NAME}".to_string()])
+            .with_environment(vec!["EXPANDED=${{ env.SERVICE_NAME }}".to_string()])
             .build(),
         )
         .build();
@@ -505,7 +509,7 @@ async fn test_working_dir_expansion() {
                 "-c".to_string(),
                 format!("pwd >> {} && sleep 3600", marker_path.display()),
             ])
-            .with_working_dir(std::path::PathBuf::from("${KEPLER_WORK_DIR}"))
+            .with_working_dir(std::path::PathBuf::from("${{ env.KEPLER_WORK_DIR }}"))
             .build(),
         )
         .build();

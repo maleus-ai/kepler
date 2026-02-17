@@ -2,15 +2,10 @@ kepler:
   logs:
     buffer_size: 0
 
-lua: |
-  function get_deps()
-    return {"dep-target"}
-  end
-
 services:
   dep-source:
-    depends_on: !lua |
-      return get_deps()
+    depends_on:
+      - dep-target
     command: ["sh", "-c", "echo DEP_SOURCE_START && sleep 30"]
     restart: no
 

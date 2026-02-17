@@ -114,7 +114,7 @@ async fn test_restart_calls_restart_hooks() {
 
     // Restart the service
     orchestrator
-        .restart_services(&config_path, &[], None)
+        .restart_services(&config_path, &[])
         .await
         .unwrap();
 
@@ -179,7 +179,7 @@ async fn test_restart_preserves_baked_config() {
                     env_output_path.display()
                 ),
             ])
-            .with_environment(vec![format!("{}=${{{}}}", env_var_name, env_var_name)])
+            .with_environment(vec![format!("{}=${{{{ env.{} }}}}", env_var_name, env_var_name)])
             .with_restart(RestartPolicy::No)
             .build(),
         )
@@ -225,7 +225,7 @@ async fn test_restart_preserves_baked_config() {
     let mut new_sys_env: HashMap<String, String> = std::env::vars().collect();
     new_sys_env.insert(env_var_name.clone(), "changed_value".to_string());
     orchestrator
-        .restart_services(&config_path, &[], Some(new_sys_env))
+        .restart_services(&config_path, &[])
         .await
         .unwrap();
 
@@ -286,7 +286,7 @@ async fn test_recreate_rebakes_config() {
                     env_output_path.display()
                 ),
             ])
-            .with_environment(vec![format!("{}=${{{}}}", env_var_name, env_var_name)])
+            .with_environment(vec![format!("{}=${{{{ env.{} }}}}", env_var_name, env_var_name)])
             .with_restart(RestartPolicy::No)
             .build(),
         )
@@ -493,7 +493,7 @@ async fn test_restart_specific_service_hooks() {
 
     // Restart only svc1
     orchestrator
-        .restart_services(&config_path, &["svc1".to_string()], None)
+        .restart_services(&config_path, &["svc1".to_string()])
         .await
         .unwrap();
 
@@ -577,7 +577,7 @@ async fn test_restart_respects_dependency_order() {
 
     // Restart all services
     orchestrator
-        .restart_services(&config_path, &[], None)
+        .restart_services(&config_path, &[])
         .await
         .unwrap();
 
@@ -856,12 +856,12 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
 
     // pre_start + post_start should fire for the new start
     assert!(
-        lines.iter().any(|l| *l == "PRE_START"),
+        lines.contains(&"PRE_START"),
         "pre_start should fire during recreate. Lines: {:?}",
         lines
     );
     assert!(
-        lines.iter().any(|l| *l == "POST_START"),
+        lines.contains(&"POST_START"),
         "post_start should fire during recreate. Lines: {:?}",
         lines
     );
@@ -964,7 +964,7 @@ async fn test_restart_calls_all_restart_hooks_in_order() {
 
     // Restart service
     orchestrator
-        .restart_services(&config_path, &[], None)
+        .restart_services(&config_path, &[])
         .await
         .unwrap();
 

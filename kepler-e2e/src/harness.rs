@@ -1127,24 +1127,26 @@ impl Drop for E2eHarness {
 /// Find a binary in common locations
 fn find_binary(name: &str) -> E2eResult<PathBuf> {
     // 1. Check alongside current executable (same build profile)
-    // Test binaries are typically in target/debug/deps, so we need to go up
-    if let Ok(exe) = std::env::current_exe() {
-        // Check same directory as executable
-        if let Some(dir) = exe.parent() {
-            let path = dir.join(name);
-            if path.exists() {
-                return Ok(path.canonicalize()?);
-            }
-
-            // Check parent directory (for when running from deps/)
+    // Test binaries live in target/debug/deps/, but cargo build output
+    // goes to target/debug/. Check parent (target/debug/) first to
+    // always pick up the freshly-built binary.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
+            // Check parent directory first (target/debug/) — this is where
+            // `cargo build` places binary crate outputs.
             if let Some(parent) = dir.parent() {
                 let path = parent.join(name);
                 if path.exists() {
                     return Ok(path.canonicalize()?);
                 }
             }
+
+            // Fallback: check same directory as executable (target/debug/deps/)
+            let path = dir.join(name);
+            if path.exists() {
+                return Ok(path.canonicalize()?);
+            }
         }
-    }
 
     // 2. Check target/release relative to current directory
     let release_path = PathBuf::from(format!("target/release/{}", name));

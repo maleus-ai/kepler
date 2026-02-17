@@ -693,7 +693,7 @@ mod tests {
             .append(true)
             .open(logs_dir.join("svc.stdout.log"))
             .unwrap();
-        write!(file, "2000\tnew-line\n").unwrap();
+        writeln!(file, "2000\tnew-line").unwrap();
         drop(file);
 
         // Second read: picks up the appended line

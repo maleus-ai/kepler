@@ -346,6 +346,31 @@ impl FileWatcherActor {
     }
 }
 
+/// Spawn a file watcher actor for a service
+///
+/// Returns a JoinHandle for the task. The watcher can be cancelled by aborting the handle.
+pub fn spawn_file_watcher(
+    config_path: PathBuf,
+    service_name: String,
+    patterns: Vec<String>,
+    working_dir: PathBuf,
+    restart_tx: mpsc::Sender<FileChangeEvent>,
+) -> tokio::task::JoinHandle<()> {
+    let actor = FileWatcherActor::new(
+        config_path,
+        service_name,
+        patterns,
+        working_dir,
+        restart_tx,
+    );
+
+    tokio::spawn(async move {
+        if let Err(e) = actor.run().await {
+            error!("File watcher error: {}", e);
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,29 +548,4 @@ mod tests {
         assert_eq!(dirs.len(), 1);
         assert!(dirs.contains(&PathBuf::from("/project")));
     }
-}
-
-/// Spawn a file watcher actor for a service
-///
-/// Returns a JoinHandle for the task. The watcher can be cancelled by aborting the handle.
-pub fn spawn_file_watcher(
-    config_path: PathBuf,
-    service_name: String,
-    patterns: Vec<String>,
-    working_dir: PathBuf,
-    restart_tx: mpsc::Sender<FileChangeEvent>,
-) -> tokio::task::JoinHandle<()> {
-    let actor = FileWatcherActor::new(
-        config_path,
-        service_name,
-        patterns,
-        working_dir,
-        restart_tx,
-    );
-
-    tokio::spawn(async move {
-        if let Err(e) = actor.run().await {
-            error!("File watcher error: {}", e);
-        }
-    })
 }

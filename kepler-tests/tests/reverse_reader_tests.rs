@@ -186,12 +186,12 @@ fn test_reverse_reader_large_file_chunk_boundaries() {
     assert!(lines_read[line_count - 1].starts_with("Line 00000"), "Last read should be first line");
 
     // Verify all lines are in reverse order
-    for i in 0..line_count {
+    for (i, line) in lines_read.iter().enumerate() {
         let expected_num = line_count - 1 - i;
         assert!(
-            lines_read[i].starts_with(&format!("Line {:05}", expected_num)),
+            line.starts_with(&format!("Line {:05}", expected_num)),
             "Line {} should be 'Line {:05}', got '{}'",
-            i, expected_num, &lines_read[i][..20]
+            i, expected_num, &line[..20]
         );
     }
 }

@@ -368,7 +368,7 @@ async fn test_restart_full_lifecycle() {
     let mut rx = subscribe_to_config(&orchestrator, &config_path).await.unwrap();
 
     orchestrator
-        .restart_services(&config_path, &[], None)
+        .restart_services(&config_path, &[])
         .await
         .unwrap();
 
@@ -742,12 +742,11 @@ async fn test_dependency_waiting_reacts_via_broadcast() {
         while let Ok(Some(event)) =
             tokio::time::timeout(deadline - tokio::time::Instant::now(), rx.recv()).await
         {
-            if let ConfigEvent::StatusChange(change) = event {
-                if change.service == "web" && change.status == ServiceStatus::Running {
+            if let ConfigEvent::StatusChange(change) = event
+                && change.service == "web" && change.status == ServiceStatus::Running {
                     web_running = true;
                     break;
                 }
-            }
         }
     }
 
@@ -831,7 +830,7 @@ async fn test_restart_broadcasts_full_lifecycle_with_healthcheck() {
     let mut rx = subscribe_to_config(&orchestrator, &config_path).await.unwrap();
 
     orchestrator
-        .restart_services(&config_path, &[], None)
+        .restart_services(&config_path, &[])
         .await
         .unwrap();
 

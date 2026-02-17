@@ -100,7 +100,7 @@ impl ServiceEventHandler {
             restarted_service
         );
 
-        for (service_name, service_config) in &config.services {
+        for (service_name, raw) in &config.services {
             // Skip the service that triggered the restart
             if service_name == restarted_service {
                 continue;
@@ -108,10 +108,7 @@ impl ServiceEventHandler {
 
             // Check if this service depends on the restarted service with restart: true
             // This is the Docker Compose compatible check
-            if !service_config
-                .depends_on
-                .should_restart_on_dependency(restarted_service)
-            {
+            if !raw.depends_on.should_restart_on_dependency(restarted_service) {
                 continue;
             }
 
@@ -132,8 +129,7 @@ impl ServiceEventHandler {
             }
 
             // Wait for the dependency's condition to be met
-            let dep_config = service_config
-                .depends_on
+            let dep_config = raw.depends_on
                 .get(restarted_service)
                 .unwrap_or_default();
 
@@ -152,10 +148,11 @@ impl ServiceEventHandler {
                 if dep_satisfied {
                     // Check if this is a transient satisfaction (dep exited but will restart)
                     let is_transient = if let Some(ref cfg) = config
-                        && let Some(dep_svc_config) = cfg.services.get(restarted_service)
+                        && let Some(dep_raw) = cfg.services.get(restarted_service)
                         && let Some(dep_state) = self.handle.get_service_state(restarted_service).await
                     {
-                        is_transient_satisfaction(&dep_state, dep_svc_config)
+                        let dep_restart = dep_raw.restart.as_static().cloned().unwrap_or_default();
+                        is_transient_satisfaction(&dep_state, &dep_restart)
                     } else {
                         false
                     };

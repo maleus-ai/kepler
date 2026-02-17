@@ -42,7 +42,7 @@ pub fn getgrouplist(user: &CStr, base_gid: u32) -> Result<Vec<u32>, nix::errno::
             groups.resize(new_len, 0);
         } else {
             groups.truncate(ngroups as usize);
-            return Ok(groups.iter().map(|&g| g as u32).collect());
+            return Ok(groups.to_vec());
         }
     }
 }
@@ -72,7 +72,7 @@ pub fn uid_has_gid(uid: u32, target_gid: u32) -> bool {
 /// Set the supplementary group list for the current process.
 #[cfg(unix)]
 pub fn setgroups(gids: &[u32]) -> std::io::Result<()> {
-    let gids: Vec<libc::gid_t> = gids.iter().copied().collect();
+    let gids: Vec<libc::gid_t> = gids.to_vec();
     let ret = unsafe { libc::setgroups(gids.len() as _, gids.as_ptr()) };
     if ret == 0 {
         Ok(())

@@ -7,5 +7,5 @@ services:
     env_file: __ENV_FILE__
     command: ["sh", "-c", "echo LIMITS_SERVICE_RUNNING && sleep 30"]
     limits:
-      memory: ${MEM_LIMIT}
+      memory: ${{ env.MEM_LIMIT }}
     restart: no

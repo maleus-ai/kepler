@@ -8,7 +8,7 @@ services:
       - cargo-git:/usr/local/cargo/git
       - target-cache:/app/target
     user: root
-    command: sh -c "cargo build --workspace && install target/debug/kepler-exec target/debug/deps/kepler-exec && cargo test --workspace"
+    command: sh -c "cargo build --workspace && install target/debug/kepler-exec target/debug/deps/kepler-exec && install target/debug/kepler-daemon target/debug/deps/kepler-daemon && install target/debug/kepler target/debug/deps/kepler && cargo test --workspace"
     environment:
       - RUST_BACKTRACE=1
       - PATH=/app/target/debug:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

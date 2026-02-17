@@ -89,6 +89,7 @@ Options:
   --no-systemd      Alias for --no-service (backwards compatibility)
   --no-build        Skip cargo build (use existing target/release binaries)
   --features LIST   Extra cargo features (comma-separated, e.g. "jemalloc,dhat-heap")
+  --debug           Set RUST_LOG=debug in the service (visible in journalctl / log file)
   --uninstall       Remove Kepler binaries and service
   -h, --help        Show this help
 EOF
@@ -99,6 +100,7 @@ OPT_SERVICE="yes"
 OPT_UNINSTALL=false
 OPT_BUILD=true
 OPT_FEATURES=""
+OPT_DEBUG=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -113,6 +115,10 @@ while [[ $# -gt 0 ]]; do
         --features)
             OPT_FEATURES="$2"
             shift 2
+            ;;
+        --debug)
+            OPT_DEBUG=true
+            shift
             ;;
         --uninstall)
             OPT_UNINSTALL=true
@@ -270,6 +276,10 @@ as_root chmod 0770 "${STATE_DIR}"
 # Step 6: Service installation
 install_systemd() {
     info "Installing systemd service"
+    local env_line=""
+    if $OPT_DEBUG; then
+        env_line=$'\nEnvironment=RUST_LOG=debug'
+    fi
     as_root tee "${SYSTEMD_DIR}/${SERVICE_NAME}.service" >/dev/null <<UNIT
 [Unit]
 Description=Kepler Process Orchestrator
@@ -278,7 +288,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=${BIN_DIR}/kepler-daemon
-Restart=on-failure
+Restart=on-failure${env_line}
 
 [Install]
 WantedBy=multi-user.target
@@ -292,6 +302,15 @@ UNIT
 
 install_launchd() {
     info "Installing launchd service"
+    local env_dict=""
+    if $OPT_DEBUG; then
+        env_dict='
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>debug</string>
+    </dict>'
+    fi
     as_root tee "${LAUNCHD_DIR}/${PLIST_NAME}.plist" >/dev/null <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -310,7 +329,7 @@ install_launchd() {
     <dict>
         <key>SuccessfulExit</key>
         <false/>
-    </dict>
+    </dict>${env_dict}
     <key>StandardOutPath</key>
     <string>/var/log/kepler.log</string>
     <key>StandardErrorPath</key>

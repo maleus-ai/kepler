@@ -1,8 +1,9 @@
 //! Programmatic config creation with builder pattern
 
 use kepler_daemon::config::{
-    DependsOn, GlobalHooks, HealthCheck, HookCommand, HookCommon, KeplerConfig, KeplerGlobalConfig,
-    LogConfig, ResourceLimits, RestartConfig, RestartPolicy, ServiceConfig, ServiceHooks, SysEnvPolicy,
+    DependsOn, GlobalHooks, HealthCheck, HookCommand, HookCommon, KeplerConfig,
+    KeplerGlobalConfig, LogConfig, RawServiceConfig, ResourceLimits, RestartConfig, RestartPolicy,
+    ServiceConfig, ServiceHooks, SysEnvPolicy,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -68,20 +69,34 @@ impl TestConfigBuilder {
 
     pub fn build(self) -> KeplerConfig {
         let kepler = self.build_kepler_global();
+        let services = self.services.into_iter()
+            .map(|(name, config)| {
+                let value = serde_yaml::to_value(config).unwrap();
+                let raw: RawServiceConfig = serde_yaml::from_value(value).unwrap();
+                (name, raw)
+            })
+            .collect();
         KeplerConfig {
             lua: self.lua,
             kepler,
-            services: self.services,
+            services,
         }
     }
 
     /// Write the config to a YAML file and return the path
     pub fn write_to_file(&self, dir: &std::path::Path) -> std::io::Result<PathBuf> {
         let kepler = self.build_kepler_global();
+        let services = self.services.iter()
+            .map(|(name, config)| {
+                let value = serde_yaml::to_value(config).unwrap();
+                let raw: RawServiceConfig = serde_yaml::from_value(value).unwrap();
+                (name.clone(), raw)
+            })
+            .collect();
         let config = KeplerConfig {
             lua: self.lua.clone(),
             kepler,
-            services: self.services.clone(),
+            services,
         };
 
         let path = dir.join("kepler.yaml");
@@ -465,7 +480,7 @@ mod tests {
             .build();
 
         assert!(config.services.contains_key("test"));
-        assert!(config.services["test"].healthcheck.is_some());
+        assert!(config.services["test"].has_healthcheck());
     }
 
     #[test]

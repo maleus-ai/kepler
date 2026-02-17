@@ -1,6 +1,6 @@
-//! E2E tests for shell expansion in config fields
+//! E2E tests for inline expression expansion in config fields
 //!
-//! Tests that ${VAR} expansion works correctly for all supported fields,
+//! Tests that ${{ env.VAR }} expansion works correctly for all supported fields,
 //! including using variables from env_file.
 
 use kepler_e2e::{E2eHarness, E2eResult};

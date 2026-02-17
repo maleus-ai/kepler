@@ -24,14 +24,20 @@ const RESTART_DELAY: Duration = Duration::from_millis(500);
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{resolve_log_retention, GlobalHooks, KeplerConfig, LogConfig, LogRetention, ServiceConfig};
+use crate::config::{resolve_log_retention, resolve_sys_env, DependsOn, GlobalHooks, KeplerConfig, LogConfig, LogRetention, RawServiceConfig, ServiceHooks, SysEnvPolicy};
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
 use crate::deps::{check_dependency_satisfied, get_start_order, get_stop_order, is_condition_unreachable_by_policy, is_dependency_permanently_unsatisfied, is_transient_satisfaction};
+use crate::lua_eval::{EvalContext, LuaEvaluator};
 use crate::events::{RestartReason, ServiceEvent};
+
+/// Shared Lua evaluator for cross-service global state within a single config.
+/// Created once per `start_services` call and reused across all service starts,
+/// ensuring the `global` table persists between services.
+type SharedLuaEvaluator = Arc<tokio::sync::Mutex<LuaEvaluator>>;
 use crate::health::spawn_health_checker;
 use crate::hooks::{
-    run_global_hook, run_service_hook, GlobalHookType, ServiceHookParams, ServiceHookType,
+    run_global_hook, run_service_hook, GlobalHookParams, GlobalHookType, ServiceHookParams, ServiceHookType,
     GLOBAL_HOOK_PREFIX,
 };
 use crate::lua_eval::DepInfo;
@@ -156,6 +162,13 @@ impl ServiceOrchestrator {
             return Ok("All services already running".to_string());
         }
 
+        // Create a shared Lua evaluator so the `global` table persists across
+        // all service starts in this config (enabling cross-service state sharing).
+        let shared_evaluator: SharedLuaEvaluator = Arc::new(tokio::sync::Mutex::new(
+            config.create_lua_evaluator()
+                .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?,
+        ));
+
         let log_config = handle
             .get_log_config()
             .await
@@ -176,12 +189,15 @@ impl ServiceOrchestrator {
             run_global_hook(
                 &global_hooks,
                 GlobalHookType::PreStart,
-                &config_dir,
-                &stored_env,
-                Some(&log_config),
-                global_log_config.as_ref(),
-                &progress,
-                Some(&handle),
+                &GlobalHookParams {
+                    working_dir: &config_dir,
+                    env: &stored_env,
+                    log_config: Some(&log_config),
+                    global_log_config: global_log_config.as_ref(),
+                    progress: &progress,
+                    handle: Some(&handle),
+                    lua_code: config.lua.as_deref(),
+                },
             )
             .await?;
         }
@@ -196,7 +212,7 @@ impl ServiceOrchestrator {
                     continue;
                 }
 
-                match self.start_single_service(&handle, service_name, &progress).await {
+                match self.start_single_service_with_evaluator(&handle, service_name, &progress, Some(shared_evaluator.clone())).await {
                     Ok(()) => started.push(service_name.clone()),
                     Err(OrchestratorError::StartupCancelled(_)) => {
                         debug!("Service {} startup was cancelled, skipping", service_name);
@@ -257,9 +273,10 @@ impl ServiceOrchestrator {
                 let handle_clone = handle.clone();
                 let progress_clone = progress.clone();
                 let service_name_clone = service_name.clone();
+                let evaluator_clone = shared_evaluator.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = self_clone.start_single_service(
-                        &handle_clone, &service_name_clone, &progress_clone,
+                    if let Err(e) = self_clone.start_single_service_with_evaluator(
+                        &handle_clone, &service_name_clone, &progress_clone, Some(evaluator_clone),
                     ).await {
                         warn!("Failed to start service {}: {}", service_name_clone, e);
                     }
@@ -301,8 +318,8 @@ impl ServiceOrchestrator {
             }
 
             // Check if any service has restart propagation enabled
-            let needs_event_handler = ctx.config.services.values().any(|svc| {
-                !svc.depends_on.dependencies_with_restart().is_empty()
+            let needs_event_handler = ctx.config.services.values().any(|raw| {
+                !raw.depends_on.dependencies_with_restart().is_empty()
             });
 
             // Spawn event handler for restart propagation if needed and not already running
@@ -320,12 +337,15 @@ impl ServiceOrchestrator {
                 && let Err(e) = run_global_hook(
                     ctx.global_hooks,
                     GlobalHookType::PostStart,
-                    ctx.config_dir,
-                    ctx.stored_env,
-                    Some(ctx.log_config),
-                    ctx.global_log_config,
-                    ctx.progress,
-                    Some(ctx.handle),
+                    &GlobalHookParams {
+                        working_dir: ctx.config_dir,
+                        env: ctx.stored_env,
+                        log_config: Some(ctx.log_config),
+                        global_log_config: ctx.global_log_config,
+                        progress: ctx.progress,
+                        handle: Some(ctx.handle),
+                        lua_code: ctx.config.lua.as_deref(),
+                    },
                 )
                 .await
             {
@@ -341,12 +361,13 @@ impl ServiceOrchestrator {
         Ok(())
     }
 
-    /// Start a single service
-    async fn start_single_service(
+    /// Start a single service, optionally sharing a Lua evaluator for cross-service global state.
+    async fn start_single_service_with_evaluator(
         &self,
         handle: &ConfigActorHandle,
         service_name: &str,
         progress: &Option<ProgressSender>,
+        shared_evaluator: Option<SharedLuaEvaluator>,
     ) -> Result<(), OrchestratorError> {
         // Atomically claim the service for startup
         if !handle.claim_service_start(service_name).await {
@@ -355,7 +376,7 @@ impl ServiceOrchestrator {
         }
 
         // Run the actual startup. If anything fails, mark as Skipped or Failed.
-        match self.execute_service_startup(handle, service_name, progress).await {
+        match self.execute_service_startup(handle, service_name, progress, shared_evaluator).await {
             Ok(()) => Ok(()),
             Err(ref e @ OrchestratorError::DependencySkipped { ref dependency, .. }) => {
                 let reason = format!("dependency `{}` was skipped", dependency);
@@ -402,72 +423,164 @@ impl ServiceOrchestrator {
         handle: &ConfigActorHandle,
         service_name: &str,
     ) -> Result<(), OrchestratorError> {
-        self.start_single_service(handle, service_name, &None).await
+        self.start_single_service_with_evaluator(handle, service_name, &None, None).await
     }
 
     /// Execute the actual service startup sequence (after claiming).
+    ///
+    /// This is the lazy resolution point: after dependencies are satisfied,
+    /// the raw service config is expanded (${{}} + !lua) and deserialized
+    /// into a typed ServiceConfig.
     async fn execute_service_startup(
         &self,
         handle: &ConfigActorHandle,
         service_name: &str,
         progress: &Option<ProgressSender>,
+        shared_evaluator: Option<SharedLuaEvaluator>,
     ) -> Result<(), OrchestratorError> {
-        // Get service context (single round-trip)
+        // Get service context (single round-trip — raw config + state)
         let ctx = handle
             .get_service_context(service_name)
             .await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
+        // Extract depends_on from raw config for dependency wait
+        let depends_on = ctx.service_config.depends_on.clone();
+
         // Wait for dependencies to satisfy their conditions (blocks while in Waiting state)
-        self.wait_for_dependencies(handle, service_name, &ctx.service_config)
+        self.wait_for_dependencies(handle, service_name, &depends_on)
             .await?;
 
         // Transition: Waiting → Starting (dependencies satisfied)
         handle.set_service_status(service_name, ServiceStatus::Starting).await?;
 
-        // Build dependency state map for if-conditions and hooks
+        // Build dependency state maps for evaluation context
+        let ctx_start = std::time::Instant::now();
         let mut dep_infos = HashMap::new();
-        for (dep_name, _) in ctx.service_config.depends_on.iter() {
+        for (dep_name, _dep_config) in depends_on.iter() {
+            let dep_name_owned = dep_name.to_string();
             if let Some(dep_state) = handle.get_service_state(dep_name).await {
-                dep_infos.insert(dep_name.to_string(), DepInfo {
+                dep_infos.insert(dep_name_owned, DepInfo {
                     status: dep_state.status.as_str().to_string(),
                     exit_code: dep_state.exit_code,
                     initialized: dep_state.initialized,
                     restart_count: dep_state.restart_count,
+                    env: dep_state.computed_env.clone(),
                 });
             }
         }
 
-        // Evaluate service-level `if` condition
-        if let Some(ref condition) = ctx.service_config.condition {
-            let state = handle.get_service_state(service_name).await;
-            let eval_ctx = crate::lua_eval::EvalContext {
-                env: ctx.env.clone(),
-                service_name: Some(service_name.to_string()),
-                initialized: state.as_ref().map(|s| s.initialized),
-                restart_count: state.as_ref().map(|s| s.restart_count),
-                exit_code: state.as_ref().and_then(|s| s.exit_code),
-                status: state.as_ref().map(|s| s.status.as_str().to_string()),
-                deps: dep_infos.clone(),
-                ..Default::default()
-            };
-            match handle.eval_if_condition(condition, eval_ctx).await {
-                Ok(true) => {} // condition passed, proceed
-                Ok(false) => {
-                    let reason = format!("`if` condition evaluated to false: `{}`", condition);
-                    tracing::info!("Service {} skipped: {}", service_name, reason);
-                    if let Err(err) = handle.set_service_status_with_reason(
-                        service_name, ServiceStatus::Skipped, Some(reason), None,
-                    ).await {
-                        warn!("Failed to set {} to Skipped: {}", service_name, err);
-                    }
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::error!("Service {} if-condition error: {}", service_name, e);
-                    return Err(OrchestratorError::HookFailed(format!("if condition error: {}", e)));
-                }
+        // Build evaluation context (sys_env + deps).
+        // env_file vars are loaded inside resolve_service (step 0) so that
+        // !lua env_file tags are evaluated before environment.
+        let sys_env = handle.get_sys_env().await;
+        let config = handle.get_config().await
+            .ok_or(OrchestratorError::ServiceContextNotFound)?;
+        let config_dir = handle.get_config_dir().await;
+
+        // Pre-load env_file vars for plain string paths (handles state dir copy fallback).
+        // For !lua env_file tags, this returns empty — resolve_service will handle them.
+        let env_file_vars = self.load_service_env_file(service_name, &ctx.service_config, &config_dir, handle).await;
+
+        let mut full_env = sys_env.clone();
+        full_env.extend(env_file_vars.clone());
+
+        let state = handle.get_service_state(service_name).await;
+        let mut eval_ctx = EvalContext {
+            sys_env: sys_env.clone(),
+            env_file: env_file_vars,
+            env: full_env,
+            service_name: Some(service_name.to_string()),
+            initialized: state.as_ref().map(|s| s.initialized),
+            restart_count: state.as_ref().map(|s| s.restart_count),
+            exit_code: state.as_ref().and_then(|s| s.exit_code),
+            status: state.as_ref().map(|s| s.status.as_str().to_string()),
+            deps: dep_infos,
+            ..Default::default()
+        };
+        debug!("[timeit] {} eval context built in {:?}", service_name, ctx_start.elapsed());
+
+        // Resolve the service: evaluate ${{ }} + !lua + deserialize to ServiceConfig.
+        // resolve_service handles env_file → environment → other fields in the correct order.
+        // Uses the shared evaluator (if provided) so the `global` table persists
+        // across service starts within the same config.
+        //
+        // Build default_user from CLI owner uid:gid (skip if root)
+        let default_user = match (handle.owner_uid(), handle.owner_gid()) {
+            (Some(uid), Some(gid)) if uid != 0 => Some(format!("{}:{}", uid, gid)),
+            (Some(uid), None) if uid != 0 => Some(format!("{}", uid)),
+            _ => None,
+        };
+        let resolve_start = std::time::Instant::now();
+        let resolved = if let Some(ref shared_eval) = shared_evaluator {
+            let evaluator = shared_eval.lock().await;
+            config.resolve_service(
+                service_name,
+                &mut eval_ctx,
+                &evaluator,
+                handle.config_path(),
+                default_user.as_deref(),
+            ).map_err(|e| OrchestratorError::ConfigError(e.to_string()))?
+        } else {
+            let lua_evaluator = config.create_lua_evaluator()
+                .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?;
+            config.resolve_service(
+                service_name,
+                &mut eval_ctx,
+                &lua_evaluator,
+                handle.config_path(),
+                default_user.as_deref(),
+            ).map_err(|e| OrchestratorError::ConfigError(e.to_string()))?
+        };
+        debug!("[timeit] {} resolve_service completed in {:?}", service_name, resolve_start.elapsed());
+
+        // Build computed_env respecting sys_env policy.
+        // eval_ctx.env has sys_env + env_file + environment (needed for Lua evaluation).
+        // But with sys_env: clear, the process should NOT inherit sys_env vars.
+        let sys_env_policy = resolve_sys_env(
+            resolved.sys_env.as_ref(),
+            config.global_sys_env(),
+        );
+        let computed_env = if sys_env_policy == SysEnvPolicy::Clear {
+            // Only env_file + environment entries (no inherited sys_env)
+            let mut env = eval_ctx.env_file.clone();
+            crate::env::insert_env_entries(&mut env, &resolved.environment);
+            env
+        } else {
+            eval_ctx.env.clone()
+        };
+
+        // Resolve working_dir
+        let working_dir = resolved
+            .working_dir
+            .as_ref()
+            .map(|wd| config_dir.join(wd))
+            .unwrap_or_else(|| config_dir.clone());
+
+        // Store resolved config and computed state in the actor
+        handle.store_resolved_config(
+            service_name,
+            resolved.clone(),
+            computed_env.clone(),
+            working_dir.clone(),
+        ).await;
+
+        // Re-fetch context with updated resolved config, env, and working_dir
+        let ctx = handle
+            .get_service_context(service_name)
+            .await
+            .ok_or(OrchestratorError::ServiceContextNotFound)?;
+
+        // Service-level `if` condition — already resolved to bool by resolve_service
+        if resolved.condition == Some(false) {
+            let reason = "`if` condition evaluated to false".to_string();
+            tracing::info!("Service {} skipped: {}", service_name, reason);
+            if let Err(err) = handle.set_service_status_with_reason(
+                service_name, ServiceStatus::Skipped, Some(reason), None,
+            ).await {
+                warn!("Failed to set {} to Skipped: {}", service_name, err);
             }
+            return Ok(());
         }
 
         // Run on_init hook if first time for this service
@@ -514,17 +627,170 @@ impl ServiceOrchestrator {
         Ok(())
     }
 
+    /// Load env_file variables for a service from the state directory copy.
+    async fn load_service_env_file(
+        &self,
+        service_name: &str,
+        raw_config: &RawServiceConfig,
+        config_dir: &Path,
+        handle: &ConfigActorHandle,
+    ) -> HashMap<String, String> {
+        // Extract env_file path from typed config (only if static/resolved)
+        let env_file_opt = raw_config.env_file.as_static().and_then(|v| v.as_ref());
+
+        if let Some(env_file_path) = env_file_opt {
+            let env_file = env_file_path.clone();
+            // Try state dir copy first, then original path
+            let config_hash = handle.config_hash().to_string();
+            let state_dir = match crate::global_state_dir() {
+                Ok(d) => d.join("configs").join(&config_hash),
+                Err(_) => return HashMap::new(),
+            };
+
+            let dest_name = format!(
+                "{}_{}",
+                service_name,
+                env_file.file_name().unwrap_or_default().to_string_lossy()
+            );
+            let state_copy = state_dir.join("env_files").join(&dest_name);
+
+            let source = if state_copy.exists() {
+                state_copy
+            } else if env_file.is_relative() {
+                config_dir.join(&env_file)
+            } else {
+                env_file
+            };
+
+            if source.exists() {
+                match crate::env::load_env_file(&source) {
+                    Ok(vars) => return vars,
+                    Err(e) => {
+                        warn!("Failed to load env_file for {}: {}", service_name, e);
+                    }
+                }
+            }
+        }
+
+        HashMap::new()
+    }
+
+    /// Re-resolve a service's config at restart time with updated context.
+    ///
+    /// Builds a fresh `EvalContext` with the current restart_count, exit_code,
+    /// and dep states, then evaluates all `${{ }}` / `!lua` fields again.
+    /// Stores the new resolved config in the actor and returns a refreshed
+    /// `ServiceContext`.
+    async fn re_resolve_service(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        exit_code: Option<i32>,
+    ) -> Result<ServiceContext, OrchestratorError> {
+        let config = handle.get_config().await
+            .ok_or(OrchestratorError::ServiceContextNotFound)?;
+        let ctx = handle.get_service_context(service_name).await
+            .ok_or(OrchestratorError::ServiceContextNotFound)?;
+        let config_dir = handle.get_config_dir().await;
+        let sys_env = handle.get_sys_env().await;
+
+        // Build dependency info from current service states
+        let mut dep_infos = HashMap::new();
+        for (dep_name, _) in ctx.service_config.depends_on.iter() {
+            if let Some(dep_state) = handle.get_service_state(dep_name).await {
+                dep_infos.insert(dep_name.to_string(), DepInfo {
+                    status: dep_state.status.as_str().to_string(),
+                    exit_code: dep_state.exit_code,
+                    initialized: dep_state.initialized,
+                    restart_count: dep_state.restart_count,
+                    env: dep_state.computed_env.clone(),
+                });
+            }
+        }
+
+        // Pre-load env_file vars for plain string paths
+        let env_file_vars = self.load_service_env_file(service_name, &ctx.service_config, &config_dir, handle).await;
+
+        let mut full_env = sys_env.clone();
+        full_env.extend(env_file_vars.clone());
+
+        // Get current service state for restart_count
+        let service_state = handle.get_service_state(service_name).await;
+
+        let mut eval_ctx = EvalContext {
+            sys_env: sys_env.clone(),
+            env_file: env_file_vars,
+            env: full_env,
+            service_name: Some(service_name.to_string()),
+            deps: dep_infos,
+            restart_count: service_state.as_ref().map(|s| s.restart_count),
+            exit_code,
+            initialized: service_state.as_ref().map(|s| s.initialized),
+            status: service_state.as_ref().map(|s| s.status.as_str().to_string()),
+            ..Default::default()
+        };
+
+        // Create fresh evaluator and resolve
+        let lua_evaluator = config.create_lua_evaluator()
+            .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?;
+
+        let default_user = match (handle.owner_uid(), handle.owner_gid()) {
+            (Some(uid), Some(gid)) if uid != 0 => Some(format!("{}:{}", uid, gid)),
+            (Some(uid), None) if uid != 0 => Some(format!("{}", uid)),
+            _ => None,
+        };
+
+        let resolved = config.resolve_service(
+            service_name,
+            &mut eval_ctx,
+            &lua_evaluator,
+            handle.config_path(),
+            default_user.as_deref(),
+        ).map_err(|e| OrchestratorError::ConfigError(e.to_string()))?;
+
+        // Build computed_env respecting sys_env policy
+        let sys_env_policy = resolve_sys_env(
+            resolved.sys_env.as_ref(),
+            config.global_sys_env(),
+        );
+        let computed_env = if sys_env_policy == SysEnvPolicy::Clear {
+            let mut env = eval_ctx.env_file.clone();
+            crate::env::insert_env_entries(&mut env, &resolved.environment);
+            env
+        } else {
+            eval_ctx.env.clone()
+        };
+
+        let working_dir = resolved
+            .working_dir
+            .as_ref()
+            .map(|wd| config_dir.join(wd))
+            .unwrap_or_else(|| config_dir.clone());
+
+        // Store in actor
+        handle.store_resolved_config(
+            service_name,
+            resolved,
+            computed_env,
+            working_dir,
+        ).await;
+
+        // Return refreshed context
+        handle.get_service_context(service_name).await
+            .ok_or(OrchestratorError::ServiceContextNotFound)
+    }
+
     /// Wait for all dependencies to satisfy their conditions
     async fn wait_for_dependencies(
         &self,
         handle: &ConfigActorHandle,
         service_name: &str,
-        service_config: &ServiceConfig,
+        depends_on: &DependsOn,
     ) -> Result<(), OrchestratorError> {
-        // Get the full config for looking up dependency service configs
+        // Get the full config for looking up dependency service configs (raw values)
         let config = handle.get_config().await;
 
-        for (dep_name, dep_config) in service_config.depends_on.iter() {
+        for (dep_name, dep_config) in depends_on.iter() {
             let start = Instant::now();
 
             debug!(
@@ -544,10 +810,11 @@ impl ServiceOrchestrator {
                     // Check if this is a transient satisfaction (dep exited but will restart).
                     // If so, fall through to recv() — the dep will restart and the condition will no longer hold.
                     let is_transient = if let Some(ref cfg) = config
-                        && let Some(dep_svc_config) = cfg.services.get(dep_name)
+                        && let Some(dep_raw) = cfg.services.get(dep_name)
                         && let Some(dep_state) = handle.get_service_state(dep_name).await
                     {
-                        is_transient_satisfaction(&dep_state, dep_svc_config)
+                        let dep_restart = dep_raw.restart.as_static().cloned().unwrap_or_default();
+                        is_transient_satisfaction(&dep_state, &dep_restart)
                     } else {
                         false
                     };
@@ -569,30 +836,23 @@ impl ServiceOrchestrator {
                     // Fall through to recv() below
                 } else {
                     // Check if dependency was skipped (cascade skip)
-                    if let Some(ref cfg) = config {
-                        if let Some(dep_state) = handle.get_service_state(dep_name).await {
-                            if dep_state.status == ServiceStatus::Skipped {
-                                let dep_config_entry = cfg.services.get(dep_name)
-                                    .and_then(|_| service_config.depends_on.get(dep_name));
-                                let allow = dep_config_entry.map(|d| d.allow_skipped).unwrap_or(false);
-                                if !allow {
-                                    return Err(OrchestratorError::DependencySkipped {
-                                        service: service_name.to_string(),
-                                        dependency: dep_name.to_string(),
-                                    });
-                                }
+                    if let Some(dep_state) = handle.get_service_state(dep_name).await
+                        && dep_state.status == ServiceStatus::Skipped
+                            && !dep_config.allow_skipped {
+                                return Err(OrchestratorError::DependencySkipped {
+                                    service: service_name.to_string(),
+                                    dependency: dep_name.to_string(),
+                                });
                             }
-                        }
-                    }
 
                     // Check if dependency is permanently unsatisfied (terminal state, won't restart)
                     if let Some(ref cfg) = config
-                        && let Some(dep_svc_config) = cfg.services.get(dep_name)
+                        && let Some(dep_raw) = cfg.services.get(dep_name)
                         && is_dependency_permanently_unsatisfied(
                             dep_name,
                             &dep_config,
                             handle,
-                            dep_svc_config,
+                            &dep_raw.restart.as_static().cloned().unwrap_or_default(),
                         ).await
                     {
                         let state = handle.get_service_state(dep_name).await;
@@ -619,15 +879,16 @@ impl ServiceOrchestrator {
 
                     // Check if condition is structurally unreachable given dep's restart policy
                     if let Some(ref cfg) = config
-                        && let Some(dep_svc_config) = cfg.services.get(dep_name)
+                        && let Some(dep_raw) = cfg.services.get(dep_name)
                     {
                         let dep_state = handle.get_service_state(dep_name).await;
                         let dep_running = dep_state.as_ref().is_some_and(|s| s.status.is_running());
                         if dep_running {
+                            let dep_restart = dep_raw.restart.as_static().cloned().unwrap_or_default();
                             if let Some(reason) = is_condition_unreachable_by_policy(
                                 dep_name,
                                 &dep_config.condition,
-                                dep_svc_config.restart.policy(),
+                                dep_restart.policy(),
                             ) {
                                 return Err(OrchestratorError::DependencyUnsatisfied {
                                     service: service_name.to_string(),
@@ -743,12 +1004,15 @@ impl ServiceOrchestrator {
             && let Err(e) = run_global_hook(
                 &global_hooks,
                 GlobalHookType::PreStop,
-                &config_dir,
-                &stored_env,
-                Some(log_cfg),
-                global_log_config.as_ref(),
-                &None,
-                Some(&handle),
+                &GlobalHookParams {
+                    working_dir: &config_dir,
+                    env: &stored_env,
+                    log_config: Some(log_cfg),
+                    global_log_config: global_log_config.as_ref(),
+                    progress: &None,
+                    handle: Some(&handle),
+                    lua_code: config.lua.as_deref(),
+                },
             )
             .await
         {
@@ -848,12 +1112,15 @@ impl ServiceOrchestrator {
             && let Err(e) = run_global_hook(
                 &global_hooks,
                 GlobalHookType::PostStop,
-                &config_dir,
-                &stored_env,
-                Some(log_cfg),
-                global_log_config.as_ref(),
-                &None,
-                Some(&handle),
+                &GlobalHookParams {
+                    working_dir: &config_dir,
+                    env: &stored_env,
+                    log_config: Some(log_cfg),
+                    global_log_config: global_log_config.as_ref(),
+                    progress: &None,
+                    handle: Some(&handle),
+                    lua_code: config.lua.as_deref(),
+                },
             )
             .await
         {
@@ -884,11 +1151,10 @@ impl ServiceOrchestrator {
             // Run service-level pre_cleanup hooks
             for service_name in &cleanable_services {
                 let ctx = handle.get_service_context(service_name).await;
-                if let Some(ref ctx) = ctx {
-                    if let Err(e) = self.run_service_hook(ctx, service_name, ServiceHookType::PreCleanup, &None, Some(&handle)).await {
+                if let Some(ref ctx) = ctx
+                    && let Err(e) = self.run_service_hook(ctx, service_name, ServiceHookType::PreCleanup, &None, Some(&handle)).await {
                         warn!("Hook pre_cleanup failed for {}: {}", service_name, e);
                     }
-                }
             }
 
             // Run global pre_cleanup hook
@@ -896,12 +1162,15 @@ impl ServiceOrchestrator {
                 && let Err(e) = run_global_hook(
                     &global_hooks,
                     GlobalHookType::PreCleanup,
-                    &config_dir,
-                    &stored_env,
-                    Some(log_cfg),
-                    global_log_config.as_ref(),
-                    &None,
-                    Some(&handle),
+                    &GlobalHookParams {
+                        working_dir: &config_dir,
+                        env: &stored_env,
+                        log_config: Some(log_cfg),
+                        global_log_config: global_log_config.as_ref(),
+                        progress: &None,
+                        handle: Some(&handle),
+                        lua_code: config.lua.as_deref(),
+                    },
                 )
                 .await
             {
@@ -930,9 +1199,9 @@ impl ServiceOrchestrator {
                     let service_logs = config
                         .services
                         .get(service_name)
-                        .and_then(|c| c.logs.as_ref());
+                        .and_then(|raw| raw.logs.as_static().cloned().flatten());
                     resolve_log_retention(
-                        service_logs,
+                        service_logs.as_ref(),
                         global_log_config.as_ref(),
                         |l| l.get_on_stop(),
                         LogRetention::Clear,
@@ -1028,7 +1297,6 @@ impl ServiceOrchestrator {
         &self,
         config_path: &Path,
         services: &[String],
-        _sys_env: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
         info!("Restarting services for {:?} (preserving state)", config_path);
 
@@ -1072,25 +1340,16 @@ impl ServiceOrchestrator {
         }
 
         // Sort services by dependency graph
-        // Stop order: reverse topological sort (dependents first, then dependencies)
         // Start order: forward topological sort (dependencies first, then dependents)
-        let stop_order = {
-            let filtered: HashMap<_, _> = config.services
-                .iter()
-                .filter(|(k, _)| services_to_restart.contains(k))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            get_stop_order(&filtered).unwrap_or_else(|_| services_to_restart.clone())
-        };
-
-        let start_order = {
-            let filtered: HashMap<_, _> = config.services
-                .iter()
-                .filter(|(k, _)| services_to_restart.contains(k))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            get_start_order(&filtered).unwrap_or_else(|_| services_to_restart.clone())
-        };
+        // Stop order: reverse of start order (dependents first, then dependencies)
+        let filtered: HashMap<_, _> = config.services
+            .iter()
+            .filter(|(k, _)| services_to_restart.contains(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let start_order = get_start_order(&filtered).unwrap_or_else(|_| services_to_restart.clone());
+        let mut stop_order = start_order.clone();
+        stop_order.reverse();
 
         // Run global pre_restart hook for full restart
         if is_full_restart
@@ -1098,12 +1357,15 @@ impl ServiceOrchestrator {
             && let Err(e) = run_global_hook(
                 &global_hooks,
                 GlobalHookType::PreRestart,
-                &config_dir,
-                &stored_env,
-                Some(log_cfg),
-                global_log_config.as_ref(),
-                &None,
-                Some(&handle),
+                &GlobalHookParams {
+                    working_dir: &config_dir,
+                    env: &stored_env,
+                    log_config: Some(log_cfg),
+                    global_log_config: global_log_config.as_ref(),
+                    progress: &None,
+                    handle: Some(&handle),
+                    lua_code: config.lua.as_deref(),
+                },
             )
             .await
         {
@@ -1163,11 +1425,11 @@ impl ServiceOrchestrator {
 
         // Phase 2: Start services (forward dependency order)
         for service_name in &start_order {
-            // Refresh context after stop (state may have changed)
-            let ctx = match handle.get_service_context(service_name).await {
-                Some(ctx) => ctx,
-                None => {
-                    warn!("Service context not found for {}", service_name);
+            // Re-resolve service config with updated context (restart_count, deps, etc.)
+            let ctx = match self.re_resolve_service(&handle, service_name, None).await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    warn!("Failed to re-resolve service {}: {}", service_name, e);
                     continue;
                 }
             };
@@ -1222,12 +1484,15 @@ impl ServiceOrchestrator {
             && let Err(e) = run_global_hook(
                 &global_hooks,
                 GlobalHookType::PostRestart,
-                &config_dir,
-                &stored_env,
-                Some(log_cfg),
-                global_log_config.as_ref(),
-                &None,
-                Some(&handle),
+                &GlobalHookParams {
+                    working_dir: &config_dir,
+                    env: &stored_env,
+                    log_config: Some(log_cfg),
+                    global_log_config: global_log_config.as_ref(),
+                    progress: &None,
+                    handle: Some(&handle),
+                    lua_code: config.lua.as_deref(),
+                },
             )
             .await
         {
@@ -1377,11 +1642,8 @@ impl ServiceOrchestrator {
         // Small delay between stop and start
         tokio::time::sleep(RESTART_DELAY).await;
 
-        // Refresh context after stop (state may have changed)
-        let ctx = handle
-            .get_service_context(service_name)
-            .await
-            .ok_or(OrchestratorError::ServiceContextNotFound)?;
+        // Re-resolve service config with updated context
+        let ctx = self.re_resolve_service(&handle, service_name, None).await?;
 
         // Emit Start event (restart includes a start)
         handle.emit_event(service_name, ServiceEvent::Start).await;
@@ -1487,9 +1749,15 @@ impl ServiceOrchestrator {
                 | ServiceStatus::Starting
             ));
 
-        // Determine if we should restart
-        let should_restart = was_actively_running
-            && ctx.service_config.restart.should_restart_on_exit(exit_code);
+        // Determine if we should restart (use resolved config or fall back to raw)
+        let should_restart = was_actively_running && {
+            if let Some(ref resolved) = ctx.resolved_config {
+                resolved.restart.should_restart_on_exit(exit_code)
+            } else {
+                let restart = ctx.service_config.restart.as_static().cloned().unwrap_or_default();
+                restart.should_restart_on_exit(exit_code)
+            }
+        };
 
         if should_restart {
             // Emit Restart event with Failure reason
@@ -1516,10 +1784,13 @@ impl ServiceOrchestrator {
             // Small delay before restart
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
+            let restart_policy = ctx.resolved_config.as_ref()
+                .map(|c| c.restart.policy().clone())
+                .unwrap_or_else(|| ctx.service_config.restart.as_static().cloned().unwrap_or_default().policy().clone());
             info!(
                 "Restarting service {} (policy: {:?})",
                 service_name,
-                ctx.service_config.restart.policy()
+                restart_policy
             );
 
             // Run pre_restart hook
@@ -1542,11 +1813,8 @@ impl ServiceOrchestrator {
             self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart)
                 .await;
 
-            // Refresh context (env may have changed if env_file was modified)
-            let ctx = handle
-                .get_service_context(service_name)
-                .await
-                .ok_or(OrchestratorError::ServiceContextNotFound)?;
+            // Re-resolve service config with updated restart_count, exit_code, deps
+            let ctx = self.re_resolve_service(&handle, service_name, exit_code).await?;
 
             // Spawn new process
             match self.spawn_service(&handle, service_name, &ctx).await {
@@ -1682,8 +1950,9 @@ impl ServiceOrchestrator {
         }
 
         // Exited/Failed/Killed — check restart policy
-        if let Some(svc_config) = config.services.get(service_name) {
-            if !svc_config.restart.should_restart_on_exit(state.exit_code) {
+        if let Some(raw) = config.services.get(service_name) {
+            let restart = raw.restart.as_static().cloned().unwrap_or_default();
+            if !restart.should_restart_on_exit(state.exit_code) {
                 // Restart policy says don't restart → service is "done"
                 return false;
             }
@@ -1693,6 +1962,10 @@ impl ServiceOrchestrator {
     }
 
     /// Run a service hook, forwarding the progress sender for event emission.
+    /// Requires resolved_config to be available in the ServiceContext.
+    ///
+    /// Hooks are resolved here (not in `resolve_service`) so that `hook_name`
+    /// is available in the `EvalContext` for `!lua` blocks.
     async fn run_service_hook(
         &self,
         ctx: &ServiceContext,
@@ -1701,30 +1974,93 @@ impl ServiceOrchestrator {
         progress: &Option<ProgressSender>,
         handle: Option<&ConfigActorHandle>,
     ) -> Result<(), OrchestratorError> {
+        let resolved = match ctx.resolved_config.as_ref() {
+            Some(c) => c,
+            None => {
+                debug!("No resolved config for {}, skipping hook {:?}", service_name, hook_type);
+                return Ok(());
+            }
+        };
+
         let mut hook_params = ServiceHookParams::from_service_context(
-            &ctx.service_config,
+            resolved,
             &ctx.working_dir,
             &ctx.env,
             Some(&ctx.log_config),
             ctx.global_log_config.as_ref(),
         );
 
-        // Populate dependency state for hook conditions
-        if let Some(h) = handle {
-            for (dep_name, _) in ctx.service_config.depends_on.iter() {
+        // For static hooks, use resolved.hooks (already resolved in resolve_service).
+        // For dynamic hooks (!lua / ${{ }}), resolve here with hook_name in context.
+        // lua_code is hoisted so it outlives hook_params.lua_code (a borrowed reference).
+        let mut lua_code: Option<String> = None;
+        let hooks: Option<ServiceHooks> = if resolved.hooks.is_some() || ctx.service_config.hooks.as_static().is_some() {
+            // Static hooks — already resolved, use them directly.
+            // Gather deps info and lua_code for ${{ }} evaluation in hook env.
+            if let Some(h) = handle {
+                let depends_on = &resolved.depends_on;
+                for (dep_name, _) in depends_on.iter() {
+                    if let Some(dep_state) = h.get_service_state(dep_name).await {
+                        hook_params.deps.insert(dep_name.to_string(), DepInfo {
+                            status: dep_state.status.as_str().to_string(),
+                            exit_code: dep_state.exit_code,
+                            initialized: dep_state.initialized,
+                            restart_count: dep_state.restart_count,
+                            env: dep_state.computed_env.clone(),
+                        });
+                    }
+                }
+                lua_code = h.get_config().await.and_then(|c| c.lua.clone());
+            }
+            resolved.hooks.clone()
+        } else if let Some(h) = handle {
+            // Dynamic hooks — need full Lua resolution with hook_name in context
+            let depends_on = &resolved.depends_on;
+            for (dep_name, _) in depends_on.iter() {
                 if let Some(dep_state) = h.get_service_state(dep_name).await {
                     hook_params.deps.insert(dep_name.to_string(), DepInfo {
                         status: dep_state.status.as_str().to_string(),
                         exit_code: dep_state.exit_code,
                         initialized: dep_state.initialized,
                         restart_count: dep_state.restart_count,
+                        env: dep_state.computed_env.clone(),
                     });
                 }
             }
-        }
+
+            let config = h.get_config().await
+                .ok_or(OrchestratorError::ServiceContextNotFound)?;
+            let raw = config.services.get(service_name)
+                .ok_or(OrchestratorError::ServiceContextNotFound)?;
+
+            let evaluator = config.create_lua_evaluator()
+                .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?;
+
+            let state = h.get_service_state(service_name).await;
+            let eval_ctx = EvalContext {
+                env: ctx.env.clone(),
+                service_name: Some(service_name.to_string()),
+                hook_name: Some(hook_type.as_str().to_string()),
+                initialized: state.as_ref().map(|s| s.initialized),
+                restart_count: state.as_ref().map(|s| s.restart_count),
+                exit_code: state.as_ref().and_then(|s| s.exit_code),
+                status: state.as_ref().map(|s| s.status.as_str().to_string()),
+                deps: hook_params.deps.clone(),
+                ..Default::default()
+            };
+
+            lua_code = config.lua.clone();
+
+            raw.hooks.resolve(&evaluator, &eval_ctx, h.config_path(), &format!("{}.hooks", service_name))
+                .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?
+        } else {
+            // No handle and dynamic hooks — cannot resolve
+            None
+        };
+        hook_params.lua_code = lua_code.as_deref();
 
         run_service_hook(
-            &ctx.service_config.hooks,
+            &hooks,
             hook_type,
             service_name,
             &hook_params,
@@ -1743,27 +2079,28 @@ impl ServiceOrchestrator {
         ctx: &ServiceContext,
         event: LifecycleEvent,
     ) {
+        let service_logs = ctx.resolved_config.as_ref().and_then(|c| c.logs.as_ref());
         let retention = match event {
             LifecycleEvent::Start => resolve_log_retention(
-                ctx.service_config.logs.as_ref(),
+                service_logs,
                 ctx.global_log_config.as_ref(),
                 |l| l.get_on_start(),
                 LogRetention::Retain,
             ),
             LifecycleEvent::Stop => resolve_log_retention(
-                ctx.service_config.logs.as_ref(),
+                service_logs,
                 ctx.global_log_config.as_ref(),
                 |l| l.get_on_stop(),
                 LogRetention::Clear,
             ),
             LifecycleEvent::Restart => resolve_log_retention(
-                ctx.service_config.logs.as_ref(),
+                service_logs,
                 ctx.global_log_config.as_ref(),
                 |l| l.get_on_restart(),
                 LogRetention::Retain,
             ),
             LifecycleEvent::Exit => resolve_log_retention(
-                ctx.service_config.logs.as_ref(),
+                service_logs,
                 ctx.global_log_config.as_ref(),
                 |l| l.get_on_exit(),
                 LogRetention::Retain,
@@ -1786,9 +2123,12 @@ impl ServiceOrchestrator {
         service_name: &str,
         ctx: &ServiceContext,
     ) -> Result<(), OrchestratorError> {
+        let resolved = ctx.resolved_config.as_ref()
+            .ok_or(OrchestratorError::ServiceContextNotFound)?;
+
         let spawn_params = SpawnServiceParams {
             service_name,
-            service_config: &ctx.service_config,
+            service_config: resolved,
             config_dir: &ctx.config_dir,
             log_config: ctx.log_config.clone(),
             handle: handle.clone(),
@@ -1818,8 +2158,13 @@ impl ServiceOrchestrator {
         service_name: &str,
         ctx: &ServiceContext,
     ) {
+        let resolved = match ctx.resolved_config.as_ref() {
+            Some(c) => c,
+            None => return,
+        };
+
         // Start health check if configured
-        if let Some(health_config) = &ctx.service_config.healthcheck {
+        if let Some(health_config) = &resolved.healthcheck {
             let task_handle = spawn_health_checker(
                 service_name.to_string(),
                 health_config.clone(),
@@ -1831,11 +2176,11 @@ impl ServiceOrchestrator {
         }
 
         // Start file watcher if configured
-        if !ctx.service_config.restart.watch_patterns().is_empty() {
+        if !resolved.restart.watch_patterns().is_empty() {
             let task_handle = spawn_file_watcher(
                 handle.config_path().to_path_buf(),
                 service_name.to_string(),
-                ctx.service_config.restart.watch_patterns().to_vec(),
+                resolved.restart.watch_patterns().to_vec(),
                 ctx.working_dir.clone(),
                 self.restart_tx.clone(),
             );
@@ -1987,12 +2332,15 @@ impl ServiceOrchestrator {
         if let Err(e) = run_global_hook(
             &snapshot.config.global_hooks().cloned(),
             GlobalHookType::PreCleanup,
-            &snapshot.config_dir,
-            &snapshot.sys_env,
-            None, // No log buffer for prune
-            snapshot.config.global_logs(),
-            &None,
-            None, // No handle available during prune
+            &GlobalHookParams {
+                working_dir: &snapshot.config_dir,
+                env: &snapshot.sys_env,
+                log_config: None,
+                global_log_config: snapshot.config.global_logs(),
+                progress: &None,
+                handle: None,
+                lua_code: snapshot.config.lua.as_deref(),
+            },
         )
         .await
         {

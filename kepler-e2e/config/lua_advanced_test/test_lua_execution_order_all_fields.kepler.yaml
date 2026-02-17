@@ -16,9 +16,6 @@ services:
     working_dir: !lua |
       track("working_dir")
       return "/tmp"
-    depends_on: !lua |
-      track("depends_on")
-      return {}
     healthcheck:
       test: !lua |
         track("healthcheck")

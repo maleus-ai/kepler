@@ -1,28 +1,9 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::config::{HookCommand, ServiceConfig};
+use crate::config::{HookCommand, evaluate_expression_string};
 use crate::errors::{DaemonError, Result};
-
-/// Expand ${VAR} references in a string using environment variables and extra env.
-///
-/// Note: This is used for runtime expansion of environment values that reference
-/// other variables (e.g., from env_file or previously set variables).
-/// Config-level environment expansion happens at config load time.
-pub fn expand_env(s: &str, extra_env: &HashMap<String, String>) -> String {
-    shellexpand::env_with_context(s, |var| -> std::result::Result<Option<Cow<'_, str>>, std::env::VarError> {
-        // Look up in the provided environment only; missing vars become empty string
-        Ok(Some(
-            extra_env
-                .get(var)
-                .map(|v| Cow::Borrowed(v.as_str()))
-                .unwrap_or(Cow::Borrowed("")),
-        ))
-    })
-    .map(|expanded| expanded.into_owned())
-    .unwrap_or_else(|_| s.to_string())
-}
+use crate::lua_eval::{EvalContext, LuaEvaluator};
 
 /// Load environment variables from a .env file
 pub fn load_env_file(path: &Path) -> Result<HashMap<String, String>> {
@@ -54,7 +35,7 @@ pub fn load_env_file(path: &Path) -> Result<HashMap<String, String>> {
 }
 
 /// Insert KEY=VALUE entries from a string slice into a HashMap.
-fn insert_env_entries(env: &mut HashMap<String, String>, entries: &[String]) {
+pub fn insert_env_entries(env: &mut HashMap<String, String>, entries: &[String]) {
     for entry in entries {
         if let Some((key, value)) = entry.split_once('=') {
             env.insert(key.to_string(), value.to_string());
@@ -62,64 +43,24 @@ fn insert_env_entries(env: &mut HashMap<String, String>, entries: &[String]) {
     }
 }
 
-/// Build the full environment for a service
+/// Build environment for a hook, merging hook-specific env with base service env.
 ///
-/// The environment is fully baked at config load time:
-/// - If `sys_env: inherit`, CLI environment vars are already in the environment array
-/// - If `sys_env: clear`, only explicitly defined vars are in the environment array
-/// - All shell expansions have been resolved
-///
-/// This function merges:
-/// 1. Variables from env_file (loaded from state directory copy)
-/// 2. Service-defined environment variables (already baked)
-///
-/// The env_file is loaded from the state directory (where it was copied at snapshot time),
-/// not from the original path. This ensures the snapshot is self-contained.
-pub fn build_service_env(
-    config: &ServiceConfig,
-    service_name: &str,
-    state_dir: &Path,
-) -> Result<HashMap<String, String>> {
-    let mut env = HashMap::with_capacity(64); // sys_env + env_file + config
-
-    // Load env_file from STATE DIRECTORY (copied at snapshot time)
-    if let Some(ref env_file) = config.env_file {
-        // Build path to the copied env_file using the same naming convention as persistence.rs
-        let env_file_name = format!(
-            "{}_{}",
-            service_name,
-            env_file.file_name().unwrap_or_default().to_string_lossy()
-        );
-        let env_path = state_dir.join("env_files").join(env_file_name);
-
-        if env_path.exists() {
-            env.extend(load_env_file(&env_path)?);
-        }
-        // If file doesn't exist in state dir, silently ignore
-        // (may not have been copied yet, or file didn't exist originally)
-    }
-
-    // Apply service-defined environment entries (already baked with sys_env if inherit policy)
-    // Note: These are already expanded at config load time, so no need to expand again
-    insert_env_entries(&mut env, &config.environment);
-
-    Ok(env)
-}
-
-/// Build environment for a hook, merging hook-specific env with base service env
+/// Hook environment entries are evaluated via `${{ }}` Lua expressions against
+/// the accumulated env (base service env + hook env_file).
 ///
 /// Priority (highest to lowest):
-/// 1. Hook's environment variables
+/// 1. Hook's environment variables (evaluated against base + env_file)
 /// 2. Hook's env_file variables
 /// 3. Base service environment (already includes service env and system env)
 pub fn build_hook_env(
     hook: &HookCommand,
     base_env: &HashMap<String, String>,
     working_dir: &Path,
+    lua_code: Option<&str>,
 ) -> Result<HashMap<String, String>> {
     let mut env = base_env.clone();
 
-    // Load from hook's env_file if specified
+    // Load from hook's env_file if specified (path already expanded)
     if let Some(env_file_path) = hook.env_file() {
         let resolved_path = if env_file_path.is_relative() {
             working_dir.join(env_file_path)
@@ -128,16 +69,43 @@ pub fn build_hook_env(
         };
 
         if resolved_path.exists() {
-            let file_env = load_env_file(&resolved_path)?;
-            env.extend(file_env);
+            let hook_env_file_vars = load_env_file(&resolved_path)?;
+            env.extend(hook_env_file_vars);
         }
     }
 
-    // Apply hook's environment (highest priority)
-    for var in hook.environment() {
-        if let Some((key, value)) = var.split_once('=') {
-            let expanded = expand_env(value, &env);
-            env.insert(key.to_string(), expanded);
+    // Evaluate ${{ }} in hook's environment entries against accumulated env
+    let has_expressions = hook.environment().iter().any(|e| e.contains("${{"));
+
+    if has_expressions {
+        let evaluator = LuaEvaluator::new().map_err(|e| DaemonError::Internal(
+            format!("Failed to create Lua evaluator for hook: {}", e),
+        ))?;
+        if let Some(code) = lua_code {
+            evaluator.load_inline(code).map_err(|e| DaemonError::Internal(
+                format!("Failed to load Lua code for hook: {}", e),
+            ))?;
+        }
+        let eval_ctx = EvalContext {
+            env: env.clone(),
+            ..Default::default()
+        };
+        let config_path = std::path::PathBuf::from("<hook>");
+        for entry in hook.environment() {
+            let expanded = if entry.contains("${{") {
+                evaluate_expression_string(entry, &evaluator, &eval_ctx, &config_path, "hook.environment")?
+            } else {
+                entry.to_string()
+            };
+            if let Some((key, value)) = expanded.split_once('=') {
+                env.insert(key.to_string(), value.to_string());
+            }
+        }
+    } else {
+        for entry in hook.environment() {
+            if let Some((key, value)) = entry.split_once('=') {
+                env.insert(key.to_string(), value.to_string());
+            }
         }
     }
 
@@ -149,55 +117,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_expand_env_basic() {
-        let mut extra = HashMap::new();
-        extra.insert("FOO".to_string(), "bar".to_string());
-        extra.insert("BAZ".to_string(), "qux".to_string());
-
-        assert_eq!(expand_env("${FOO}", &extra), "bar");
-        assert_eq!(expand_env("prefix_${FOO}_suffix", &extra), "prefix_bar_suffix");
-        assert_eq!(expand_env("${FOO}_${BAZ}", &extra), "bar_qux");
-    }
-
-    #[test]
-    fn test_expand_env_missing() {
-        let extra = HashMap::new();
-        assert_eq!(expand_env("${NONEXISTENT}", &extra), "");
-        assert_eq!(expand_env("prefix_${NONEXISTENT}_suffix", &extra), "prefix__suffix");
-    }
-
-    #[test]
-    fn test_expand_env_no_vars() {
-        let extra = HashMap::new();
-        assert_eq!(expand_env("no variables here", &extra), "no variables here");
-    }
-
-    #[test]
-    fn test_expand_env_does_not_fallback_to_process_env() {
-        // Set a real process env var that should NOT be visible to expand_env
-        unsafe {
-            std::env::set_var("KEPLER_TEST_EXPAND_ISOLATION", "leaked");
-        }
-
-        let extra = HashMap::new();
-        // expand_env must return "" because the var is not in extra_env,
-        // even though it exists in the process environment
-        assert_eq!(
-            expand_env("${KEPLER_TEST_EXPAND_ISOLATION}", &extra),
-            "",
-            "expand_env must not fall back to std::env::var"
-        );
-
-        // But if explicitly provided in extra_env, it works
-        let mut with_var = HashMap::new();
-        with_var.insert("KEPLER_TEST_EXPAND_ISOLATION".to_string(), "explicit".to_string());
-        assert_eq!(
-            expand_env("${KEPLER_TEST_EXPAND_ISOLATION}", &with_var),
-            "explicit"
-        );
-
-        unsafe {
-            std::env::remove_var("KEPLER_TEST_EXPAND_ISOLATION");
-        }
+    fn test_insert_env_entries() {
+        let mut env = HashMap::new();
+        let entries = vec![
+            "FOO=bar".to_string(),
+            "BAZ=qux".to_string(),
+            "INVALID".to_string(), // no '=' — should be skipped
+        ];
+        insert_env_entries(&mut env, &entries);
+        assert_eq!(env.get("FOO").unwrap(), "bar");
+        assert_eq!(env.get("BAZ").unwrap(), "qux");
+        assert!(!env.contains_key("INVALID"));
     }
 }

@@ -1,10 +1,15 @@
 //! Log retention tests
 
-use kepler_daemon::config::{LogConfig, LogRetention, LogRetentionConfig};
+use kepler_daemon::config::{LogConfig, LogRetention, LogRetentionConfig, RawServiceConfig, ServiceConfig};
 use kepler_daemon::logs::LogStream;
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use tempfile::TempDir;
+
+fn deser_svc(raw: &RawServiceConfig) -> ServiceConfig {
+    let val = serde_yaml::to_value(raw).unwrap();
+    serde_yaml::from_value(val).unwrap()
+}
 
 /// Default behavior clears logs on stop
 #[tokio::test]
@@ -142,9 +147,9 @@ async fn test_service_log_config_overrides_global() {
     );
 
     // Check service config overrides
+    let svc = deser_svc(&config.services["test"]);
     assert_eq!(
-        config.services["test"]
-            .logs
+        svc.logs
             .as_ref()
             .unwrap()
             .get_on_stop(),
@@ -187,7 +192,8 @@ async fn test_all_log_retention_events() {
         .get_config()
         .await
         .unwrap();
-    let service_logs = config.services["test"].logs.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let service_logs = svc.logs.as_ref().unwrap();
 
     assert_eq!(service_logs.get_on_stop(), Some(LogRetention::Retain));
     assert_eq!(service_logs.get_on_start(), Some(LogRetention::Clear));
@@ -496,7 +502,8 @@ services:
     assert_eq!(global_logs.get_on_exit(), Some(LogRetention::Retain));
 
     // Check service config overrides
-    let service_logs = config.services["test"].logs.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let service_logs = svc.logs.as_ref().unwrap();
     assert_eq!(service_logs.get_on_stop(), Some(LogRetention::Clear));
     assert_eq!(service_logs.get_on_exit(), Some(LogRetention::Clear));
 }

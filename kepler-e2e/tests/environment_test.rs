@@ -66,7 +66,7 @@ async fn test_env_file_loading() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that shell expansion ${VAR} works in environment values
+/// Test that ${{ env.VAR }} expansion works in environment values
 #[tokio::test]
 async fn test_shell_expansion() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -83,14 +83,14 @@ async fn test_shell_expansion() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "shell-expansion-service", "running", Duration::from_secs(10))
         .await?;
 
-    // The HOME variable should be expanded from the system environment
-    // Check that EXPANDED_VAR contains something (not the literal ${HOME})
+    // The HOME variable should be expanded via ${{ env.HOME }}
+    // Check that EXPANDED_VAR contains something (not the literal expression)
     let logs = harness.wait_for_log_content(&config_path, "EXPANDED_VAR=", Duration::from_secs(5)).await?;
 
-    // Should not contain the literal "${HOME}"
+    // Should not contain the literal "${{ env.HOME }}"
     assert!(
-        !logs.stdout_contains("EXPANDED_VAR=${HOME}"),
-        "Shell expansion should work. stdout: {}", logs.stdout
+        !logs.stdout_contains("${{ env.HOME }}"),
+        "Inline expression expansion should work. stdout: {}", logs.stdout
     );
 
     harness.stop_daemon().await?;

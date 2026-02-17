@@ -438,11 +438,10 @@ async fn test_log_chronological_ordering() -> E2eResult<()> {
         // Timestamp format: "YYYY-MM-DD HH:MM:SS"
         if line.len() >= 19 && line.chars().nth(4) == Some('-') {
             let timestamp = &line[..19];
-            if let Some(prev) = prev_timestamp {
-                if timestamp < prev {
+            if let Some(prev) = prev_timestamp
+                && timestamp < prev {
                     order_violations += 1;
                 }
-            }
             prev_timestamp = Some(timestamp);
         }
     }
@@ -469,12 +468,11 @@ async fn test_log_chronological_ordering() -> E2eResult<()> {
             None
         };
 
-        if let (Some(prev), Some(curr)) = (prev_service, current_service) {
-            if prev != curr {
+        if let (Some(prev), Some(curr)) = (prev_service, current_service)
+            && prev != curr {
                 found_interleaving = true;
                 break;
             }
-        }
         prev_service = current_service;
     }
 

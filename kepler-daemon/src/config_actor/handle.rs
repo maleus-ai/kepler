@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::config::{KeplerConfig, LogConfig, ServiceConfig, SysEnvPolicy};
+use crate::config::{KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
 use crate::errors::{DaemonError, Result};
 use crate::events::{ServiceEvent, ServiceEventReceiver};
 use crate::lua_eval::EvalContext;
@@ -19,7 +19,7 @@ use crate::logs::LogWriterConfig;
 use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
 
-use super::command::ConfigCommand;
+use super::command::{ConfigCommand, OutputTasks};
 use super::context::{ConfigEvent, DiagnosticCounts, HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
 
 /// Handle for sending commands to a config actor.
@@ -34,6 +34,8 @@ pub struct ConfigActorHandle {
     dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>>,
     /// UID of the CLI user who loaded this config (for per-request authorization)
     owner_uid: Option<u32>,
+    /// GID of the CLI user who loaded this config (for default user fallback)
+    owner_gid: Option<u32>,
 }
 
 impl ConfigActorHandle {
@@ -45,6 +47,7 @@ impl ConfigActorHandle {
         subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ConfigEvent>>>>,
         dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>>,
         owner_uid: Option<u32>,
+        owner_gid: Option<u32>,
     ) -> Self {
         Self {
             config_path,
@@ -53,6 +56,7 @@ impl ConfigActorHandle {
             subscribers,
             dep_watchers,
             owner_uid,
+            owner_gid,
         }
     }
 
@@ -69,6 +73,11 @@ impl ConfigActorHandle {
     /// Get the owner UID of this config (who loaded it)
     pub fn owner_uid(&self) -> Option<u32> {
         self.owner_uid
+    }
+
+    /// Get the owner GID of this config (who loaded it)
+    pub fn owner_gid(&self) -> Option<u32> {
+        self.owner_gid
     }
 
     /// Subscribe to config events (status changes, Ready, Quiescent).
@@ -268,8 +277,8 @@ impl ConfigActorHandle {
         reply_rx.await.unwrap_or_else(|_| (Vec::new(), false))
     }
 
-    /// Get a service configuration
-    pub async fn get_service_config(&self, service_name: &str) -> Option<ServiceConfig> {
+    /// Get a service's raw (unexpanded) configuration
+    pub async fn get_service_config(&self, service_name: &str) -> Option<RawServiceConfig> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .tx
@@ -664,6 +673,30 @@ impl ConfigActorHandle {
             .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
     }
 
+    /// Store the resolved (expanded) ServiceConfig for a service after lazy expansion,
+    /// and update computed_env and working_dir in ServiceState.
+    pub async fn store_resolved_config(
+        &self,
+        service_name: &str,
+        config: ServiceConfig,
+        computed_env: HashMap<String, String>,
+        working_dir: PathBuf,
+    ) {
+        if self
+            .tx
+            .send(ConfigCommand::StoreResolvedConfig {
+                service_name: service_name.to_string(),
+                config: Box::new(config),
+                computed_env,
+                working_dir,
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send StoreResolvedConfig");
+        }
+    }
+
     /// Clear logs for a service
     pub async fn clear_service_logs(&self, service_name: &str) {
         if self
@@ -715,7 +748,7 @@ impl ConfigActorHandle {
     pub async fn take_output_tasks(
         &self,
         service_name: &str,
-    ) -> (Option<JoinHandle<()>>, Option<JoinHandle<()>>) {
+    ) -> OutputTasks {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .tx
@@ -948,7 +981,7 @@ impl ConfigActorHandle {
         self.tx
             .send(ConfigCommand::EvalIfCondition {
                 condition: condition.to_string(),
-                context: ctx,
+                context: Box::new(ctx),
                 reply: reply_tx,
             })
             .await

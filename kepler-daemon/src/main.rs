@@ -54,8 +54,8 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
 
@@ -492,7 +492,7 @@ async fn handle_request(
         Request::Restart {
             config_path,
             services,
-            sys_env,
+            sys_env: _,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -578,7 +578,7 @@ async fn handle_request(
 
             // Run restart_services (blocks until done)
             let result = orchestrator
-                .restart_services(&config_path, &services, sys_env)
+                .restart_services(&config_path, &services)
                 .await;
 
             // Brief sleep to drain remaining events, then abort forwarding task
@@ -854,7 +854,7 @@ async fn handle_request(
             for (name, svc_config) in &config.services {
                 if services.as_ref().is_none_or(|s| s.contains(name)) {
                     let state = handle.get_service_state(name).await;
-                    let has_hc = svc_config.healthcheck.is_some();
+                    let has_hc = svc_config.has_healthcheck();
                     let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
                     let phase = status_to_phase(state.as_ref(), target);
                     progress.send(ProgressEvent {
@@ -876,7 +876,7 @@ async fn handle_request(
                                 if services.as_ref().is_none_or(|s| s.contains(&change.service)) =>
                             {
                                 let has_hc = config.services.get(&change.service)
-                                    .is_some_and(|s| s.healthcheck.is_some());
+                                    .is_some_and(|s| s.has_healthcheck());
                                 let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
                                 // Fetch full state for skip_reason on Skipped status
                                 let state = handle.get_service_state(&change.service).await;

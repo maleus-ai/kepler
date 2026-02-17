@@ -36,6 +36,8 @@ pub struct HookRunContext<'a> {
     pub service_groups: &'a [String],
     pub store_stdout: bool,
     pub store_stderr: bool,
+    /// Lua code from config's `lua:` block, for `${{ }}` evaluation in hook env
+    pub lua_code: Option<&'a str>,
 }
 
 /// Parameters for running a service hook
@@ -49,6 +51,8 @@ pub struct ServiceHookParams<'a> {
     pub global_log_config: Option<&'a LogConfig>,
     /// Dependency service states (keyed by dep service name)
     pub deps: HashMap<String, DepInfo>,
+    /// Lua code from config's `lua:` block, for `${{ }}` evaluation in hook env
+    pub lua_code: Option<&'a str>,
 }
 
 impl<'a> ServiceHookParams<'a> {
@@ -72,6 +76,7 @@ impl<'a> ServiceHookParams<'a> {
             service_log_config: service_config.logs.as_ref(),
             global_log_config,
             deps: HashMap::new(),
+            lua_code: None,
         }
     }
 }
@@ -209,7 +214,7 @@ pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>, service: &st
     };
 
     // Build hook-specific environment (merges with base env)
-    let hook_env = build_hook_env(hook, ctx.env, &effective_working_dir)?;
+    let hook_env = build_hook_env(hook, ctx.env, &effective_working_dir, ctx.lua_code)?;
 
     // Determine effective user
     // Priority: hook user > service user > daemon user
@@ -285,16 +290,23 @@ pub fn global_hook_service_name(hook_type: GlobalHookType) -> String {
 /// `if: "always()"` or `if: "failure()"` still run after a failure.
 /// The first error is propagated after all eligible hooks have run.
 ///
+/// Context for running a global hook.
+pub struct GlobalHookParams<'a> {
+    pub working_dir: &'a Path,
+    pub env: &'a HashMap<String, String>,
+    pub log_config: Option<&'a LogWriterConfig>,
+    pub global_log_config: Option<&'a LogConfig>,
+    pub progress: &'a Option<ProgressSender>,
+    pub handle: Option<&'a ConfigActorHandle>,
+    /// Lua code from config's `lua:` block, for `${{ }}` evaluation in hook env
+    pub lua_code: Option<&'a str>,
+}
+
 /// Note: Global hooks always run as the daemon user (no service user to inherit).
 pub async fn run_global_hook(
     hooks: &Option<GlobalHooks>,
     hook_type: GlobalHookType,
-    working_dir: &Path,
-    env: &HashMap<String, String>,
-    log_config: Option<&LogWriterConfig>,
-    global_log_config: Option<&LogConfig>,
-    progress: &Option<ProgressSender>,
-    handle: Option<&ConfigActorHandle>,
+    params: &GlobalHookParams<'_>,
 ) -> Result<()> {
     let hooks = match hooks {
         Some(h) => h,
@@ -318,11 +330,11 @@ pub async fn run_global_hook(
         }
 
         // Evaluate runtime `if` condition if present
-        if let Some(condition) = hook.condition() {
-            if let Some(h) = handle {
+        if let Some(condition) = hook.condition()
+            && let Some(h) = params.handle {
                 let initialized = h.is_config_initialized().await;
                 let eval_ctx = EvalContext {
-                    env: env.clone(),
+                    env: params.env.clone(),
                     initialized: Some(initialized),
                     hook_had_failure: Some(had_failure),
                     ..Default::default()
@@ -339,33 +351,33 @@ pub async fn run_global_hook(
                     }
                 }
             }
-        }
 
         info!("Running global {} hook", hook_type.as_str());
         let hook_name = hook_type.as_str().to_string();
-        emit_hook_event(progress, "global", ServicePhase::HookStarted { hook: hook_name.clone() }).await;
+        emit_hook_event(params.progress, "global", ServicePhase::HookStarted { hook: hook_name.clone() }).await;
 
         let service_name = global_hook_service_name(hook_type);
         // Resolve store settings from global config
-        let (store_stdout, store_stderr) = resolve_log_store(None, global_log_config);
+        let (store_stdout, store_stderr) = resolve_log_store(None, params.global_log_config);
         // Global hooks run as daemon user (no service user to inherit)
         let ctx = HookRunContext {
-            base_working_dir: working_dir,
-            env,
-            log_config,
+            base_working_dir: params.working_dir,
+            env: params.env,
+            log_config: params.log_config,
             service_name: &service_name,
             service_user: None,
             service_groups: &[],
             store_stdout,
             store_stderr,
+            lua_code: params.lua_code,
         };
         match run_hook(hook, &ctx, "global", hook_type.as_str()).await {
             Ok(()) => {
-                emit_hook_event(progress, "global", ServicePhase::HookCompleted { hook: hook_name }).await;
+                emit_hook_event(params.progress, "global", ServicePhase::HookCompleted { hook: hook_name }).await;
             }
             Err(e) => {
                 had_failure = true;
-                emit_hook_event(progress, "global", ServicePhase::HookFailed { hook: hook_name, message: e.to_string() }).await;
+                emit_hook_event(params.progress, "global", ServicePhase::HookFailed { hook: hook_name, message: e.to_string() }).await;
                 if first_error.is_none() {
                     first_error = Some(e);
                 }
@@ -424,8 +436,8 @@ pub async fn run_service_hook(
         }
 
         // Evaluate runtime `if` condition if present
-        if let Some(condition) = hook.condition() {
-            if let Some(h) = handle {
+        if let Some(condition) = hook.condition()
+            && let Some(h) = handle {
                 // Build runtime eval context from service state
                 let state = h.get_service_state(service_name).await;
                 let eval_ctx = EvalContext {
@@ -452,7 +464,6 @@ pub async fn run_service_hook(
                     }
                 }
             }
-        }
 
         info!(
             "Running {} hook for service {}",
@@ -474,6 +485,7 @@ pub async fn run_service_hook(
             service_groups: params.service_groups,
             store_stdout,
             store_stderr,
+            lua_code: params.lua_code,
         };
         match run_hook(hook, &ctx, service_name, hook_type.as_str()).await {
             Ok(()) => {

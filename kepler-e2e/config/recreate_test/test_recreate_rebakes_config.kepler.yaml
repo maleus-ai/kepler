@@ -7,5 +7,5 @@ services:
     command: ["sh", "-c", "echo VAR=$TEST_RECREATE_VAR && sleep 3600"]
     sys_env: inherit
     environment:
-      - TEST_RECREATE_VAR=${TEST_RECREATE_VAR}
+      - TEST_RECREATE_VAR=${{ env.TEST_RECREATE_VAR }}
     restart: no

@@ -75,13 +75,9 @@ pub enum HookCommand {
 /// - Array of hooks: `post_exit: [{ run: "echo a" }, { run: "echo b", if: "..." }]`
 /// - null/missing: empty list
 #[derive(Debug, Clone, serde::Serialize)]
+#[derive(Default)]
 pub struct HookList(pub Vec<HookCommand>);
 
-impl Default for HookList {
-    fn default() -> Self {
-        HookList(Vec::new())
-    }
-}
 
 impl<'de> Deserialize<'de> for HookList {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

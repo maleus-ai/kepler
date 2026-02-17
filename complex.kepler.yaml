@@ -163,7 +163,7 @@ services:
       retries: 4
       start_period: 5s
 
-  # 4. minio — Variable expansion with defaults, working_dir
+  # 4. minio — Inline expression expansion with defaults, working_dir
   minio:
     command:
       [
@@ -174,9 +174,9 @@ services:
     restart: always
     working_dir: /tmp
     environment:
-      - MINIO_ROOT_USER=${MINIO_USER:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_PASS:-minioadmin}
-      - MINIO_PORT=${MINIO_PORT:-9000}
+      - MINIO_ROOT_USER=${{ env.MINIO_USER or "minioadmin" }}
+      - MINIO_ROOT_PASSWORD=${{ env.MINIO_PASS or "minioadmin" }}
+      - MINIO_PORT=${{ env.MINIO_PORT or "9000" }}
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/minio_ready"]
       interval: 1500ms
@@ -184,7 +184,7 @@ services:
       retries: 3
       start_period: 2s
 
-  # 5. consul — Variable expansion with :+, hook with working_dir
+  # 5. consul — Inline expression expansion, hook with working_dir
   consul:
     command:
       [
@@ -195,7 +195,7 @@ services:
     restart: always
     environment:
       - CONSUL_BIND=0.0.0.0
-      - CONSUL_DC=${CONSUL_DC:+production}
+      - CONSUL_DC=${{ env.CONSUL_DC and "production" or "" }}
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/consul_ready"]
       interval: 2s
@@ -554,7 +554,7 @@ services:
             "echo 'payment-service healthcheck FAILED — alerting ops'",
           ]
 
-  # 21. notification-service — Lua depends_on
+  # 21. notification-service — static depends_on with Lua condition
   notification-service:
     command:
       [
@@ -563,11 +563,11 @@ services:
         "echo 'Notification service starting'; touch /tmp/notif_ready; while true; do sleep 5; done",
       ]
     restart: always
-    depends_on: !lua |
-      return {
-        {["event-bus"] = {condition = "service_healthy"}},
-        {["rabbitmq"] = {condition = "service_healthy"}}
-      }
+    depends_on:
+      - event-bus:
+          condition: service_healthy
+      - rabbitmq:
+          condition: service_healthy
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/notif_ready"]
       interval: 2s
@@ -954,7 +954,7 @@ services:
 
   # 41. uptime-checker — Lua global table usage, conditional startup
   uptime-checker:
-    if: "true"
+    if: true
     command:
       [
         "sh",
@@ -1110,7 +1110,7 @@ services:
       post_exit:
         run: echo "emergency-shutdown post_exit — incident report filed"
 
-  # 50. post-mortem — Depends on emergency-shutdown completing, env expansion, hook command format
+  # 50. post-mortem — Depends on emergency-shutdown completing, inline expression expansion, hook command format
   post-mortem:
     command:
       [
@@ -1124,8 +1124,8 @@ services:
           condition: service_completed_successfully
           timeout: 5m
     environment:
-      - REPORT_DIR=${REPORT_DIR:-/tmp/reports}
-      - INCIDENT_ID=${INCIDENT_ID:-unknown}
+      - REPORT_DIR=${{ env.REPORT_DIR or "/tmp/reports" }}
+      - INCIDENT_ID=${{ env.INCIDENT_ID or "unknown" }}
     hooks:
       post_exit:
         command: ["sh", "-c", "echo 'post-mortem post_exit — archiving report'"]
@@ -1137,7 +1137,7 @@ services:
 
   # 51. profiler — Conditional service, only starts when ENABLE_PROFILING is set
   profiler:
-    if: "ctx.env.ENABLE_PROFILING ~= nil"
+    if: ${{ ctx.env.ENABLE_PROFILING ~= nil }}
     command:
       [
         "sh",
