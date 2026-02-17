@@ -262,8 +262,9 @@ impl KeplerConfig {
 
         let mut config: KeplerConfig = if has_lua_tags {
             // Parse as raw YAML Value first to handle Lua tags
+            let de = serde_yaml::Deserializer::from_str(&contents);
             let mut value: serde_yaml::Value =
-                serde_yaml::from_str(&contents).map_err(|e| DaemonError::ConfigParse {
+                serde_path_to_error::deserialize(de).map_err(|e| DaemonError::ConfigParse {
                     path: path.to_path_buf(),
                     source: e,
                 })?;
@@ -271,14 +272,15 @@ impl KeplerConfig {
             // Process Lua scripts with sys_env context
             lua::process_lua_scripts(&mut value, config_dir, path, sys_env)?;
 
-            // Now deserialize the processed value
-            serde_yaml::from_value(value).map_err(|e| DaemonError::ConfigParse {
+            // Now deserialize the processed value with path tracking
+            serde_path_to_error::deserialize(value).map_err(|e| DaemonError::ConfigParse {
                 path: path.to_path_buf(),
                 source: e,
             })?
         } else {
-            // No Lua tags, parse directly
-            serde_yaml::from_str(&contents).map_err(|e| DaemonError::ConfigParse {
+            // No Lua tags, parse directly with path tracking
+            let de = serde_yaml::Deserializer::from_str(&contents);
+            serde_path_to_error::deserialize(de).map_err(|e| DaemonError::ConfigParse {
                 path: path.to_path_buf(),
                 source: e,
             })?
@@ -1199,6 +1201,166 @@ services:
         assert!(
             hooks.pre_cleanup.is_some(),
             "pre_cleanup hook should be parsed"
+        );
+    }
+
+    // ================================================================
+    // serde_path_to_error path tracking tests
+    // ================================================================
+
+    /// Helper: deserialize with path tracking (same as production code path)
+    fn deserialize_config(
+        yaml: &str,
+    ) -> std::result::Result<KeplerConfig, serde_path_to_error::Error<serde_yaml::Error>> {
+        let de = serde_yaml::Deserializer::from_str(yaml);
+        serde_path_to_error::deserialize(de)
+    }
+
+    #[test]
+    fn test_error_path_invalid_depends_on_format() {
+        // DependsOnFormat is #[serde(untagged)]: List | Map
+        // An integer is neither a list nor a map
+        let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    depends_on: 42
+"#;
+        let err = deserialize_config(yaml).unwrap_err();
+        let path = err.path().to_string();
+        assert_eq!(
+            path, "services.app.depends_on",
+            "path should point to the depends_on field"
+        );
+        assert!(
+            err.inner()
+                .to_string()
+                .contains("data did not match any variant of untagged enum"),
+            "should be an untagged enum error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_error_path_invalid_dependency_entry() {
+        // DependencyEntry is #[serde(untagged)]: Simple(String) | Extended(HashMap)
+        // An integer element in the list matches neither
+        let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    depends_on:
+      - 42
+"#;
+        let err = deserialize_config(yaml).unwrap_err();
+        let path = err.path().to_string();
+        assert!(
+            path.starts_with("services.app.depends_on"),
+            "path should point to the depends_on field, got: {path}"
+        );
+    }
+
+    #[test]
+    fn test_error_path_invalid_hook_command() {
+        // HookCommand is #[serde(untagged)]: Script { run, .. } | Command { command, .. }
+        // An object with neither run nor command field
+        let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    hooks:
+      pre_start:
+        bad_field: "test"
+"#;
+        let err = deserialize_config(yaml).unwrap_err();
+        let path = err.path().to_string();
+        assert!(
+            path.starts_with("services.app.hooks.pre_start"),
+            "path should point to the hook field, got: {path}"
+        );
+        assert!(
+            err.inner()
+                .to_string()
+                .contains("data did not match any variant of untagged enum"),
+            "should be an untagged enum error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_error_path_invalid_log_store_config() {
+        // LogStoreConfig is #[serde(untagged)]: Simple(bool) | Extended { stdout, stderr }
+        // A string is neither a bool nor an object
+        let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    logs:
+      store: "invalid"
+"#;
+        let err = deserialize_config(yaml).unwrap_err();
+        let path = err.path().to_string();
+        assert_eq!(
+            path, "services.app.logs.store",
+            "path should point to the store field"
+        );
+        assert!(
+            err.inner()
+                .to_string()
+                .contains("data did not match any variant of untagged enum"),
+            "should be an untagged enum error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_error_path_invalid_restart_config() {
+        // RestartConfig is #[serde(untagged)]: Simple(RestartPolicy) | Extended { policy, watch }
+        // A number is neither a valid policy string nor an object
+        let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    restart: 42
+"#;
+        let err = deserialize_config(yaml).unwrap_err();
+        let path = err.path().to_string();
+        assert_eq!(
+            path, "services.app.restart",
+            "path should point to the restart field"
+        );
+        assert!(
+            err.inner()
+                .to_string()
+                .contains("data did not match any variant of untagged enum"),
+            "should be an untagged enum error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_error_path_invalid_exit_code_entry() {
+        // ExitCodeEntry is #[serde(untagged)]: Range(String) | Single(i32)
+        // A boolean is neither a string nor an integer.
+        // This is nested inside DependsOnFormat (also untagged), so the outer
+        // enum error surfaces at the depends_on level.
+        let yaml = r#"
+services:
+  worker:
+    command: ["./worker"]
+  handler:
+    command: ["./handler"]
+    depends_on:
+      worker:
+        condition: service_failed
+        exit_code:
+          - true
+"#;
+        let err = deserialize_config(yaml).unwrap_err();
+        let path = err.path().to_string();
+        assert!(
+            path.starts_with("services.handler.depends_on"),
+            "path should include depends_on, got: {path}"
         );
     }
 }

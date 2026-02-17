@@ -1,15 +1,22 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// Format a YAML error for user-friendly display
-fn format_yaml_error(e: &serde_yaml::Error) -> String {
-    let msg = e.to_string();
+/// Format a YAML error for user-friendly display, including the field path
+fn format_yaml_error(e: &serde_path_to_error::Error<serde_yaml::Error>) -> String {
+    let path = e.path().to_string();
+    let inner = e.inner();
+    let msg = inner.to_string();
 
-    // Try to extract location info
-    if let Some(loc) = e.location() {
+    let located = if let Some(loc) = inner.location() {
         format!("Line {}, Column {}: {}", loc.line(), loc.column(), msg)
     } else {
         msg
+    };
+
+    if path.is_empty() {
+        located
+    } else {
+        format!("{}: {}", path, located)
     }
 }
 
@@ -22,7 +29,7 @@ pub enum DaemonError {
     ConfigParse {
         path: PathBuf,
         #[source]
-        source: serde_yaml::Error,
+        source: serde_path_to_error::Error<serde_yaml::Error>,
     },
 
     #[error("Config file not found: {0}")]
