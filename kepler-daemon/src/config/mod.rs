@@ -21,7 +21,9 @@ pub use deps::{
 };
 pub use duration::{format_duration, parse_duration};
 pub use expand::{
-    evaluate_environment_sequential, evaluate_expression_string, evaluate_value_tree, resolve_sys_env,
+    evaluate_environment_sequential, evaluate_environment_sequential_with_env,
+    evaluate_expression_string, evaluate_expression_string_with_env,
+    evaluate_value_tree, evaluate_value_tree_with_env, resolve_sys_env,
 };
 pub use health::HealthCheck;
 pub use hooks::{GlobalHooks, HookCommand, HookCommon, HookList, ServiceHooks};
@@ -143,6 +145,33 @@ impl<T: Clone + DeserializeOwned> ConfigValue<T> {
             }
         }
     }
+
+    /// Resolve the value using a shared cached Lua env table.
+    ///
+    /// Like `resolve()` but accepts `&mut Option<mlua::Table>` to share a single
+    /// Lua env table across multiple calls, avoiding repeated rebuilds.
+    pub fn resolve_with_env(
+        &self,
+        evaluator: &LuaEvaluator,
+        ctx: &EvalContext,
+        config_path: &Path,
+        field_path: &str,
+        cached_env: &mut Option<mlua::Table>,
+    ) -> Result<T> {
+        match self {
+            ConfigValue::Static(v) => Ok(v.clone()),
+            ConfigValue::Dynamic(value) => {
+                let start = std::time::Instant::now();
+                let mut value = value.clone();
+                evaluate_value_tree_with_env(&mut value, evaluator, ctx, config_path, field_path, cached_env)?;
+                let result = serde_yaml::from_value(value).map_err(|e| {
+                    DaemonError::Config(format!("Failed to resolve '{}': {}", field_path, e))
+                });
+                tracing::debug!("[timeit] {} resolved in {:?}", field_path, start.elapsed());
+                result
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -249,6 +278,52 @@ impl RawServiceConfig {
                     evaluate_value_tree(&mut value, evaluator, ctx, config_path, &format!("{}.environment", name))?;
                 }
                 evaluate_environment_sequential(&mut value, evaluator, ctx, config_path, name)?;
+                serde_yaml::from_value(value).map_err(|e| {
+                    DaemonError::Config(format!("service '{}': {}", name, e))
+                })
+            }
+        }
+    }
+
+    /// Resolve environment entries using a `PreparedEnv` for env table reuse.
+    ///
+    /// Static entries are added to both `ctx.env` and the live Lua env table.
+    /// Dynamic entries with `${{ }}` are evaluated using the pre-built env table.
+    /// The `PreparedEnv`'s env sub-table is updated in-place as entries are resolved.
+    pub fn resolve_environment_with_env(
+        &self,
+        evaluator: &LuaEvaluator,
+        ctx: &mut EvalContext,
+        prepared: &crate::lua_eval::PreparedEnv,
+        config_path: &Path,
+        name: &str,
+    ) -> Result<Vec<String>> {
+        match &self.environment {
+            ConfigValue::Static(entries) => {
+                for entry in entries {
+                    if let Some((k, v)) = entry.split_once('=') {
+                        ctx.env.insert(k.to_string(), v.to_string());
+                        prepared.set_env(k, v).map_err(|e| DaemonError::LuaError {
+                            path: config_path.to_path_buf(),
+                            message: format!("Error updating Lua env table: {}", e),
+                        })?;
+                    }
+                }
+                Ok(entries.clone())
+            }
+            ConfigValue::Dynamic(value) => {
+                let mut value = value.clone();
+                // If !lua tag, evaluate first to produce a sequence using cached env
+                if matches!(&value, serde_yaml::Value::Tagged(t) if t.tag == "!lua") {
+                    let mut cached = Some(prepared.table.clone());
+                    evaluate_value_tree_with_env(
+                        &mut value, evaluator, ctx, config_path,
+                        &format!("{}.environment", name), &mut cached,
+                    )?;
+                }
+                evaluate_environment_sequential_with_env(
+                    &mut value, evaluator, ctx, prepared, config_path, name,
+                )?;
                 serde_yaml::from_value(value).map_err(|e| {
                     DaemonError::Config(format!("service '{}': {}", name, e))
                 })
@@ -783,8 +858,10 @@ impl KeplerConfig {
     ///
     /// Evaluation order:
     /// 0. Resolve `env_file` → load file → populate ctx.env_file + ctx.env
-    /// 1. Resolve `environment` sequentially (builds up ctx.env)
-    /// 2. Resolve remaining fields
+    /// 1. Build PreparedEnv (env sub-table unfrozen)
+    /// 2. Resolve `environment` sequentially using PreparedEnv (updates Lua env in-place)
+    /// 3. Freeze env sub-table
+    /// 4. Resolve remaining fields using shared cached env table (no rebuilds)
     pub fn resolve_service(
         &self,
         name: &str,
@@ -803,41 +880,54 @@ impl KeplerConfig {
         // Ensure service_name is set in context
         ctx.service_name = Some(name.to_string());
 
-        // Step 0: Resolve env_file and load its variables
+        // Step 0: Resolve env_file and load its variables (one-off, builds own env if dynamic)
         let env_file = raw.resolve_env_file(evaluator, ctx, config_path, config_dir, name)?;
 
-        // Step 1: Resolve environment sequentially (builds ctx.env)
-        let environment = raw.resolve_environment(evaluator, ctx, config_path, name)?;
+        // Step 1: Build PreparedEnv from current ctx (env sub-table is unfrozen)
+        let prepared = evaluator.prepare_env_mutable(ctx).map_err(|e| {
+            DaemonError::LuaError {
+                path: config_path.to_path_buf(),
+                message: format!("Error building Lua environment: {}", e),
+            }
+        })?;
 
-        // Step 2: Resolve remaining fields
+        // Step 2: Resolve environment sequentially using PreparedEnv
+        let environment = raw.resolve_environment_with_env(evaluator, ctx, &prepared, config_path, name)?;
+
+        // Step 3: Freeze env sub-table (env resolution is complete)
+        prepared.freeze_env();
+
+        // Step 4: Resolve remaining fields using the shared env table
+        let mut shared_env: Option<mlua::Table> = Some(prepared.table);
+
         let command = if raw.has_run() {
-            let run = raw.run.resolve(evaluator, ctx, config_path, &format!("{}.run", name))?;
+            let run = raw.run.resolve_with_env(evaluator, ctx, config_path, &format!("{}.run", name), &mut shared_env)?;
             match run {
                 Some(script) => vec!["sh".to_string(), "-c".to_string(), script],
                 None => Vec::new(),
             }
         } else {
-            raw.command.resolve(evaluator, ctx, config_path, &format!("{}.command", name))?
+            raw.command.resolve_with_env(evaluator, ctx, config_path, &format!("{}.command", name), &mut shared_env)?
         };
-        let working_dir = raw.working_dir.resolve(evaluator, ctx, config_path, &format!("{}.working_dir", name))?;
-        let condition = raw.condition.resolve(evaluator, ctx, config_path, &format!("{}.if", name))?;
-        let user = raw.user.resolve(evaluator, ctx, config_path, &format!("{}.user", name))?;
+        let working_dir = raw.working_dir.resolve_with_env(evaluator, ctx, config_path, &format!("{}.working_dir", name), &mut shared_env)?;
+        let condition = raw.condition.resolve_with_env(evaluator, ctx, config_path, &format!("{}.if", name), &mut shared_env)?;
+        let user = raw.user.resolve_with_env(evaluator, ctx, config_path, &format!("{}.user", name), &mut shared_env)?;
         // Apply default_user fallback for dynamic user fields that resolved to None
         let user = user.or_else(|| default_user.map(String::from));
-        let groups = raw.groups.resolve(evaluator, ctx, config_path, &format!("{}.groups", name))?;
-        let healthcheck = raw.healthcheck.resolve(evaluator, ctx, config_path, &format!("{}.healthcheck", name))?;
-        let limits = raw.limits.resolve(evaluator, ctx, config_path, &format!("{}.limits", name))?;
-        let restart = raw.restart.resolve(evaluator, ctx, config_path, &format!("{}.restart", name))?;
-        let logs = raw.logs.resolve(evaluator, ctx, config_path, &format!("{}.logs", name))?;
+        let groups = raw.groups.resolve_with_env(evaluator, ctx, config_path, &format!("{}.groups", name), &mut shared_env)?;
+        let healthcheck = raw.healthcheck.resolve_with_env(evaluator, ctx, config_path, &format!("{}.healthcheck", name), &mut shared_env)?;
+        let limits = raw.limits.resolve_with_env(evaluator, ctx, config_path, &format!("{}.limits", name), &mut shared_env)?;
+        let restart = raw.restart.resolve_with_env(evaluator, ctx, config_path, &format!("{}.restart", name), &mut shared_env)?;
+        let logs = raw.logs.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs", name), &mut shared_env)?;
         // Dynamic hooks (`!lua` / `${{ }}`) are deferred to execution time in
         // `run_service_hook` where `hook_name` context is available.
         let hooks = if raw.hooks.is_dynamic() {
             None
         } else {
-            raw.hooks.resolve(evaluator, ctx, config_path, &format!("{}.hooks", name))?
+            raw.hooks.resolve_with_env(evaluator, ctx, config_path, &format!("{}.hooks", name), &mut shared_env)?
         };
 
-        let output = raw.output.resolve(evaluator, ctx, config_path, &format!("{}.output", name))?;
+        let output = raw.output.resolve_with_env(evaluator, ctx, config_path, &format!("{}.output", name), &mut shared_env)?;
         // outputs are resolved later after hooks/process complete (they reference ctx.hooks.*)
         // For now, store None; the orchestrator will resolve them when outputs are available.
         let outputs: Option<HashMap<String, String>> = None;

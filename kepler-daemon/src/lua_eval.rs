@@ -6,6 +6,45 @@
 use mlua::{FromLua, Lua, Result as LuaResult, Table, Value};
 use std::collections::HashMap;
 
+/// Pre-built Lua environment table with an updatable `env` sub-table.
+///
+/// Created by `LuaEvaluator::prepare_env_mutable()`. The env sub-table is
+/// always frozen from Lua's perspective (Lua code cannot mutate it), but
+/// `set_env()` can add entries by temporarily toggling readonly from Rust.
+/// Call `freeze_env()` once env resolution is complete to permanently lock
+/// the table — after that, `set_env()` will error.
+pub struct PreparedEnv {
+    /// The full env table to set as Lua chunk environment.
+    pub table: Table,
+    /// Handle to the env sub-table (always readonly from Lua's perspective).
+    env_table: Table,
+    /// Once true, `set_env()` will error.
+    permanently_frozen: std::cell::Cell<bool>,
+}
+
+impl PreparedEnv {
+    /// Add an env var to the live Lua env table.
+    ///
+    /// Temporarily unfreezes the table, writes the entry, and re-freezes.
+    /// Errors if `freeze_env()` has been called.
+    pub fn set_env(&self, key: &str, value: &str) -> mlua::Result<()> {
+        if self.permanently_frozen.get() {
+            return Err(mlua::Error::RuntimeError(
+                "env table is permanently frozen".to_string(),
+            ));
+        }
+        self.env_table.set_readonly(false);
+        let result = self.env_table.raw_set(key, value);
+        self.env_table.set_readonly(true);
+        result
+    }
+
+    /// Permanently freeze the env sub-table. After this, `set_env()` will error.
+    pub fn freeze_env(&self) {
+        self.permanently_frozen.set(true);
+    }
+}
+
 /// Information about a dependency service, exposed to Lua conditions.
 #[derive(Debug, Clone, Default)]
 pub struct DepInfo {
@@ -144,6 +183,113 @@ impl LuaEvaluator {
     /// for each expression within the same context.
     pub fn prepare_env(&self, ctx: &EvalContext) -> LuaResult<Table> {
         self.build_env_table(ctx)
+    }
+
+    /// Build a mutable environment table for sequential env resolution.
+    ///
+    /// Same as `prepare_env` but leaves `ctx.env` unfrozen so new entries can
+    /// be added via `PreparedEnv::set_env()`. The `env` shortcut alias points
+    /// to the same unfrozen table. Call `PreparedEnv::freeze_env()` after env
+    /// resolution completes, then reuse `PreparedEnv::table` for all remaining
+    /// field resolutions.
+    pub fn prepare_env_mutable(&self, ctx: &EvalContext) -> LuaResult<PreparedEnv> {
+        let env_table = self.lua.create_table()?;
+
+        // Create the `ctx` table — same as build_ctx_table but env sub-table is unfrozen
+        let ctx_table = self.lua.create_table()?;
+
+        // Add ctx.sys_env (read-only)
+        let sys_env = self.create_frozen_env(&ctx.sys_env)?;
+        ctx_table.raw_set("sys_env", sys_env)?;
+
+        // Add ctx.env_file (read-only)
+        let env_file = self.create_frozen_env(&ctx.env_file)?;
+        ctx_table.raw_set("env_file", env_file)?;
+
+        // Add ctx.env (frozen from Lua's perspective; set_env toggles readonly from Rust)
+        let env = self.create_frozen_env(&ctx.env)?;
+        ctx_table.raw_set("env", env.clone())?;
+
+        // Add scalar ctx fields
+        if let Some(ref service_name) = ctx.service_name {
+            ctx_table.raw_set("service_name", service_name.as_str())?;
+        }
+        if let Some(ref hook_name) = ctx.hook_name {
+            ctx_table.raw_set("hook_name", hook_name.as_str())?;
+        }
+        if let Some(initialized) = ctx.initialized {
+            ctx_table.raw_set("initialized", initialized)?;
+        }
+        if let Some(restart_count) = ctx.restart_count {
+            ctx_table.raw_set("restart_count", restart_count)?;
+        }
+        if let Some(exit_code) = ctx.exit_code {
+            ctx_table.raw_set("exit_code", exit_code)?;
+        }
+        if let Some(ref status) = ctx.status {
+            ctx_table.raw_set("status", status.as_str())?;
+        }
+
+        // Add ctx.hooks (read-only)
+        if !ctx.hooks.is_empty() {
+            let hooks_table = self.lua.create_table()?;
+            for (hook_name, steps) in &ctx.hooks {
+                let hook_table = self.lua.create_table()?;
+                let outputs_table = self.lua.create_table()?;
+                for (step_name, outputs) in steps {
+                    let step_table = self.create_frozen_env(outputs)?;
+                    outputs_table.raw_set(step_name.as_str(), step_table)?;
+                }
+                outputs_table.set_readonly(true);
+                hook_table.raw_set("outputs", outputs_table)?;
+                hook_table.set_readonly(true);
+                hooks_table.raw_set(hook_name.as_str(), hook_table)?;
+            }
+            hooks_table.set_readonly(true);
+            ctx_table.raw_set("hooks", hooks_table)?;
+        }
+
+        // Freeze ctx table (shallow — nested env table stays unfrozen)
+        ctx_table.set_readonly(true);
+
+        env_table.set("ctx", ctx_table.clone())?;
+
+        // Add `env` shortcut (alias for ctx.env — same unfrozen table)
+        env_table.set("env", env.clone())?;
+
+        // Add `hooks` shortcut
+        if let Ok(hooks_shortcut) = ctx_table.get::<Table>("hooks") {
+            env_table.set("hooks", hooks_shortcut)?;
+        }
+
+        // Add `deps` table (frozen)
+        let deps_table = self.build_deps_table(ctx)?;
+        env_table.set("deps", deps_table)?;
+
+        // Add `global` (shared mutable table)
+        let global: Table = self.lua.globals().get("global")?;
+        env_table.set("global", global)?;
+
+        // Set metatable with __index fallback to globals
+        let globals = self.lua.globals();
+        let meta = self.lua.create_table()?;
+        meta.set("__index", globals)?;
+        env_table.set_metatable(Some(meta));
+
+        Ok(PreparedEnv {
+            table: env_table,
+            env_table: env,
+            permanently_frozen: std::cell::Cell::new(false),
+        })
+    }
+
+    /// Evaluate a `!lua` block reusing a pre-built environment table.
+    ///
+    /// Like `eval()` but avoids rebuilding the env table.
+    pub fn eval_with_env<T: FromLua>(&self, code: &str, env_table: &Table, chunk_name: &str) -> LuaResult<T> {
+        let chunk = self.lua.load(code);
+        let func = chunk.set_name(chunk_name).set_environment(env_table.clone()).into_function()?;
+        func.call(())
     }
 
     /// Build the custom environment table for a `!lua` block.
@@ -411,6 +557,7 @@ impl LuaEvaluator {
         table.set_readonly(true);
         Ok(table)
     }
+
 }
 
 /// Convert a Lua table (array or map) to a Vec<String> for environment variables.

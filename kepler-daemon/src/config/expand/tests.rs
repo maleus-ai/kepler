@@ -352,3 +352,89 @@ fn test_is_standalone_expression() {
     assert!(!is_standalone_expression("${{ a }} ${{ b }}"));
     assert!(!is_standalone_expression("no expression"));
 }
+
+// --- Cached env tests ---
+
+#[test]
+fn test_evaluate_expression_string_with_env() {
+    let (eval, ctx) = make_evaluator_and_ctx();
+    let path = test_path();
+    let env_table = eval.prepare_env(&ctx).unwrap();
+
+    assert_eq!(
+        evaluate_expression_string_with_env("${{ env.HOME }}", &eval, &env_table, &path, "test").unwrap(),
+        "/home/user"
+    );
+    assert_eq!(
+        evaluate_expression_string_with_env(
+            "${{ env.HOME }}/app:${{ env.APP_PORT }}",
+            &eval, &env_table, &path, "test"
+        ).unwrap(),
+        "/home/user/app:8080"
+    );
+}
+
+#[test]
+fn test_evaluate_value_tree_with_env_shared_cache() {
+    let (eval, ctx) = make_evaluator_and_ctx();
+    let path = test_path();
+    let mut cached_env: Option<mlua::Table> = None;
+
+    // First call populates cache
+    let mut value1 = serde_yaml::Value::String("${{ env.HOME }}/app".to_string());
+    evaluate_value_tree_with_env(&mut value1, &eval, &ctx, &path, "test1", &mut cached_env).unwrap();
+    assert_eq!(value1.as_str().unwrap(), "/home/user/app");
+    assert!(cached_env.is_some(), "Cache should be populated after first call");
+
+    // Second call reuses cache (no rebuild)
+    let mut value2 = serde_yaml::Value::String("${{ env.DB_HOST }}:${{ env.APP_PORT }}".to_string());
+    evaluate_value_tree_with_env(&mut value2, &eval, &ctx, &path, "test2", &mut cached_env).unwrap();
+    assert_eq!(value2.as_str().unwrap(), "localhost:8080");
+}
+
+#[test]
+fn test_evaluate_value_tree_with_env_lua_tag_uses_cache() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut env = HashMap::new();
+    env.insert("PORT".to_string(), "8080".to_string());
+    let ctx = EvalContext { env, ..Default::default() };
+    let path = test_path();
+    let mut cached_env: Option<mlua::Table> = None;
+
+    let yaml = r#"
+command: !lua 'return {"echo", ctx.env.PORT}'
+"#;
+    let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+    evaluate_value_tree_with_env(&mut value, &eval, &ctx, &path, "test", &mut cached_env).unwrap();
+
+    let cmd = value["command"].as_sequence().unwrap();
+    assert_eq!(cmd[0].as_str().unwrap(), "echo");
+    assert_eq!(cmd[1].as_str().unwrap(), "8080");
+    assert!(cached_env.is_some(), "Cache should be populated by !lua tag");
+}
+
+#[test]
+fn test_sequential_env_with_prepared_env() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut env = HashMap::new();
+    env.insert("BASE".to_string(), "hello".to_string());
+    let mut ctx = EvalContext { env, ..Default::default() };
+    let path = test_path();
+
+    let prepared = eval.prepare_env_mutable(&ctx).unwrap();
+
+    let yaml = r#"
+- FIRST=${{ env.BASE }}_world
+- SECOND=${{ env.FIRST }}_again
+"#;
+    let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+    evaluate_environment_sequential_with_env(&mut value, &eval, &mut ctx, &prepared, &path, "test").unwrap();
+
+    let seq = value.as_sequence().unwrap();
+    assert_eq!(seq[0].as_str().unwrap(), "FIRST=hello_world");
+    assert_eq!(seq[1].as_str().unwrap(), "SECOND=hello_world_again");
+
+    // Verify ctx.env was updated
+    assert_eq!(ctx.env.get("FIRST").unwrap(), "hello_world");
+    assert_eq!(ctx.env.get("SECOND").unwrap(), "hello_world_again");
+}
