@@ -36,7 +36,7 @@ pub struct HookRunContext<'a> {
     pub service_groups: &'a [String],
     pub store_stdout: bool,
     pub store_stderr: bool,
-    /// Lua code from config's `lua:` block, for `${{ }}` evaluation in hook env
+    /// Lua code from config's `lua:` block, for `${{ }}$` evaluation in hook env
     pub lua_code: Option<&'a str>,
 }
 
@@ -51,7 +51,7 @@ pub struct ServiceHookParams<'a> {
     pub global_log_config: Option<&'a LogConfig>,
     /// Dependency service states (keyed by dep service name)
     pub deps: HashMap<String, DepInfo>,
-    /// Lua code from config's `lua:` block, for `${{ }}` evaluation in hook env
+    /// Lua code from config's `lua:` block, for `${{ }}$` evaluation in hook env
     pub lua_code: Option<&'a str>,
     /// All hook outputs from prior phases: `hook_name -> step_name -> { key -> value }`
     pub all_hook_outputs: HashMap<String, HashMap<String, HashMap<String, String>>>,
@@ -321,7 +321,7 @@ pub struct GlobalHookParams<'a> {
     pub global_log_config: Option<&'a LogConfig>,
     pub progress: &'a Option<ProgressSender>,
     pub handle: Option<&'a ConfigActorHandle>,
-    /// Lua code from config's `lua:` block, for `${{ }}` evaluation in hook env
+    /// Lua code from config's `lua:` block, for `${{ }}$` evaluation in hook env
     pub lua_code: Option<&'a str>,
 }
 

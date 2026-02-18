@@ -398,14 +398,14 @@ depends_on:
 
 ### Inline Lua Expression Syntax
 
-Kepler uses `${{ expr }}` inline Lua expressions for dynamic values in configuration:
+Kepler uses `${{ expr }}$` inline Lua expressions for dynamic values in configuration:
 
 | Syntax | Description |
 |--------|-------------|
-| `${{ env.VAR }}` | Environment variable reference |
-| `${{ env.VAR or "default" }}` | Default value if unset |
-| `${{ deps.svc.status }}` | Dependency status |
-| `${{ ctx.service_name }}` | Current service name |
+| `${{ env.VAR }}$` | Environment variable reference |
+| `${{ env.VAR or "default" }}$` | Default value if unset |
+| `${{ deps.svc.status }}$` | Dependency status |
+| `${{ ctx.service_name }}$` | Current service name |
 
 See [Inline Expressions](variable-expansion.md) for the user-facing reference.
 
@@ -439,7 +439,7 @@ See [Environment Variables](environment-variables.md) for the full reference.
 
 ### What is NOT Evaluated
 
-`${{ }}` expressions and `!lua` tags are intentionally **not** evaluated for service names in `depends_on` — service names must be literal strings for dependency graph construction. However, dependency config fields (`condition`, `timeout`, `restart`, `exit_code`) **do** support `!lua` and `${{ }}`, evaluated eagerly at config load time.
+`${{ }}$` expressions and `!lua` tags are intentionally **not** evaluated for service names in `depends_on` — service names must be literal strings for dependency graph construction. However, dependency config fields (`condition`, `timeout`, `restart`, `exit_code`) **do** support `!lua` and `${{ }}$`, evaluated eagerly at config load time.
 
 ### Environment Priority (Runtime)
 
@@ -674,7 +674,7 @@ sequenceDiagram
 | Secure file writing | `kepler-daemon/src/persistence.rs` | File permissions |
 | Socket security | `kepler-protocol/src/server.rs` | Group-based access control |
 | Config loading | `kepler-daemon/src/config_actor.rs` | Lifecycle management, event channels |
-| Env expansion | `kepler-daemon/src/config/expand.rs` | `${{ }}` inline Lua expression evaluation |
+| Env expansion | `kepler-daemon/src/config/expand.rs` | `${{ }}$` inline Lua expression evaluation |
 | Env building | `kepler-daemon/src/env.rs` | Priority merging |
 | Lua evaluation | `kepler-daemon/src/lua_eval.rs` | Sandbox implementation |
 | Process spawning | `kepler-daemon/src/process.rs` | Security controls |

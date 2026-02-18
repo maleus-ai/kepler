@@ -26,7 +26,7 @@ pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 pub static UMASK_LOCK: Mutex<()> = Mutex::new(());
 
 /// Resolve hooks for execution. Static hooks are returned directly from
-/// `resolved_config.hooks`. Dynamic hooks (`!lua` / `${{ }}`) are resolved
+/// `resolved_config.hooks`. Dynamic hooks (`!lua` / `${{ }}$`) are resolved
 /// at execution time with `hook_name` in the evaluation context.
 async fn resolve_hooks_for_execution(
     handle: &ConfigActorHandle,
@@ -230,7 +230,7 @@ impl TestDaemonHarness {
             .await
             .ok_or("Service not found")?;
 
-        // Build evaluation context and resolve service (evaluate ${{ }} + !lua + deserialize)
+        // Build evaluation context and resolve service (evaluate ${{ }}$ + !lua + deserialize)
         let sys_env = self.handle.get_sys_env().await;
         let config = self.handle.get_config().await
             .ok_or("Config not found")?;
@@ -254,7 +254,7 @@ impl TestDaemonHarness {
         let lua_evaluator = config.create_lua_evaluator()
             .map_err(|e| format!("Failed to create Lua evaluator: {}", e))?;
 
-        // Resolve service: evaluate ${{ }} + !lua + deserialize to ServiceConfig
+        // Resolve service: evaluate ${{ }}$ + !lua + deserialize to ServiceConfig
         let resolved = config.resolve_service(
             service_name,
             &mut eval_ctx,

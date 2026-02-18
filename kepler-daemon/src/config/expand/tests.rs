@@ -20,20 +20,114 @@ fn test_path() -> PathBuf {
     PathBuf::from("/test/config.yaml")
 }
 
+// ============================================================================
+// Tokenizer tests
+// ============================================================================
+
+#[test]
+fn test_parse_tokens_no_expressions() {
+    let tokens = parse_expr_tokens("hello world");
+    assert_eq!(tokens, vec![ExprToken::String("hello world")]);
+}
+
+#[test]
+fn test_parse_tokens_single_expression() {
+    let tokens = parse_expr_tokens("${{ env.HOME }}$");
+    assert_eq!(tokens, vec![ExprToken::Expression("env.HOME")]);
+}
+
+#[test]
+fn test_parse_tokens_embedded() {
+    let tokens = parse_expr_tokens("prefix_${{ env.HOME }}$_suffix");
+    assert_eq!(
+        tokens,
+        vec![
+            ExprToken::String("prefix_"),
+            ExprToken::Expression("env.HOME"),
+            ExprToken::String("_suffix"),
+        ]
+    );
+}
+
+#[test]
+fn test_parse_tokens_multiple_expressions() {
+    let tokens = parse_expr_tokens("${{ a }}$/app:${{ b }}$");
+    assert_eq!(
+        tokens,
+        vec![
+            ExprToken::Expression("a"),
+            ExprToken::String("/app:"),
+            ExprToken::Expression("b"),
+        ]
+    );
+}
+
+#[test]
+fn test_parse_tokens_nested_braces() {
+    let tokens = parse_expr_tokens("${{ {1, 2, 3} }}$");
+    assert_eq!(tokens, vec![ExprToken::Expression("{1, 2, 3}")]);
+}
+
+#[test]
+fn test_parse_tokens_deeply_nested_braces() {
+    let tokens = parse_expr_tokens("${{ {a={foo={bar=baz}}} }}$");
+    assert_eq!(tokens, vec![ExprToken::Expression("{a={foo={bar=baz}}}")]);
+}
+
+#[test]
+fn test_parse_tokens_unclosed() {
+    let tokens = parse_expr_tokens("${{env.HOME");
+    assert_eq!(
+        tokens,
+        vec![
+            ExprToken::String("${{"),
+            ExprToken::String("env.HOME"),
+        ]
+    );
+}
+
+#[test]
+fn test_parse_tokens_standalone_with_whitespace() {
+    let tokens = parse_expr_tokens("  ${{ 42 }}$  ");
+    assert!(is_standalone_tokens(&tokens));
+}
+
+#[test]
+fn test_parse_tokens_not_standalone_with_text() {
+    let tokens = parse_expr_tokens("prefix ${{ 42 }}$");
+    assert!(!is_standalone_tokens(&tokens));
+}
+
+#[test]
+fn test_parse_tokens_not_standalone_multiple() {
+    let tokens = parse_expr_tokens("${{ a }}$ ${{ b }}$");
+    assert!(!is_standalone_tokens(&tokens));
+}
+
+#[test]
+fn test_parse_tokens_empty_string() {
+    let tokens = parse_expr_tokens("");
+    assert!(tokens.is_empty());
+}
+
+// ============================================================================
+// Expression evaluation tests
+// ============================================================================
+
 #[test]
 fn test_basic_lookup() {
     let (eval, ctx) = make_evaluator_and_ctx();
     let path = test_path();
     assert_eq!(
-        evaluate_expression_string("${{ env.HOME }}", &eval, &ctx, &path, "test").unwrap(),
+        evaluate_expression_string("${{ env.HOME }}$", &eval, &ctx, &path, "test").unwrap(),
         "/home/user"
     );
     assert_eq!(
-        evaluate_expression_string("${{ env.DB_HOST }}", &eval, &ctx, &path, "test").unwrap(),
+        evaluate_expression_string("${{ env.DB_HOST }}$", &eval, &ctx, &path, "test").unwrap(),
         "localhost"
     );
     assert_eq!(
-        evaluate_expression_string("${{ env.APP_PORT }}", &eval, &ctx, &path, "test").unwrap(),
+        evaluate_expression_string("${{ env.APP_PORT }}$", &eval, &ctx, &path, "test").unwrap(),
         "8080"
     );
 }
@@ -43,13 +137,13 @@ fn test_missing_var_nil_to_empty() {
     let (eval, ctx) = make_evaluator_and_ctx();
     let path = test_path();
     assert_eq!(
-        evaluate_expression_string("${{ env.NONEXISTENT }}", &eval, &ctx, &path, "test")
+        evaluate_expression_string("${{ env.NONEXISTENT }}$", &eval, &ctx, &path, "test")
             .unwrap(),
         ""
     );
     assert_eq!(
         evaluate_expression_string(
-            "prefix_${{ env.NONEXISTENT }}_suffix",
+            "prefix_${{ env.NONEXISTENT }}$_suffix",
             &eval,
             &ctx,
             &path,
@@ -67,7 +161,7 @@ fn test_or_default_syntax() {
     // Set variable — should use set value
     assert_eq!(
         evaluate_expression_string(
-            "${{ env.HOME or '/default' }}",
+            "${{ env.HOME or '/default' }}$",
             &eval,
             &ctx,
             &path,
@@ -79,7 +173,7 @@ fn test_or_default_syntax() {
     // Unset variable — should use default
     assert_eq!(
         evaluate_expression_string(
-            "${{ env.MISSING or 'fallback' }}",
+            "${{ env.MISSING or 'fallback' }}$",
             &eval,
             &ctx,
             &path,
@@ -111,23 +205,23 @@ fn test_deps_status() {
     let path = test_path();
 
     assert_eq!(
-        evaluate_expression_string("${{ deps.db.status }}", &eval, &ctx, &path, "test")
+        evaluate_expression_string("${{ deps.db.status }}$", &eval, &ctx, &path, "test")
             .unwrap(),
         "healthy"
     );
     assert_eq!(
-        evaluate_expression_string("${{ deps.db.exit_code }}", &eval, &ctx, &path, "test")
+        evaluate_expression_string("${{ deps.db.exit_code }}$", &eval, &ctx, &path, "test")
             .unwrap(),
         ""
     );
     assert_eq!(
-        evaluate_expression_string("${{ deps.db.initialized }}", &eval, &ctx, &path, "test")
+        evaluate_expression_string("${{ deps.db.initialized }}$", &eval, &ctx, &path, "test")
             .unwrap(),
         "true"
     );
     assert_eq!(
         evaluate_expression_string(
-            "${{ deps.db.restart_count }}",
+            "${{ deps.db.restart_count }}$",
             &eval,
             &ctx,
             &path,
@@ -159,7 +253,7 @@ fn test_deps_env_var() {
 
     assert_eq!(
         evaluate_expression_string(
-            "${{ deps.setup.env.MY_VAR }}",
+            "${{ deps.setup.env.MY_VAR }}$",
             &eval,
             &ctx,
             &path,
@@ -170,7 +264,7 @@ fn test_deps_env_var() {
     );
     assert_eq!(
         evaluate_expression_string(
-            "${{ deps.setup.env.MISSING }}",
+            "${{ deps.setup.env.MISSING }}$",
             &eval,
             &ctx,
             &path,
@@ -185,7 +279,7 @@ fn test_deps_env_var() {
 fn test_single_brace_syntax_treated_as_literal() {
     let (eval, ctx) = make_evaluator_and_ctx();
     let path = test_path();
-    // ${VAR} is not a valid expression — only ${{ }} is
+    // ${VAR} is not a valid expression — only ${{ }}$ is
     assert_eq!(
         evaluate_expression_string("${HOME}", &eval, &ctx, &path, "test").unwrap(),
         "${HOME}"
@@ -198,7 +292,7 @@ fn test_multiple_expressions() {
     let path = test_path();
     assert_eq!(
         evaluate_expression_string(
-            "${{ env.HOME }}/app:${{ env.APP_PORT }}",
+            "${{ env.HOME }}$/app:${{ env.APP_PORT }}$",
             &eval,
             &ctx,
             &path,
@@ -224,7 +318,7 @@ fn test_no_closing_braces() {
 fn test_evaluate_value_tree_basic() {
     let (eval, ctx) = make_evaluator_and_ctx();
     let path = test_path();
-    let mut value = serde_yaml::Value::String("${{ env.HOME }}/app".to_string());
+    let mut value = serde_yaml::Value::String("${{ env.HOME }}$/app".to_string());
     evaluate_value_tree(&mut value, &eval, &ctx, &path, "test").unwrap();
     assert_eq!(value.as_str().unwrap(), "/home/user/app");
 }
@@ -237,7 +331,7 @@ fn test_evaluate_value_tree_skips_depends_on() {
 depends_on:
   - db
   - cache
-command: ["${{ env.HOME }}/app"]
+command: ["${{ env.HOME }}$/app"]
 "#;
     let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
     evaluate_value_tree(&mut value, &eval, &ctx, &path, "test").unwrap();
@@ -263,8 +357,8 @@ fn test_sequential_environment_evaluation() {
     let path = test_path();
 
     let yaml = r#"
-- FIRST=${{ env.BASE }}_world
-- SECOND=${{ env.FIRST }}_again
+- FIRST=${{ env.BASE }}$_world
+- SECOND=${{ env.FIRST }}$_again
 "#;
     let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
     evaluate_environment_sequential(&mut value, &eval, &mut ctx, &path, "test").unwrap();
@@ -281,12 +375,12 @@ fn test_standalone_expression_type_preservation() {
     let path = test_path();
 
     // Standalone bool
-    let mut value = serde_yaml::Value::String("${{ true }}".to_string());
+    let mut value = serde_yaml::Value::String("${{ true }}$".to_string());
     evaluate_value_tree(&mut value, &eval, &ctx, &path, "test").unwrap();
     assert_eq!(value, serde_yaml::Value::Bool(true));
 
     // Standalone number
-    let mut value = serde_yaml::Value::String("${{ 42 }}".to_string());
+    let mut value = serde_yaml::Value::String("${{ 42 }}$".to_string());
     evaluate_value_tree(&mut value, &eval, &ctx, &path, "test").unwrap();
     assert_eq!(
         value,
@@ -294,7 +388,7 @@ fn test_standalone_expression_type_preservation() {
     );
 
     // Standalone table → sequence
-    let mut value = serde_yaml::Value::String("${{ {1, 2, 3} }}".to_string());
+    let mut value = serde_yaml::Value::String("${{ {1, 2, 3} }}$".to_string());
     evaluate_value_tree(&mut value, &eval, &ctx, &path, "test").unwrap();
     assert!(value.is_sequence());
 }
@@ -333,23 +427,23 @@ fn test_bare_var_in_inline_resolves_to_nil() {
     let path = test_path();
 
     // Bare variable names resolve to nil (empty string in embedded context)
-    let mut value = serde_yaml::Value::String("prefix_${{ HOME }}_suffix".to_string());
+    let mut value = serde_yaml::Value::String("prefix_${{ HOME }}$_suffix".to_string());
     evaluate_value_tree(&mut value, &eval, &ctx, &path, "test").unwrap();
     assert_eq!(value.as_str().unwrap(), "prefix__suffix");
 
     // Standalone bare var resolves to nil
-    let mut value = serde_yaml::Value::String("${{ HOME }}".to_string());
+    let mut value = serde_yaml::Value::String("${{ HOME }}$".to_string());
     evaluate_value_tree(&mut value, &eval, &ctx, &path, "test").unwrap();
     assert!(value.is_null(), "Standalone bare var should resolve to nil");
 }
 
 #[test]
 fn test_is_standalone_expression() {
-    assert!(is_standalone_expression("${{ env.HOME }}"));
-    assert!(is_standalone_expression("  ${{ 42 }}  "));
-    assert!(!is_standalone_expression("prefix ${{ env.HOME }}"));
-    assert!(!is_standalone_expression("${{ env.HOME }} suffix"));
-    assert!(!is_standalone_expression("${{ a }} ${{ b }}"));
+    assert!(is_standalone_expression("${{ env.HOME }}$"));
+    assert!(is_standalone_expression("  ${{ 42 }}$  "));
+    assert!(!is_standalone_expression("prefix ${{ env.HOME }}$"));
+    assert!(!is_standalone_expression("${{ env.HOME }}$ suffix"));
+    assert!(!is_standalone_expression("${{ a }}$ ${{ b }}$"));
     assert!(!is_standalone_expression("no expression"));
 }
 
@@ -362,12 +456,12 @@ fn test_evaluate_expression_string_with_env() {
     let env_table = eval.prepare_env(&ctx).unwrap();
 
     assert_eq!(
-        evaluate_expression_string_with_env("${{ env.HOME }}", &eval, &env_table, &path, "test").unwrap(),
+        evaluate_expression_string_with_env("${{ env.HOME }}$", &eval, &env_table, &path, "test").unwrap(),
         "/home/user"
     );
     assert_eq!(
         evaluate_expression_string_with_env(
-            "${{ env.HOME }}/app:${{ env.APP_PORT }}",
+            "${{ env.HOME }}$/app:${{ env.APP_PORT }}$",
             &eval, &env_table, &path, "test"
         ).unwrap(),
         "/home/user/app:8080"
@@ -381,13 +475,13 @@ fn test_evaluate_value_tree_with_env_shared_cache() {
     let mut cached_env: Option<mlua::Table> = None;
 
     // First call populates cache
-    let mut value1 = serde_yaml::Value::String("${{ env.HOME }}/app".to_string());
+    let mut value1 = serde_yaml::Value::String("${{ env.HOME }}$/app".to_string());
     evaluate_value_tree_with_env(&mut value1, &eval, &ctx, &path, "test1", &mut cached_env).unwrap();
     assert_eq!(value1.as_str().unwrap(), "/home/user/app");
     assert!(cached_env.is_some(), "Cache should be populated after first call");
 
     // Second call reuses cache (no rebuild)
-    let mut value2 = serde_yaml::Value::String("${{ env.DB_HOST }}:${{ env.APP_PORT }}".to_string());
+    let mut value2 = serde_yaml::Value::String("${{ env.DB_HOST }}$:${{ env.APP_PORT }}$".to_string());
     evaluate_value_tree_with_env(&mut value2, &eval, &ctx, &path, "test2", &mut cached_env).unwrap();
     assert_eq!(value2.as_str().unwrap(), "localhost:8080");
 }
@@ -424,8 +518,8 @@ fn test_sequential_env_with_prepared_env() {
     let prepared = eval.prepare_env_mutable(&ctx).unwrap();
 
     let yaml = r#"
-- FIRST=${{ env.BASE }}_world
-- SECOND=${{ env.FIRST }}_again
+- FIRST=${{ env.BASE }}$_world
+- SECOND=${{ env.FIRST }}$_again
 "#;
     let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
     evaluate_environment_sequential_with_env(&mut value, &eval, &mut ctx, &prepared, &path, "test").unwrap();
@@ -437,4 +531,19 @@ fn test_sequential_env_with_prepared_env() {
     // Verify ctx.env was updated
     assert_eq!(ctx.env.get("FIRST").unwrap(), "hello_world");
     assert_eq!(ctx.env.get("SECOND").unwrap(), "hello_world_again");
+}
+
+// ============================================================================
+// Nested braces tests (previously broken with old }} delimiter)
+// ============================================================================
+
+#[test]
+fn test_nested_braces_evaluation() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+    let path = test_path();
+
+    let mut value = serde_yaml::Value::String("${{ {a={b=42}} }}$".to_string());
+    evaluate_value_tree(&mut value, &eval, &ctx, &path, "test").unwrap();
+    assert!(value.is_mapping());
 }

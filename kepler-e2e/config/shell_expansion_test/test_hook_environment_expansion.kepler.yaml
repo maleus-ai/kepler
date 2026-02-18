@@ -9,6 +9,6 @@ services:
     hooks:
       pre_start:
         environment:
-          - EXPANDED_HOOK_VAR=${{ env.HOOK_BASE }}_expanded
+          - EXPANDED_HOOK_VAR=${{ env.HOOK_BASE }}$_expanded
         run: "echo $EXPANDED_HOOK_VAR >> __MARKER_FILE__"
     restart: no

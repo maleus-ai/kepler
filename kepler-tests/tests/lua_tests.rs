@@ -24,7 +24,7 @@ fn load_config_from_string(yaml: &str, dir: &Path) -> Result<KeplerConfig, Strin
     KeplerConfig::load(&config_path, &sys_env).map_err(|e| e.to_string())
 }
 
-/// Helper to resolve a service config with Lua evaluation and ${{ env.VAR }} expansion.
+/// Helper to resolve a service config with Lua evaluation and ${{ env.VAR }}$ expansion.
 /// Uses the current process environment as sys_env.
 fn resolve_svc(config: &KeplerConfig, name: &str, config_path: &Path) -> kepler_daemon::config::ServiceConfig {
     let sys_env: HashMap<String, String> = std::env::vars().collect();
@@ -936,7 +936,7 @@ services:
     assert_eq!(service.condition, Some(false));
 }
 
-/// Test: `if: ${{ 1 == 1 }}` (dynamic expression) resolves to Some(true)
+/// Test: `if: ${{ 1 == 1 }}$` (dynamic expression) resolves to Some(true)
 #[test]
 fn test_service_if_dynamic_expression() {
     let temp_dir = TempDir::new().unwrap();
@@ -944,7 +944,7 @@ fn test_service_if_dynamic_expression() {
     let yaml = r#"
 services:
   test:
-    if: ${{ 1 == 1 }}
+    if: ${{ 1 == 1 }}$
     command: ["echo", "hello"]
 "#;
 

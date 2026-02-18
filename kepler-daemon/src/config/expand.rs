@@ -1,15 +1,15 @@
 //! Expression evaluation for configuration files
 //!
-//! This module handles `${{ expr }}` inline Lua expression evaluation in
+//! This module handles `${{ expr }}$` inline Lua expression evaluation in
 //! configuration values, and `!lua` tag evaluation, using a unified
 //! `LuaEvaluator` + `EvalContext` system.
 //!
-//! `${{ expr }}` expressions are evaluated as Lua code via `eval_inline_expr`,
+//! `${{ expr }}$` expressions are evaluated as Lua code via `eval_inline_expr`,
 //! which provides `env`, `ctx`, `deps`, `global`, and stdlib access.
 //! Unknown bare names resolve to nil (standard Lua behavior).
 //!
-//! Standalone `${{ expr }}` (the entire string) preserves the Lua return type
-//! (bool, number, table, etc.). Embedded `${{ expr }}` in a larger string
+//! Standalone `${{ expr }}$` (the entire string) preserves the Lua return type
+//! (bool, number, table, etc.). Embedded `${{ expr }}$` in a larger string
 //! coerces each result to a string.
 
 use std::path::Path;
@@ -35,34 +35,139 @@ pub fn resolve_sys_env(
         .unwrap_or(SysEnvPolicy::Inherit)
 }
 
-/// Check if a string is a standalone `${{ expr }}` (the entire string is one expression).
-fn is_standalone_expression(s: &str) -> bool {
-    let trimmed = s.trim();
-    if !trimmed.starts_with("${{") {
-        return false;
-    }
-    // Find the closing `}}`
-    let after_open = &trimmed[3..];
-    if let Some(end) = after_open.find("}}") {
-        // Check that nothing follows after the closing `}}`
-        let remainder = &after_open[end + 2..];
-        remainder.trim().is_empty()
-    } else {
-        false
-    }
+// ============================================================================
+// ExprToken — tokenizer for `${{ expr }}$` expressions
+// ============================================================================
+
+/// A token from parsing a `${{ expr }}$` expression string.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ExprToken<'a> {
+    /// Literal text outside any `${{ }}$` marker.
+    String(&'a str),
+    /// Lua expression content (trimmed text between `${{` and `}}$`).
+    Expression(&'a str),
 }
 
-/// Extract the expression content from a standalone `${{ expr }}`.
-fn extract_standalone_expr(s: &str) -> &str {
-    let trimmed = s.trim();
-    let after_open = &trimmed[3..];
-    let end = after_open.find("}}").unwrap();
-    after_open[..end].trim()
-}
-
-/// Evaluate all `${{ ... }}` expressions in a string, coercing results to strings.
+/// Parse a string into a sequence of literal and expression tokens.
 ///
-/// Scans for `${{ ... }}`, evaluates each expression via `evaluator.eval_inline_expr()`,
+/// Scans for `${{` opening markers and `}}$` closing markers.
+/// The `}}$` closing delimiter is not valid Lua syntax, so there is
+/// no ambiguity with nested braces in Lua table constructors.
+///
+/// An unclosed `${{` (no matching `}}$`) is emitted as literal text.
+pub(crate) fn parse_expr_tokens(s: &str) -> Vec<ExprToken<'_>> {
+    let mut tokens = Vec::new();
+    let mut remaining = s;
+    let mut offset = 0;
+
+    while let Some(start) = remaining.find("${{") {
+        // Emit literal text before the marker
+        if start > 0 {
+            tokens.push(ExprToken::String(&s[offset..offset + start]));
+        }
+
+        let after_open = &remaining[start + 3..];
+        if let Some(end) = after_open.find("}}$") {
+            let expr = after_open[..end].trim();
+            tokens.push(ExprToken::Expression(expr));
+            let skip = start + 3 + end + 3; // "${{" + content + "}}$"
+            offset += skip;
+            remaining = &s[offset..];
+        } else {
+            // No closing `}}$` — emit "${{" as literal and continue scanning
+            tokens.push(ExprToken::String(&s[offset..offset + start + 3]));
+            offset += start + 3;
+            remaining = &s[offset..];
+        }
+    }
+
+    // Emit trailing literal text
+    if offset < s.len() {
+        tokens.push(ExprToken::String(&s[offset..]));
+    }
+
+    tokens
+}
+
+/// Check if tokens represent a standalone expression (single `${{ expr }}$`
+/// with only optional surrounding whitespace).
+pub(crate) fn is_standalone_tokens(tokens: &[ExprToken<'_>]) -> bool {
+    let mut found_expr = false;
+    for token in tokens {
+        match token {
+            ExprToken::Expression(_) => {
+                if found_expr {
+                    return false; // multiple expressions
+                }
+                found_expr = true;
+            }
+            ExprToken::String(s) => {
+                if !s.trim().is_empty() {
+                    return false; // non-whitespace literal
+                }
+            }
+        }
+    }
+    found_expr
+}
+
+/// Extract the expression from standalone tokens.
+/// Panics if the tokens are not standalone.
+fn extract_expr_from_standalone<'a>(tokens: &[ExprToken<'a>]) -> &'a str {
+    for token in tokens {
+        if let ExprToken::Expression(expr) = token {
+            return expr;
+        }
+    }
+    unreachable!("extract_expr_from_standalone called on non-standalone tokens")
+}
+
+// ============================================================================
+// Legacy helpers — thin wrappers used by tests
+// ============================================================================
+
+/// Check if a string is a standalone `${{ expr }}$` (the entire string is one expression).
+#[cfg(test)]
+fn is_standalone_expression(s: &str) -> bool {
+    is_standalone_tokens(&parse_expr_tokens(s))
+}
+
+// ============================================================================
+// Expression evaluation
+// ============================================================================
+
+/// Shared implementation: tokenize, evaluate expressions, interpolate into a string.
+fn evaluate_tokens_to_string(
+    s: &str,
+    evaluator: &LuaEvaluator,
+    env_table: &mlua::Table,
+    config_path: &Path,
+    chunk_name: &str,
+) -> Result<String> {
+    let tokens = parse_expr_tokens(s);
+    let mut result = String::with_capacity(s.len());
+
+    for token in &tokens {
+        match token {
+            ExprToken::String(text) => result.push_str(text),
+            ExprToken::Expression(expr) => {
+                let lua_result = evaluator
+                    .eval_inline_expr_with_env(expr, env_table, chunk_name)
+                    .map_err(|e| DaemonError::LuaError {
+                        path: config_path.to_path_buf(),
+                        message: format!("Error evaluating ${{{{ {} }}}}$: {}", expr, e),
+                    })?;
+                result.push_str(&lua_value_to_string(&lua_result));
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Evaluate all `${{ ... }}$` expressions in a string, coercing results to strings.
+///
+/// Scans for `${{ ... }}$`, evaluates each expression via `evaluator.eval_inline_expr()`,
 /// coerces the Lua result to string, and interpolates into the result.
 pub fn evaluate_expression_string(
     s: &str,
@@ -71,46 +176,16 @@ pub fn evaluate_expression_string(
     config_path: &Path,
     chunk_name: &str,
 ) -> Result<String> {
-    let mut result = String::with_capacity(s.len());
-    let mut remaining = s;
-
-    // Build env table once and reuse for all expressions in this string
     let env_table = evaluator
         .prepare_env(ctx)
         .map_err(|e| DaemonError::LuaError {
             path: config_path.to_path_buf(),
             message: format!("Error building Lua environment: {}", e),
         })?;
-
-    while let Some(start) = remaining.find("${{") {
-        // Append everything before the marker
-        result.push_str(&remaining[..start]);
-
-        let after_open = &remaining[start + 3..];
-        if let Some(end) = after_open.find("}}") {
-            let expr = after_open[..end].trim();
-            let lua_result = evaluator
-                .eval_inline_expr_with_env(expr, &env_table, chunk_name)
-                .map_err(|e| DaemonError::LuaError {
-                    path: config_path.to_path_buf(),
-                    message: format!("Error evaluating ${{{{ {} }}}}: {}", expr, e),
-                })?;
-            let string_value = lua_value_to_string(&lua_result);
-            result.push_str(&string_value);
-            remaining = &after_open[end + 2..];
-        } else {
-            // No closing `}}` — treat as literal
-            result.push_str("${{");
-            remaining = after_open;
-        }
-    }
-
-    // Append anything left after the last match
-    result.push_str(remaining);
-    Ok(result)
+    evaluate_tokens_to_string(s, evaluator, &env_table, config_path, chunk_name)
 }
 
-/// Evaluate all `${{ ... }}` expressions in a string, reusing a pre-built env table.
+/// Evaluate all `${{ ... }}$` expressions in a string, reusing a pre-built env table.
 ///
 /// Like `evaluate_expression_string` but avoids rebuilding the Lua environment
 /// table. Used when a cached env table is already available.
@@ -121,32 +196,7 @@ pub fn evaluate_expression_string_with_env(
     config_path: &Path,
     chunk_name: &str,
 ) -> Result<String> {
-    let mut result = String::with_capacity(s.len());
-    let mut remaining = s;
-
-    while let Some(start) = remaining.find("${{") {
-        result.push_str(&remaining[..start]);
-
-        let after_open = &remaining[start + 3..];
-        if let Some(end) = after_open.find("}}") {
-            let expr = after_open[..end].trim();
-            let lua_result = evaluator
-                .eval_inline_expr_with_env(expr, env_table, chunk_name)
-                .map_err(|e| DaemonError::LuaError {
-                    path: config_path.to_path_buf(),
-                    message: format!("Error evaluating ${{{{ {} }}}}: {}", expr, e),
-                })?;
-            let string_value = lua_value_to_string(&lua_result);
-            result.push_str(&string_value);
-            remaining = &after_open[end + 2..];
-        } else {
-            result.push_str("${{");
-            remaining = after_open;
-        }
-    }
-
-    result.push_str(remaining);
-    Ok(result)
+    evaluate_tokens_to_string(s, evaluator, env_table, config_path, chunk_name)
 }
 
 /// Convert a Lua value to a string representation for interpolation.
@@ -161,12 +211,12 @@ fn lua_value_to_string(value: &mlua::Value) -> String {
     }
 }
 
-/// Evaluate all `${{ }}` expressions and `!lua` tags in a YAML value tree in-place.
+/// Evaluate all `${{ }}$` expressions and `!lua` tags in a YAML value tree in-place.
 ///
 /// Single pass replacing both the old `expand_value_tree` and `process_lua_tags_recursive`:
 ///
-/// - `Value::String` exactly `${{ expr }}` (standalone) → eval Lua → replace Value with typed result
-/// - `Value::String` with embedded `${{ expr }}` → eval each, interpolate as string
+/// - `Value::String` exactly `${{ expr }}$` (standalone) → eval Lua → replace Value with typed result
+/// - `Value::String` with embedded `${{ expr }}$` → eval each, interpolate as string
 /// - `Value::Tagged(!lua)` → eval Lua code → replace Value (same as old behavior)
 /// - `Value::Mapping/Sequence` → recurse, skip `depends_on`
 pub fn evaluate_value_tree(
@@ -219,14 +269,15 @@ fn evaluate_value_tree_inner(
                 }
             };
 
-            if is_standalone_expression(s) {
+            let tokens = parse_expr_tokens(s);
+            if is_standalone_tokens(&tokens) {
                 // Standalone: evaluate and preserve Lua type
-                let expr = extract_standalone_expr(s);
+                let expr = extract_expr_from_standalone(&tokens);
                 let lua_result = evaluator
                     .eval_inline_expr_with_env(expr, &env_table, field_path)
                     .map_err(|e| DaemonError::LuaError {
                         path: config_path.to_path_buf(),
-                        message: format!("Error evaluating ${{{{ {} }}}}: {}", expr, e),
+                        message: format!("Error evaluating ${{{{ {} }}}}$: {}", expr, e),
                     })?;
                 *value = lua_to_yaml(lua_result, config_path)?;
             } else {
@@ -329,7 +380,7 @@ fn evaluate_value_tree_inner(
     Ok(())
 }
 
-/// Evaluate `${{ }}` in environment entries sequentially, building up context as we go.
+/// Evaluate `${{ }}$` in environment entries sequentially, building up context as we go.
 ///
 /// Each entry's key=value is added to `ctx.env` after evaluation,
 /// so later entries can reference earlier ones.
@@ -360,7 +411,7 @@ pub fn evaluate_environment_sequential(
     Ok(())
 }
 
-/// Evaluate `${{ }}` in environment entries sequentially using a `PreparedEnv`.
+/// Evaluate `${{ }}$` in environment entries sequentially using a `PreparedEnv`.
 ///
 /// Like `evaluate_environment_sequential` but reuses the pre-built env table
 /// and updates it in-place via `prepared.set_env()` as new entries are resolved,

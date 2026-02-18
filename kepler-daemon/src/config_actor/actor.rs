@@ -168,7 +168,7 @@ impl ConfigActor {
 
                 // Restore service states from snapshot + persisted state
                 // computed_env and working_dir start empty — they are built lazily
-                // at service start time via ${{}} expansion.
+                // at service start time via ${{}}$ expansion.
                 let services = snapshot
                     .config
                     .services
@@ -284,7 +284,7 @@ impl ConfigActor {
                 let _ = persistence.copy_env_files(&config.services, &config_dir);
 
                 // Initialize service states with empty computed_env and working_dir.
-                // These are built lazily at service start time via ${{}} expansion.
+                // These are built lazily at service start time via ${{}}$ expansion.
                 let services = config
                     .services
                     .keys()

@@ -429,7 +429,7 @@ impl ServiceOrchestrator {
     /// Execute the actual service startup sequence (after claiming).
     ///
     /// This is the lazy resolution point: after dependencies are satisfied,
-    /// the raw service config is expanded (${{}} + !lua) and deserialized
+    /// the raw service config is expanded (${{}}$ + !lua) and deserialized
     /// into a typed ServiceConfig.
     async fn execute_service_startup(
         &self,
@@ -502,7 +502,7 @@ impl ServiceOrchestrator {
         };
         debug!("[timeit] {} eval context built in {:?}", service_name, ctx_start.elapsed());
 
-        // Resolve the service: evaluate ${{ }} + !lua + deserialize to ServiceConfig.
+        // Resolve the service: evaluate ${{ }}$ + !lua + deserialize to ServiceConfig.
         // resolve_service handles env_file → environment → other fields in the correct order.
         // Uses the shared evaluator (if provided) so the `global` table persists
         // across service starts within the same config.
@@ -685,7 +685,7 @@ impl ServiceOrchestrator {
     /// Re-resolve a service's config at restart time with updated context.
     ///
     /// Builds a fresh `EvalContext` with the current restart_count, exit_code,
-    /// and dep states, then evaluates all `${{ }}` / `!lua` fields again.
+    /// and dep states, then evaluates all `${{ }}$` / `!lua` fields again.
     /// Stores the new resolved config in the actor and returns a refreshed
     /// `ServiceContext`.
     async fn re_resolve_service(
@@ -1894,7 +1894,7 @@ impl ServiceOrchestrator {
             if let Some(config) = handle.get_config().await {
                 if let Some(raw) = config.services.get(service_name) {
                     if !raw.outputs.is_static_none() {
-                        // Build eval context with hook outputs for resolving ${{ }} expressions
+                        // Build eval context with hook outputs for resolving ${{ }}$ expressions
                         let hook_outputs = crate::outputs::read_all_hook_outputs(&config_dir, service_name);
                         let process_outputs = crate::outputs::read_process_outputs(&config_dir, service_name);
 
@@ -2088,12 +2088,12 @@ impl ServiceOrchestrator {
         }
 
         // For static hooks, use resolved.hooks (already resolved in resolve_service).
-        // For dynamic hooks (!lua / ${{ }}), resolve here with hook_name in context.
+        // For dynamic hooks (!lua / ${{ }}$), resolve here with hook_name in context.
         // lua_code is hoisted so it outlives hook_params.lua_code (a borrowed reference).
         let mut lua_code: Option<String> = None;
         let hooks: Option<ServiceHooks> = if resolved.hooks.is_some() || ctx.service_config.hooks.as_static().is_some() {
             // Static hooks — already resolved, use them directly.
-            // Gather deps info and lua_code for ${{ }} evaluation in hook env.
+            // Gather deps info and lua_code for ${{ }}$ evaluation in hook env.
             if let Some(h) = handle {
                 let depends_on = &resolved.depends_on;
                 for (dep_name, _) in depends_on.iter() {

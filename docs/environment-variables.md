@@ -71,14 +71,14 @@ Higher-priority sources override lower-priority ones when keys conflict.
 
 ## Three-Stage Expansion
 
-Inline Lua expressions (`${{ expr }}`) are evaluated in three stages, each building on the previous context:
+Inline Lua expressions (`${{ expr }}$`) are evaluated in three stages, each building on the previous context:
 
 ### Stage 1: env_file Path
 
 The `env_file` path is expanded using **system environment only** (at config load time):
 
 ```yaml
-env_file: ${{ env.CONFIG_DIR }}/.env    # env.CONFIG_DIR from system env
+env_file: ${{ env.CONFIG_DIR }}$/.env    # env.CONFIG_DIR from system env
 ```
 
 ### Stage 2: environment Array
@@ -88,8 +88,8 @@ The `environment` array entries are expanded **sequentially** using **system env
 ```yaml
 environment:
   - BASE_DIR=/opt/app
-  - DB_URL=postgres://${{ env.DB_HOST }}/mydb    # DB_HOST from system env or .env file
-  - CONFIG=${{ env.BASE_DIR }}/config             # BASE_DIR from the entry above
+  - DB_URL=postgres://${{ env.DB_HOST }}$/mydb    # DB_HOST from system env or .env file
+  - CONFIG=${{ env.BASE_DIR }}$/config             # BASE_DIR from the entry above
 ```
 
 ### Stage 3: Other Fields
@@ -97,8 +97,8 @@ environment:
 Remaining config fields are expanded using **system env + env_file + environment array + deps**:
 
 ```yaml
-working_dir: ${{ env.APP_DIR }}         # Can reference vars from environment array
-user: ${{ env.SERVICE_USER or "nobody" }}
+working_dir: ${{ env.APP_DIR }}$         # Can reference vars from environment array
+user: ${{ env.SERVICE_USER or "nobody" }}$
 ```
 
 ### Summary
@@ -115,7 +115,7 @@ See [Inline Expressions](variable-expansion.md) for the full syntax reference.
 
 ## Passing Values to Commands
 
-You can use `${{ }}` expressions directly in command arrays, or pass values via environment variables for the shell to expand at runtime:
+You can use `${{ }}$` expressions directly in command arrays, or pass values via environment variables for the shell to expand at runtime:
 
 ```yaml
 services:
@@ -123,10 +123,10 @@ services:
     command: ["sh", "-c", "echo Hello $NAME"]  # Shell expands $NAME at runtime
     environment:
       - NAME=World                             # Set in process env
-      - DB_URL=postgres://${{ env.DB_HOST }}/db  # Expanded at service start time
+      - DB_URL=postgres://${{ env.DB_HOST }}$/db  # Expanded at service start time
 ```
 
-Both approaches work. Use `${{ }}` when you want Kepler to resolve values at start time, and shell `$VAR` when you want the shell to resolve them at runtime.
+Both approaches work. Use `${{ }}$` when you want Kepler to resolve values at start time, and shell `$VAR` when you want the shell to resolve them at runtime.
 
 ---
 
@@ -177,7 +177,7 @@ services:
     environment:
       - PATH=/usr/bin:/bin       # Explicit PATH
       - NODE_ENV=production
-      - DATABASE_URL=${{ env.DB_URL }}   # Expanded from system env at start time
+      - DATABASE_URL=${{ env.DB_URL }}$   # Expanded from system env at start time
     env_file: .env               # Additional vars from file
 ```
 
@@ -189,9 +189,9 @@ services:
     command: ["./app"]
     sys_env: clear
     environment:
-      - PATH=${{ env.PATH }}
-      - HOME=${{ env.HOME }}
-      - USER=${{ env.USER }}
+      - PATH=${{ env.PATH }}$
+      - HOME=${{ env.HOME }}$
+      - USER=${{ env.USER }}$
       - NODE_ENV=production
 ```
 
@@ -214,15 +214,15 @@ services:
     command: ["./app"]
     environment:
       - APP_DIR=/opt/app
-      - CONFIG_PATH=${{ env.APP_DIR }}/config.yaml
-      - LOG_DIR=${{ env.APP_DIR }}/logs
+      - CONFIG_PATH=${{ env.APP_DIR }}$/config.yaml
+      - LOG_DIR=${{ env.APP_DIR }}$/logs
 ```
 
 ---
 
 ## See Also
 
-- [Inline Expressions](variable-expansion.md) — `${{ expr }}` syntax reference
-- [Lua Scripting](lua-scripting.md) — Dynamic environment via `!lua` and `${{ }}`
+- [Inline Expressions](variable-expansion.md) — `${{ expr }}$` syntax reference
+- [Lua Scripting](lua-scripting.md) — Dynamic environment via `!lua` and `${{ }}$`
 - [Configuration](configuration.md) — Full config reference
 - [Security Model](security-model.md) — Environment isolation as security feature

@@ -12,7 +12,7 @@ services:
     output: true
 
   consumer:
-    command: ["sh", "-c", "echo CONSUMER_PORT=${{ deps['producer'].outputs.port }}; sleep 300"]
+    command: ["sh", "-c", "echo CONSUMER_PORT=${{ deps['producer'].outputs.port }}$; sleep 300"]
     depends_on:
       producer:
         condition: service_completed_successfully

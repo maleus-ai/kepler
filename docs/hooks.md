@@ -340,7 +340,7 @@ hooks:
   pre_start:
     - run: echo "::output::port=8080"
       output: config
-    - run: echo "Port is ${{ hooks.pre_start.outputs.config.port }}"
+    - run: echo "Port is ${{ hooks.pre_start.outputs.config.port }}$"
 ```
 
 Marker lines are filtered from logs — they are captured but not written to the log stream. Regular output lines continue to appear in logs normally.
@@ -421,9 +421,9 @@ services:
             TOKEN=$(openssl rand -hex 16)
             echo "::output::token=$TOKEN"
           output: gen_token
-        - run: echo "Starting with token ${{ hooks.pre_start.outputs.gen_token.token }}"
+        - run: echo "Starting with token ${{ hooks.pre_start.outputs.gen_token.token }}$"
     outputs:
-      auth_token: ${{ ctx.hooks.pre_start.outputs.gen_token.token }}
+      auth_token: ${{ ctx.hooks.pre_start.outputs.gen_token.token }}$
 ```
 
 ### Different User for Hooks

@@ -194,7 +194,7 @@ services:
   test:
     command: ["sleep", "infinity"]
     environment:
-      - TEST_VAR=${{ env.MY_CLEAR_VAR }}
+      - TEST_VAR=${{ env.MY_CLEAR_VAR }}$
 "#;
     let config_path = config_dir.join("kepler.yaml");
     std::fs::write(&config_path, config_content).unwrap();
@@ -339,13 +339,13 @@ async fn test_env_expansion_only_happens_once() {
     let config_dir = temp_dir.path().to_path_buf();
     let state_dir = config_dir.join(".kepler");
 
-    // Create a config that references an env var via ${{ env.VAR }} syntax
+    // Create a config that references an env var via ${{ env.VAR }}$ syntax
     let config_content = r#"
 services:
   test:
     command: ["sleep", "infinity"]
     environment:
-      - EXPANDED_VAR=${{ env.MY_TEST_VAR }}
+      - EXPANDED_VAR=${{ env.MY_TEST_VAR }}$
 "#;
     let config_path = config_dir.join("kepler.yaml");
     std::fs::write(&config_path, config_content).unwrap();
@@ -456,13 +456,13 @@ async fn test_sys_env_only_uses_cli_env_not_daemon_env() {
         std::env::set_var("KEPLER_DAEMON_ONLY_VAR", "daemon_value");
     }
 
-    // Create a config that references an env var via ${{ env.VAR }} expansion
+    // Create a config that references an env var via ${{ env.VAR }}$ expansion
     let config_content = r#"
 services:
   test:
     command: ["sleep", "infinity"]
     environment:
-      - LEAKED=${{ env.KEPLER_DAEMON_ONLY_VAR }}
+      - LEAKED=${{ env.KEPLER_DAEMON_ONLY_VAR }}$
 "#;
     let config_path = config_dir.join("kepler.yaml");
     std::fs::write(&config_path, config_content).unwrap();
@@ -477,7 +477,7 @@ services:
             .unwrap();
 
     // Verify that the daemon's process env var is NOT in the actor's sys_env.
-    // With lazy expansion, ${{ env.KEPLER_DAEMON_ONLY_VAR }} will resolve using sys_env,
+    // With lazy expansion, ${{ env.KEPLER_DAEMON_ONLY_VAR }}$ will resolve using sys_env,
     // which should NOT contain the daemon-only var.
     let sys_env = handle.get_sys_env().await;
     assert!(
