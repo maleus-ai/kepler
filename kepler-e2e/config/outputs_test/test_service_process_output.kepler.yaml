@@ -1,0 +1,11 @@
+# Test service process output capture: service with `output: true` captures ::output:: markers
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  output-service:
+    command: ["sh", "-c", "echo '::output::result=hello'; echo '::output::port=8080'; echo PROCESS_DONE; exit 0"]
+    restart: no
+    output: true

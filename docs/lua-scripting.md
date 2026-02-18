@@ -124,6 +124,8 @@ Every `!lua` block and `${{ }}` expression receives the same context:
 | `ctx.initialized` | Whether the service has been initialized |
 | `ctx.exit_code` | Last exit code (available during restart) |
 | `ctx.status` | Current service status |
+| `ctx.hooks` | Hook step outputs (`hook_name.outputs.step_name.key`). See [Outputs](outputs.md) |
+| `hooks` | Shortcut for `ctx.hooks` |
 | `deps` | Dependency information table |
 | `global` | Shared mutable table for cross-block state |
 
@@ -136,6 +138,7 @@ Every `!lua` block and `${{ }}` expression receives the same context:
 | `deps.NAME.initialized` | Whether the dependency has been initialized |
 | `deps.NAME.restart_count` | Number of times the dependency has restarted |
 | `deps.NAME.env.VAR` | A variable from the dependency's computed environment |
+| `deps.NAME.outputs.KEY` | A named output from the dependency. See [Outputs](outputs.md) |
 
 ---
 
@@ -367,6 +370,23 @@ services:
       - TOKEN=${{ deps.setup.env.AUTH_TOKEN }}
 ```
 
+### Cross-Service Output References
+
+```yaml
+services:
+  producer:
+    command: ["sh", "-c", "echo '::output::port=9090'"]
+    restart: no
+    output: true
+  consumer:
+    command: !lua |
+      local port = deps.producer.outputs.port or "8080"
+      return {"./consume", "--port", port}
+    depends_on:
+      producer:
+        condition: service_completed_successfully
+```
+
 ---
 
 ## See Also
@@ -375,3 +395,4 @@ services:
 - [Environment Variables](environment-variables.md) — How `ctx.env` is built
 - [Configuration](configuration.md) — Full config reference
 - [Architecture](architecture.md#lua-scripting-security) — Internal sandbox implementation
+- [Outputs](outputs.md) — Hook step outputs, process outputs, and cross-service output passing

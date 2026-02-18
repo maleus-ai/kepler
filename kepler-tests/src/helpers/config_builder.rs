@@ -64,6 +64,7 @@ impl TestConfigBuilder {
             logs: self.logs.clone(),
             hooks: self.hooks.clone(),
             timeout: None,
+            output_max_size: None,
         })
     }
 
@@ -129,6 +130,8 @@ pub struct TestServiceBuilder {
     limits: Option<ResourceLimits>,
     user: Option<String>,
     groups: Vec<String>,
+    output: Option<bool>,
+    outputs: Option<HashMap<String, String>>,
 }
 
 impl TestServiceBuilder {
@@ -148,6 +151,8 @@ impl TestServiceBuilder {
             limits: None,
             user: None,
             groups: Vec::new(),
+            output: None,
+            outputs: None,
         }
     }
 
@@ -272,6 +277,18 @@ impl TestServiceBuilder {
         self
     }
 
+    /// Enable output capture from process stdout (`output: true`)
+    pub fn with_output(mut self, output: bool) -> Self {
+        self.output = Some(output);
+        self
+    }
+
+    /// Set named output declarations
+    pub fn with_outputs(mut self, outputs: HashMap<String, String>) -> Self {
+        self.outputs = Some(outputs);
+        self
+    }
+
     pub fn build(self) -> ServiceConfig {
         let depends_on = if let Some(extended) = self.depends_on_extended {
             extended
@@ -293,6 +310,8 @@ impl TestServiceBuilder {
             groups: self.groups,
             limits: self.limits,
             condition: None,
+            output: self.output,
+            outputs: self.outputs,
         }
     }
 }

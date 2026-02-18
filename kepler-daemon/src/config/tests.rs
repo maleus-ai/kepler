@@ -372,3 +372,152 @@ services:
     assert!(msg.contains("svc.depends_on"), "Error should mention field path, got: {}", msg);
     assert!(msg.contains("!lua is not allowed on depends_on itself"), "Error should explain restriction, got: {}", msg);
 }
+
+// ============================================================================
+// Output field tests
+// ============================================================================
+
+#[test]
+fn test_hook_output_field_parsing() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    restart: no
+    hooks:
+      pre_start:
+        run: "echo hello"
+        output: step1
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let raw = &config.services["svc"];
+    let hooks = raw.hooks.as_static().unwrap().as_ref().unwrap();
+    let hook = &hooks.pre_start.as_ref().unwrap().0[0];
+    assert_eq!(hook.output(), Some("step1"));
+}
+
+#[test]
+fn test_hook_output_field_default() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    hooks:
+      pre_start:
+        run: "echo hello"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let raw = &config.services["svc"];
+    let hooks = raw.hooks.as_static().unwrap().as_ref().unwrap();
+    let hook = &hooks.pre_start.as_ref().unwrap().0[0];
+    assert_eq!(hook.output(), None);
+}
+
+#[test]
+fn test_service_output_field_parsing() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    restart: no
+    output: true
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let raw = &config.services["svc"];
+    assert_eq!(raw.output.as_static(), Some(&Some(true)));
+}
+
+#[test]
+fn test_service_outputs_field_parsing() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    restart: no
+    outputs:
+      port: "8080"
+      host: "localhost"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let raw = &config.services["svc"];
+    let outputs = raw.outputs.as_static().unwrap().as_ref().unwrap();
+    assert_eq!(outputs.get("port"), Some(&"8080".to_string()));
+    assert_eq!(outputs.get("host"), Some(&"localhost".to_string()));
+}
+
+#[test]
+fn test_output_max_size_parsing() {
+    let yaml = r#"
+kepler:
+  output_max_size: 2mb
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.output_max_size(), 2 * 1024 * 1024);
+}
+
+#[test]
+fn test_output_max_size_default() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.output_max_size(), 1048576); // 1MB
+}
+
+#[test]
+fn test_validate_output_requires_restart_no() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    restart: always
+    output: true
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let err = config.validate(Path::new("test.yaml")).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("'output: true' is only allowed on services with 'restart: no'"),
+        "got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_validate_outputs_requires_restart_no() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    restart: always
+    outputs:
+      port: "8080"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let err = config.validate(Path::new("test.yaml")).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("'outputs' is only allowed on services with 'restart: no'"),
+        "got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_validate_output_with_restart_no_ok() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    restart: no
+    output: true
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(config.validate(Path::new("test.yaml")).is_ok());
+}

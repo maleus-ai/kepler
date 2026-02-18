@@ -138,7 +138,9 @@ impl From<&ServiceState> for ServiceInfo {
 pub struct ProcessHandle {
     /// Channel to signal shutdown to the monitor task (carries signal number, 15=SIGTERM)
     pub shutdown_tx: Option<tokio::sync::oneshot::Sender<i32>>,
-    pub stdout_task: Option<JoinHandle<()>>,
+    /// Stdout capture task. Returns `Some(Vec<String>)` of raw `KEY=VALUE` lines
+    /// when output capture is enabled, `None` otherwise.
+    pub stdout_task: Option<JoinHandle<Option<Vec<String>>>>,
     pub stderr_task: Option<JoinHandle<()>>,
 }
 

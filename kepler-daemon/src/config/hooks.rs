@@ -50,6 +50,10 @@ pub struct HookCommon {
     /// expression evaluates to a truthy value at runtime.
     #[serde(default, rename = "if")]
     pub condition: Option<String>,
+    /// Output capture name. When set, `::output::KEY=VALUE` lines from stdout
+    /// are captured and made available as `ctx.hooks.<hook_name>.<output_name>.<key>`.
+    #[serde(default)]
+    pub output: Option<String>,
 }
 
 /// Hook command - either a script or a command array
@@ -177,6 +181,10 @@ impl HookCommand {
 
     pub fn condition(&self) -> Option<&str> {
         self.common().condition.as_deref()
+    }
+
+    pub fn output(&self) -> Option<&str> {
+        self.common().output.as_deref()
     }
 }
 

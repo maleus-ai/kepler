@@ -1,0 +1,12 @@
+# Test that ::output:: marker lines are NOT present in service logs
+# Regular output should still appear
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  marker-service:
+    command: ["sh", "-c", "echo REGULAR_OUTPUT; echo '::output::secret=hidden'; echo ANOTHER_LINE; exit 0"]
+    restart: no
+    output: true

@@ -17,6 +17,7 @@ pub mod hooks;
 pub mod logs;
 pub mod lua_eval;
 pub mod orchestrator;
+pub mod outputs;
 pub mod persistence;
 pub mod process;
 pub mod state;

@@ -22,6 +22,8 @@ Kepler supports inline Lua expressions in configuration values using `${{ expr }
 | `${{ env.VAR }}`              | Reference an environment variable  |
 | `${{ env.VAR or "default" }}` | Use `"default"` if `VAR` is unset  |
 | `${{ deps.svc.status }}`      | Reference dependency status        |
+| `${{ deps.svc.outputs.key }}` | Reference a dependency's output value |
+| `${{ hooks.pre_start.outputs.step1.token }}` | Reference a hook step output |
 | `${{ ctx.service_name }}`     | Reference the current service name |
 
 Expressions are evaluated as Lua code with access to `env`, `ctx`, `deps`, and `global`.
@@ -139,6 +141,9 @@ user: ${{ env.SERVICE_USER or "nobody" }}
 | `deps.NAME.initialized`   | Whether dependency has been initialized                    |
 | `deps.NAME.restart_count` | Dependency's restart count                                 |
 | `deps.NAME.env.VAR`       | A variable from a dependency's environment                 |
+| `deps.NAME.outputs.KEY`   | A named output from a dependency service. See [Outputs](outputs.md) |
+| `ctx.hooks.HOOK.outputs.STEP.KEY` | Hook step output value (available after hook runs). See [Outputs](outputs.md) |
+| `hooks.HOOK.outputs.STEP.KEY` | Shortcut for `ctx.hooks.HOOK.outputs.STEP.KEY` |
 | `global`                  | Shared mutable table (set via `lua:` directive)            |
 
 > **Note:** Bare variable names like `${{ HOME }}` resolve to nil. To access environment variables, use `env.HOME` or `ctx.env.HOME`.
@@ -203,6 +208,24 @@ services:
       - SETUP_TOKEN=${{ deps.setup.env.TOKEN }}
 ```
 
+### Using Dependency Outputs
+
+```yaml
+services:
+  producer:
+    command: ["sh", "-c", "echo '::output::port=9090' && echo '::output::token=secret'"]
+    restart: no
+    output: true
+  consumer:
+    command: ["./consume"]
+    depends_on:
+      producer:
+        condition: service_completed_successfully
+    environment:
+      - PORT=${{ deps.producer.outputs.port }}
+      - TOKEN=${{ deps.producer.outputs.token }}
+```
+
 ### Conditional Restart Command
 
 ```yaml
@@ -236,3 +259,4 @@ services:
 - [Environment Variables](environment-variables.md) — How environment is built
 - [Lua Scripting](lua-scripting.md) — Full `!lua` blocks for complex logic
 - [Configuration](configuration.md) — Full config reference
+- [Outputs](outputs.md) — Hook step outputs, process outputs, and cross-service output passing

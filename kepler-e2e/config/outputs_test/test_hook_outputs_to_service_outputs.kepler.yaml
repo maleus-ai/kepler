@@ -1,0 +1,25 @@
+# Test hook outputs → service outputs declaration → dependent service reads them
+# The setup service has a hook that emits outputs, and an `outputs:` map that references them.
+# The app service depends on setup and accesses the declared outputs.
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  setup:
+    command: ["sh", "-c", "echo SETUP_DONE; exit 0"]
+    restart: no
+    hooks:
+      pre_start:
+        run: "echo '::output::token=abc-123'; echo '::output::port=8080'"
+        output: init
+    outputs:
+      app_token: "${{ hooks.pre_start.outputs.init.token }}"
+      app_url: "http://localhost:${{ hooks.pre_start.outputs.init.port }}"
+
+  app:
+    command: ["sh", "-c", "echo APP_TOKEN=${{ deps['setup'].outputs.app_token }}; echo APP_URL=${{ deps['setup'].outputs.app_url }}; sleep 300"]
+    depends_on:
+      setup:
+        condition: service_completed_successfully

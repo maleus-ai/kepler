@@ -1,0 +1,26 @@
+# Test combined process outputs and declared outputs
+# Process emits outputs via ::output::, and service also has an `outputs:` map.
+# Declared outputs should override process outputs on conflict.
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  combined:
+    command: ["sh", "-c", "echo '::output::process_key=process_val'; echo '::output::shared_key=from_process'; echo COMBINED_DONE; exit 0"]
+    restart: no
+    output: true
+    hooks:
+      pre_start:
+        run: "echo '::output::hook_val=from_hook'"
+        output: init
+    outputs:
+      declared_key: "declared_val"
+      shared_key: "from_declaration"
+
+  reader:
+    command: ["sh", "-c", "echo PROCESS_KEY=${{ deps['combined'].outputs.process_key }}; echo DECLARED_KEY=${{ deps['combined'].outputs.declared_key }}; echo SHARED_KEY=${{ deps['combined'].outputs.shared_key }}; sleep 300"]
+    depends_on:
+      combined:
+        condition: service_completed_successfully

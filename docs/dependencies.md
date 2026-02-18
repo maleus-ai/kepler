@@ -11,6 +11,7 @@ Kepler supports Docker Compose-compatible dependency configuration with conditio
 - [Transient Exit Filtering](#transient-exit-filtering)
 - [Restart Propagation](#restart-propagation)
 - [Exit Code Filters](#exit-code-filters)
+- [Dependency Outputs](#dependency-outputs)
 - [Permanently Unsatisfied Dependencies](#permanently-unsatisfied-dependencies)
 - [Skipped Services](#skipped-services)
 - [Topological Ordering](#topological-ordering)
@@ -214,6 +215,41 @@ The condition is only satisfied if the exit code matches the filter.
 
 ---
 
+## Dependency Outputs
+
+When a dependency has `output: true` or an `outputs:` declaration, its captured outputs are available to dependent services via the `deps` table:
+
+```
+deps.<name>.outputs.<key>
+```
+
+This is available in `${{ }}` expressions and `!lua` blocks. The outputs table is read-only (frozen).
+
+Requirements:
+- The dependency must have `restart: no` (outputs require one-shot services)
+- The dependency must have reached a terminal state (exited) before outputs are available
+- Process outputs and declared outputs are merged — declarations override on conflict
+
+```yaml
+services:
+  migration:
+    command: ["sh", "-c", "echo '::output::version=42' && ./migrate"]
+    restart: no
+    output: true
+
+  app:
+    command: ["./server"]
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    environment:
+      - DB_VERSION=${{ deps.migration.outputs.version }}
+```
+
+See [Outputs](outputs.md) for full details on output capture, marker format, and resolution timing.
+
+---
+
 ## Permanently Unsatisfied Dependencies
 
 A dependency is **permanently unsatisfied** when:
@@ -307,6 +343,25 @@ services:
 
 Note: If `app` had `restart: always`, `monitor` would be immediately Skipped since `service_failed` is structurally unreachable.
 
+### Output Passing Between Services
+
+```yaml
+services:
+  setup:
+    command: ["sh", "-c", "echo '::output::token=secret-abc' && echo '::output::port=9090'"]
+    restart: no
+    output: true
+
+  app:
+    command: ["./server"]
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      - AUTH_TOKEN=${{ deps.setup.outputs.token }}
+      - BACKEND_PORT=${{ deps.setup.outputs.port }}
+```
+
 ### Dependency with Timeout
 
 ```yaml
@@ -340,3 +395,4 @@ services:
 - [Health Checks](health-checks.md) -- Health check conditions
 - [Configuration](configuration.md) -- Full config reference
 - [Architecture](architecture.md#dependency-management) -- Internal implementation details
+- [Outputs](outputs.md) -- Output capture and cross-service output passing

@@ -15,6 +15,8 @@ pub struct DepInfo {
     pub restart_count: u32,
     /// Dependency's computed environment variables
     pub env: HashMap<String, String>,
+    /// Final combined outputs (process + resolved) for dependent service access
+    pub outputs: HashMap<String, String>,
 }
 
 /// Context passed to each Lua evaluation.
@@ -42,6 +44,8 @@ pub struct EvalContext {
     pub hook_had_failure: Option<bool>,
     /// Dependency service states (keyed by dep service name)
     pub deps: HashMap<String, DepInfo>,
+    /// Hook outputs: `hook_name -> step_name -> { key -> value }`
+    pub hooks: HashMap<String, HashMap<String, HashMap<String, String>>>,
 }
 
 /// Evaluator for Lua scripts in config files.
@@ -157,6 +161,11 @@ impl LuaEvaluator {
         let env_shortcut: Table = ctx_table.get("env")?;
         env_table.set("env", env_shortcut)?;
 
+        // Add `hooks` shortcut (alias for ctx.hooks) if present
+        if let Ok(hooks_shortcut) = ctx_table.get::<Table>("hooks") {
+            env_table.set("hooks", hooks_shortcut)?;
+        }
+
         // Add `deps` table (frozen, from ctx.deps)
         let deps_table = self.build_deps_table(ctx)?;
         env_table.set("deps", deps_table)?;
@@ -215,6 +224,26 @@ impl LuaEvaluator {
             ctx_table.raw_set("status", status.as_str())?;
         }
 
+        // Add ctx.hooks (read-only, nested: hook_name → outputs → step_name → key → value)
+        // Access pattern: ctx.hooks.pre_start.outputs.step1.token
+        if !ctx.hooks.is_empty() {
+            let hooks_table = self.lua.create_table()?;
+            for (hook_name, steps) in &ctx.hooks {
+                let hook_table = self.lua.create_table()?;
+                let outputs_table = self.lua.create_table()?;
+                for (step_name, outputs) in steps {
+                    let step_table = self.create_frozen_env(outputs)?;
+                    outputs_table.raw_set(step_name.as_str(), step_table)?;
+                }
+                outputs_table.set_readonly(true);
+                hook_table.raw_set("outputs", outputs_table)?;
+                hook_table.set_readonly(true);
+                hooks_table.raw_set(hook_name.as_str(), hook_table)?;
+            }
+            hooks_table.set_readonly(true);
+            ctx_table.raw_set("hooks", hooks_table)?;
+        }
+
         // Freeze ctx table using Luau's native table.freeze
         ctx_table.set_readonly(true);
 
@@ -239,6 +268,10 @@ impl LuaEvaluator {
             // Add dep.env sub-table (frozen)
             let dep_env = self.create_frozen_env(&dep.env)?;
             dep_table.raw_set("env", dep_env)?;
+
+            // Add dep.outputs sub-table (frozen)
+            let dep_outputs = self.create_frozen_env(&dep.outputs)?;
+            dep_table.raw_set("outputs", dep_outputs)?;
 
             dep_table.set_readonly(true);
             deps_table.raw_set(name.as_str(), dep_table)?;

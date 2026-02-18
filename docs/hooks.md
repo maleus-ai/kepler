@@ -133,6 +133,7 @@ hooks:
 | `working_dir` | `string` | Working directory (overrides service default) |
 | `environment` | `string[]` | Additional environment variables |
 | `env_file` | `string` | Additional env file to load |
+| `output` | `string` | Output step name. Enables `::output::KEY=VALUE` capture on this step's stdout. See [Outputs](outputs.md) |
 
 ---
 
@@ -321,6 +322,33 @@ kepler logs --follow --no-hook  # Follow without hook output
 
 ---
 
+## Hook Step Outputs
+
+Hook steps can capture structured output by adding the `output: <step_name>` field. When set, the step's stdout is scanned for `::output::KEY=VALUE` markers and the captured values are made available to later steps and to service output declarations.
+
+Only steps with `output:` are scanned — steps without it have no capture overhead. The value of `output:` becomes the step name used in the access path:
+
+```
+ctx.hooks.<hook_name>.outputs.<step_name>.<key>
+hooks.<hook_name>.outputs.<step_name>.<key>     # shortcut
+```
+
+Within the same hook phase, later steps can reference outputs from earlier steps:
+
+```yaml
+hooks:
+  pre_start:
+    - run: echo "::output::port=8080"
+      output: config
+    - run: echo "Port is ${{ hooks.pre_start.outputs.config.port }}"
+```
+
+Marker lines are filtered from logs — they are captured but not written to the log stream. Regular output lines continue to appear in logs normally.
+
+Global hooks do **not** support output capture. See [Outputs](outputs.md) for the full reference including marker format, size limits, and cross-service access.
+
+---
+
 ## Cleanup Hooks
 
 The `pre_cleanup` hook (global) runs when the `--clean` flag is used with `kepler stop`:
@@ -380,6 +408,24 @@ services:
         command: ["./notify.sh", "Backend process exited"]
 ```
 
+### Hook Output Capture and Chaining
+
+```yaml
+services:
+  app:
+    command: ["./app"]
+    restart: no
+    hooks:
+      pre_start:
+        - run: |
+            TOKEN=$(openssl rand -hex 16)
+            echo "::output::token=$TOKEN"
+          output: gen_token
+        - run: echo "Starting with token ${{ hooks.pre_start.outputs.gen_token.token }}"
+    outputs:
+      auth_token: ${{ ctx.hooks.pre_start.outputs.gen_token.token }}
+```
+
 ### Different User for Hooks
 
 ```yaml
@@ -404,3 +450,4 @@ services:
 - [Health Checks](health-checks.md) -- Health check hooks
 - [Environment Variables](environment-variables.md) -- Hook environment inheritance
 - [Privilege Dropping](privilege-dropping.md) -- Hook user overrides
+- [Outputs](outputs.md) -- Hook step outputs, process outputs, and cross-service output passing
