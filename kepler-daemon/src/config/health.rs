@@ -3,13 +3,14 @@
 use serde::Deserialize;
 use std::time::Duration;
 
+use super::ConfigValue;
 use super::duration::{deserialize_duration, serialize_duration};
 
 /// Health check configuration
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthCheck {
-    pub test: Vec<String>,
+    pub test: ConfigValue<Vec<String>>,
     #[serde(default = "default_interval", deserialize_with = "deserialize_duration", serialize_with = "serialize_duration")]
     pub interval: Duration,
     #[serde(default = "default_timeout", deserialize_with = "deserialize_duration", serialize_with = "serialize_duration")]

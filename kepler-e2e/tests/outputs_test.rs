@@ -332,3 +332,102 @@ async fn test_combined_process_and_declared_outputs() -> E2eResult<()> {
     harness.stop_daemon().await?;
     Ok(())
 }
+
+/// Test that hook steps within the same phase can access outputs from prior steps.
+/// Step A emits outputs, step B reads them via ${{ hooks.pre_start.outputs.step_a.token }}$,
+/// step C emits its own, step D reads from both step A and step C.
+#[tokio::test]
+async fn test_hook_step_output_accumulation() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path =
+        harness.load_config(TEST_MODULE, "test_hook_step_output_accumulation")?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    harness
+        .wait_for_service_status(
+            &config_path,
+            "accumulator",
+            "running",
+            Duration::from_secs(10),
+        )
+        .await?;
+
+    // Verify the service started (hooks completed successfully)
+    let logs = harness
+        .wait_for_log_content(&config_path, "SERVICE_STARTED", Duration::from_secs(5))
+        .await?;
+    assert!(
+        logs.stdout_contains("SERVICE_STARTED"),
+        "Service should start after hooks complete. logs: {}",
+        logs.stdout
+    );
+
+    // Step B should have read step A's outputs
+    let all_logs = harness.get_logs(&config_path, None, 1000).await?;
+    assert!(
+        all_logs.stdout_contains("STEP_B_TOKEN=secret-42"),
+        "Step B should read step A's token output. logs: {}",
+        all_logs.stdout
+    );
+    assert!(
+        all_logs.stdout_contains("STEP_B_HOST=localhost"),
+        "Step B should read step A's host output. logs: {}",
+        all_logs.stdout
+    );
+
+    // Step D should have read both step A and step C's outputs
+    assert!(
+        all_logs.stdout_contains("STEP_D_ALL=secret-42-yes"),
+        "Step D should read step A and step C outputs. logs: {}",
+        all_logs.stdout
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Test that hook steps in a later phase can access outputs from an earlier phase.
+/// pre_start emits outputs, post_start reads them.
+#[tokio::test]
+async fn test_hook_cross_phase_output_access() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path =
+        harness.load_config(TEST_MODULE, "test_hook_cross_phase_output_access")?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    harness
+        .wait_for_service_status(
+            &config_path,
+            "cross-phase",
+            "running",
+            Duration::from_secs(10),
+        )
+        .await?;
+
+    // Give post_start hook time to run after the service starts
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // post_start hook should have read pre_start outputs
+    let all_logs = harness.get_logs(&config_path, None, 1000).await?;
+    assert!(
+        all_logs.stdout_contains("CROSS_PHASE_TOKEN=xyz-789"),
+        "post_start hook should read pre_start step's token. logs: {}",
+        all_logs.stdout
+    );
+    assert!(
+        all_logs.stdout_contains("CROSS_PHASE_PORT=3000"),
+        "post_start hook should read pre_start step's port. logs: {}",
+        all_logs.stdout
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}

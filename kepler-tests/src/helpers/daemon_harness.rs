@@ -1,12 +1,12 @@
 //! Test harness that manages daemon state without full binary
 
-use kepler_daemon::config::{KeplerConfig, LogRetention, RawServiceConfig, ServiceConfig, ServiceHooks};
+use kepler_daemon::config::{KeplerConfig, LogRetention, RawServiceConfig, ServiceConfig, ServiceHooks, resolve_log_store};
 use kepler_daemon::config_actor::{ConfigActor, ConfigActorHandle, TaskHandleType};
 use kepler_daemon::env::{insert_env_entries, load_env_file};
 use kepler_daemon::health::spawn_health_checker;
 use kepler_daemon::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use kepler_daemon::logs::{BufferedLogWriter, LogReader, LogStream, LogWriterConfig, LogLine};
-use kepler_daemon::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
+use kepler_daemon::process::{spawn_service, stop_service, CommandSpec, ProcessExitEvent, SpawnServiceParams};
 use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
 use std::collections::HashMap;
@@ -25,59 +25,17 @@ pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// lock to prevent other tests from creating files with unexpected permissions.
 pub static UMASK_LOCK: Mutex<()> = Mutex::new(());
 
-/// Resolve hooks for execution. Static hooks are returned directly from
-/// `resolved_config.hooks`. Dynamic hooks (`!lua` / `${{ }}$`) are resolved
-/// at execution time with `hook_name` in the evaluation context.
+/// Resolve hooks for execution. Hooks are now always directly available
+/// (inner ConfigValue fields are resolved per-step at execution time).
 async fn resolve_hooks_for_execution(
     handle: &ConfigActorHandle,
-    service_name: &str,
-    hook_type: ServiceHookType,
+    _service_name: &str,
+    _hook_type: ServiceHookType,
     resolved: &ServiceConfig,
-    env: &HashMap<String, String>,
+    _env: &HashMap<String, String>,
 ) -> (Option<ServiceHooks>, Option<String>) {
-    if resolved.hooks.is_some() {
-        let lua_code = handle.get_config().await.and_then(|c| c.lua.clone());
-        return (resolved.hooks.clone(), lua_code);
-    }
-
-    let config = match handle.get_config().await {
-        Some(c) => c,
-        None => return (None, None),
-    };
-    let raw = match config.services.get(service_name) {
-        Some(r) => r,
-        None => return (None, None),
-    };
-
-    // Static raw hooks that resolved to None = no hooks configured
-    if raw.hooks.as_static().is_some() {
-        return (None, config.lua.clone());
-    }
-
-    // Dynamic hooks — resolve with hook_name in context
-    let evaluator = match config.create_lua_evaluator() {
-        Ok(e) => e,
-        Err(_) => return (None, config.lua.clone()),
-    };
-
-    let state = handle.get_service_state(service_name).await;
-    let eval_ctx = kepler_daemon::lua_eval::EvalContext {
-        env: env.clone(),
-        service_name: Some(service_name.to_string()),
-        hook_name: Some(hook_type.as_str().to_string()),
-        initialized: state.as_ref().map(|s| s.initialized),
-        restart_count: state.as_ref().map(|s| s.restart_count),
-        exit_code: state.as_ref().and_then(|s| s.exit_code),
-        status: state.as_ref().map(|s| s.status.as_str().to_string()),
-        ..Default::default()
-    };
-
-    let hooks = raw.hooks.resolve(
-        &evaluator, &eval_ctx, handle.config_path(),
-        &format!("{}.hooks", service_name),
-    ).unwrap_or(None);
-
-    (hooks, config.lua.clone())
+    let lua_code = handle.get_config().await.and_then(|c| c.lua.clone());
+    (resolved.hooks.clone(), lua_code)
 }
 
 /// Test harness for managing daemon state
@@ -293,17 +251,24 @@ impl TestDaemonHarness {
             .is_service_initialized(service_name)
             .await;
 
-        let (hooks, lua_code) = resolve_hooks_for_execution(
+        let (hooks, _lua_code) = resolve_hooks_for_execution(
             &self.handle, service_name, ServiceHookType::PreStart, &resolved, &computed_env,
         ).await;
-        let mut hook_params = ServiceHookParams::from_service_context(
-            &resolved,
-            &working_dir,
-            &computed_env,
-            Some(&ctx.log_config),
-            ctx.global_log_config.as_ref(),
-        );
-        hook_params.lua_code = lua_code.as_deref();
+        let hook_params = ServiceHookParams {
+            working_dir: &working_dir,
+            env: &computed_env,
+            log_config: Some(&ctx.log_config),
+            service_user: resolved.user.as_deref(),
+            service_groups: &resolved.groups,
+            service_log_config: resolved.logs.as_ref(),
+            global_log_config: ctx.global_log_config.as_ref(),
+            deps: HashMap::new(),
+            all_hook_outputs: HashMap::new(),
+            output_max_size: 1024 * 1024,
+            evaluator: Some(&lua_evaluator),
+            config_path: Some(&self.config_path),
+            config_dir: Some(&self.config_dir),
+        };
 
         if should_run_init {
             // Mark as initialized
@@ -324,14 +289,24 @@ impl TestDaemonHarness {
         .await?;
 
         // Spawn the process
+        let (store_stdout, store_stderr) = resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
+        let spec = CommandSpec::with_all_options(
+            resolved.command.clone(),
+            working_dir,
+            computed_env,
+            resolved.user.clone(),
+            resolved.groups.clone(),
+            resolved.limits.clone(),
+            true,
+        );
         let spawn_params = SpawnServiceParams {
             service_name,
-            service_config: &resolved,
-            config_dir: &ctx.config_dir,
+            spec,
             log_config: ctx.log_config.clone(),
             handle: self.handle.clone(),
             exit_tx: self.exit_tx.clone(),
-            global_log_config: ctx.global_log_config.as_ref(),
+            store_stdout,
+            store_stderr,
             output_capture: None,
         };
         let process_handle = spawn_service(spawn_params).await?;
@@ -449,17 +424,31 @@ impl TestDaemonHarness {
         let resolved = ctx.resolved_config.as_ref().ok_or("Service not resolved")?;
 
         // Run on_stop hook
-        let (hooks, lua_code) = resolve_hooks_for_execution(
+        let (hooks, _lua_code) = resolve_hooks_for_execution(
             &self.handle, service_name, ServiceHookType::PreStop, resolved, &ctx.env,
         ).await;
-        let mut hook_params = ServiceHookParams::from_service_context(
-            resolved,
-            &ctx.working_dir,
-            &ctx.env,
-            Some(&ctx.log_config),
-            ctx.global_log_config.as_ref(),
-        );
-        hook_params.lua_code = lua_code.as_deref();
+        let working_dir = resolved
+            .working_dir
+            .as_ref()
+            .map(|wd| self.config_dir.join(wd))
+            .unwrap_or_else(|| self.config_dir.clone());
+        let lua_evaluator = self.handle.get_config().await
+            .and_then(|c| c.create_lua_evaluator().ok());
+        let hook_params = ServiceHookParams {
+            working_dir: &working_dir,
+            env: &ctx.env,
+            log_config: Some(&ctx.log_config),
+            service_user: resolved.user.as_deref(),
+            service_groups: &resolved.groups,
+            service_log_config: resolved.logs.as_ref(),
+            global_log_config: ctx.global_log_config.as_ref(),
+            deps: HashMap::new(),
+            all_hook_outputs: HashMap::new(),
+            output_max_size: 1024 * 1024,
+            evaluator: lua_evaluator.as_ref(),
+            config_path: Some(&self.config_path),
+            config_dir: Some(&self.config_dir),
+        };
 
         run_service_hook(
             &hooks,
@@ -488,17 +477,31 @@ impl TestDaemonHarness {
         let resolved = ctx.resolved_config.as_ref().ok_or("Service not resolved")?;
 
         // Run on_stop hook
-        let (hooks, lua_code) = resolve_hooks_for_execution(
+        let (hooks, _lua_code) = resolve_hooks_for_execution(
             &self.handle, service_name, ServiceHookType::PreStop, resolved, &ctx.env,
         ).await;
-        let mut hook_params = ServiceHookParams::from_service_context(
-            resolved,
-            &ctx.working_dir,
-            &ctx.env,
-            Some(&ctx.log_config),
-            ctx.global_log_config.as_ref(),
-        );
-        hook_params.lua_code = lua_code.as_deref();
+        let working_dir = resolved
+            .working_dir
+            .as_ref()
+            .map(|wd| self.config_dir.join(wd))
+            .unwrap_or_else(|| self.config_dir.clone());
+        let lua_evaluator = self.handle.get_config().await
+            .and_then(|c| c.create_lua_evaluator().ok());
+        let hook_params = ServiceHookParams {
+            working_dir: &working_dir,
+            env: &ctx.env,
+            log_config: Some(&ctx.log_config),
+            service_user: resolved.user.as_deref(),
+            service_groups: &resolved.groups,
+            service_log_config: resolved.logs.as_ref(),
+            global_log_config: ctx.global_log_config.as_ref(),
+            deps: HashMap::new(),
+            all_hook_outputs: HashMap::new(),
+            output_max_size: 1024 * 1024,
+            evaluator: lua_evaluator.as_ref(),
+            config_path: Some(&self.config_path),
+            config_dir: Some(&self.config_dir),
+        };
 
         run_service_hook(
             &hooks,
@@ -573,17 +576,33 @@ impl TestDaemonHarness {
                 };
 
                 // Run on_restart hook
-                let (hooks, lua_code) = resolve_hooks_for_execution(
+                let (hooks, _lua_code) = resolve_hooks_for_execution(
                     &handle, &event.service_name, ServiceHookType::PreRestart, resolved, &ctx.env,
                 ).await;
-                let mut hook_params = ServiceHookParams::from_service_context(
-                    resolved,
-                    &ctx.working_dir,
-                    &ctx.env,
-                    Some(&ctx.log_config),
-                    ctx.global_log_config.as_ref(),
-                );
-                hook_params.lua_code = lua_code.as_deref();
+                let working_dir = resolved
+                    .working_dir
+                    .as_ref()
+                    .map(|wd| ctx.config_dir.join(wd))
+                    .unwrap_or_else(|| ctx.config_dir.clone());
+                let lua_evaluator = handle.get_config().await
+                    .and_then(|c| c.create_lua_evaluator().ok());
+                let config_path = handle.config_path().to_path_buf();
+                let config_dir = config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+                let hook_params = ServiceHookParams {
+                    working_dir: &working_dir,
+                    env: &ctx.env,
+                    log_config: Some(&ctx.log_config),
+                    service_user: resolved.user.as_deref(),
+                    service_groups: &resolved.groups,
+                    service_log_config: resolved.logs.as_ref(),
+                    global_log_config: ctx.global_log_config.as_ref(),
+                    deps: HashMap::new(),
+                    all_hook_outputs: HashMap::new(),
+                    output_max_size: 1024 * 1024,
+                    evaluator: lua_evaluator.as_ref(),
+                    config_path: Some(&config_path),
+                    config_dir: Some(&config_dir),
+                };
 
                 let _ = run_service_hook(
                     &hooks,
@@ -625,14 +644,24 @@ impl TestDaemonHarness {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                 // Restart the service
+                let (store_stdout, store_stderr) = resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
+                let spec = CommandSpec::with_all_options(
+                    resolved.command.clone(),
+                    working_dir,
+                    ctx.env.clone(),
+                    resolved.user.clone(),
+                    resolved.groups.clone(),
+                    resolved.limits.clone(),
+                    true,
+                );
                 let spawn_params = SpawnServiceParams {
                     service_name: &event.service_name,
-                    service_config: resolved,
-                    config_dir: &ctx.config_dir,
+                    spec,
                     log_config: ctx.log_config.clone(),
                     handle: handle.clone(),
                     exit_tx: exit_tx.clone(),
-                    global_log_config: ctx.global_log_config.as_ref(),
+                    store_stdout,
+                    store_stderr,
                     output_capture: None,
                 };
                 if let Ok(process_handle) = spawn_service(spawn_params).await {
@@ -684,17 +713,33 @@ impl TestDaemonHarness {
                 };
 
                 // Run on_exit hook
-                let (hooks, lua_code) = resolve_hooks_for_execution(
+                let (hooks, _lua_code) = resolve_hooks_for_execution(
                     &handle, &event.service_name, ServiceHookType::PostExit, resolved, &ctx.env,
                 ).await;
-                let mut hook_params = ServiceHookParams::from_service_context(
-                    resolved,
-                    &ctx.working_dir,
-                    &ctx.env,
-                    Some(&ctx.log_config),
-                    ctx.global_log_config.as_ref(),
-                );
-                hook_params.lua_code = lua_code.as_deref();
+                let working_dir = resolved
+                    .working_dir
+                    .as_ref()
+                    .map(|wd| ctx.config_dir.join(wd))
+                    .unwrap_or_else(|| ctx.config_dir.clone());
+                let lua_evaluator = handle.get_config().await
+                    .and_then(|c| c.create_lua_evaluator().ok());
+                let config_path = handle.config_path().to_path_buf();
+                let config_dir = config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+                let hook_params = ServiceHookParams {
+                    working_dir: &working_dir,
+                    env: &ctx.env,
+                    log_config: Some(&ctx.log_config),
+                    service_user: resolved.user.as_deref(),
+                    service_groups: &resolved.groups,
+                    service_log_config: resolved.logs.as_ref(),
+                    global_log_config: ctx.global_log_config.as_ref(),
+                    deps: HashMap::new(),
+                    all_hook_outputs: HashMap::new(),
+                    output_max_size: 1024 * 1024,
+                    evaluator: lua_evaluator.as_ref(),
+                    config_path: Some(&config_path),
+                    config_dir: Some(&config_dir),
+                };
 
                 let _ = run_service_hook(
                     &hooks,
@@ -735,10 +780,9 @@ impl TestDaemonHarness {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                     // Run on_restart hook
-                    let (restart_hooks, restart_lua_code) = resolve_hooks_for_execution(
+                    let (restart_hooks, _restart_lua_code) = resolve_hooks_for_execution(
                         &handle, &event.service_name, ServiceHookType::PreRestart, resolved, &ctx.env,
                     ).await;
-                    hook_params.lua_code = restart_lua_code.as_deref();
 
                     let _ = run_service_hook(
                         &restart_hooks,
@@ -772,14 +816,24 @@ impl TestDaemonHarness {
                     }
 
                     // Restart the service
+                    let (store_stdout, store_stderr) = resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
+                    let spec = CommandSpec::with_all_options(
+                        resolved.command.clone(),
+                        working_dir.clone(),
+                        ctx.env.clone(),
+                        resolved.user.clone(),
+                        resolved.groups.clone(),
+                        resolved.limits.clone(),
+                        true,
+                    );
                     let spawn_params = SpawnServiceParams {
                         service_name: &event.service_name,
-                        service_config: resolved,
-                        config_dir: &ctx.config_dir,
+                        spec,
                         log_config: ctx.log_config.clone(),
                         handle: handle.clone(),
                         exit_tx: exit_tx.clone(),
-                        global_log_config: ctx.global_log_config.as_ref(),
+                        store_stdout,
+                        store_stderr,
                         output_capture: None,
                     };
                     if let Ok(process_handle) = spawn_service(spawn_params).await {

@@ -22,7 +22,7 @@ fn test_health_check_builder() {
         .with_retries(5)
         .build();
 
-    assert_eq!(hc.test, vec!["true"]);
+    assert_eq!(*hc.test.as_static().unwrap(), vec!["true"]);
     assert_eq!(hc.interval, Duration::from_secs(5));
     assert_eq!(hc.retries, 5);
 }

@@ -313,8 +313,8 @@ fn spawn_capture_task(
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 // Check for ::output:: marker
-                if let Some(ref mut cap) = captured {
-                    if let Some(kv) = line.strip_prefix("::output::") {
+                if let Some(ref mut cap) = captured
+                    && let Some(kv) = line.strip_prefix("::output::") {
                         if kv.contains('=') {
                             if !capture_overflow {
                                 let line_size = kv.len();
@@ -338,7 +338,6 @@ fn spawn_capture_task(
                         // Marker lines are NOT written to logs
                         continue;
                     }
-                }
 
                 if log_to_tracing {
                     info!(target: "hook", "[{}] {}", service_name, line);

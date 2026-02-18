@@ -316,7 +316,7 @@ services:
 
     let healthcheck = service.healthcheck.as_ref().unwrap();
     assert_eq!(
-        healthcheck.test,
+        *healthcheck.test.as_static().unwrap(),
         vec!["sh", "-c", "curl -f http://localhost:8080/health"]
     );
 }
@@ -582,8 +582,8 @@ services:
     }
 
     let logs = config.global_logs().expect("kepler.logs should exist");
-    assert_eq!(logs.max_size, Some("50M".to_string()));
-    assert_eq!(logs.buffer_size, Some(16384));
+    assert_eq!(*logs.max_size.as_static().unwrap(), Some("50M".to_string()));
+    assert_eq!(*logs.buffer_size.as_static().unwrap(), Some(16384));
 }
 
 /// Test: !lua tag works for service-level logs configuration
@@ -619,8 +619,8 @@ services:
     }
 
     let logs = service.logs.as_ref().expect("service.logs should exist");
-    assert_eq!(logs.max_size, Some("100M".to_string()));
-    assert_eq!(logs.buffer_size, Some(0));
+    assert_eq!(*logs.max_size.as_static().unwrap(), Some("100M".to_string()));
+    assert_eq!(*logs.buffer_size.as_static().unwrap(), Some(0));
 }
 
 /// Test: depends_on simple list with static service names

@@ -1,6 +1,6 @@
 //! Restart policy and file watching tests
 
-use kepler_daemon::config::{RestartConfig, RestartPolicy, ServiceHooks, HookCommand, HookList};
+use kepler_daemon::config::{ConfigValue, RestartConfig, RestartPolicy, ServiceHooks, HookCommand, HookList};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -262,7 +262,7 @@ async fn test_restart_config_extended_policy_only() {
             ])
             .with_restart_config(RestartConfig::Extended {
                 policy: RestartPolicy::Always,
-                watch: vec![],
+                watch: vec![].into(),
             })
             .build(),
         )
@@ -703,14 +703,14 @@ fn test_should_restart_on_file_change_helper() {
     // Extended form - no watch
     let extended_no_watch = RestartConfig::Extended {
         policy: RestartPolicy::Always,
-        watch: vec![],
+        watch: vec![].into(),
     };
     assert!(!extended_no_watch.should_restart_on_file_change());
 
     // Extended form - with watch
     let extended_with_watch = RestartConfig::Extended {
         policy: RestartPolicy::Always,
-        watch: vec!["*.ts".to_string()],
+        watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
     };
     assert!(extended_with_watch.should_restart_on_file_change());
 }
@@ -725,7 +725,7 @@ fn test_watch_patterns_accessor() {
     // Extended form with patterns
     let extended = RestartConfig::Extended {
         policy: RestartPolicy::Always,
-        watch: vec!["src/**/*.ts".to_string(), "*.json".to_string()],
+        watch: ConfigValue::wrap_vec(vec!["src/**/*.ts".to_string(), "*.json".to_string()]).into(),
     };
     assert_eq!(extended.watch_patterns().len(), 2);
     assert_eq!(extended.watch_patterns()[0], "src/**/*.ts");
@@ -743,7 +743,7 @@ fn test_policy_accessor() {
 
     let extended = RestartConfig::Extended {
         policy: RestartPolicy::OnFailure,
-        watch: vec![],
+        watch: vec![].into(),
     };
     assert_eq!(extended.policy(), &RestartPolicy::OnFailure);
 }
@@ -758,21 +758,21 @@ fn test_restart_config_validate() {
     // Valid: extended with always + watch
     let extended_valid = RestartConfig::Extended {
         policy: RestartPolicy::Always,
-        watch: vec!["*.ts".to_string()],
+        watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
     };
     assert!(extended_valid.validate().is_ok());
 
     // Valid: extended with on-failure + watch
     let extended_on_failure = RestartConfig::Extended {
         policy: RestartPolicy::OnFailure,
-        watch: vec!["*.ts".to_string()],
+        watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
     };
     assert!(extended_on_failure.validate().is_ok());
 
     // Invalid: policy: no + watch
     let invalid = RestartConfig::Extended {
         policy: RestartPolicy::No,
-        watch: vec!["*.ts".to_string()],
+        watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
     };
     let result = invalid.validate();
     assert!(result.is_err());

@@ -1,6 +1,6 @@
 //! Hook execution tests
 
-use kepler_daemon::config::{HookCommand, HookCommon, HookList, ServiceHooks};
+use kepler_daemon::config::{ConfigValue, HookCommand, HookCommon, HookList, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -52,10 +52,10 @@ async fn test_command_format_hook() {
 
     let hooks = ServiceHooks {
         pre_start: Some(HookList(vec![HookCommand::Command {
-            command: vec![
+            command: ConfigValue::wrap_vec(vec![
                 "touch".to_string(),
                 marker_path.to_string_lossy().to_string(),
-            ],
+            ]).into(),
             common: HookCommon::default(),
         }])),
         ..Default::default()
@@ -365,9 +365,9 @@ async fn test_hook_own_environment_variables() {
 
     let hooks = ServiceHooks {
         pre_start: Some(HookList(vec![HookCommand::Script {
-            run: format!("echo \"HOOK_VAR=$HOOK_VAR\" >> {}", marker_path.display()),
+            run: format!("echo \"HOOK_VAR=$HOOK_VAR\" >> {}", marker_path.display()).into(),
             common: HookCommon {
-                environment: vec!["HOOK_VAR=from_hook".to_string()],
+                environment: ConfigValue::wrap_vec(vec!["HOOK_VAR=from_hook".to_string()]).into(),
                 ..Default::default()
             },
         }])),
@@ -418,9 +418,9 @@ async fn test_hook_env_file() {
 
     let hooks = ServiceHooks {
         pre_start: Some(HookList(vec![HookCommand::Script {
-            run: format!("echo \"HOOK_FILE_VAR=$HOOK_FILE_VAR\" >> {}", marker_path.display()),
+            run: format!("echo \"HOOK_FILE_VAR=$HOOK_FILE_VAR\" >> {}", marker_path.display()).into(),
             common: HookCommon {
-                env_file: Some(env_file_path),
+                env_file: Some(env_file_path).into(),
                 ..Default::default()
             },
         }])),
@@ -471,9 +471,9 @@ async fn test_hook_env_overrides_service_env() {
 
     let hooks = ServiceHooks {
         pre_start: Some(HookList(vec![HookCommand::Script {
-            run: format!("echo SHARED_VAR=$(printenv SHARED_VAR) >> {}", marker_path.display()),
+            run: format!("echo SHARED_VAR=$(printenv SHARED_VAR) >> {}", marker_path.display()).into(),
             common: HookCommon {
-                environment: vec!["SHARED_VAR=from_hook".to_string()],
+                environment: ConfigValue::wrap_vec(vec!["SHARED_VAR=from_hook".to_string()]).into(),
                 ..Default::default()
             },
         }])),
@@ -521,9 +521,9 @@ async fn test_hook_env_expansion_with_service_env() {
 
     let hooks = ServiceHooks {
         pre_start: Some(HookList(vec![HookCommand::Script {
-            run: format!("echo \"COMBINED=$COMBINED\" >> {}", marker_path.display()),
+            run: format!("echo \"COMBINED=$COMBINED\" >> {}", marker_path.display()).into(),
             common: HookCommon {
-                environment: vec!["COMBINED=${{ env.SERVICE_VAR }}$_plus_hook".to_string()],
+                environment: ConfigValue::wrap_vec(vec!["COMBINED=${{ env.SERVICE_VAR }}$_plus_hook".to_string()]).into(),
                 ..Default::default()
             },
         }])),
@@ -588,10 +588,10 @@ async fn test_hook_env_priority() {
                 marker_path.display(),
                 marker_path.display(),
                 marker_path.display()
-            ),
+            ).into(),
             common: HookCommon {
-                environment: vec!["VAR3=hook_env".to_string()],
-                env_file: Some(hook_env_file),
+                environment: ConfigValue::wrap_vec(vec!["VAR3=hook_env".to_string()]).into(),
+                env_file: Some(hook_env_file).into(),
                 ..Default::default()
             },
         }])),
@@ -670,8 +670,8 @@ async fn test_log_output_disabled() {
         .with_logs(LogConfig {
             store: Some(LogStoreConfig::Simple(false)),
             retention: None,
-            max_size: None,
-            buffer_size: None,
+            max_size: ConfigValue::default(),
+            buffer_size: ConfigValue::default(),
         })
         .add_service(
             "test",
@@ -726,8 +726,8 @@ async fn test_log_output_enabled() {
         .with_logs(LogConfig {
             store: Some(LogStoreConfig::Simple(true)),
             retention: None,
-            max_size: None,
-            buffer_size: None,
+            max_size: ConfigValue::default(),
+            buffer_size: ConfigValue::default(),
         })
         .add_service(
             "test",
@@ -815,9 +815,9 @@ async fn test_hook_always_runs_after_failure() {
         pre_start: Some(HookList(vec![
             HookCommand::script(format!("echo 'first' >> {} && exit 1", order_file.display())),
             HookCommand::Script {
-                run: format!("echo 'always' >> {}", order_file.display()),
+                run: format!("echo 'always' >> {}", order_file.display()).into(),
                 common: HookCommon {
-                    condition: Some("always()".to_string()),
+                    condition: Some("always()".to_string()).into(),
                     ..Default::default()
                 },
             },
@@ -860,9 +860,9 @@ async fn test_hook_failure_condition_runs() {
         pre_start: Some(HookList(vec![
             HookCommand::script(format!("echo 'first' >> {} && exit 1", order_file.display())),
             HookCommand::Script {
-                run: format!("echo 'on_failure' >> {}", order_file.display()),
+                run: format!("echo 'on_failure' >> {}", order_file.display()).into(),
                 common: HookCommon {
-                    condition: Some("failure()".to_string()),
+                    condition: Some("failure()".to_string()).into(),
                     ..Default::default()
                 },
             },
@@ -905,9 +905,9 @@ async fn test_hook_success_condition_skips_after_failure() {
         pre_start: Some(HookList(vec![
             HookCommand::script(format!("echo 'first' >> {} && exit 1", order_file.display())),
             HookCommand::Script {
-                run: format!("echo 'on_success' >> {}", order_file.display()),
+                run: format!("echo 'on_success' >> {}", order_file.display()).into(),
                 common: HookCommon {
-                    condition: Some("success()".to_string()),
+                    condition: Some("success()".to_string()).into(),
                     ..Default::default()
                 },
             },
@@ -949,9 +949,9 @@ async fn test_hook_error_still_propagates() {
         pre_start: Some(HookList(vec![
             HookCommand::script(format!("echo 'first' >> {} && exit 1", order_file.display())),
             HookCommand::Script {
-                run: format!("echo 'cleanup' >> {}", order_file.display()),
+                run: format!("echo 'cleanup' >> {}", order_file.display()).into(),
                 common: HookCommon {
-                    condition: Some("always()".to_string()),
+                    condition: Some("always()".to_string()).into(),
                     ..Default::default()
                 },
             },

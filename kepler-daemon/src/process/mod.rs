@@ -17,12 +17,11 @@ pub use spawn::{spawn_blocking, spawn_detached, BlockingMode, BlockingResult, De
 pub use validation::{kill_process_by_pid, validate_running_process};
 
 use chrono::Utc;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::config::{resolve_log_store, resolve_sys_env, LogConfig, ServiceConfig, SysEnvPolicy};
 use crate::config_actor::{ConfigActorHandle, TaskHandleType};
 use crate::errors::{DaemonError, Result};
 use crate::logs::LogWriterConfig;
@@ -40,12 +39,12 @@ pub struct ProcessExitEvent {
 /// Parameters for spawning a service
 pub struct SpawnServiceParams<'a> {
     pub service_name: &'a str,
-    pub service_config: &'a ServiceConfig,
-    pub config_dir: &'a Path,
+    pub spec: CommandSpec,
     pub log_config: LogWriterConfig,
     pub handle: ConfigActorHandle,
     pub exit_tx: mpsc::Sender<ProcessExitEvent>,
-    pub global_log_config: Option<&'a LogConfig>,
+    pub store_stdout: bool,
+    pub store_stderr: bool,
     /// Optional output capture for `::output::KEY=VALUE` markers
     pub output_capture: Option<OutputCaptureConfig>,
 }
@@ -54,30 +53,17 @@ pub struct SpawnServiceParams<'a> {
 pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHandle> {
     let SpawnServiceParams {
         service_name,
-        service_config,
-        config_dir,
+        spec,
         log_config,
         handle,
         exit_tx,
-        global_log_config,
+        store_stdout,
+        store_stderr,
         output_capture,
     } = params;
 
-    let working_dir = service_config
-        .working_dir
-        .as_ref()
-        .map(|wd| config_dir.join(wd))
-        .unwrap_or_else(|| config_dir.to_path_buf());
-
-    // Get environment from the service context (already pre-computed)
-    let env = handle
-        .get_service_context(service_name)
-        .await
-        .map(|ctx| ctx.env)
-        .unwrap_or_default();
-
     // Validate command
-    if service_config.command.is_empty() {
+    if spec.program_and_args.is_empty() {
         return Err(DaemonError::Config(format!(
             "Service {} has empty command",
             service_name
@@ -87,28 +73,9 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
     info!(
         "Starting service {}: {} {:?}",
         service_name,
-        &service_config.command[0],
-        &service_config.command[1..]
+        &spec.program_and_args[0],
+        &spec.program_and_args[1..]
     );
-
-    // Resolve sys_env policy: service setting > global setting > default (Clear)
-    let global_sys_env = handle.get_global_sys_env().await;
-    let resolved_sys_env = resolve_sys_env(service_config.sys_env.as_ref(), global_sys_env.as_ref());
-    let clear_env = resolved_sys_env == SysEnvPolicy::Clear;
-
-    let spec = CommandSpec::with_all_options(
-        service_config.command.clone(),
-        working_dir,
-        env,
-        service_config.user.clone(),
-        service_config.groups.clone(),
-        service_config.limits.clone(),
-        clear_env,
-    );
-
-    // Resolve store settings
-    let (store_stdout, store_stderr) =
-        resolve_log_store(service_config.logs.as_ref(), global_log_config);
 
     // Spawn the command detached for monitoring
     let result = spawn_detached(

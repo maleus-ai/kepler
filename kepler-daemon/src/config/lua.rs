@@ -31,10 +31,7 @@ pub fn process_lua_scripts(
             if let Some(logs_value) = kepler_map.get_mut(Value::String("logs".to_string())) {
                 let ctx = EvalContext {
                     sys_env: sys_env.clone(),
-                    env_file: HashMap::new(),
                     env: sys_env.clone(),
-                    service_name: None,
-                    hook_name: None,
                     ..Default::default()
                 };
                 super::expand::evaluate_value_tree(logs_value, evaluator, &ctx, config_path, "kepler.logs")?;
@@ -63,23 +60,23 @@ fn process_global_hooks_lua(
         _ => return Ok(()),
     };
 
-    // Process each hook type with its name in the context
+    // Process each hook type with its name in the context.
+    // Build the base context once; only hook_name changes per iteration.
     let hook_names: Vec<String> = hooks_map
         .keys()
         .filter_map(|k| k.as_str().map(String::from))
         .collect();
 
+    let mut ctx = EvalContext {
+        sys_env: sys_env.clone(),
+        env: sys_env.clone(),
+        ..Default::default()
+    };
+
     for hook_name in hook_names {
         if let Some(hook_value) = hooks_map.get_mut(Value::String(hook_name.clone())) {
             let field_path = format!("kepler.hooks.{}", hook_name);
-            let ctx = EvalContext {
-                sys_env: sys_env.clone(),
-                env_file: HashMap::new(),
-                env: sys_env.clone(),
-                service_name: None, // Global hooks have no service
-                hook_name: Some(hook_name),
-                ..Default::default()
-            };
+            ctx.hook_name = Some(hook_name);
             super::expand::evaluate_value_tree(hook_value, evaluator, &ctx, config_path, &field_path)?;
         }
     }

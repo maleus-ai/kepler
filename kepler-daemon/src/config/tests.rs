@@ -120,14 +120,31 @@ environment:
     assert!(!raw.command.is_dynamic());
     assert!(!raw.environment.is_dynamic());
 
+    // With the new design, sequences are always Static at the outer level.
+    // Inner elements with ${{ }}$ are individually Dynamic.
     let yaml_dynamic = r#"
 command: ["./app", "${{ env.HOME }}$"]
 environment:
   - FOO=${{ env.HOME }}$
 "#;
     let raw_dyn: RawServiceConfig = serde_yaml::from_str(yaml_dynamic).unwrap();
-    assert!(raw_dyn.command.is_dynamic());
-    assert!(raw_dyn.environment.is_dynamic());
+    // Outer level is Static (sequence), inner elements have dynamic content
+    assert!(!raw_dyn.command.is_dynamic());
+    assert!(!raw_dyn.environment.is_dynamic());
+    // Verify inner elements: first is static, second is dynamic
+    let cmd_items = raw_dyn.command.as_static().unwrap();
+    assert!(!cmd_items[0].is_dynamic());
+    assert!(cmd_items[1].is_dynamic());
+    let env_items = raw_dyn.environment.as_static().unwrap();
+    assert!(env_items[0].is_dynamic());
+
+    // Top-level !lua makes the outer ConfigValue dynamic
+    let yaml_lua = r#"
+command: !lua |
+  return {"./app", env.HOME}
+"#;
+    let raw_lua: RawServiceConfig = serde_yaml::from_str(yaml_lua).unwrap();
+    assert!(raw_lua.command.is_dynamic());
 }
 
 #[test]
@@ -391,7 +408,7 @@ services:
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     let raw = &config.services["svc"];
-    let hooks = raw.hooks.as_static().unwrap().as_ref().unwrap();
+    let hooks = raw.hooks.as_ref().unwrap();
     let hook = &hooks.pre_start.as_ref().unwrap().0[0];
     assert_eq!(hook.output(), Some("step1"));
 }
@@ -408,7 +425,7 @@ services:
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     let raw = &config.services["svc"];
-    let hooks = raw.hooks.as_static().unwrap().as_ref().unwrap();
+    let hooks = raw.hooks.as_ref().unwrap();
     let hook = &hooks.pre_start.as_ref().unwrap().0[0];
     assert_eq!(hook.output(), None);
 }
@@ -441,8 +458,8 @@ services:
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     let raw = &config.services["svc"];
     let outputs = raw.outputs.as_static().unwrap().as_ref().unwrap();
-    assert_eq!(outputs.get("port"), Some(&"8080".to_string()));
-    assert_eq!(outputs.get("host"), Some(&"localhost".to_string()));
+    assert_eq!(outputs.get("port").and_then(|v| v.as_static()), Some(&"8080".to_string()));
+    assert_eq!(outputs.get("host").and_then(|v| v.as_static()), Some(&"localhost".to_string()));
 }
 
 #[test]

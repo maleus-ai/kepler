@@ -523,6 +523,9 @@ impl ConfigActor {
             ConfigCommand::GetConfigDir { reply } => {
                 let _ = reply.send(self.config_dir.clone());
             }
+            ConfigCommand::GetStateDir { reply } => {
+                let _ = reply.send(self.persistence.state_dir().to_path_buf());
+            }
             ConfigCommand::GetLogConfig { reply } => {
                 let _ = reply.send(self.log_config.clone());
             }
@@ -989,6 +992,7 @@ impl ConfigActor {
             service_config,
             resolved_config,
             config_dir: self.config_dir.clone(),
+            state_dir: self.persistence.state_dir().to_path_buf(),
             log_config: self.log_config.clone(),
             global_log_config: self.config.global_logs().cloned(),
             env: service_state.computed_env.clone(),

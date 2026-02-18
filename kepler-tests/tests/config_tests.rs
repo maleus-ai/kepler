@@ -115,12 +115,12 @@ services:
     assert!(hooks.post_healthcheck_fail.is_some());
 
     match &hooks.post_healthcheck_success.as_ref().unwrap().0[0] {
-        HookCommand::Script { run, .. } => assert_eq!(run, "echo healthy"),
+        HookCommand::Script { run, .. } => assert_eq!(run.as_static().unwrap(), "echo healthy"),
         _ => panic!("Expected Script hook"),
     }
 
     match &hooks.post_healthcheck_fail.as_ref().unwrap().0[0] {
-        HookCommand::Script { run, .. } => assert_eq!(run, "echo unhealthy"),
+        HookCommand::Script { run, .. } => assert_eq!(run.as_static().unwrap(), "echo unhealthy"),
         _ => panic!("Expected Script hook"),
     }
 }
@@ -197,7 +197,7 @@ services:
     let hooks = svc.hooks.as_ref().unwrap();
     match &hooks.pre_start.as_ref().unwrap().0[0] {
         HookCommand::Script { run, .. } => {
-            assert_eq!(run, "echo hello && echo world");
+            assert_eq!(run.as_static().unwrap(), "echo hello && echo world");
         }
         _ => panic!("Expected Script hook"),
     }
@@ -225,7 +225,9 @@ services:
     let hooks = svc.hooks.as_ref().unwrap();
     match &hooks.pre_start.as_ref().unwrap().0[0] {
         HookCommand::Command { command, .. } => {
-            assert_eq!(command, &vec!["echo", "hello", "world"]);
+            let cmd_strs: Vec<&str> = command.as_static().unwrap().iter()
+                .filter_map(|v| v.as_static().map(|s| s.as_str())).collect();
+            assert_eq!(cmd_strs, vec!["echo", "hello", "world"]);
         }
         _ => panic!("Expected Command hook"),
     }

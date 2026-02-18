@@ -21,11 +21,23 @@ lua: |
     return name
   end
 
+  -- Shared global state for cross-service coordination
+  global.base_port = 3000
+  global.platform_version = "2.5.0"
+  global.initialized_services = 0
+
+  -- Track service initialization
+  function track_init(name)
+    global.initialized_services = global.initialized_services + 1
+    return name .. " (#" .. tostring(global.initialized_services) .. ")"
+  end
+
   -- Build environment array for a service with optional extras
   function svc_env(name, extras)
     local env = {
       "SERVICE_NAME=" .. name,
-      "SERVICE_PORT=" .. next_port()
+      "SERVICE_PORT=" .. next_port(),
+      "PLATFORM_VERSION=" .. global.platform_version
     }
     if extras then
       for _, e in ipairs(extras) do
@@ -38,6 +50,7 @@ lua: |
 kepler:
   sys_env: inherit
   timeout: 30s
+  output_max_size: "2mb"
 
   logs:
     max_size: "1M"
@@ -50,7 +63,7 @@ kepler:
 
   hooks:
     pre_start:
-      - if: "not ctx.initialized"
+      - if: not ctx.initialized
         run: echo "Global on_init — initializing platform"
         environment:
           - KEPLER_PHASE=init
@@ -105,7 +118,7 @@ services:
         on_exit: retain
     hooks:
       pre_start:
-        - if: "not ctx.initialized"
+        - if: not ctx.initialized
           run: echo "postgres on_init — creating data directory"
         - command: ["sh", "-c", "echo 'postgres pre_start — checking config'"]
       post_start:
@@ -212,63 +225,76 @@ services:
   # TIER 2: One-Shot Setup (5 services, service_completed_successfully / service_healthy deps)
   # ═══════════════════════════════════════════════════════════════════════════
 
-  # 6. db-migration — Depends on postgres healthy with timeout
+  # 6. db-migration — run: form, output capture, hook step outputs, advanced hook if
   db-migration:
-    command:
-      [
-        "sh",
-        "-c",
-        "echo 'Running database migrations...'; sleep 1; echo 'Migrations complete'; exit 0",
-      ]
+    run: |
+      echo 'Running database migrations...'
+      sleep 1
+      echo '::output::schema_version=42'
+      echo '::output::tables_migrated=15'
+      echo 'Migrations complete'
     restart: no
+    output: true
     depends_on:
       postgres:
         condition: service_healthy
         timeout: 60s
     hooks:
       pre_start:
-        run: echo "db-migration pre_start — checking schema version"
+        - run: echo "::output::started_at=$(date +%s)"
+          output: timing
+        - run: echo "db-migration pre_start — schema version from hook=${{ hooks.pre_start.outputs.timing.started_at }}$"
+        - if: always()
+          run: echo "db-migration pre_start — always runs regardless of prior step outcome"
       post_exit:
-        run: echo "db-migration post_exit — migration finished"
+        - if: ctx.exit_code == 0
+          run: echo "db-migration post_exit — migration succeeded"
+        - if: failure()
+          run: echo "db-migration post_exit — a prior hook step failed, running cleanup"
 
-  # 7. db-seed — Depends on db-migration completed
+  # 7. db-seed — Cross-service output access, sequential env evaluation, outputs declaration
   db-seed:
-    command:
-      [
-        "sh",
-        "-c",
-        "echo 'Seeding database...'; sleep 1; echo 'Seed data loaded'; exit 0",
-      ]
+    run: |
+      echo "Seeding database (schema v${SCHEMA_VERSION})..."
+      sleep 1
+      echo "::output::rows_inserted=500"
+      echo "::output::seed_status=complete"
+      echo "Seed data loaded"
     restart: no
+    output: true
     depends_on:
       db-migration:
         condition: service_completed_successfully
     environment:
       - SEED_ENV=development
       - SEED_COUNT=100
+      - SCHEMA_VERSION=${{ deps["db-migration"].outputs.schema_version or "unknown" }}$
+      - SEED_LABEL=${{ env.SEED_ENV }}$-v${{ env.SCHEMA_VERSION }}$
+    outputs:
+      seed_summary: "${{ env.SEED_LABEL }}$:${{ env.SEED_COUNT }}$-rows"
 
-  # 8. redis-init — Depends on redis healthy
+  # 8. redis-init — run: form, output capture
   redis-init:
-    command:
-      [
-        "sh",
-        "-c",
-        "echo 'Initializing Redis keyspaces...'; sleep 1; echo 'Redis init complete'; exit 0",
-      ]
+    run: |
+      echo 'Initializing Redis keyspaces...'
+      sleep 1
+      echo '::output::keyspaces=sessions,cache,locks'
+      echo 'Redis init complete'
     restart: no
+    output: true
     depends_on:
       redis:
         condition: service_healthy
 
-  # 9. minio-init — Depends on minio healthy with timeout, limits
+  # 9. minio-init — run: form, output capture, limits
   minio-init:
-    command:
-      [
-        "sh",
-        "-c",
-        "echo 'Creating MinIO buckets...'; sleep 1; echo 'Buckets created'; exit 0",
-      ]
+    run: |
+      echo 'Creating MinIO buckets...'
+      sleep 1
+      echo '::output::buckets=uploads,backups,logs'
+      echo 'Buckets created'
     restart: no
+    output: true
     depends_on:
       minio:
         condition: service_healthy
@@ -276,15 +302,15 @@ services:
     limits:
       memory: "128M"
 
-  # 10. consul-register — Depends on consul healthy, lua environment
+  # 10. consul-register — run: form, lua environment, output capture
   consul-register:
-    command:
-      [
-        "sh",
-        "-c",
-        "echo 'Registering services in Consul...'; sleep 1; echo 'Registration complete'; exit 0",
-      ]
+    run: |
+      echo 'Registering services in Consul...'
+      sleep 1
+      echo '::output::registry_count=5'
+      echo 'Registration complete'
     restart: no
+    output: true
     depends_on:
       consul:
         condition: service_healthy
@@ -295,14 +321,9 @@ services:
   # TIER 3: Core Services (5 services)
   # ═══════════════════════════════════════════════════════════════════════════
 
-  # 11. auth-service — 3 deps (2 healthy + 1 completed), 7 hooks
+  # 11. auth-service — 3 deps, ctx.restart_count, dep output access, hook dep state, global table
   auth-service:
-    command:
-      [
-        "sh",
-        "-c",
-        "echo 'Auth service starting'; touch /tmp/auth_ready; while true; do sleep 5; done",
-      ]
+    command: ${{ ctx.restart_count > 0 and {"sh", "-c", "echo 'Auth service RESTARTING (attempt " .. ctx.restart_count .. ")'; touch /tmp/auth_ready; while true; do sleep 5; done"} or {"sh", "-c", "echo 'Auth service starting'; touch /tmp/auth_ready; while true; do sleep 5; done"} }}$
     restart: always
     depends_on:
       - postgres:
@@ -312,6 +333,9 @@ services:
           condition: service_healthy
       - db-migration:
           condition: service_completed_successfully
+    environment:
+      - SCHEMA_VERSION=${{ deps["db-migration"].outputs.schema_version or "unknown" }}$
+      - RESTART_COUNT=${{ ctx.restart_count }}$
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/auth_ready"]
       interval: 2s
@@ -320,21 +344,27 @@ services:
       start_period: 2s
     hooks:
       pre_start:
-        - if: "not ctx.initialized"
-          run: echo "auth-service on_init — loading JWT keys"
-        - run: echo "auth-service pre_start — validating config"
+        - if: not ctx.initialized
+          run: echo "::output::jwt_key=rsa-256-init"
+          output: init_keys
+          environment: !lua |
+            track_init(ctx.service_name)
+            return {"INIT_PHASE=jwt_setup"}
+        - run: echo "auth-service pre_start — schema=${{ deps['db-migration'].outputs.schema_version or 'n/a' }}$"
       post_start:
         command: ["sh", "-c", "echo 'auth-service post_start — listening'"]
       pre_stop:
-        run: echo "auth-service pre_stop — draining connections"
+        - run: echo "auth-service pre_stop — draining connections"
+        - if: deps.postgres.status == 'healthy'
+          run: echo "auth-service pre_stop — postgres still healthy, flushing sessions"
       post_stop:
         command: ["sh", "-c", "echo 'auth-service post_stop — cleanup done'"]
       pre_restart:
-        run: echo "auth-service pre_restart — saving state"
+        run: echo "auth-service pre_restart — restart #${{ ctx.restart_count }}$, saving state"
       post_restart:
         run: echo "auth-service post_restart — state restored"
 
-  # 12. config-service — restart:on-failure, healthcheck start_period:0s
+  # 12. config-service — restart:on-failure, dep output access, healthcheck start_period:0s
   config-service:
     command:
       [
@@ -349,6 +379,8 @@ services:
           restart: true
       - consul-register:
           condition: service_completed_successfully
+    environment:
+      - REGISTRY_COUNT=${{ deps["consul-register"].outputs.registry_count or "0" }}$
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/config_ready"]
       interval: 2s
@@ -356,7 +388,7 @@ services:
       retries: 3
       start_period: 0s
 
-  # 13. gateway — File watching, long timeout dep
+  # 13. gateway — File watching, long timeout dep, dynamic env_file path
   gateway:
     command:
       [
@@ -373,6 +405,9 @@ services:
           timeout: 2m
       - config-service:
           condition: service_healthy
+    env_file: ${{ ctx.sys_env.GATEWAY_ENV_FILE or ".env" }}$
+    environment:
+      - GATEWAY_VERSION=${{ global.platform_version }}$
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/gateway_ready"]
       interval: 2s
@@ -401,7 +436,7 @@ services:
       retries: 3
       start_period: 2s
 
-  # 15. storage-service — Lua environment with ctx.env, restart:on-failure
+  # 15. storage-service — Lua env, cross-service output access, ctx.status
   storage-service:
     command:
       [
@@ -416,13 +451,19 @@ services:
       - minio-init:
           condition: service_completed_successfully
     environment: !lua |
-      return svc_env(ctx.service_name, {"STORAGE_BACKEND=s3"})
+      return svc_env(ctx.service_name, {
+        "STORAGE_BACKEND=s3",
+        "AVAILABLE_BUCKETS=" .. (deps["minio-init"].outputs.buckets or "default")
+      })
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/storage_ready"]
       interval: 2s
       timeout: 3s
       retries: 3
       start_period: 2s
+    hooks:
+      pre_start:
+        run: echo "storage-service pre_start — minio status=${{ deps.minio.status }}$"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # TIER 4: Business Services (10 services)
@@ -614,7 +655,7 @@ services:
       retries: 3
       start_period: 2s
 
-  # 24. analytics-service — 3-way fan-in including completed dep
+  # 24. analytics-service — 3-way fan-in, cross-service output access, dep state in hooks
   analytics-service:
     command:
       [
@@ -630,22 +671,28 @@ services:
           condition: service_healthy
       - redis-init:
           condition: service_completed_successfully
+    environment:
+      - REDIS_KEYSPACES=${{ deps["redis-init"].outputs.keyspaces or "default" }}$
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/analytics_ready"]
       interval: 3s
       timeout: 5s
       retries: 4
       start_period: 3s
+    hooks:
+      pre_start:
+        run: echo "analytics pre_start — postgres restarts=${{ deps.postgres.restart_count }}$, event-bus initialized=${{ deps['event-bus'].initialized }}$"
 
-  # 25. report-service — restart:no, logs retention on_exit:retain
+  # 25. report-service — run: form, logs retention, output capture
   report-service:
-    command:
-      [
-        "sh",
-        "-c",
-        "echo 'Report service starting'; sleep 2; echo 'Report generated'; exit 0",
-      ]
+    run: |
+      echo "Report service starting"
+      sleep 2
+      echo "::output::report_id=rpt-$(date +%s)"
+      echo "::output::report_status=generated"
+      echo "Report generated"
     restart: no
+    output: true
     depends_on:
       - analytics-service:
           condition: service_healthy
@@ -972,8 +1019,9 @@ services:
       retries: 3
       start_period: 2s
     environment: !lua |
+      local label = track_init(ctx.service_name)
       register_service(ctx.service_name)
-      return svc_env(ctx.service_name, nil)
+      return svc_env(ctx.service_name, {"INIT_LABEL=" .. label})
 
   # 42. trace-collector — Deep chain (5+ levels: rabbitmq→event-bus→gateway→trace-collector)
   trace-collector:
@@ -1072,19 +1120,22 @@ services:
       - health-monitor:
           condition: service_unhealthy
 
-  # 48. cascade-handler — Deferred chain (depends on deferred service completing), allow_skipped
+  # 48. cascade-handler — Deferred chain, allow_skipped, skipped() function, dep state access
   cascade-handler:
-    command:
-      [
-        "sh",
-        "-c",
-        "echo 'Cascade handler — running post-failover tasks'; sleep 1; exit 0",
-      ]
+    run: |
+      echo "Cascade handler — running post-failover tasks"
+      sleep 1
     restart: no
     depends_on:
       - postgres-failover:
           condition: service_completed_successfully
           allow_skipped: true
+    hooks:
+      pre_start:
+        - if: skipped('postgres-failover')
+          run: echo "cascade-handler — postgres-failover was skipped, running in no-op mode"
+        - if: success('postgres-failover')
+          run: echo "cascade-handler — postgres-failover succeeded, proceeding with full recovery"
 
   # 49. emergency-shutdown — 3x service_failed fan-in
   emergency-shutdown:
@@ -1104,20 +1155,28 @@ services:
           condition: service_failed
     hooks:
       pre_start:
-        - if: "not ctx.initialized"
-          run: echo "emergency-shutdown on_init — loading runbook"
-        - run: echo "emergency-shutdown pre_start — notifying oncall"
+        - if: not ctx.initialized
+          run: echo "::output::runbook_loaded=true"
+          output: init_step
+        - run: echo "emergency-shutdown pre_start — notifying oncall, runbook=${{ hooks.pre_start.outputs.init_step.runbook_loaded or 'skipped' }}$"
+        - if: failure()
+          run: echo "emergency-shutdown pre_start — a prior step failed, proceeding with caution"
+        - if: always()
+          run: echo "emergency-shutdown pre_start — final step always executes"
       post_exit:
-        run: echo "emergency-shutdown post_exit — incident report filed"
+        - if: ctx.exit_code == 0
+          run: echo "emergency-shutdown post_exit — incident report filed successfully"
+        - if: ctx.exit_code ~= 0
+          run: echo "emergency-shutdown post_exit — shutdown failed with code ${{ ctx.exit_code }}$"
 
-  # 50. post-mortem — Depends on emergency-shutdown completing, inline expression expansion, hook command format
+  # 50. post-mortem — run: form, embedded expressions, dep exit_code access
   post-mortem:
-    command:
-      [
-        "sh",
-        "-c",
-        "echo 'Post-mortem analysis starting'; echo 'Report dir: ${REPORT_DIR:-/tmp/reports}'; sleep 2; echo 'Post-mortem complete'; exit 0",
-      ]
+    run: |
+      echo "Post-mortem analysis starting"
+      echo "Report dir: ${REPORT_DIR}"
+      echo "Emergency shutdown exit code: ${EMERGENCY_EXIT_CODE}"
+      sleep 2
+      echo "Post-mortem complete"
     restart: no
     depends_on:
       - emergency-shutdown:
@@ -1126,9 +1185,14 @@ services:
     environment:
       - REPORT_DIR=${{ env.REPORT_DIR or "/tmp/reports" }}$
       - INCIDENT_ID=${{ env.INCIDENT_ID or "unknown" }}$
+      - EMERGENCY_EXIT_CODE=${{ deps["emergency-shutdown"].exit_code }}$
+      - PLATFORM_VERSION=${{ global.platform_version }}$
     hooks:
       post_exit:
-        command: ["sh", "-c", "echo 'post-mortem post_exit — archiving report'"]
+        - command:
+            ["sh", "-c", "echo 'post-mortem post_exit — archiving report'"]
+        - if: always()
+          run: echo "post-mortem — final cleanup, status=${{ ctx.status }}$"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # TIER 8: Optional/Conditional (2 services)

@@ -17,7 +17,7 @@ use std::path::Path;
 use super::SysEnvPolicy;
 use crate::config::lua::lua_to_yaml;
 use crate::errors::{DaemonError, Result};
-use crate::lua_eval::{EvalContext, LuaEvaluator, PreparedEnv};
+use crate::lua_eval::{EvalContext, LuaEvaluator};
 
 /// Resolve sys_env policy for a service.
 /// Priority: service explicit setting > global setting > default (Inherit)
@@ -41,7 +41,7 @@ pub fn resolve_sys_env(
 
 /// A token from parsing a `${{ expr }}$` expression string.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ExprToken<'a> {
+pub enum ExprToken<'a> {
     /// Literal text outside any `${{ }}$` marker.
     String(&'a str),
     /// Lua expression content (trimmed text between `${{` and `}}$`).
@@ -55,7 +55,7 @@ pub(crate) enum ExprToken<'a> {
 /// no ambiguity with nested braces in Lua table constructors.
 ///
 /// An unclosed `${{` (no matching `}}$`) is emitted as literal text.
-pub(crate) fn parse_expr_tokens(s: &str) -> Vec<ExprToken<'_>> {
+pub fn parse_expr_tokens(s: &str) -> Vec<ExprToken<'_>> {
     let mut tokens = Vec::new();
     let mut remaining = s;
     let mut offset = 0;
@@ -91,7 +91,7 @@ pub(crate) fn parse_expr_tokens(s: &str) -> Vec<ExprToken<'_>> {
 
 /// Check if tokens represent a standalone expression (single `${{ expr }}$`
 /// with only optional surrounding whitespace).
-pub(crate) fn is_standalone_tokens(tokens: &[ExprToken<'_>]) -> bool {
+pub fn is_standalone_tokens(tokens: &[ExprToken<'_>]) -> bool {
     let mut found_expr = false;
     for token in tokens {
         match token {
@@ -113,7 +113,7 @@ pub(crate) fn is_standalone_tokens(tokens: &[ExprToken<'_>]) -> bool {
 
 /// Extract the expression from standalone tokens.
 /// Panics if the tokens are not standalone.
-fn extract_expr_from_standalone<'a>(tokens: &[ExprToken<'a>]) -> &'a str {
+pub fn extract_expr_from_standalone<'a>(tokens: &[ExprToken<'a>]) -> &'a str {
     for token in tokens {
         if let ExprToken::Expression(expr) = token {
             return expr;
@@ -200,7 +200,7 @@ pub fn evaluate_expression_string_with_env(
 }
 
 /// Convert a Lua value to a string representation for interpolation.
-fn lua_value_to_string(value: &mlua::Value) -> String {
+pub(crate) fn lua_value_to_string(value: &mlua::Value) -> String {
     match value {
         mlua::Value::Nil => String::new(),
         mlua::Value::Boolean(b) => b.to_string(),
@@ -249,25 +249,14 @@ fn evaluate_value_tree_inner(
     ctx: &EvalContext,
     config_path: &Path,
     field_path: &str,
-    in_depends_on: bool,
+    in_deferred_field: bool,
     cached_env: &mut Option<mlua::Table>,
 ) -> Result<()> {
     use serde_yaml::Value;
 
     match &*value {
-        Value::String(s) if !in_depends_on && s.contains("${{") => {
-            // Lazily build env table on first dynamic expression
-            let env_table = match cached_env {
-                Some(t) => t.clone(),
-                None => {
-                    let t = evaluator.prepare_env(ctx).map_err(|e| DaemonError::LuaError {
-                        path: config_path.to_path_buf(),
-                        message: format!("Error building Lua environment: {}", e),
-                    })?;
-                    *cached_env = Some(t.clone());
-                    t
-                }
-            };
+        Value::String(s) if !in_deferred_field && s.contains("${{") => {
+            let env_table = super::get_or_build_env(evaluator, ctx, config_path, cached_env)?;
 
             let tokens = parse_expr_tokens(s);
             if is_standalone_tokens(&tokens) {
@@ -294,18 +283,7 @@ fn evaluate_value_tree_inner(
                 message: "!lua value must be a string".to_string(),
             })?;
 
-            // Lazily build env table on first dynamic expression
-            let env_table = match cached_env {
-                Some(t) => t.clone(),
-                None => {
-                    let t = evaluator.prepare_env(ctx).map_err(|e| DaemonError::LuaError {
-                        path: config_path.to_path_buf(),
-                        message: format!("Error building Lua environment: {}", e),
-                    })?;
-                    *cached_env = Some(t.clone());
-                    t
-                }
-            };
+            let env_table = super::get_or_build_env(evaluator, ctx, config_path, cached_env)?;
 
             let lua_result: mlua::Value =
                 evaluator
@@ -325,7 +303,7 @@ fn evaluate_value_tree_inner(
                     ctx,
                     config_path,
                     field_path,
-                    in_depends_on,
+                    in_deferred_field,
                     cached_env,
                 )?;
             }
@@ -334,7 +312,7 @@ fn evaluate_value_tree_inner(
             if let Value::Mapping(map) = value {
                 let keys: Vec<serde_yaml::Value> = map.keys().cloned().collect();
                 for key in keys {
-                    let is_depends_on = key.as_str() == Some("depends_on")
+                    let is_deferred = key.as_str() == Some("depends_on")
                         || key.as_str() == Some("outputs");
                     let child_path = if let Some(key_str) = key.as_str() {
                         if field_path.is_empty() {
@@ -352,7 +330,7 @@ fn evaluate_value_tree_inner(
                             ctx,
                             config_path,
                             &child_path,
-                            is_depends_on,
+                            is_deferred,
                             cached_env,
                         )?;
                     }
@@ -368,7 +346,7 @@ fn evaluate_value_tree_inner(
                         ctx,
                         config_path,
                         field_path,
-                        in_depends_on,
+                        in_deferred_field,
                         cached_env,
                     )?;
                 }
@@ -380,75 +358,6 @@ fn evaluate_value_tree_inner(
     Ok(())
 }
 
-/// Evaluate `${{ }}$` in environment entries sequentially, building up context as we go.
-///
-/// Each entry's key=value is added to `ctx.env` after evaluation,
-/// so later entries can reference earlier ones.
-pub fn evaluate_environment_sequential(
-    env_value: &mut serde_yaml::Value,
-    evaluator: &LuaEvaluator,
-    ctx: &mut EvalContext,
-    config_path: &Path,
-    service_name: &str,
-) -> Result<()> {
-    use serde_yaml::Value;
-
-    if let Value::Sequence(seq) = env_value {
-        for item in seq.iter_mut() {
-            if let Value::String(s) = item {
-                if s.contains("${{") {
-                    let chunk_name = format!("{}.environment", service_name);
-                    *s = evaluate_expression_string(s, evaluator, ctx, config_path, &chunk_name)?;
-                }
-                // Add to context for subsequent entries
-                if let Some((key, value)) = s.split_once('=') {
-                    ctx.env.insert(key.to_string(), value.to_string());
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Evaluate `${{ }}$` in environment entries sequentially using a `PreparedEnv`.
-///
-/// Like `evaluate_environment_sequential` but reuses the pre-built env table
-/// and updates it in-place via `prepared.set_env()` as new entries are resolved,
-/// avoiding a full env table rebuild per entry.
-pub fn evaluate_environment_sequential_with_env(
-    env_value: &mut serde_yaml::Value,
-    evaluator: &LuaEvaluator,
-    ctx: &mut EvalContext,
-    prepared: &PreparedEnv,
-    config_path: &Path,
-    service_name: &str,
-) -> Result<()> {
-    use serde_yaml::Value;
-
-    if let Value::Sequence(seq) = env_value {
-        for item in seq.iter_mut() {
-            if let Value::String(s) = item {
-                if s.contains("${{") {
-                    let chunk_name = format!("{}.environment", service_name);
-                    *s = evaluate_expression_string_with_env(
-                        s, evaluator, &prepared.table, config_path, &chunk_name,
-                    )?;
-                }
-                // Add to both ctx.env and the live Lua env table
-                if let Some((key, value)) = s.split_once('=') {
-                    ctx.env.insert(key.to_string(), value.to_string());
-                    prepared.set_env(key, value).map_err(|e| DaemonError::LuaError {
-                        path: config_path.to_path_buf(),
-                        message: format!("Error updating Lua env table: {}", e),
-                    })?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests;

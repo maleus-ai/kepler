@@ -1,6 +1,6 @@
 //! Output storage for hook step and service process outputs.
 //!
-//! Disk layout under `<config_dir>/.kepler/outputs/<service>/`:
+//! Disk layout under `<state_dir>/outputs/<service>/`:
 //! - `hooks/<hook_name>/<step_name>.json` — hook step outputs
 //! - `process.json` — process `::output::KEY=VALUE` outputs
 //! - `outputs.json` — final combined outputs for dependent services
@@ -15,32 +15,30 @@ use crate::errors::Result;
 pub fn parse_capture_lines(lines: &[String]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for line in lines {
-        if let Some((key, value)) = line.split_once('=') {
-            if !key.is_empty() {
+        if let Some((key, value)) = line.split_once('=')
+            && !key.is_empty() {
                 map.insert(key.to_string(), value.to_string());
             }
-        }
     }
     map
 }
 
 /// Base directory for a service's outputs.
-fn service_outputs_dir(config_dir: &Path, service: &str) -> std::path::PathBuf {
-    config_dir
-        .join(".kepler")
+fn service_outputs_dir(base_dir: &Path, service: &str) -> std::path::PathBuf {
+    base_dir
         .join("outputs")
         .join(service)
 }
 
 /// Write hook step outputs for a service hook phase/step.
 pub fn write_hook_step_outputs(
-    config_dir: &Path,
+    base_dir: &Path,
     service: &str,
     hook_name: &str,
     step_name: &str,
     outputs: &HashMap<String, String>,
 ) -> Result<()> {
-    let dir = service_outputs_dir(config_dir, service)
+    let dir = service_outputs_dir(base_dir, service)
         .join("hooks")
         .join(hook_name);
     std::fs::create_dir_all(&dir).map_err(|e| {
@@ -64,10 +62,10 @@ pub fn write_hook_step_outputs(
 
 /// Read all hook outputs for a service: `hook_name -> step_name -> { key -> value }`.
 pub fn read_all_hook_outputs(
-    config_dir: &Path,
+    base_dir: &Path,
     service: &str,
 ) -> HashMap<String, HashMap<String, HashMap<String, String>>> {
-    let hooks_dir = service_outputs_dir(config_dir, service).join("hooks");
+    let hooks_dir = service_outputs_dir(base_dir, service).join("hooks");
     let mut result: HashMap<String, HashMap<String, HashMap<String, String>>> = HashMap::new();
 
     let hook_entries = match std::fs::read_dir(&hooks_dir) {
@@ -87,13 +85,11 @@ pub fn read_all_hook_outputs(
         let mut steps: HashMap<String, HashMap<String, String>> = HashMap::new();
         for step_entry in step_entries.flatten() {
             let file_name = step_entry.file_name().to_string_lossy().to_string();
-            if let Some(step_name) = file_name.strip_suffix(".json") {
-                if let Ok(contents) = std::fs::read_to_string(step_entry.path()) {
-                    if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&contents) {
-                        steps.insert(step_name.to_string(), map);
-                    }
+            if let Some(step_name) = file_name.strip_suffix(".json")
+                && let Ok(contents) = std::fs::read_to_string(step_entry.path())
+                && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&contents) {
+                    steps.insert(step_name.to_string(), map);
                 }
-            }
         }
         if !steps.is_empty() {
             result.insert(hook_name, steps);
@@ -105,11 +101,11 @@ pub fn read_all_hook_outputs(
 
 /// Write process outputs for a service.
 pub fn write_process_outputs(
-    config_dir: &Path,
+    base_dir: &Path,
     service: &str,
     outputs: &HashMap<String, String>,
 ) -> Result<()> {
-    let dir = service_outputs_dir(config_dir, service);
+    let dir = service_outputs_dir(base_dir, service);
     std::fs::create_dir_all(&dir).map_err(|e| {
         crate::errors::DaemonError::Internal(format!(
             "Failed to create output dir {:?}: {}",
@@ -134,10 +130,10 @@ pub fn write_process_outputs(
 
 /// Read process outputs for a service.
 pub fn read_process_outputs(
-    config_dir: &Path,
+    base_dir: &Path,
     service: &str,
 ) -> HashMap<String, String> {
-    let path = service_outputs_dir(config_dir, service).join("process.json");
+    let path = service_outputs_dir(base_dir, service).join("process.json");
     match std::fs::read_to_string(&path) {
         Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
         Err(_) => HashMap::new(),
@@ -146,11 +142,11 @@ pub fn read_process_outputs(
 
 /// Write final resolved outputs (process outputs merged with declared outputs).
 pub fn write_resolved_outputs(
-    config_dir: &Path,
+    base_dir: &Path,
     service: &str,
     outputs: &HashMap<String, String>,
 ) -> Result<()> {
-    let dir = service_outputs_dir(config_dir, service);
+    let dir = service_outputs_dir(base_dir, service);
     std::fs::create_dir_all(&dir).map_err(|e| {
         crate::errors::DaemonError::Internal(format!(
             "Failed to create output dir {:?}: {}",
@@ -178,35 +174,33 @@ pub fn write_resolved_outputs(
 /// Merges process outputs with resolved outputs (resolved takes precedence).
 /// Falls back to just process outputs if no resolved outputs exist.
 pub fn read_service_outputs(
-    config_dir: &Path,
+    base_dir: &Path,
     service: &str,
 ) -> HashMap<String, String> {
-    let dir = service_outputs_dir(config_dir, service);
+    let dir = service_outputs_dir(base_dir, service);
     let outputs_path = dir.join("outputs.json");
     let process_path = dir.join("process.json");
 
     let mut result = HashMap::new();
 
     // Start with process outputs
-    if let Ok(contents) = std::fs::read_to_string(&process_path) {
-        if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&contents) {
+    if let Ok(contents) = std::fs::read_to_string(&process_path)
+        && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&contents) {
             result.extend(map);
         }
-    }
 
     // Override with resolved outputs (declarations take precedence)
-    if let Ok(contents) = std::fs::read_to_string(&outputs_path) {
-        if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&contents) {
+    if let Ok(contents) = std::fs::read_to_string(&outputs_path)
+        && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&contents) {
             result.extend(map);
         }
-    }
 
     result
 }
 
 /// Clear all outputs for a service.
-pub fn clear_service_outputs(config_dir: &Path, service: &str) -> Result<()> {
-    let dir = service_outputs_dir(config_dir, service);
+pub fn clear_service_outputs(base_dir: &Path, service: &str) -> Result<()> {
+    let dir = service_outputs_dir(base_dir, service);
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| {
             crate::errors::DaemonError::Internal(format!(

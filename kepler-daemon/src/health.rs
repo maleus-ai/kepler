@@ -10,7 +10,6 @@ use crate::config::HealthCheck;
 use crate::config_actor::ConfigActorHandle;
 use crate::events::{HealthStatus, ServiceEvent};
 use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
-use crate::lua_eval::EvalContext;
 use crate::state::ServiceStatus;
 
 /// Spawn a health check monitoring task for a service
@@ -61,7 +60,8 @@ async fn health_check_loop(
         };
 
         // Run health check with service environment
-        let passed = run_health_check(&config.test, config.timeout, &ctx.env, &ctx.working_dir).await;
+        let test_cmd = config.test.as_static().cloned().unwrap_or_default();
+        let passed = run_health_check(&test_cmd, config.timeout, &ctx.env, &ctx.working_dir).await;
 
         // Update state based on result
         let update_result = handle
@@ -181,61 +181,30 @@ async fn run_status_change_hook(
             }
         };
 
-        let working_dir = resolved
-            .working_dir
-            .as_ref()
-            .map(|wd| ctx.config_dir.join(wd))
-            .unwrap_or_else(|| ctx.config_dir.clone());
+        // Create evaluator for hook step resolution
+        let config = handle.get_config().await;
+        let evaluator = config.as_ref()
+            .and_then(|c| c.create_lua_evaluator().ok());
 
-        let hook_params = ServiceHookParams::from_service_context(
-            resolved,
-            &working_dir,
-            &ctx.env,
-            Some(&ctx.log_config),
-            ctx.global_log_config.as_ref(),
-        );
-
-        // For static hooks, use resolved.hooks. For dynamic hooks, resolve with hook_name.
-        let hooks = if resolved.hooks.is_some() || ctx.service_config.hooks.as_static().is_some() {
-            resolved.hooks.clone()
-        } else {
-            // Dynamic hooks — resolve from raw config with hook_name in context
-            match handle.get_config().await {
-                Some(config) => {
-                    match config.services.get(service_name) {
-                        Some(raw) => {
-                            let evaluator = match config.create_lua_evaluator() {
-                                Ok(e) => e,
-                                Err(e) => {
-                                    warn!("Failed to create Lua evaluator for {}: {}", service_name, e);
-                                    return;
-                                }
-                            };
-                            let state = handle.get_service_state(service_name).await;
-                            let eval_ctx = EvalContext {
-                                env: ctx.env.clone(),
-                                service_name: Some(service_name.to_string()),
-                                hook_name: Some(hook_type.as_str().to_string()),
-                                initialized: state.as_ref().map(|s| s.initialized),
-                                restart_count: state.as_ref().map(|s| s.restart_count),
-                                exit_code: state.as_ref().and_then(|s| s.exit_code),
-                                status: state.as_ref().map(|s| s.status.as_str().to_string()),
-                                ..Default::default()
-                            };
-                            match raw.hooks.resolve(&evaluator, &eval_ctx, handle.config_path(), &format!("{}.hooks", service_name)) {
-                                Ok(h) => h,
-                                Err(e) => {
-                                    warn!("Failed to resolve hooks for {}: {}", service_name, e);
-                                    return;
-                                }
-                            }
-                        }
-                        None => return,
-                    }
-                }
-                None => None,
-            }
+        let hook_params = ServiceHookParams {
+            working_dir: &ctx.working_dir,
+            env: &ctx.env,
+            log_config: Some(&ctx.log_config),
+            service_user: resolved.user.as_deref(),
+            service_groups: &resolved.groups,
+            service_log_config: resolved.logs.as_ref(),
+            global_log_config: ctx.global_log_config.as_ref(),
+            deps: HashMap::new(),
+            all_hook_outputs: HashMap::new(),
+            output_max_size: crate::config::DEFAULT_OUTPUT_MAX_SIZE,
+            evaluator: evaluator.as_ref(),
+            config_path: Some(handle.config_path()),
+            config_dir: Some(&ctx.config_dir),
         };
+
+        // Hooks are always available from resolved config (inner fields may still
+        // be ConfigValue::Dynamic, resolved per-step in run_hook_step).
+        let hooks = resolved.hooks.clone();
 
         if let Err(e) = run_service_hook(
             &hooks,

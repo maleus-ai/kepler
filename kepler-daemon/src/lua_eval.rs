@@ -193,92 +193,10 @@ impl LuaEvaluator {
     /// resolution completes, then reuse `PreparedEnv::table` for all remaining
     /// field resolutions.
     pub fn prepare_env_mutable(&self, ctx: &EvalContext) -> LuaResult<PreparedEnv> {
-        let env_table = self.lua.create_table()?;
-
-        // Create the `ctx` table — same as build_ctx_table but env sub-table is unfrozen
-        let ctx_table = self.lua.create_table()?;
-
-        // Add ctx.sys_env (read-only)
-        let sys_env = self.create_frozen_env(&ctx.sys_env)?;
-        ctx_table.raw_set("sys_env", sys_env)?;
-
-        // Add ctx.env_file (read-only)
-        let env_file = self.create_frozen_env(&ctx.env_file)?;
-        ctx_table.raw_set("env_file", env_file)?;
-
-        // Add ctx.env (frozen from Lua's perspective; set_env toggles readonly from Rust)
-        let env = self.create_frozen_env(&ctx.env)?;
-        ctx_table.raw_set("env", env.clone())?;
-
-        // Add scalar ctx fields
-        if let Some(ref service_name) = ctx.service_name {
-            ctx_table.raw_set("service_name", service_name.as_str())?;
-        }
-        if let Some(ref hook_name) = ctx.hook_name {
-            ctx_table.raw_set("hook_name", hook_name.as_str())?;
-        }
-        if let Some(initialized) = ctx.initialized {
-            ctx_table.raw_set("initialized", initialized)?;
-        }
-        if let Some(restart_count) = ctx.restart_count {
-            ctx_table.raw_set("restart_count", restart_count)?;
-        }
-        if let Some(exit_code) = ctx.exit_code {
-            ctx_table.raw_set("exit_code", exit_code)?;
-        }
-        if let Some(ref status) = ctx.status {
-            ctx_table.raw_set("status", status.as_str())?;
-        }
-
-        // Add ctx.hooks (read-only)
-        if !ctx.hooks.is_empty() {
-            let hooks_table = self.lua.create_table()?;
-            for (hook_name, steps) in &ctx.hooks {
-                let hook_table = self.lua.create_table()?;
-                let outputs_table = self.lua.create_table()?;
-                for (step_name, outputs) in steps {
-                    let step_table = self.create_frozen_env(outputs)?;
-                    outputs_table.raw_set(step_name.as_str(), step_table)?;
-                }
-                outputs_table.set_readonly(true);
-                hook_table.raw_set("outputs", outputs_table)?;
-                hook_table.set_readonly(true);
-                hooks_table.raw_set(hook_name.as_str(), hook_table)?;
-            }
-            hooks_table.set_readonly(true);
-            ctx_table.raw_set("hooks", hooks_table)?;
-        }
-
-        // Freeze ctx table (shallow — nested env table stays unfrozen)
-        ctx_table.set_readonly(true);
-
-        env_table.set("ctx", ctx_table.clone())?;
-
-        // Add `env` shortcut (alias for ctx.env — same unfrozen table)
-        env_table.set("env", env.clone())?;
-
-        // Add `hooks` shortcut
-        if let Ok(hooks_shortcut) = ctx_table.get::<Table>("hooks") {
-            env_table.set("hooks", hooks_shortcut)?;
-        }
-
-        // Add `deps` table (frozen)
-        let deps_table = self.build_deps_table(ctx)?;
-        env_table.set("deps", deps_table)?;
-
-        // Add `global` (shared mutable table)
-        let global: Table = self.lua.globals().get("global")?;
-        env_table.set("global", global)?;
-
-        // Set metatable with __index fallback to globals
-        let globals = self.lua.globals();
-        let meta = self.lua.create_table()?;
-        meta.set("__index", globals)?;
-        env_table.set_metatable(Some(meta));
-
+        let (table, env_table) = self.build_full_env_table(ctx, false)?;
         Ok(PreparedEnv {
-            table: env_table,
-            env_table: env,
+            table,
+            env_table,
             permanently_frozen: std::cell::Cell::new(false),
         })
     }
@@ -297,15 +215,23 @@ impl LuaEvaluator {
     /// Includes `ctx`, `deps`, `env` (shortcut for `ctx.env`), `global`,
     /// and a `__index` fallback to Lua globals (stdlib + user functions).
     fn build_env_table(&self, ctx: &EvalContext) -> LuaResult<Table> {
+        self.build_full_env_table(ctx, true).map(|(table, _)| table)
+    }
+
+    /// Build the full environment table with ctx, deps, env shortcut, global, and metatable.
+    ///
+    /// When `freeze_env` is true, `ctx.env` is frozen (normal path).
+    /// When false, the env sub-table stays unfrozen for `PreparedEnv::set_env()`.
+    /// Returns `(env_table, env_sub_table)`.
+    fn build_full_env_table(&self, ctx: &EvalContext, freeze_env: bool) -> LuaResult<(Table, Table)> {
         let env_table = self.lua.create_table()?;
 
         // Create the `ctx` table with granular access
-        let ctx_table = self.build_ctx_table(ctx)?;
+        let (ctx_table, env_sub) = self.build_ctx_table(ctx, freeze_env)?;
         env_table.set("ctx", ctx_table.clone())?;
 
         // Add `env` shortcut (alias for ctx.env)
-        let env_shortcut: Table = ctx_table.get("env")?;
-        env_table.set("env", env_shortcut)?;
+        env_table.set("env", env_sub.clone())?;
 
         // Add `hooks` shortcut (alias for ctx.hooks) if present
         if let Ok(hooks_shortcut) = ctx_table.get::<Table>("hooks") {
@@ -327,11 +253,15 @@ impl LuaEvaluator {
         meta.set("__index", globals)?;
         env_table.set_metatable(Some(meta));
 
-        Ok(env_table)
+        Ok((env_table, env_sub))
     }
 
     /// Build the `ctx` table used by all evaluation environments.
-    fn build_ctx_table(&self, ctx: &EvalContext) -> LuaResult<Table> {
+    ///
+    /// When `freeze_env` is true, the `ctx.env` sub-table is frozen (normal path).
+    /// When false, it stays unfrozen so `PreparedEnv::set_env()` can mutate it.
+    /// Returns `(ctx_table, env_sub_table)`.
+    fn build_ctx_table(&self, ctx: &EvalContext, freeze_env: bool) -> LuaResult<(Table, Table)> {
         let ctx_table = self.lua.create_table()?;
 
         // Add ctx.sys_env (read-only)
@@ -342,9 +272,20 @@ impl LuaEvaluator {
         let env_file = self.create_frozen_env(&ctx.env_file)?;
         ctx_table.raw_set("env_file", env_file)?;
 
-        // Add ctx.env (read-only full accumulated environment)
-        let env = self.create_frozen_env(&ctx.env)?;
-        ctx_table.raw_set("env", env)?;
+        // Add ctx.env (frozen or unfrozen depending on freeze_env)
+        let env = if freeze_env {
+            self.create_frozen_env(&ctx.env)?
+        } else {
+            // Create env table that's readonly from Lua's perspective but
+            // can be toggled from Rust via PreparedEnv::set_env()
+            let t = self.lua.create_table()?;
+            for (k, v) in &ctx.env {
+                t.raw_set(k.as_str(), v.as_str())?;
+            }
+            t.set_readonly(true);
+            t
+        };
+        ctx_table.raw_set("env", env.clone())?;
 
         // Add ctx.service_name (nil if global)
         if let Some(ref service_name) = ctx.service_name {
@@ -393,7 +334,7 @@ impl LuaEvaluator {
         // Freeze ctx table using Luau's native table.freeze
         ctx_table.set_readonly(true);
 
-        Ok(ctx_table)
+        Ok((ctx_table, env))
     }
 
     /// Build the `deps` table (frozen) from context dependencies.

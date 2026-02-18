@@ -1,7 +1,7 @@
 //! Programmatic config creation with builder pattern
 
 use kepler_daemon::config::{
-    DependsOn, GlobalHooks, HealthCheck, HookCommand, HookCommon, KeplerConfig,
+    ConfigValue, DependsOn, GlobalHooks, HealthCheck, HookCommand, HookCommon, KeplerConfig,
     KeplerGlobalConfig, LogConfig, RawServiceConfig, ResourceLimits, RestartConfig, RestartPolicy,
     ServiceConfig, ServiceHooks, SysEnvPolicy,
 };
@@ -230,7 +230,7 @@ impl TestServiceBuilder {
 
     /// Set restart policy with watch patterns
     pub fn with_restart_and_watch(mut self, policy: RestartPolicy, watch: Vec<String>) -> Self {
-        self.restart = RestartConfig::Extended { policy, watch };
+        self.restart = RestartConfig::Extended { policy, watch: ConfigValue::wrap_vec(watch).into() };
         self
     }
 
@@ -394,7 +394,7 @@ impl TestHealthCheckBuilder {
 
     pub fn build(self) -> HealthCheck {
         HealthCheck {
-            test: self.test,
+            test: self.test.into(),
             interval: self.interval,
             timeout: self.timeout,
             retries: self.retries,
@@ -415,7 +415,7 @@ impl TestHookBuilder {
     /// Create a command hook using the `command:` format
     pub fn command(cmd: &[&str]) -> HookCommand {
         HookCommand::Command {
-            command: cmd.iter().map(|s| s.to_string()).collect(),
+            command: ConfigValue::wrap_vec(cmd.iter().map(|s| s.to_string()).collect()).into(),
             common: HookCommon::default(),
         }
     }
@@ -433,50 +433,56 @@ impl TestHookBuilder {
     /// Create a script hook with environment variables
     pub fn script_with_env(script: &str, environment: Vec<String>) -> HookCommand {
         HookCommand::Script {
-            run: script.to_string(),
-            common: HookCommon { environment, ..Default::default() },
+            run: script.to_string().into(),
+            common: HookCommon {
+                environment: ConfigValue::wrap_vec(environment).into(),
+                ..Default::default()
+            },
         }
     }
 
     /// Create a script hook with an env_file
     pub fn script_with_env_file(script: &str, env_file: PathBuf) -> HookCommand {
         HookCommand::Script {
-            run: script.to_string(),
-            common: HookCommon { env_file: Some(env_file), ..Default::default() },
+            run: script.to_string().into(),
+            common: HookCommon { env_file: Some(env_file).into(), ..Default::default() },
         }
     }
 
     /// Create a script hook with a custom working directory
     pub fn script_with_working_dir(script: &str, working_dir: PathBuf) -> HookCommand {
         HookCommand::Script {
-            run: script.to_string(),
-            common: HookCommon { working_dir: Some(working_dir), ..Default::default() },
+            run: script.to_string().into(),
+            common: HookCommon { working_dir: Some(working_dir).into(), ..Default::default() },
         }
     }
 
     /// Create a script hook with custom groups
     pub fn script_with_groups(script: &str, groups: Vec<String>) -> HookCommand {
         HookCommand::Script {
-            run: script.to_string(),
-            common: HookCommon { groups, ..Default::default() },
+            run: script.to_string().into(),
+            common: HookCommon {
+                groups: ConfigValue::wrap_vec(groups).into(),
+                ..Default::default()
+            },
         }
     }
 
     /// Create a script hook with a custom user
     pub fn script_with_user(script: &str, user: &str) -> HookCommand {
         HookCommand::Script {
-            run: script.to_string(),
-            common: HookCommon { user: Some(user.to_string()), ..Default::default() },
+            run: script.to_string().into(),
+            common: HookCommon { user: Some(user.to_string()).into(), ..Default::default() },
         }
     }
 
     /// Create a script hook with custom user and groups
     pub fn script_with_user_and_groups(script: &str, user: &str, groups: Vec<String>) -> HookCommand {
         HookCommand::Script {
-            run: script.to_string(),
+            run: script.to_string().into(),
             common: HookCommon {
-                user: Some(user.to_string()),
-                groups,
+                user: Some(user.to_string()).into(),
+                groups: ConfigValue::wrap_vec(groups).into(),
                 ..Default::default()
             },
         }
