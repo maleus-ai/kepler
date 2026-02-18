@@ -57,7 +57,7 @@ services:
 
   backend:
     working_dir: ./apps/backend
-    command: ["npm", "run", "dev"]
+    run: npm run dev        # Shell script form (runs via sh -c)
     user: "node:developers"
     depends_on:
       database:
@@ -170,7 +170,8 @@ See [Hooks](hooks.md) for format, execution order, and examples.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `if` | `string` | - | Lua condition expression. When present, service is only started if truthy. |
-| `command` | `string[]` | required | Command to run. Supports `${{ }}` and `!lua`. |
+| `command` | `string[]` | - | Command to run (exec, no shell). Supports `${{ }}` and `!lua`. Mutually exclusive with `run`. |
+| `run` | `string` | - | Shell script to run (via `sh -c`). Supports `${{ }}` and `!lua`. Mutually exclusive with `command`. |
 | `working_dir` | `string` | config dir | Working directory. Supports `${{ }}`. |
 | `depends_on` | `string[]\|object` | `[]` | Service dependencies. Service names must be static. Config fields (`condition`, `timeout`, `restart`, `exit_code`) support `!lua` and `${{ }}`. See [Dependencies](dependencies.md) |
 | `environment` | `string[]` | `[]` | Environment variables (`KEY=value`). Supports `${{ }}` (sequential). See [Environment Variables](environment-variables.md) |

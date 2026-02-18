@@ -25,13 +25,9 @@ kepler:
 
 services:
   # A one-shot migration task that runs first then exits
+  # `run:` executes via sh -c — ideal for shell scripts, pipes, and chaining
   migration:
-    command:
-      [
-        "sh",
-        "-c",
-        "echo 'Running migrations...'; sleep 2; echo 'Migrations complete!'",
-      ]
+    run: echo 'Running migrations...'; sleep 2; echo 'Migrations complete!'
 
   # A simple HTTP server using Python's built-in module
   # Waits for migration to finish before starting
@@ -61,12 +57,7 @@ services:
   # A background worker that runs periodic tasks
   # Waits for the web server to be healthy before starting
   worker:
-    command:
-      [
-        "sh",
-        "-c",
-        'echo ''Worker started''; while true; do echo "[$(date +%T)] Tick"; sleep 5; done',
-      ]
+    run: echo 'Worker started'; while true; do echo "[$(date +%T)] Tick"; sleep 5; done
     depends_on:
       web:
         condition: service_healthy

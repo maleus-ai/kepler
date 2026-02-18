@@ -73,6 +73,7 @@ The following fields support `${{ }}`:
 - `user`
 - `groups`
 - `command` entries
+- `run`
 - `hooks.run` / `hooks.command`
 - `healthcheck.test`
 - `restart.watch` patterns

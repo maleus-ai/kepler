@@ -264,6 +264,98 @@ services:
 }
 
 #[test]
+fn test_run_field_parses_static() {
+    let yaml = r#"
+run: "echo hello"
+"#;
+    let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(raw.has_run());
+    assert!(!raw.has_command());
+    assert!(!raw.run.is_dynamic());
+    assert_eq!(raw.run.as_static().unwrap(), &Some("echo hello".to_string()));
+}
+
+#[test]
+fn test_run_field_serde_roundtrip() {
+    let yaml = r#"
+services:
+  test:
+    run: "echo done"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let yaml2 = serde_yaml::to_string(&config).unwrap();
+    assert!(yaml2.contains("run"), "run field should be in serialized YAML, got:\n{}", yaml2);
+
+    // Verify round-trip through KeplerConfig::load (what TestDaemonHarness uses)
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, &yaml2).unwrap();
+    let config2 = KeplerConfig::load_without_sys_env(&config_path)
+        .unwrap_or_else(|e| panic!("Failed to load round-tripped YAML:\n{}\nError: {}", yaml2, e));
+    assert!(config2.services["test"].has_run(), "run field lost after round-trip. YAML:\n{}", yaml2);
+    assert!(!config2.services["test"].has_command());
+}
+
+#[test]
+fn test_run_field_dynamic() {
+    let yaml = r#"
+run: "echo ${{ env.HOME }}"
+"#;
+    let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(raw.has_run());
+    assert!(raw.run.is_dynamic());
+}
+
+#[test]
+fn test_run_and_command_mutually_exclusive() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    run: "echo hello"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let err = config.validate(Path::new("test.yaml")).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("'command' and 'run' are mutually exclusive"), "got: {}", msg);
+}
+
+#[test]
+fn test_neither_run_nor_command_fails_validation() {
+    let yaml = r#"
+services:
+  svc:
+    environment:
+      - FOO=bar
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let err = config.validate(Path::new("test.yaml")).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("either 'command' or 'run' is required"), "got: {}", msg);
+}
+
+#[test]
+fn test_run_resolves_to_sh_c() {
+    use crate::lua_eval::EvalContext;
+    use std::path::PathBuf;
+
+    let yaml = r#"
+services:
+  svc:
+    run: "echo hello && echo world"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let evaluator = config.create_lua_evaluator().unwrap();
+    let config_path = PathBuf::from("/tmp/test.yaml");
+    let mut ctx = EvalContext::default();
+
+    let resolved = config
+        .resolve_service("svc", &mut ctx, &evaluator, &config_path, None)
+        .unwrap();
+    assert_eq!(resolved.command, vec!["sh", "-c", "echo hello && echo world"]);
+}
+
+#[test]
 fn test_depends_on_lua_tag_rejected_with_clear_error() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let config_path = temp_dir.path().join("kepler.yaml");

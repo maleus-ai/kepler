@@ -1,0 +1,8 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  bad-service:
+    command: ["echo", "hello"]
+    run: "echo hello"

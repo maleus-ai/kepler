@@ -1,6 +1,6 @@
 //! Full lifecycle integration tests
 
-use kepler_daemon::config::{HookList, ServiceHooks};
+use kepler_daemon::config::{HookList, KeplerConfig, ServiceHooks};
 use kepler_daemon::state::ServiceStatus;
 use kepler_tests::helpers::config_builder::{
     TestConfigBuilder, TestHealthCheckBuilder, TestServiceBuilder,
@@ -643,3 +643,40 @@ async fn test_process_group_cleanup_on_stop() {
         );
     }
 }
+
+/// Service with `run` field starts, executes shell script, and creates marker file
+#[tokio::test]
+async fn test_service_run_field_executes_shell_script() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("run_output");
+
+    let yaml = format!(
+        r#"
+services:
+  test:
+    run: "echo hello > {} && sleep 3600"
+"#,
+        marker_path.display()
+    );
+
+    let config: KeplerConfig = serde_yaml::from_str(&yaml).unwrap();
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    // Wait for the marker file to appear (proves the shell script executed)
+    let found = marker
+        .wait_for_marker("run_output", Duration::from_secs(5))
+        .await;
+    assert!(found, "run field should execute shell script and create marker file");
+
+    // Verify the content
+    let content = marker.read_marker("run_output").expect("marker file should have content");
+    assert_eq!(content.trim(), "hello");
+
+    harness.stop_service("test").await.unwrap();
+}
+
