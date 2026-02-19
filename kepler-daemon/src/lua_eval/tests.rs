@@ -701,3 +701,105 @@ fn test_inline_expr_hooks_access() {
     let result = eval.eval_inline_expr("hooks.pre_start.outputs.step1.token", &ctx, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "abc");
 }
+
+// --- PreparedEnv tests ---
+
+#[test]
+fn test_prepared_env_set_env_visible_in_lua() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut env = HashMap::new();
+    env.insert("INITIAL".to_string(), "yes".to_string());
+    let ctx = EvalContext { env, ..Default::default() };
+
+    let prepared = eval.prepare_env_mutable(&ctx).unwrap();
+
+    // Initial env var is visible
+    let result = eval.eval_inline_expr_with_env("env.INITIAL", &prepared.table, "test").unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "yes");
+
+    // Lua cannot write to env (it's frozen from Lua's perspective)
+    let result = eval.eval_with_env::<Value>(r#"env.HACK = "bad""#, &prepared.table, "test");
+    assert!(result.is_err(), "Lua should not be able to write to env before freeze_env");
+
+    // Add a new env var via set_env (Rust-side toggle)
+    prepared.set_env("ADDED", "new_value").unwrap();
+
+    // New env var is visible in subsequent evaluations
+    let result = eval.eval_inline_expr_with_env("env.ADDED", &prepared.table, "test").unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "new_value");
+
+    // Also visible via ctx.env
+    let result = eval.eval_inline_expr_with_env("ctx.env.ADDED", &prepared.table, "test").unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "new_value");
+}
+
+#[test]
+fn test_prepared_env_freeze_prevents_writes() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let prepared = eval.prepare_env_mutable(&ctx).unwrap();
+
+    // Can write before freezing
+    prepared.set_env("KEY", "value").unwrap();
+
+    // Freeze the env sub-table
+    prepared.freeze_env();
+
+    // Cannot write after freezing
+    let result = prepared.set_env("ANOTHER", "val");
+    assert!(result.is_err(), "set_env should fail after freeze_env");
+}
+
+#[test]
+fn test_prepared_env_lua_cannot_mutate_frozen_env() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let prepared = eval.prepare_env_mutable(&ctx).unwrap();
+    prepared.freeze_env();
+
+    // Lua code should not be able to write to env
+    let result = eval.eval_with_env::<Value>(r#"env.NEW = "value""#, &prepared.table, "test");
+    assert!(result.is_err(), "Lua should not be able to write to frozen env");
+}
+
+#[test]
+fn test_eval_with_env_reuses_table() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut env = HashMap::new();
+    env.insert("PORT".to_string(), "3000".to_string());
+    let ctx = EvalContext { env, ..Default::default() };
+
+    let prepared = eval.prepare_env_mutable(&ctx).unwrap();
+    prepared.freeze_env();
+
+    // eval_with_env should work with the prepared table
+    let result: String = eval.eval_with_env(r#"return env.PORT"#, &prepared.table, "test").unwrap();
+    assert_eq!(result, "3000");
+
+    // Global state should be shared across calls
+    let _: Value = eval.eval_with_env(r#"global.counter = 1"#, &prepared.table, "test").unwrap();
+    let counter: i64 = eval.eval_with_env(r#"return global.counter"#, &prepared.table, "test").unwrap();
+    assert_eq!(counter, 1);
+}
+
+#[test]
+fn test_prepared_env_shallow_freeze() {
+    // Verify that freezing ctx_table (shallow) does NOT freeze the nested env table
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let prepared = eval.prepare_env_mutable(&ctx).unwrap();
+
+    // ctx is frozen but env sub-table should still be writable from Rust
+    prepared.set_env("KEY", "val").unwrap();
+
+    // Lua should not be able to reassign ctx.env (ctx is frozen)
+    let result = eval.eval_with_env::<Value>(r#"ctx.env = {}"#, &prepared.table, "test");
+    assert!(result.is_err(), "Lua should not be able to reassign ctx.env on frozen ctx");
+
+    // But the env sub-table entries should be accessible
+    let result = eval.eval_inline_expr_with_env("ctx.env.KEY", &prepared.table, "test").unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "val");
+}
