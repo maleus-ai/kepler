@@ -1,0 +1,11 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  dependency:
+    command: ["sh", "-c", "sleep 300"]
+  dependent:
+    command: ["sh", "-c", "echo DEPENDENT_STARTED; sleep 300"]
+    depends_on:
+      - dependency

@@ -112,7 +112,7 @@ async fn run() -> Result<()> {
     let sys_env: HashMap<String, String> = std::env::vars().collect();
 
     match cli.command {
-        Commands::Start { service, detach, wait, timeout } => {
+        Commands::Start { service, detach, wait, timeout, no_deps } => {
             if detach && wait {
                 // -d --wait: Fire start, subscribe for progress, exit when all ready
                 let (progress_rx, sub_future) = client.subscribe(
@@ -127,6 +127,7 @@ async fn run() -> Result<()> {
                         config_path: canonical_path,
                         service,
                         sys_env: Some(sys_env),
+                        no_deps,
                     },
                 )?;
                 if let Some(timeout_str) = &timeout {
@@ -149,7 +150,7 @@ async fn run() -> Result<()> {
                 }
             } else if detach {
                 // -d: Fire start, exit immediately
-                let (_progress_rx, response_future) = client.start(canonical_path, service, Some(sys_env))?;
+                let (_progress_rx, response_future) = client.start(canonical_path, service, Some(sys_env), no_deps)?;
                 let response = response_future.await?;
                 handle_response(response);
             } else {
@@ -160,6 +161,7 @@ async fn run() -> Result<()> {
                         config_path: canonical_path.clone(),
                         service: service.clone(),
                         sys_env: Some(sys_env),
+                        no_deps,
                     },
                 )?;
                 foreground_with_logs(
@@ -182,13 +184,18 @@ async fn run() -> Result<()> {
             }
         }
 
-        Commands::Restart { services, detach, wait, timeout } => {
+        Commands::Restart { services, detach, wait, timeout, no_deps } => {
+            if no_deps && services.is_empty() {
+                eprintln!("Error: --no-deps requires specifying at least one service");
+                std::process::exit(1);
+            }
             if detach && wait {
                 // -d --wait: Fire restart with progress bars for full lifecycle
                 let (progress_rx, response_future) = client.restart(
                     canonical_path,
                     services,
                     Some(sys_env),
+                    no_deps,
                 )?;
                 if let Some(timeout_str) = &timeout {
                     let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
@@ -211,7 +218,7 @@ async fn run() -> Result<()> {
                 }
             } else if detach {
                 // -d: Fire restart, exit when done
-                let (_progress_rx, response_future) = client.restart(canonical_path, services, Some(sys_env))?;
+                let (_progress_rx, response_future) = client.restart(canonical_path, services, Some(sys_env), no_deps)?;
                 let response = response_future.await?;
                 handle_response(response);
             } else {
@@ -220,6 +227,7 @@ async fn run() -> Result<()> {
                     canonical_path.clone(),
                     services,
                     Some(sys_env),
+                    no_deps,
                 )?;
                 // Phase 1: Progress bars for Stopping → Stopped → Starting → Started/Healthy
                 let response = run_with_progress(progress_rx, restart_future).await?;

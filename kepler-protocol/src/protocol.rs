@@ -63,6 +63,9 @@ pub enum Request {
         /// System environment variables captured from CLI
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
+        /// Skip dependency waiting and `if:` condition (requires specific service)
+        #[serde(default)]
+        no_deps: bool,
     },
     /// Stop service(s)
     Stop {
@@ -86,6 +89,9 @@ pub enum Request {
         /// System environment variables (unused, kept for API compatibility)
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
+        /// Skip dependency ordering (use user-specified order instead)
+        #[serde(default)]
+        no_deps: bool,
     },
     /// Recreate config - stop, re-bake config snapshot, start
     Recreate {

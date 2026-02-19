@@ -188,11 +188,13 @@ impl Client {
         config_path: PathBuf,
         service: Option<String>,
         sys_env: Option<HashMap<String, String>>,
+        no_deps: bool,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Start {
             config_path,
             service,
             sys_env,
+            no_deps,
         })
     }
 
@@ -218,11 +220,13 @@ impl Client {
         config_path: PathBuf,
         services: Vec<String>,
         sys_env: Option<HashMap<String, String>>,
+        no_deps: bool,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Restart {
             config_path,
             services,
             sys_env,
+            no_deps,
         })
     }
 
