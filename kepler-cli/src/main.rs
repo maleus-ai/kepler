@@ -111,8 +111,34 @@ async fn run() -> Result<()> {
     // Collect system environment once for commands that need it
     let sys_env: HashMap<String, String> = std::env::vars().collect();
 
+    /// Build override_envs from `-e` flags and `--refresh-env`.
+    /// - No flags: None (no override)
+    /// - `--refresh-env`: full sys_env from current CLI process
+    /// - `-e KEY=VALUE`: only those specific overrides
+    fn build_override_envs(raw: Vec<String>, refresh_env: bool, sys_env: &HashMap<String, String>) -> Option<HashMap<String, String>> {
+        // --refresh-env: start with the full current CLI env as the base
+        // -e KEY=VALUE: patch specific keys on top
+        // Both can be combined: refresh first, then apply -e overrides
+        let mut map = if refresh_env {
+            sys_env.clone()
+        } else if raw.is_empty() {
+            return None;
+        } else {
+            HashMap::new()
+        };
+        for entry in raw {
+            if let Some((key, value)) = entry.split_once('=') {
+                map.insert(key.to_string(), value.to_string());
+            } else {
+                eprintln!("Warning: ignoring invalid override-env (expected KEY=VALUE): {}", entry);
+            }
+        }
+        if map.is_empty() { None } else { Some(map) }
+    }
+
     match cli.command {
-        Commands::Start { services, detach, wait, timeout, no_deps } => {
+        Commands::Start { services, detach, wait, timeout, no_deps, override_envs, refresh_env } => {
+            let override_envs = build_override_envs(override_envs, refresh_env, &sys_env);
             if no_deps && services.is_empty() {
                 eprintln!("Error: --no-deps requires specifying at least one service");
                 std::process::exit(1);
@@ -132,6 +158,7 @@ async fn run() -> Result<()> {
                         services,
                         sys_env: Some(sys_env),
                         no_deps,
+                        override_envs: override_envs.clone(),
                     },
                 )?;
                 if let Some(timeout_str) = &timeout {
@@ -154,7 +181,7 @@ async fn run() -> Result<()> {
                 }
             } else if detach {
                 // -d: Fire start, exit immediately
-                let (_progress_rx, response_future) = client.start(canonical_path, services, Some(sys_env), no_deps)?;
+                let (_progress_rx, response_future) = client.start(canonical_path, services, Some(sys_env), no_deps, override_envs.clone())?;
                 let response = response_future.await?;
                 handle_response(response);
             } else {
@@ -167,6 +194,7 @@ async fn run() -> Result<()> {
                         services: services.clone(),
                         sys_env: Some(sys_env),
                         no_deps,
+                        override_envs,
                     },
                 )?;
                 foreground_with_logs(
@@ -189,7 +217,8 @@ async fn run() -> Result<()> {
             }
         }
 
-        Commands::Restart { services, detach, wait, timeout, no_deps } => {
+        Commands::Restart { services, detach, wait, timeout, no_deps, override_envs, refresh_env } => {
+            let override_envs = build_override_envs(override_envs, refresh_env, &sys_env);
             if no_deps && services.is_empty() {
                 eprintln!("Error: --no-deps requires specifying at least one service");
                 std::process::exit(1);
@@ -201,6 +230,7 @@ async fn run() -> Result<()> {
                     services,
                     Some(sys_env),
                     no_deps,
+                    override_envs.clone(),
                 )?;
                 if let Some(timeout_str) = &timeout {
                     let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
@@ -223,7 +253,7 @@ async fn run() -> Result<()> {
                 }
             } else if detach {
                 // -d: Fire restart, exit when done
-                let (_progress_rx, response_future) = client.restart(canonical_path, services, Some(sys_env), no_deps)?;
+                let (_progress_rx, response_future) = client.restart(canonical_path, services, Some(sys_env), no_deps, override_envs.clone())?;
                 let response = response_future.await?;
                 handle_response(response);
             } else {
@@ -233,6 +263,7 @@ async fn run() -> Result<()> {
                     services,
                     Some(sys_env),
                     no_deps,
+                    override_envs,
                 )?;
                 // Phase 1: Progress bars for Stopping → Stopped → Starting → Started/Healthy
                 let response = run_with_progress(progress_rx, restart_future).await?;

@@ -279,4 +279,9 @@ pub enum ConfigCommand {
         context: Box<EvalContext>,
         reply: oneshot::Sender<Result<bool>>,
     },
+    /// Merge overrides into the stored sys_env, re-save snapshot, and clear resolved config cache
+    MergeSysEnv {
+        overrides: HashMap<String, String>,
+        reply: oneshot::Sender<()>,
+    },
 }

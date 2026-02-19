@@ -67,6 +67,9 @@ pub enum Request {
         /// Skip dependency waiting and `if:` condition (requires specific services)
         #[serde(default)]
         no_deps: bool,
+        /// Override specific system environment variables (merged into stored sys_env)
+        #[serde(default)]
+        override_envs: Option<HashMap<String, String>>,
     },
     /// Stop service(s)
     Stop {
@@ -93,6 +96,9 @@ pub enum Request {
         /// Skip dependency ordering (use user-specified order instead)
         #[serde(default)]
         no_deps: bool,
+        /// Override specific system environment variables (merged into stored sys_env)
+        #[serde(default)]
+        override_envs: Option<HashMap<String, String>>,
     },
     /// Recreate config - stop, re-bake config snapshot, start
     Recreate {
