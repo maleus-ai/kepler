@@ -223,7 +223,7 @@ When a dependency has `output: true` or an `outputs:` declaration, its captured 
 deps.<name>.outputs.<key>
 ```
 
-This is available in `${{ }}` expressions and `!lua` blocks. The outputs table is read-only (frozen).
+This is available in `${{ }}$` expressions and `!lua` blocks. The outputs table is read-only (frozen).
 
 Requirements:
 - The dependency must have `restart: no` (outputs require one-shot services)
@@ -243,7 +243,7 @@ services:
       migration:
         condition: service_completed_successfully
     environment:
-      - DB_VERSION=${{ deps.migration.outputs.version }}
+      - DB_VERSION=${{ deps.migration.outputs.version }}$
 ```
 
 See [Outputs](outputs.md) for full details on output capture, marker format, and resolution timing.
@@ -358,8 +358,8 @@ services:
       setup:
         condition: service_completed_successfully
     environment:
-      - AUTH_TOKEN=${{ deps.setup.outputs.token }}
-      - BACKEND_PORT=${{ deps.setup.outputs.port }}
+      - AUTH_TOKEN=${{ deps.setup.outputs.token }}$
+      - BACKEND_PORT=${{ deps.setup.outputs.port }}$
 ```
 
 ### Dependency with Timeout

@@ -523,7 +523,7 @@ async fn test_hook_env_expansion_with_service_env() {
         pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!("echo \"COMBINED=$COMBINED\" >> {}", marker_path.display()),
             common: HookCommon {
-                environment: vec!["COMBINED=${{ env.SERVICE_VAR }}_plus_hook".to_string()],
+                environment: vec!["COMBINED=${{ env.SERVICE_VAR }}$_plus_hook".to_string()],
                 ..Default::default()
             },
         }])),

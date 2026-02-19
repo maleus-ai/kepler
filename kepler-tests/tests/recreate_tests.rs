@@ -179,7 +179,7 @@ async fn test_restart_preserves_baked_config() {
                     env_output_path.display()
                 ),
             ])
-            .with_environment(vec![format!("{}=${{{{ env.{} }}}}", env_var_name, env_var_name)])
+            .with_environment(vec![format!("{}=${{{{ env.{} }}}}$", env_var_name, env_var_name)])
             .with_restart(RestartPolicy::No)
             .build(),
         )
@@ -286,7 +286,7 @@ async fn test_recreate_rebakes_config() {
                     env_output_path.display()
                 ),
             ])
-            .with_environment(vec![format!("{}=${{{{ env.{} }}}}", env_var_name, env_var_name)])
+            .with_environment(vec![format!("{}=${{{{ env.{} }}}}$", env_var_name, env_var_name)])
             .with_restart(RestartPolicy::No)
             .build(),
         )

@@ -155,7 +155,7 @@ impl LuaEvaluator {
         Ok(!matches!(result, Value::Nil | Value::Boolean(false)))
     }
 
-    /// Evaluate an inline `${{ expr }}` expression and return the raw Lua value.
+    /// Evaluate an inline `${{ expr }}$` expression and return the raw Lua value.
     ///
     /// Uses the same environment as `!lua` blocks: includes `ctx`, `deps`, `env`
     /// shortcut, `global`, and a `__index` fallback to Lua globals.
@@ -167,7 +167,7 @@ impl LuaEvaluator {
         func.call(())
     }
 
-    /// Evaluate an inline `${{ expr }}` reusing a pre-built environment table.
+    /// Evaluate an inline `${{ expr }}$` reusing a pre-built environment table.
     ///
     /// Avoids rebuilding the env table for each expression within the same evaluation context.
     pub fn eval_inline_expr_with_env(&self, expr: &str, env_table: &Table, chunk_name: &str) -> LuaResult<Value> {
@@ -177,7 +177,7 @@ impl LuaEvaluator {
         func.call(())
     }
 
-    /// Build and return the environment table for inline `${{ }}` evaluation.
+    /// Build and return the environment table for inline `${{ }}$` evaluation.
     ///
     /// Use this to build the table once, then pass it to `eval_inline_expr_with_env`
     /// for each expression within the same context.
@@ -521,9 +521,9 @@ impl LuaEvaluator {
         Ok(env_table)
     }
 
-    /// Build the environment table for inline `${{ expr }}` evaluation.
+    /// Build the environment table for inline `${{ expr }}$` evaluation.
     ///
-    /// Intentionally delegates to `build_env_table` so that `${{ expr }}` and
+    /// Intentionally delegates to `build_env_table` so that `${{ expr }}$` and
     /// `!lua` blocks share the same environment (ctx, deps, env, global, stdlib).
     /// This indirection exists so the two contexts can diverge in the future
     /// without changing callers.

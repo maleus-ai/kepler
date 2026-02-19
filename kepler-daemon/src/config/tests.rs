@@ -121,9 +121,9 @@ environment:
     assert!(!raw.environment.is_dynamic());
 
     let yaml_dynamic = r#"
-command: ["./app", "${{ env.HOME }}"]
+command: ["./app", "${{ env.HOME }}$"]
 environment:
-  - FOO=${{ env.HOME }}
+  - FOO=${{ env.HOME }}$
 "#;
     let raw_dyn: RawServiceConfig = serde_yaml::from_str(yaml_dynamic).unwrap();
     assert!(raw_dyn.command.is_dynamic());
@@ -198,7 +198,7 @@ fn test_resolve_service_dynamic_user_fallback_to_default() {
 services:
   svc:
     command: ["./svc"]
-    user: "${{ nil }}"
+    user: "${{ nil }}$"
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     assert!(config.services.get("svc").unwrap().user.is_dynamic());
@@ -224,7 +224,7 @@ fn test_resolve_service_dynamic_user_no_fallback_without_default() {
 services:
   svc:
     command: ["./svc"]
-    user: "${{ nil }}"
+    user: "${{ nil }}$"
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     let evaluator = config.create_lua_evaluator().unwrap();
@@ -250,7 +250,7 @@ lua: |
 services:
   svc:
     command: ["./svc"]
-    user: "${{ get_user() }}"
+    user: "${{ get_user() }}$"
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     let evaluator = config.create_lua_evaluator().unwrap();
@@ -299,7 +299,7 @@ services:
 #[test]
 fn test_run_field_dynamic() {
     let yaml = r#"
-run: "echo ${{ env.HOME }}"
+run: "echo ${{ env.HOME }}$"
 "#;
     let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
     assert!(raw.has_run());

@@ -16,7 +16,7 @@ Complete reference for Kepler's YAML configuration format.
 
 ## Overview
 
-Kepler uses YAML configuration files (default: `kepler.yaml` or `kepler.yml`). Global config (the `kepler:` namespace) is evaluated eagerly at load time and stored as an immutable snapshot. Service config is evaluated **lazily at each service start** — `${{ }}` expressions and `!lua` tags are resolved with the full runtime context (environment, dependencies, restart count, etc.).
+Kepler uses YAML configuration files (default: `kepler.yaml` or `kepler.yml`). Global config (the `kepler:` namespace) is evaluated eagerly at load time and stored as an immutable snapshot. Service config is evaluated **lazily at each service start** — `${{ }}$` expressions and `!lua` tags are resolved with the full runtime context (environment, dependencies, restart count, etc.).
 
 To re-evaluate global config after changes, use `kepler recreate` (stops services, re-reads config, starts again).
 
@@ -61,7 +61,7 @@ services:
     restart: no
     output: true                        # Capture ::output::KEY=VALUE from stdout
     outputs:                            # Declare named outputs from hooks
-      db_version: ${{ ctx.hooks.pre_start.outputs.check.version }}
+      db_version: ${{ ctx.hooks.pre_start.outputs.check.version }}$
     hooks:
       pre_start:
         - run: echo "::output::version=$(cat VERSION)"
@@ -108,7 +108,7 @@ services:
         condition: service_healthy
         timeout: 60s              # Wait up to 60s for backend health
     environment:
-      - VITE_API_URL=${{ env.BACKEND_URL }}
+      - VITE_API_URL=${{ env.BACKEND_URL }}$
     restart: always
     logs:
       retention:
@@ -183,19 +183,19 @@ See [Hooks](hooks.md) for format, execution order, and examples.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `if` | `string` | - | Lua condition expression. When present, service is only started if truthy. |
-| `command` | `string[]` | - | Command to run (exec, no shell). Supports `${{ }}` and `!lua`. Mutually exclusive with `run`. |
-| `run` | `string` | - | Shell script to run (via `sh -c`). Supports `${{ }}` and `!lua`. Mutually exclusive with `command`. |
-| `working_dir` | `string` | config dir | Working directory. Supports `${{ }}`. |
-| `depends_on` | `string[]\|object` | `[]` | Service dependencies. Service names must be static. Config fields (`condition`, `timeout`, `restart`, `exit_code`) support `!lua` and `${{ }}`. See [Dependencies](dependencies.md) |
-| `environment` | `string[]` | `[]` | Environment variables (`KEY=value`). Supports `${{ }}` (sequential). See [Environment Variables](environment-variables.md) |
-| `env_file` | `string` | - | Path to `.env` file. Supports `${{ }}` (system env only). |
+| `command` | `string[]` | - | Command to run (exec, no shell). Supports `${{ }}$` and `!lua`. Mutually exclusive with `run`. |
+| `run` | `string` | - | Shell script to run (via `sh -c`). Supports `${{ }}$` and `!lua`. Mutually exclusive with `command`. |
+| `working_dir` | `string` | config dir | Working directory. Supports `${{ }}$`. |
+| `depends_on` | `string[]\|object` | `[]` | Service dependencies. Service names must be static. Config fields (`condition`, `timeout`, `restart`, `exit_code`) support `!lua` and `${{ }}$`. See [Dependencies](dependencies.md) |
+| `environment` | `string[]` | `[]` | Environment variables (`KEY=value`). Supports `${{ }}$` (sequential). See [Environment Variables](environment-variables.md) |
+| `env_file` | `string` | - | Path to `.env` file. Supports `${{ }}$` (system env only). |
 | `sys_env` | `string` | global | System env policy: `clear` or `inherit`. Inherits from `kepler.sys_env` if not set |
 | `restart` | `string\|object` | `no` | Restart policy. See [Restart Configuration](#restart-configuration) |
-| `healthcheck` | `object` | - | Health check config. Supports `${{ }}` and `!lua`. See [Health Checks](health-checks.md) |
-| `hooks` | `object` | - | Service-specific hooks. Supports `${{ }}` and `!lua`. See [Hooks](hooks.md) |
-| `user` | `string` | CLI user | User to run as (Unix). Supports `${{ }}`. Supports `"name"`, `"uid"`, `"name:group"`, `"uid:gid"`. Defaults to the CLI user who loaded the config. See [Privilege Dropping](privilege-dropping.md) |
-| `groups` | `string[]` | `[]` | Supplementary groups lockdown (Unix). Supports `${{ }}`. See [Privilege Dropping](privilege-dropping.md) |
-| `logs` | `object` | - | Log configuration. Supports `${{ }}` and `!lua`. See [Log Management](log-management.md) |
+| `healthcheck` | `object` | - | Health check config. Supports `${{ }}$` and `!lua`. See [Health Checks](health-checks.md) |
+| `hooks` | `object` | - | Service-specific hooks. Supports `${{ }}$` and `!lua`. See [Hooks](hooks.md) |
+| `user` | `string` | CLI user | User to run as (Unix). Supports `${{ }}$`. Supports `"name"`, `"uid"`, `"name:group"`, `"uid:gid"`. Defaults to the CLI user who loaded the config. See [Privilege Dropping](privilege-dropping.md) |
+| `groups` | `string[]` | `[]` | Supplementary groups lockdown (Unix). Supports `${{ }}$`. See [Privilege Dropping](privilege-dropping.md) |
+| `logs` | `object` | - | Log configuration. Supports `${{ }}$` and `!lua`. See [Log Management](log-management.md) |
 | `limits` | `object` | - | Resource limits. See [Privilege Dropping](privilege-dropping.md) |
 | `output` | `bool` | `false` | Enable `::output::KEY=VALUE` capture from process stdout. Requires `restart: no`. See [Outputs](outputs.md) |
 | `outputs` | `object` | - | Named output declarations (expressions referencing hook/dep outputs). Requires `restart: no`. See [Outputs](outputs.md) |
@@ -257,7 +257,7 @@ Service names must:
 
 ## Config Immutability
 
-Once a config is loaded, the raw service definitions are stored as a snapshot. Global config (`kepler:` namespace, `lua:` directive) is evaluated once at load time. Service-level `${{ }}` expressions and `!lua` tags are re-evaluated **on every service start/restart** with the current runtime context.
+Once a config is loaded, the raw service definitions are stored as a snapshot. Global config (`kepler:` namespace, `lua:` directive) is evaluated once at load time. Service-level `${{ }}$` expressions and `!lua` tags are re-evaluated **on every service start/restart** with the current runtime context.
 
 To apply changes to the config file:
 
@@ -282,8 +282,8 @@ The `recreate` command:
 - [Hooks](hooks.md) -- Global and service hooks
 - [Health Checks](health-checks.md) -- Health check configuration
 - [Environment Variables](environment-variables.md) -- Env var handling
-- [Inline Expressions](variable-expansion.md) -- `${{ expr }}` syntax reference
-- [Lua Scripting](lua-scripting.md) -- Dynamic config with `!lua` and `${{ }}`
+- [Inline Expressions](variable-expansion.md) -- `${{ expr }}$` syntax reference
+- [Lua Scripting](lua-scripting.md) -- Dynamic config with `!lua` and `${{ }}$`
 - [Log Management](log-management.md) -- Log storage and streaming
 - [File Watching](file-watching.md) -- Auto-restart on changes
 - [Privilege Dropping](privilege-dropping.md) -- User/group and limits

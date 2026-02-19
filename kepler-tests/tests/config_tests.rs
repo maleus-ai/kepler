@@ -1268,7 +1268,7 @@ services:
     assert_eq!(resolved.command, vec!["sh", "-c", "echo hello && sleep 3600"]);
 }
 
-/// Dynamic `run` field with ${{ }} resolves correctly
+/// Dynamic `run` field with ${{ }}$ resolves correctly
 #[test]
 fn test_run_field_dynamic_resolves() {
     use kepler_daemon::lua_eval::EvalContext;
@@ -1280,7 +1280,7 @@ fn test_run_field_dynamic_resolves() {
     let yaml = r#"
 services:
   test:
-    run: "echo ${{ env.MY_VAR }}"
+    run: "echo ${{ env.MY_VAR }}$"
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();

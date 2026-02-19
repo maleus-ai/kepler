@@ -49,7 +49,7 @@ pub fn process_lua_scripts(
     Ok(())
 }
 
-/// Process Lua tags and `${{ }}` expressions in global hooks with proper hook_name context.
+/// Process Lua tags and `${{ }}$` expressions in global hooks with proper hook_name context.
 fn process_global_hooks_lua(
     hooks_value: &mut serde_yaml::Value,
     evaluator: &LuaEvaluator,

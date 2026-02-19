@@ -26,7 +26,7 @@ There are two ways to capture outputs, and one way to declare them:
 
 2. **Service process outputs** — Set `output: true` on a service. Lines matching `::output::KEY=VALUE` on the process stdout are captured on exit and available to dependent services as `deps['<name>'].outputs.<key>`.
 
-3. **Service output declarations** — Define an `outputs:` map on a service with `${{ }}` expressions referencing hook outputs. These are resolved after process exit and merged with process outputs. Available to dependents as `deps['<name>'].outputs.<key>`.
+3. **Service output declarations** — Define an `outputs:` map on a service with `${{ }}$` expressions referencing hook outputs. These are resolved after process exit and merged with process outputs. Available to dependents as `deps['<name>'].outputs.<key>`.
 
 ---
 
@@ -71,7 +71,7 @@ services:
       pre_start:
         - run: echo "::output::token=$(generate-token)"
           output: gen_token
-        - run: echo "Using token ${{ ctx.hooks.pre_start.outputs.gen_token.token }}"
+        - run: echo "Using token ${{ ctx.hooks.pre_start.outputs.gen_token.token }}$"
 ```
 
 - Only steps with `output:` have their stdout scanned for markers
@@ -91,7 +91,7 @@ A shortcut is also available:
 hooks.<hook_name>.outputs.<step_name>.<key>
 ```
 
-Both are equivalent and work in `${{ }}` expressions and `!lua` blocks.
+Both are equivalent and work in `${{ }}$` expressions and `!lua` blocks.
 
 ---
 
@@ -116,7 +116,7 @@ services:
 
 ## Service Output Declarations
 
-The optional `outputs:` map lets you declare named outputs using `${{ }}` expressions that reference hook outputs.
+The optional `outputs:` map lets you declare named outputs using `${{ }}$` expressions that reference hook outputs.
 
 ```yaml
 services:
@@ -128,7 +128,7 @@ services:
         - run: echo "::output::token=$(generate-token)"
           output: setup
     outputs:
-      auth_token: ${{ ctx.hooks.pre_start.outputs.setup.token }}
+      auth_token: ${{ ctx.hooks.pre_start.outputs.setup.token }}$
 ```
 
 - Resolved **after process exit** (when all hook outputs are available)
@@ -154,11 +154,11 @@ services:
       producer:
         condition: service_completed_successfully
     environment:
-      - DATA_PORT=${{ deps.producer.outputs.port }}
+      - DATA_PORT=${{ deps.producer.outputs.port }}$
 ```
 
 - `deps['<name>'].outputs.<key>` or `deps.<name>.outputs.<key>` — access any output (process or declared)
-- Available in `${{ }}` expressions and `!lua` blocks
+- Available in `${{ }}$` expressions and `!lua` blocks
 - Read-only (frozen Lua table)
 - Requires the dependency to have reached a terminal state
 
@@ -173,7 +173,7 @@ Outputs are resolved in this order during a service lifecycle:
 3. **Process spawns** — stdout scanned for markers if `output: true`
 4. **Process exits** — process outputs written to disk
 5. **Post-exit hooks run** — step outputs captured for steps with `output:`
-6. **Declared `outputs:` resolved** — `${{ }}` expressions evaluated with full hook context
+6. **Declared `outputs:` resolved** — `${{ }}$` expressions evaluated with full hook context
 7. **Final outputs stored** — process outputs merged with declared outputs (declared win)
 8. **Dependent service starts** — reads predecessor's outputs from disk
 
@@ -254,7 +254,7 @@ services:
             echo "::output::host=localhost"
           output: config
         - run: |
-            echo "Starting on ${{ hooks.pre_start.outputs.config.host }}:${{ hooks.pre_start.outputs.config.port }}"
+            echo "Starting on ${{ hooks.pre_start.outputs.config.host }}$:${{ hooks.pre_start.outputs.config.port }}$"
 ```
 
 ### Hook Outputs to Service Declarations
@@ -271,7 +271,7 @@ services:
         - run: echo "::output::token=$(generate-token)"
           output: init
     outputs:
-      auth_token: ${{ ctx.hooks.pre_start.outputs.init.token }}
+      auth_token: ${{ ctx.hooks.pre_start.outputs.init.token }}$
 
   app:
     command: ["./app"]
@@ -279,7 +279,7 @@ services:
       setup:
         condition: service_completed_successfully
     environment:
-      - AUTH_TOKEN=${{ deps.setup.outputs.auth_token }}
+      - AUTH_TOKEN=${{ deps.setup.outputs.auth_token }}$
 ```
 
 ### Process Output to Dependent Access
@@ -299,8 +299,8 @@ services:
       producer:
         condition: service_completed_successfully
     environment:
-      - PRODUCER_PORT=${{ deps.producer.outputs.port }}
-      - PRODUCER_SECRET=${{ deps.producer.outputs.secret }}
+      - PRODUCER_PORT=${{ deps.producer.outputs.port }}$
+      - PRODUCER_SECRET=${{ deps.producer.outputs.secret }}$
 ```
 
 ### Combined Process and Declared Outputs
@@ -318,7 +318,7 @@ services:
         - run: echo "::output::summary=Worker finished successfully"
           output: report
     outputs:
-      result: ${{ "processed:" .. (ctx.hooks.post_exit.outputs.report.summary or "unknown") }}
+      result: ${{ "processed:" .. (ctx.hooks.post_exit.outputs.report.summary or "unknown") }}$
       status: override_from_declaration  # overrides process "status=done"
 
   aggregator:
@@ -327,9 +327,9 @@ services:
       worker:
         condition: service_completed_successfully
     environment:
-      - RAW=${{ deps.worker.outputs.raw_result }}       # from process
-      - RESULT=${{ deps.worker.outputs.result }}         # from declaration
-      - STATUS=${{ deps.worker.outputs.status }}         # "override_from_declaration"
+      - RAW=${{ deps.worker.outputs.raw_result }}$       # from process
+      - RESULT=${{ deps.worker.outputs.result }}$         # from declaration
+      - STATUS=${{ deps.worker.outputs.status }}$         # "override_from_declaration"
 ```
 
 ---
@@ -339,5 +339,5 @@ services:
 - [Hooks](hooks.md) -- Hook step output capture
 - [Dependencies](dependencies.md) -- Dependency output access
 - [Configuration](configuration.md) -- `output`, `outputs`, `output_max_size` fields
-- [Inline Expressions](variable-expansion.md) -- `${{ }}` syntax for output access
+- [Inline Expressions](variable-expansion.md) -- `${{ }}$` syntax for output access
 - [Lua Scripting](lua-scripting.md) -- Lua context for outputs

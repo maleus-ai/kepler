@@ -45,7 +45,7 @@ pub fn insert_env_entries(env: &mut HashMap<String, String>, entries: &[String])
 
 /// Build environment for a hook, merging hook-specific env with base service env.
 ///
-/// Hook environment entries are evaluated via `${{ }}` Lua expressions against
+/// Hook environment entries are evaluated via `${{ }}$` Lua expressions against
 /// the accumulated env (base service env + hook env_file).
 ///
 /// Priority (highest to lowest):
@@ -74,7 +74,7 @@ pub fn build_hook_env(
         }
     }
 
-    // Evaluate ${{ }} in hook's environment entries against accumulated env
+    // Evaluate ${{ }}$ in hook's environment entries against accumulated env
     let has_expressions = hook.environment().iter().any(|e| e.contains("${{"));
 
     if has_expressions {

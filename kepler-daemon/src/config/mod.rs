@@ -49,7 +49,7 @@ use crate::lua_eval::{EvalContext, LuaEvaluator};
 pub enum ConfigValue<T> {
     /// Value parsed successfully at config load time.
     Static(T),
-    /// Value contains `${{ }}` or `!lua` — needs evaluation at service start time.
+    /// Value contains `${{ }}$` or `!lua` — needs evaluation at service start time.
     Dynamic(serde_yaml::Value),
 }
 
@@ -87,7 +87,7 @@ impl<'de, T: DeserializeOwned> serde::Deserialize<'de> for ConfigValue<T> {
     }
 }
 
-/// Check if a YAML value contains dynamic content (`!lua` tags or `${{ }}` expressions).
+/// Check if a YAML value contains dynamic content (`!lua` tags or `${{ }}$` expressions).
 fn contains_dynamic_content(value: &serde_yaml::Value) -> bool {
     use serde_yaml::Value;
     match value {
@@ -181,7 +181,7 @@ impl<T: Clone + DeserializeOwned> ConfigValue<T> {
 /// Per-service configuration with fields wrapped in `ConfigValue<T>`.
 ///
 /// Fields are parsed at config load time. Static values are available immediately;
-/// dynamic values (containing `${{ }}` or `!lua`) are resolved lazily at service start time.
+/// dynamic values (containing `${{ }}$` or `!lua`) are resolved lazily at service start time.
 ///
 /// `depends_on` and `sys_env` are always static (not wrapped in ConfigValue).
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -223,7 +223,7 @@ pub struct RawServiceConfig {
     /// Only allowed on `restart: no` services.
     #[serde(default, skip_serializing_if = "ConfigValue::is_static_none")]
     pub output: ConfigValue<Option<bool>>,
-    /// Named output declarations that reference hook/process outputs via `${{ }}` expressions.
+    /// Named output declarations that reference hook/process outputs via `${{ }}$` expressions.
     /// Only allowed on `restart: no` services.
     #[serde(default, skip_serializing_if = "ConfigValue::is_static_none")]
     pub outputs: ConfigValue<Option<HashMap<String, String>>>,
@@ -288,7 +288,7 @@ impl RawServiceConfig {
     /// Resolve environment entries using a `PreparedEnv` for env table reuse.
     ///
     /// Static entries are added to both `ctx.env` and the live Lua env table.
-    /// Dynamic entries with `${{ }}` are evaluated using the pre-built env table.
+    /// Dynamic entries with `${{ }}$` are evaluated using the pre-built env table.
     /// The `PreparedEnv`'s env sub-table is updated in-place as entries are resolved.
     pub fn resolve_environment_with_env(
         &self,
@@ -527,7 +527,7 @@ pub struct KeplerGlobalConfig {
 /// Root configuration structure
 ///
 /// Services are stored as typed `RawServiceConfig` with `ConfigValue<T>` fields.
-/// Static fields are available immediately; dynamic fields (containing `${{ }}` or `!lua`)
+/// Static fields are available immediately; dynamic fields (containing `${{ }}$` or `!lua`)
 /// are resolved lazily at service start time.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KeplerConfig {
@@ -596,9 +596,9 @@ impl KeplerConfig {
     ///
     /// The `sys_env` parameter provides the system environment variables captured from the CLI.
     /// These are used for:
-    /// 1. Expanding `${{ expr }}` references in env_file paths (eagerly, for snapshot self-containment)
+    /// 1. Expanding `${{ expr }}$` references in env_file paths (eagerly, for snapshot self-containment)
     /// 2. Lua script evaluation context (for global lua block and kepler namespace)
-    /// 3. At service start time, for `${{ expr }}` evaluation in service fields
+    /// 3. At service start time, for `${{ expr }}$` evaluation in service fields
     ///
     /// Services are stored as raw YAML Values. Expansion happens lazily at service start time.
     /// Maximum config file size (10MB) to prevent OOM from accidentally large files
@@ -649,7 +649,7 @@ impl KeplerConfig {
 
         // Step 3: Create shared evaluator for config loading.
         // This evaluator is used for both global !lua processing and
-        // eager expansion of env_file/${{ }} paths and depends_on.
+        // eager expansion of env_file/${{ }}$ paths and depends_on.
         let load_evaluator = LuaEvaluator::new().map_err(|e| DaemonError::Internal(
             format!("Failed to create Lua evaluator: {}", e),
         ))?;
@@ -711,7 +711,7 @@ impl KeplerConfig {
             }
         }
 
-        // Step 7: Eagerly expand env_file ${{ }} paths and depends_on !lua tags,
+        // Step 7: Eagerly expand env_file ${{ }}$ paths and depends_on !lua tags,
         // then deserialize each service into RawServiceConfig.
         //
         // The evaluator has the lua: block loaded so that depends_on !lua blocks
@@ -733,7 +733,7 @@ impl KeplerConfig {
 
             let mut value = value.clone();
             if let Some(mapping) = value.as_mapping_mut() {
-                // Eagerly expand ${{ }} in env_file paths before parsing
+                // Eagerly expand ${{ }}$ in env_file paths before parsing
                 if let Some(ef_val) = mapping.get_mut(serde_yaml::Value::String("env_file".into()))
                     && let Some(ef_str) = ef_val.as_str()
                         && ef_str.contains("${{") {
@@ -743,26 +743,26 @@ impl KeplerConfig {
                             *ef_val = serde_yaml::Value::String(expanded);
                         }
 
-                // Eagerly evaluate !lua and ${{ }} inside depends_on config fields only.
+                // Eagerly evaluate !lua and ${{ }}$ inside depends_on config fields only.
                 // The depends_on structure itself (service names) must be static for the
                 // dependency graph. Only config fields (condition, timeout, restart, exit_code)
-                // can use !lua/${{ }}.
+                // can use !lua/${{ }}$.
                 if let Some(dep_val) = mapping.get_mut(serde_yaml::Value::String("depends_on".into()))
                 {
                     let field_path = format!("{}.depends_on", name);
 
-                    // Reject !lua/${{ }} at the depends_on level — structure must be static
+                    // Reject !lua/${{ }}$ at the depends_on level — structure must be static
                     if let serde_yaml::Value::Tagged(t) = &dep_val {
                         return Err(DaemonError::Config(format!(
                             "Configuration errors in {}:\n  - {}: !{} is not allowed on depends_on itself \
-                            (dependency names must be static); use !lua/${{{{ }}}} inside dependency \
+                            (dependency names must be static); use !lua/${{{{ }}}}$ inside dependency \
                             config fields (condition, timeout, etc.) instead",
                             path.display(), field_path, t.tag
                         )));
                     }
                     if matches!(dep_val, serde_yaml::Value::String(s) if s.contains("${{")) {
                         return Err(DaemonError::Config(format!(
-                            "Configuration errors in {}:\n  - {}: ${{{{ }}}} expressions are not allowed \
+                            "Configuration errors in {}:\n  - {}: ${{{{ }}}}$ expressions are not allowed \
                             on depends_on itself (dependency names must be static); use them inside \
                             dependency config fields (condition, timeout, etc.) instead",
                             path.display(), field_path
@@ -839,7 +839,7 @@ impl KeplerConfig {
 
     /// Create a fresh LuaEvaluator with this config's `lua:` code loaded.
     ///
-    /// Used by the orchestrator at service start time for `${{ }}` and `!lua` evaluation.
+    /// Used by the orchestrator at service start time for `${{ }}$` and `!lua` evaluation.
     pub fn create_lua_evaluator(&self) -> Result<LuaEvaluator> {
         let evaluator = LuaEvaluator::new()
             .map_err(|e| DaemonError::Internal(format!("Failed to create Lua evaluator: {}", e)))?;
@@ -919,7 +919,7 @@ impl KeplerConfig {
         let limits = raw.limits.resolve_with_env(evaluator, ctx, config_path, &format!("{}.limits", name), &mut shared_env)?;
         let restart = raw.restart.resolve_with_env(evaluator, ctx, config_path, &format!("{}.restart", name), &mut shared_env)?;
         let logs = raw.logs.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs", name), &mut shared_env)?;
-        // Dynamic hooks (`!lua` / `${{ }}`) are deferred to execution time in
+        // Dynamic hooks (`!lua` / `${{ }}$`) are deferred to execution time in
         // `run_service_hook` where `hook_name` context is available.
         let hooks = if raw.hooks.is_dynamic() {
             None

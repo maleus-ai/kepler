@@ -174,9 +174,9 @@ services:
     restart: always
     working_dir: /tmp
     environment:
-      - MINIO_ROOT_USER=${{ env.MINIO_USER or "minioadmin" }}
-      - MINIO_ROOT_PASSWORD=${{ env.MINIO_PASS or "minioadmin" }}
-      - MINIO_PORT=${{ env.MINIO_PORT or "9000" }}
+      - MINIO_ROOT_USER=${{ env.MINIO_USER or "minioadmin" }}$
+      - MINIO_ROOT_PASSWORD=${{ env.MINIO_PASS or "minioadmin" }}$
+      - MINIO_PORT=${{ env.MINIO_PORT or "9000" }}$
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/minio_ready"]
       interval: 1500ms
@@ -195,7 +195,7 @@ services:
     restart: always
     environment:
       - CONSUL_BIND=0.0.0.0
-      - CONSUL_DC=${{ env.CONSUL_DC and "production" or "" }}
+      - CONSUL_DC=${{ env.CONSUL_DC and "production" or "" }}$
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/consul_ready"]
       interval: 2s
@@ -1124,8 +1124,8 @@ services:
           condition: service_completed_successfully
           timeout: 5m
     environment:
-      - REPORT_DIR=${{ env.REPORT_DIR or "/tmp/reports" }}
-      - INCIDENT_ID=${{ env.INCIDENT_ID or "unknown" }}
+      - REPORT_DIR=${{ env.REPORT_DIR or "/tmp/reports" }}$
+      - INCIDENT_ID=${{ env.INCIDENT_ID or "unknown" }}$
     hooks:
       post_exit:
         command: ["sh", "-c", "echo 'post-mortem post_exit — archiving report'"]
@@ -1137,7 +1137,7 @@ services:
 
   # 51. profiler — Conditional service, only starts when ENABLE_PROFILING is set
   profiler:
-    if: ${{ ctx.env.ENABLE_PROFILING ~= nil }}
+    if: ${{ ctx.env.ENABLE_PROFILING ~= nil }}$
     command:
       [
         "sh",

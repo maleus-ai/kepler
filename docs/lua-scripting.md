@@ -1,6 +1,6 @@
 # Lua Scripting
 
-Kepler supports dynamic config generation with sandboxed Luau scripts via the `!lua` YAML tag and `${{ expr }}` inline expressions.
+Kepler supports dynamic config generation with sandboxed Luau scripts via the `!lua` YAML tag and `${{ expr }}$` inline expressions.
 
 ## Table of Contents
 
@@ -24,7 +24,7 @@ Kepler supports dynamic config generation with sandboxed Luau scripts via the `!
 
 Kepler uses Luau (a sandboxed Lua 5.1 derivative) for dynamic config generation. There are two complementary ways to use Lua:
 
-1. **`${{ expr }}`** — Inline expressions for simple value interpolation
+1. **`${{ expr }}$`** — Inline expressions for simple value interpolation
 2. **`!lua`** — YAML tags for multi-line Lua code blocks
 
 Both share the same evaluation context and sandbox restrictions.
@@ -33,17 +33,17 @@ Both share the same evaluation context and sandbox restrictions.
 
 ## Two Ways to Use Lua
 
-### `${{ expr }}` — Inline Expressions
+### `${{ expr }}$` — Inline Expressions
 
 Best for simple value references and short expressions:
 
 ```yaml
 services:
   app:
-    command: ["./app", "--port", "${{ env.PORT or '8080' }}"]
+    command: ["./app", "--port", "${{ env.PORT or '8080' }}$"]
     environment:
-      - DATABASE_URL=postgres://${{ env.DB_HOST }}:${{ env.DB_PORT }}/mydb
-    working_dir: ${{ env.APP_DIR or "/opt/app" }}
+      - DATABASE_URL=postgres://${{ env.DB_HOST }}$:${{ env.DB_PORT }}$/mydb
+    working_dir: ${{ env.APP_DIR or "/opt/app" }}$
 ```
 
 ### `!lua` — Code Blocks
@@ -67,17 +67,17 @@ services:
       return env
 ```
 
-Both `${{ }}` and `!lua` can be used in the same config file, even in the same service.
+Both `${{ }}$` and `!lua` can be used in the same config file, even in the same service.
 
 ---
 
 ## Inline Expressions
 
-`${{ expr }}` expressions are evaluated as Lua code. See [Inline Expressions](variable-expansion.md) for the full reference.
+`${{ expr }}$` expressions are evaluated as Lua code. See [Inline Expressions](variable-expansion.md) for the full reference.
 
 Key points:
-- **Standalone** `${{ expr }}` preserves Lua types (bool, number, table)
-- **Embedded** `${{ expr }}` in a string coerces results to strings
+- **Standalone** `${{ expr }}$` preserves Lua types (bool, number, table)
+- **Embedded** `${{ expr }}$` in a string coerces results to strings
 - Bare variable names resolve to nil — use `env.VAR` to access environment variables
 
 ---
@@ -110,7 +110,7 @@ Lua scripts can return:
 
 ## Available Context
 
-Every `!lua` block and `${{ }}` expression receives the same context:
+Every `!lua` block and `${{ }}$` expression receives the same context:
 
 | Variable | Description |
 |----------|-------------|
@@ -144,7 +144,7 @@ Every `!lua` block and `${{ }}` expression receives the same context:
 
 ## The `global` Table
 
-The `global` table is shared across all `!lua` blocks and `${{ }}` expressions in the same evaluation. Use it to share state:
+The `global` table is shared across all `!lua` blocks and `${{ }}$` expressions in the same evaluation. Use it to share state:
 
 ```yaml
 lua: |
@@ -153,11 +153,11 @@ lua: |
 services:
   web:
     environment:
-      - PORT=${{ tostring(global.base_port) }}
+      - PORT=${{ tostring(global.base_port) }}$
 
   api:
     environment:
-      - PORT=${{ tostring(global.base_port + 1) }}
+      - PORT=${{ tostring(global.base_port + 1) }}$
 ```
 
 ---
@@ -175,9 +175,9 @@ lua: |
 
 services:
   web:
-    command: ["./server", "--port", "${{ get_port('web') }}"]
+    command: ["./server", "--port", "${{ get_port('web') }}$"]
   api:
-    command: ["./server", "--port", "${{ get_port('api') }}"]
+    command: ["./server", "--port", "${{ get_port('api') }}$"]
 ```
 
 ---
@@ -190,7 +190,7 @@ The `kepler:` namespace (logs, hooks) and the `lua:` directive are evaluated **o
 
 ### Service Config (lazily at start time)
 
-Service-level `${{ }}` and `!lua` are evaluated **at each service start**. This means:
+Service-level `${{ }}$` and `!lua` are evaluated **at each service start**. This means:
 
 - **Re-evaluated on every start/restart** — not cached from the first start
 - **Full context available** — sys_env, env_file, environment, deps, restart_count
@@ -208,16 +208,16 @@ Within a service, evaluation happens in this order:
 | Order | What | `ctx.env` contains |
 |-------|------|-------------------|
 | 1 | `lua:` directive | System env only |
-| 2 | `env_file` path `${{ }}` | System env only |
-| 3 | `environment` array `${{ }}` | System env + env_file (sequential) |
-| 4 | All other fields `${{ }}` and `!lua` | System env + env_file + environment |
+| 2 | `env_file` path `${{ }}$` | System env only |
+| 3 | `environment` array `${{ }}$` | System env + env_file (sequential) |
+| 4 | All other fields `${{ }}$` and `!lua` | System env + env_file + environment |
 
 **Sequential environment evaluation:** Each `environment` entry is evaluated in order, and its result is added to the context for subsequent entries:
 
 ```yaml
 environment:
   - BASE=/opt/app
-  - CONFIG=${{ env.BASE }}/config    # Can see BASE from previous entry
+  - CONFIG=${{ env.BASE }}$/config    # Can see BASE from previous entry
 ```
 
 ---
@@ -236,18 +236,18 @@ command: !lua |
 
 Without `tostring()`, numbers in string arrays will cause deserialization errors.
 
-### In `${{ }}` expressions
+### In `${{ }}$` expressions
 
 - **Standalone** expressions preserve types automatically
 - **Embedded** expressions coerce to strings (nil → empty, numbers → string)
 
 ```yaml
 # Standalone: type preserved
-command: ${{ {"echo", "hello"} }}   # Returns a sequence
+command: ${{ {"echo", "hello"} }}$   # Returns a sequence
 
 # Embedded: coerced to string
 environment:
-  - PORT=${{ 8080 }}                # "8080" (number → string in context)
+  - PORT=${{ 8080 }}$                # "8080" (number → string in context)
 ```
 
 ---
@@ -279,7 +279,7 @@ The Lua environment provides a **restricted subset** of the standard library:
 - **Writes to `ctx.*` raise runtime errors**
 - **Metatables are protected** from removal
 - **`require()` is blocked** — external module loading is not permitted
-- **`${{ }}` shares the same environment as `!lua`** — bare variable names resolve to nil (standard Lua behavior)
+- **`${{ }}$` shares the same environment as `!lua`** — bare variable names resolve to nil (standard Lua behavior)
 
 ---
 
@@ -296,14 +296,14 @@ lua: |
 
 services:
   web:
-    command: ["node", "server.js", "-p", "${{ port_for(0) }}"]
+    command: ["node", "server.js", "-p", "${{ port_for(0) }}$"]
     environment:
-      - PORT=${{ port_for(0) }}
+      - PORT=${{ port_for(0) }}$
 
   api:
-    command: ["node", "api.js", "-p", "${{ port_for(1) }}"]
+    command: ["node", "api.js", "-p", "${{ port_for(1) }}$"]
     environment:
-      - PORT=${{ port_for(1) }}
+      - PORT=${{ port_for(1) }}$
 ```
 
 ### Conditional Configuration
@@ -350,9 +350,9 @@ services:
 ```yaml
 services:
   app:
-    command: ${{ ctx.restart_count > 0 and {"./app", "--recovery"} or {"./app"} }}
+    command: ${{ ctx.restart_count > 0 and {"./app", "--recovery"} or {"./app"} }}$
     environment:
-      - RESTART_COUNT=${{ ctx.restart_count }}
+      - RESTART_COUNT=${{ ctx.restart_count }}$
 ```
 
 ### Cross-Service Environment References
@@ -367,7 +367,7 @@ services:
     command: ["./app"]
     depends_on: [setup]
     environment:
-      - TOKEN=${{ deps.setup.env.AUTH_TOKEN }}
+      - TOKEN=${{ deps.setup.env.AUTH_TOKEN }}$
 ```
 
 ### Cross-Service Output References
@@ -391,7 +391,7 @@ services:
 
 ## See Also
 
-- [Inline Expressions](variable-expansion.md) — `${{ expr }}` syntax reference
+- [Inline Expressions](variable-expansion.md) — `${{ expr }}$` syntax reference
 - [Environment Variables](environment-variables.md) — How `ctx.env` is built
 - [Configuration](configuration.md) — Full config reference
 - [Architecture](architecture.md#lua-scripting-security) — Internal sandbox implementation

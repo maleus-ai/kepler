@@ -1,6 +1,6 @@
 # Inline Expressions
 
-Kepler supports inline Lua expressions in configuration values using `${{ expr }}` syntax.
+Kepler supports inline Lua expressions in configuration values using `${{ expr }}$` syntax.
 
 ## Table of Contents
 
@@ -18,13 +18,13 @@ Kepler supports inline Lua expressions in configuration values using `${{ expr }
 
 | Syntax                        | Description                        |
 | ----------------------------- | ---------------------------------- |
-| `${{ expr }}`                 | Evaluate a Lua expression inline   |
-| `${{ env.VAR }}`              | Reference an environment variable  |
-| `${{ env.VAR or "default" }}` | Use `"default"` if `VAR` is unset  |
-| `${{ deps.svc.status }}`      | Reference dependency status        |
-| `${{ deps.svc.outputs.key }}` | Reference a dependency's output value |
-| `${{ hooks.pre_start.outputs.step1.token }}` | Reference a hook step output |
-| `${{ ctx.service_name }}`     | Reference the current service name |
+| `${{ expr }}$`                 | Evaluate a Lua expression inline   |
+| `${{ env.VAR }}$`              | Reference an environment variable  |
+| `${{ env.VAR or "default" }}$` | Use `"default"` if `VAR` is unset  |
+| `${{ deps.svc.status }}$`      | Reference dependency status        |
+| `${{ deps.svc.outputs.key }}$` | Reference a dependency's output value |
+| `${{ hooks.pre_start.outputs.step1.token }}$` | Reference a hook step output |
+| `${{ ctx.service_name }}$`     | Reference the current service name |
 
 Expressions are evaluated as Lua code with access to `env`, `ctx`, `deps`, and `global`.
 
@@ -36,17 +36,17 @@ Expressions are evaluated as Lua code with access to `env`, `ctx`, `deps`, and `
 
 ```yaml
 environment:
-  - PORT=${{ 4040 * 2 }}              # number → string (embedded in KEY=value)
+  - PORT=${{ 4040 * 2 }}$              # number → string (embedded in KEY=value)
 
 # These preserve Lua types:
-command: ${{ {"echo", "hello"} }}  # table → sequence
+command: ${{ {"echo", "hello"} }}$  # table → sequence
 ```
 
 **Embedded** expressions (part of a larger string) are **coerced to strings**:
 
 ```yaml
 environment:
-  - DATABASE_URL=postgres://${{ env.DB_HOST }}:${{ env.DB_PORT }}/mydb
+  - DATABASE_URL=postgres://${{ env.DB_HOST }}$:${{ env.DB_PORT }}$/mydb
 ```
 
 Type coercion rules:
@@ -62,13 +62,13 @@ Type coercion rules:
 
 ## Where Expressions Are Evaluated
 
-All `${{ }}` expressions in service config are evaluated **at service start time** (not at config load time). This means:
+All `${{ }}$` expressions in service config are evaluated **at service start time** (not at config load time). This means:
 
 - Expressions re-evaluate on every service start/restart
 - `deps` information is available (dependency status, env, etc.)
 - Runtime context like `ctx.restart_count` is available
 
-The following fields support `${{ }}`:
+The following fields support `${{ }}$`:
 
 - `environment` entries (evaluated sequentially — later entries can reference earlier ones)
 - `working_dir`
@@ -89,7 +89,7 @@ The following fields support `${{ }}`:
 ## Where Expressions Are NOT Evaluated
 
 - **`depends_on` service names** — Service names (keys/entries) in dependencies must be literal strings. They are needed at config load time for dependency graph construction.
-- **`depends_on` config fields** (`condition`, `timeout`, `restart`, `exit_code`) — These fields **do** support `!lua` tags and `${{ }}` expressions, evaluated eagerly at config load time with system environment only.
+- **`depends_on` config fields** (`condition`, `timeout`, `restart`, `exit_code`) — These fields **do** support `!lua` tags and `${{ }}$` expressions, evaluated eagerly at config load time with system environment only.
 
 ---
 
@@ -100,7 +100,7 @@ The available context depends on the evaluation stage:
 ### Stage 1: env_file Path (config load time)
 
 ```yaml
-env_file: ${{ env.CONFIG_DIR }}/.env    # Only system env available
+env_file: ${{ env.CONFIG_DIR }}$/.env    # Only system env available
 ```
 
 ### Stage 2: environment Array (service start time)
@@ -110,8 +110,8 @@ Evaluated **sequentially** — each entry's result is added to the context for s
 ```yaml
 environment:
   - BASE_DIR=/opt/app
-  - CONFIG=${{ env.BASE_DIR }}/config   # Can reference BASE_DIR from previous entry
-  - DB_HOST=${{ env.DB_HOST or "localhost" }}
+  - CONFIG=${{ env.BASE_DIR }}$/config   # Can reference BASE_DIR from previous entry
+  - DB_HOST=${{ env.DB_HOST or "localhost" }}$
 ```
 
 ### Stage 3: Other Fields (service start time)
@@ -119,8 +119,8 @@ environment:
 All remaining fields are evaluated with the full context (system env + env_file + environment array + deps):
 
 ```yaml
-working_dir: ${{ env.APP_DIR }}
-user: ${{ env.SERVICE_USER or "nobody" }}
+working_dir: ${{ env.APP_DIR }}$
+user: ${{ env.SERVICE_USER or "nobody" }}$
 ```
 
 ### Available Variables
@@ -146,7 +146,7 @@ user: ${{ env.SERVICE_USER or "nobody" }}
 | `hooks.HOOK.outputs.STEP.KEY` | Shortcut for `ctx.hooks.HOOK.outputs.STEP.KEY` |
 | `global`                  | Shared mutable table (set via `lua:` directive)            |
 
-> **Note:** Bare variable names like `${{ HOME }}` resolve to nil. To access environment variables, use `env.HOME` or `ctx.env.HOME`.
+> **Note:** Bare variable names like `${{ HOME }}$` resolve to nil. To access environment variables, use `env.HOME` or `ctx.env.HOME`.
 
 ---
 
@@ -156,16 +156,16 @@ Use Lua's `or` operator for default values:
 
 ```yaml
 environment:
-  - PORT=${{ env.PORT or "8080" }}
-  - DB_HOST=${{ env.DB_HOST or "localhost" }}
-  - LOG_LEVEL=${{ env.LOG_LEVEL or "info" }}
+  - PORT=${{ env.PORT or "8080" }}$
+  - DB_HOST=${{ env.DB_HOST or "localhost" }}$
+  - LOG_LEVEL=${{ env.LOG_LEVEL or "info" }}$
 ```
 
 For numeric defaults:
 
 ```yaml
 environment:
-  - WORKERS=${{ tonumber(env.WORKERS) or 4 }}
+  - WORKERS=${{ tonumber(env.WORKERS) or 4 }}$
 ```
 
 ---
@@ -178,8 +178,8 @@ environment:
 services:
   app:
     environment:
-      - DATABASE_URL=postgres://${{ env.DB_HOST }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}
-      - REDIS_URL=redis://${{ env.REDIS_HOST or "localhost" }}:6379
+      - DATABASE_URL=postgres://${{ env.DB_HOST }}$:${{ env.DB_PORT }}$/${{ env.DB_NAME }}$
+      - REDIS_URL=redis://${{ env.REDIS_HOST or "localhost" }}$:6379
 ```
 
 ### Sequential Environment References
@@ -189,8 +189,8 @@ services:
   app:
     environment:
       - APP_DIR=/opt/app
-      - CONFIG_PATH=${{ env.APP_DIR }}/config.yaml
-      - LOG_DIR=${{ env.APP_DIR }}/logs
+      - CONFIG_PATH=${{ env.APP_DIR }}$/config.yaml
+      - LOG_DIR=${{ env.APP_DIR }}$/logs
 ```
 
 ### Using Dependency Information
@@ -205,7 +205,7 @@ services:
     command: ["./app"]
     depends_on: [setup]
     environment:
-      - SETUP_TOKEN=${{ deps.setup.env.TOKEN }}
+      - SETUP_TOKEN=${{ deps.setup.env.TOKEN }}$
 ```
 
 ### Using Dependency Outputs
@@ -222,8 +222,8 @@ services:
       producer:
         condition: service_completed_successfully
     environment:
-      - PORT=${{ deps.producer.outputs.port }}
-      - TOKEN=${{ deps.producer.outputs.token }}
+      - PORT=${{ deps.producer.outputs.port }}$
+      - TOKEN=${{ deps.producer.outputs.token }}$
 ```
 
 ### Conditional Restart Command
@@ -231,7 +231,7 @@ services:
 ```yaml
 services:
   app:
-    command: ${{ ctx.restart_count > 0 and {"./app", "--recovery"} or {"./app"} }}
+    command: ${{ ctx.restart_count > 0 and {"./app", "--recovery"} or {"./app"} }}$
 ```
 
 ### Using Global Lua Functions
@@ -246,10 +246,10 @@ lua: |
 services:
   web:
     environment:
-      - PORT=${{ port_for(0) }}
+      - PORT=${{ port_for(0) }}$
   api:
     environment:
-      - PORT=${{ port_for(1) }}
+      - PORT=${{ port_for(1) }}$
 ```
 
 ---

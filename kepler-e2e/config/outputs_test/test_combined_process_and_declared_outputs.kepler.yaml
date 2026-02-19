@@ -20,7 +20,7 @@ services:
       shared_key: "from_declaration"
 
   reader:
-    command: ["sh", "-c", "echo PROCESS_KEY=${{ deps['combined'].outputs.process_key }}; echo DECLARED_KEY=${{ deps['combined'].outputs.declared_key }}; echo SHARED_KEY=${{ deps['combined'].outputs.shared_key }}; sleep 300"]
+    command: ["sh", "-c", "echo PROCESS_KEY=${{ deps['combined'].outputs.process_key }}$; echo DECLARED_KEY=${{ deps['combined'].outputs.declared_key }}$; echo SHARED_KEY=${{ deps['combined'].outputs.shared_key }}$; sleep 300"]
     depends_on:
       combined:
         condition: service_completed_successfully

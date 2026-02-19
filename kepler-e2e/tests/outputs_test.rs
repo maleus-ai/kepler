@@ -94,7 +94,7 @@ async fn test_service_process_output() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test dependent service reads producer's outputs via ${{ deps['producer'].outputs.port }}.
+/// Test dependent service reads producer's outputs via ${{ deps['producer'].outputs.port }}$.
 #[tokio::test]
 async fn test_dependent_reads_outputs() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
