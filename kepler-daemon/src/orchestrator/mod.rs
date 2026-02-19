@@ -41,7 +41,7 @@ use crate::hooks::{
     GLOBAL_HOOK_PREFIX,
 };
 use crate::lua_eval::DepInfo;
-use crate::logs::LogWriterConfig;
+use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
 use crate::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
 use crate::state::ServiceStatus;
 use crate::watcher::{spawn_file_watcher, FileChangeEvent};
@@ -404,6 +404,14 @@ impl ServiceOrchestrator {
                 Ok(())
             }
             Err(e) => {
+                // Write error to service stderr log so it's visible via `kepler logs`.
+                // Skip for hook errors — they already wrote to stderr in run_service_hook.
+                if !matches!(e, OrchestratorError::HookFailed(_)) {
+                    if let Some(log_config) = handle.get_log_config().await {
+                        let mut writer = BufferedLogWriter::from_config(&log_config, service_name, LogStream::Stderr);
+                        writer.write(&e.to_string());
+                    }
+                }
                 if let Err(err) = handle.set_service_status_with_reason(
                     service_name, ServiceStatus::Failed, None, Some(e.to_string()),
                 ).await {

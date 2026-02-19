@@ -5,7 +5,7 @@ use tracing::{debug, error, info};
 use crate::config::{resolve_log_store, GlobalHooks, HookCommand, HookList, LogConfig, ResolvableCommand, ServiceHooks};
 use crate::config_actor::ConfigActorHandle;
 use crate::errors::{DaemonError, Result};
-use crate::logs::LogWriterConfig;
+use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
 use crate::lua_eval::{DepInfo, EvalContext, LuaEvaluator};
 use crate::process::{spawn_blocking, BlockingMode, OutputCaptureConfig};
 use kepler_protocol::protocol::{ProgressEvent, ServicePhase};
@@ -466,6 +466,11 @@ pub async fn run_global_hook(
             }
             Err(e) => {
                 had_failure = true;
+                // Write error to global hook stderr log so it's visible via `kepler logs`
+                if let Some(log_config) = params.log_config {
+                    let mut writer = BufferedLogWriter::from_config(log_config, &service_name, LogStream::Stderr);
+                    writer.write(&format!("Hook {} failed: {}", hook_type.as_str(), e));
+                }
                 emit_hook_event(params.progress, "global", ServicePhase::HookFailed { hook: hook_name, message: e.to_string() }).await;
                 if first_error.is_none() {
                     first_error = Some(e);
@@ -609,6 +614,11 @@ pub async fn run_service_hook(
                     service_name,
                     e
                 );
+                // Write error to service stderr log so it's visible via `kepler logs`
+                if let Some(log_config) = params.log_config {
+                    let mut writer = BufferedLogWriter::from_config(log_config, service_name, LogStream::Stderr);
+                    writer.write(&format!("Hook {} failed: {}", hook_type.as_str(), e));
+                }
                 emit_hook_event(progress, service_name, ServicePhase::HookFailed { hook: hook_name, message: e.to_string() }).await;
                 if first_error.is_none() {
                     first_error = Some(e);
