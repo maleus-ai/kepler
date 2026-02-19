@@ -21,7 +21,7 @@ use kepler_protocol::{
     errors::ClientError,
     protocol::{ConfigStatus, CursorLogEntry, LogCursorData, LogEntry, LogMode, Response, ResponseData, ServerEvent, ServiceInfo, ServicePhase, ServiceTarget},
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tabled::{Table, Tabled};
 use tabled::settings::Style;
 use tracing_subscriber::EnvFilter;
@@ -137,7 +137,7 @@ async fn run() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Start { services, detach, wait, timeout, no_deps, override_envs, refresh_env } => {
+        Commands::Start { services, detach, wait, timeout, no_deps, override_envs, refresh_env, abort_on_failure, no_abort_on_failure } => {
             let override_envs = build_override_envs(override_envs, refresh_env, &sys_env);
             if no_deps && services.is_empty() {
                 eprintln!("Error: --no-deps requires specifying at least one service");
@@ -154,7 +154,7 @@ async fn run() -> Result<()> {
                 // alongside the subscription but don't care about its result.
                 let (_start_progress_rx, start_future) = client.send_request(
                     kepler_protocol::protocol::Request::Start {
-                        config_path: canonical_path,
+                        config_path: canonical_path.clone(),
                         services,
                         sys_env: Some(sys_env),
                         no_deps,
@@ -166,7 +166,7 @@ async fn run() -> Result<()> {
                         .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
                     let result = tokio::time::timeout(
                         timeout_duration,
-                        wait_until_ready_with_start(progress_rx, sub_future, start_future),
+                        wait_until_ready_with_start(progress_rx, sub_future, start_future, abort_on_failure, &client, &canonical_path),
                     ).await;
                     match result {
                         Ok(Ok(())) => {}
@@ -177,7 +177,7 @@ async fn run() -> Result<()> {
                         }
                     }
                 } else {
-                    wait_until_ready_with_start(progress_rx, sub_future, start_future).await?;
+                    wait_until_ready_with_start(progress_rx, sub_future, start_future, abort_on_failure, &client, &canonical_path).await?;
                 }
             } else if detach {
                 // -d: Fire start, exit immediately
@@ -199,7 +199,7 @@ async fn run() -> Result<()> {
                 )?;
                 foreground_with_logs(
                     start_future,
-                    follow_logs_until_quiescent(&client, &canonical_path, log_service),
+                    follow_logs_until_quiescent(&client, &canonical_path, log_service, !no_abort_on_failure),
                 ).await?;
             }
         }
@@ -269,7 +269,7 @@ async fn run() -> Result<()> {
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);
                 // Phase 2: Follow logs until quiescence or Ctrl+C
-                follow_logs_until_quiescent(&client, &canonical_path, None).await?;
+                follow_logs_until_quiescent(&client, &canonical_path, None, true).await?;
             }
         }
 
@@ -414,7 +414,7 @@ async fn run_with_progress(
                             }
                         }
                     }
-                    Some(ServerEvent::Ready { .. } | ServerEvent::Quiescent { .. }) => {
+                    Some(ServerEvent::Ready { .. } | ServerEvent::Quiescent { .. } | ServerEvent::UnhandledFailure { .. }) => {
                         // Ignored in run_with_progress (used by start -d / foreground mode)
                     }
                     None => {
@@ -475,7 +475,11 @@ async fn foreground_with_logs(
     let mut request_done = false;
     let mut saved_error: Option<CliError> = None;
     loop {
+        // biased: poll log_future first so its internal subscribe_events() call
+        // queues the Subscribe request before request_future queues Start.
+        // This ensures the daemon sets up event forwarding before services begin.
         tokio::select! {
+            biased;
             result = &mut log_future => {
                 if let Some(err) = saved_error {
                     return Err(err);
@@ -509,6 +513,9 @@ async fn wait_until_ready_with_start(
     mut progress_rx: mpsc::UnboundedReceiver<ServerEvent>,
     sub_future: impl Future<Output = std::result::Result<Response, ClientError>>,
     start_future: impl Future<Output = std::result::Result<Response, ClientError>>,
+    abort_on_failure: bool,
+    client: &Client,
+    config_path: &Path,
 ) -> Result<()> {
     let mp = MultiProgress::new();
 
@@ -525,6 +532,7 @@ async fn wait_until_ready_with_start(
     let mut bars: HashMap<String, ProgressBar> = HashMap::new();
     let mut targets: HashMap<String, ServiceTarget> = HashMap::new();
     let mut finished: HashMap<String, bool> = HashMap::new();
+    let mut has_unhandled_failure = false;
 
     tokio::pin!(sub_future);
     tokio::pin!(start_future);
@@ -616,11 +624,45 @@ async fn wait_until_ready_with_start(
                         }
                     }
                     Some(ServerEvent::Ready { .. }) => {
-                        // Daemon says all services are ready — exit wait mode
+                        // Daemon says all services are ready — but a fast-exiting
+                        // service may have reached Running (triggering Ready) then
+                        // immediately exited, with UnhandledFailure still in flight.
+                        // Drain the channel briefly to catch those late events.
+                        let grace_deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+                        loop {
+                            let remaining = grace_deadline.saturating_duration_since(tokio::time::Instant::now());
+                            if remaining.is_zero() {
+                                break;
+                            }
+                            match tokio::time::timeout(remaining, progress_rx.recv()).await {
+                                Ok(Some(ServerEvent::UnhandledFailure { service, exit_code, .. })) => {
+                                    let code_str = exit_code.map(|c| format!(" (exit code {})", c)).unwrap_or_default();
+                                    eprintln!("Unhandled failure: service '{}' failed{}", service, code_str);
+                                    has_unhandled_failure = true;
+                                    if abort_on_failure {
+                                        break;
+                                    }
+                                }
+                                Ok(Some(ServerEvent::Quiescent { .. })) => {
+                                    // All services settled — no more events coming
+                                    break;
+                                }
+                                Ok(Some(_)) => continue,
+                                Ok(None) | Err(_) => break,
+                            }
+                        }
                         break;
                     }
                     Some(ServerEvent::Quiescent { .. }) => {
-                        // Ignored in --wait mode
+                        // Ignored in --wait mode (unless inside Ready grace period above)
+                    }
+                    Some(ServerEvent::UnhandledFailure { service, exit_code, .. }) => {
+                        let code_str = exit_code.map(|c| format!(" (exit code {})", c)).unwrap_or_default();
+                        eprintln!("Unhandled failure: service '{}' failed{}", service, code_str);
+                        has_unhandled_failure = true;
+                        if abort_on_failure {
+                            break;
+                        }
                     }
                     None => {
                         // Subscribe channel closed — wait for start response as fallback
@@ -634,6 +676,14 @@ async fn wait_until_ready_with_start(
                     }
                 }
             }
+            // Poll Subscribe before Start to ensure the subscription is set up
+            // on the daemon side before services begin starting — otherwise,
+            // events like UnhandledFailure can be emitted before the subscriber
+            // is registered and get lost.
+            _ = &mut sub_future, if !sub_done => {
+                sub_done = true;
+                // Subscription ended; drain remaining events
+            }
             result = &mut start_future, if !start_done => {
                 start_done = true;
                 // Start request acknowledged by daemon.
@@ -645,11 +695,24 @@ async fn wait_until_ready_with_start(
                 }
                 // Continue listening for Ready signal or progress events
             }
-            _ = &mut sub_future, if !sub_done => {
-                sub_done = true;
-                // Subscription ended; drain remaining events
-            }
         }
+    }
+
+    if abort_on_failure && has_unhandled_failure {
+        eprintln!("Stopping all services due to unhandled failure...");
+        if let Ok((progress_rx, response_future)) = client.stop(
+            config_path.to_path_buf(),
+            None,
+            false,
+            None,
+        ) {
+            let _ = run_with_progress(progress_rx, response_future).await;
+        }
+        std::process::exit(1);
+    }
+
+    if has_unhandled_failure {
+        std::process::exit(1);
     }
 
     Ok(())
@@ -1347,35 +1410,52 @@ fn write_cursor_batch(
     }
 }
 
+/// Signal sent by the quiescence monitor.
+enum QuiescenceSignal {
+    /// All services settled — nothing more will change.
+    Quiescent,
+    /// A service failed with no handler.
+    UnhandledFailure { service: String, exit_code: Option<i32> },
+}
+
 /// Event-driven quiescence monitor.
 ///
-/// Consumes progress events and fires the oneshot when all observed services
-/// reach a terminal phase (Stopped or Failed). Requires at least one
+/// Consumes progress events and sends signals when quiescence is reached
+/// or unhandled failures are detected. Requires at least one
 /// non-terminal observation before declaring quiescence, to prevent false
 /// positives from deferred services that appear as Stopped in the initial
 /// snapshot.
 async fn quiescence_monitor(
     mut progress_rx: mpsc::UnboundedReceiver<ServerEvent>,
-    quiescent_tx: oneshot::Sender<()>,
+    signal_tx: mpsc::UnboundedSender<QuiescenceSignal>,
 ) {
     while let Some(event) = progress_rx.recv().await {
-        if matches!(event, ServerEvent::Quiescent { .. }) {
-            let _ = quiescent_tx.send(());
-            return;
+        match event {
+            ServerEvent::UnhandledFailure { service, exit_code, .. } => {
+                let _ = signal_tx.send(QuiescenceSignal::UnhandledFailure { service, exit_code });
+            }
+            ServerEvent::Quiescent { .. } => {
+                let _ = signal_tx.send(QuiescenceSignal::Quiescent);
+                return;
+            }
+            _ => {}
         }
     }
     // Channel closed = subscription ended (config unloaded)
-    let _ = quiescent_tx.send(());
+    let _ = signal_tx.send(QuiescenceSignal::Quiescent);
 }
 
 /// Follow logs until all services reach a terminal state (quiescent) or Ctrl+C.
 ///
 /// On Ctrl+C: sends stop with progress bars, then exits.
 /// On quiescence (all services stopped/failed via subscription): exits cleanly.
+/// On unhandled failure with `abort_on_failure`: stops services, exits 1.
+/// On unhandled failure without `abort_on_failure`: continues, exits 1 at quiescence.
 async fn follow_logs_until_quiescent(
     client: &Client,
     config_path: &Path,
     service: Option<&str>,
+    abort_on_failure: bool,
 ) -> Result<()> {
     let use_color = std::io::stdout().is_terminal();
     let mut color_map: HashMap<String, Color> = HashMap::new();
@@ -1383,7 +1463,7 @@ async fn follow_logs_until_quiescent(
     let mut cached_ts_str = String::new();
 
     // Set up quiescence detection via subscription
-    let (quiescent_tx, quiescent_rx) = oneshot::channel::<()>();
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<QuiescenceSignal>();
     let progress_rx = client.subscribe_events(
         config_path.to_path_buf(),
         service.map(|s| vec![s.to_string()]),
@@ -1397,19 +1477,34 @@ async fn follow_logs_until_quiescent(
     // false positives from deferred services that appear as Stopped in the initial
     // snapshot. The 2s fallback poll handles the edge case where ALL services
     // are already terminal at subscription time.
-    tokio::spawn(quiescence_monitor(progress_rx, quiescent_tx));
+    tokio::spawn(quiescence_monitor(progress_rx, signal_tx));
+
+    // Track whether any unhandled failure was seen
+    let mut has_unhandled_failure = false;
+    let mut abort_triggered = false;
 
     // Wrap quiescence signal with a 2s fallback status poll for edge cases
     // (all services already terminal at snapshot time, daemon bugs, empty config)
     let quiescence_future = {
         let config_path = config_path.to_path_buf();
         async move {
-            let mut quiescent_rx = quiescent_rx;
             loop {
                 tokio::select! {
-                    result = &mut quiescent_rx => {
-                        let _ = result;
-                        return;
+                    signal = signal_rx.recv() => {
+                        match signal {
+                            Some(QuiescenceSignal::UnhandledFailure { service, exit_code }) => {
+                                let code_str = exit_code.map(|c| format!(" (exit code {})", c)).unwrap_or_default();
+                                eprintln!("Unhandled failure: service '{}' failed{}", service, code_str);
+                                has_unhandled_failure = true;
+                                if abort_on_failure {
+                                    abort_triggered = true;
+                                    return (has_unhandled_failure, abort_triggered);
+                                }
+                            }
+                            Some(QuiescenceSignal::Quiescent) | None => {
+                                return (has_unhandled_failure, abort_triggered);
+                            }
+                        }
                     }
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {
                         // Fallback: poll status to handle missed events / daemon bugs
@@ -1419,13 +1514,22 @@ async fn follow_logs_until_quiescent(
                                     matches!(info.status.as_str(), "stopped" | "exited" | "killed" | "failed" | "skipped")
                                 });
                                 if all_terminal {
-                                    return;
+                                    return (has_unhandled_failure, abort_triggered);
                                 }
                             }
                     }
                 }
             }
         }
+    };
+
+    // We need to extract the failure state after the future completes.
+    // Use a shared cell since the future moves the variables.
+    let quiescence_result = std::sync::Arc::new(std::sync::Mutex::new((false, false)));
+    let quiescence_result_clone = quiescence_result.clone();
+    let quiescence_wrapper = async move {
+        let result = quiescence_future.await;
+        *quiescence_result_clone.lock().unwrap() = result;
     };
 
     let exit_reason = stream_cursor_logs(
@@ -1437,15 +1541,21 @@ async fn follow_logs_until_quiescent(
             mode: StreamMode::UntilQuiescent,
         },
         async { let _ = tokio::signal::ctrl_c().await; },
-        quiescence_future,
+        quiescence_wrapper,
         |service_table, entries| {
             write_cursor_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
         },
     )
     .await?;
 
-    if exit_reason == StreamExitReason::ShutdownRequested {
-        eprintln!("\nGracefully stopping...");
+    let (has_unhandled_failure, abort_triggered) = *quiescence_result.lock().unwrap();
+
+    if exit_reason == StreamExitReason::ShutdownRequested || abort_triggered {
+        if abort_triggered {
+            eprintln!("\nStopping all services due to unhandled failure...");
+        } else {
+            eprintln!("\nGracefully stopping...");
+        }
         match client.stop(
             config_path.to_path_buf(),
             service.map(String::from),
@@ -1470,6 +1580,13 @@ async fn follow_logs_until_quiescent(
                 eprintln!("Error stopping services: {}", e);
             }
         }
+        if abort_triggered {
+            std::process::exit(1);
+        }
+    }
+
+    if has_unhandled_failure {
+        std::process::exit(1);
     }
 
     Ok(())

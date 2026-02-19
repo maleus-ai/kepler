@@ -436,6 +436,26 @@ pub fn is_transient_satisfaction(dep_state: &ServiceState, restart_config: &Rest
         && restart_config.should_restart_on_exit(dep_state.exit_code)
 }
 
+/// Check if any service has a `service_failed` or `service_stopped` dependency on the given service.
+///
+/// A failure is "handled" when another service declares a `depends_on` with
+/// `service_failed` or `service_stopped` condition targeting the failed service,
+/// acting as an error handler (analogous to GitHub Actions' `if: failure()`).
+pub fn is_failure_handled(
+    failed_service: &str,
+    services: &HashMap<String, RawServiceConfig>,
+) -> bool {
+    services.values().any(|raw| {
+        raw.depends_on.iter().any(|(dep_name, dep_config)| {
+            dep_name == failed_service
+                && matches!(
+                    dep_config.condition,
+                    DependencyCondition::ServiceFailed | DependencyCondition::ServiceStopped
+                )
+        })
+    })
+}
+
 /// Detect dependency cycles in the service configuration
 pub fn detect_cycles(services: &HashMap<String, RawServiceConfig>) -> Result<()> {
     // Validate all dependencies exist first

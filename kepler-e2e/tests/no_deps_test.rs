@@ -83,7 +83,7 @@ async fn test_start_specific_without_no_deps_still_waits() -> E2eResult<()> {
         .wait_for_service_status_any(&config_path, "dependency", &["stopped", "exited"], Duration::from_secs(10))
         .await?;
     harness
-        .wait_for_service_status_any(&config_path, "dependent", &["stopped", "exited", "waiting"], Duration::from_secs(10))
+        .wait_for_service_status_any(&config_path, "dependent", &["stopped", "exited", "waiting", "failed", "killed"], Duration::from_secs(10))
         .await?;
 
     // Now start only "dependent" WITHOUT --no-deps — should block on dependency

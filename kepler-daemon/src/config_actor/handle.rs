@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use crate::config::{KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
 use crate::errors::{DaemonError, Result};
 use crate::events::{ServiceEvent, ServiceEventReceiver};
-use crate::lua_eval::EvalContext;
+use crate::lua_eval::{ConditionResult, EvalContext};
 use crate::logs::LogWriterConfig;
 use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
@@ -1011,7 +1011,7 @@ impl ConfigActorHandle {
     // === Lua Evaluation ===
 
     /// Evaluate a runtime `if` condition using the Lua evaluator.
-    pub async fn eval_if_condition(&self, condition: &str, ctx: EvalContext) -> Result<bool> {
+    pub async fn eval_if_condition(&self, condition: &str, ctx: EvalContext) -> Result<ConditionResult> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ConfigCommand::EvalIfCondition {

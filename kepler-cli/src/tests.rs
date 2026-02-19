@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::VecDeque;
+use tokio::sync::oneshot;
 use kepler_protocol::protocol::{CursorLogEntry, ProgressEvent, StreamType};
 
 type ClientResult = std::result::Result<Response, ClientError>;
@@ -700,13 +701,13 @@ async fn test_follow_exits_on_quiescence() {
 // Quiescence monitor unit tests
 // ========================================================================
 
-/// Quiescence monitor fires when it receives ServerEvent::Quiescent.
+/// Quiescence monitor fires Quiescent signal when it receives ServerEvent::Quiescent.
 #[tokio::test]
 async fn test_quiescence_monitor_fires_on_quiescent_event() {
     let (tx, rx) = mpsc::unbounded_channel();
-    let (quiescent_tx, quiescent_rx) = oneshot::channel();
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
 
-    let handle = tokio::spawn(quiescence_monitor(rx, quiescent_tx));
+    let handle = tokio::spawn(quiescence_monitor(rx, signal_tx));
 
     // Send some progress events (should be ignored)
     tx.send(ServerEvent::Progress {
@@ -718,10 +719,11 @@ async fn test_quiescence_monitor_fires_on_quiescent_event() {
     tx.send(ServerEvent::Quiescent { request_id: 1 }).unwrap();
 
     // Monitor should fire quiescence
-    tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
+    let signal = tokio::time::timeout(Duration::from_secs(1), signal_rx.recv())
         .await
         .expect("quiescence should fire within 1s")
-        .expect("oneshot should not be dropped");
+        .expect("channel should not be closed");
+    assert!(matches!(signal, QuiescenceSignal::Quiescent));
     handle.await.unwrap();
 }
 
@@ -729,34 +731,66 @@ async fn test_quiescence_monitor_fires_on_quiescent_event() {
 #[tokio::test]
 async fn test_quiescence_monitor_channel_close_fires() {
     let (tx, rx) = mpsc::unbounded_channel();
-    let (quiescent_tx, quiescent_rx) = oneshot::channel();
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
 
-    tokio::spawn(quiescence_monitor(rx, quiescent_tx));
+    tokio::spawn(quiescence_monitor(rx, signal_tx));
 
     // Send nothing, just close
     drop(tx);
 
-    tokio::time::timeout(Duration::from_secs(1), quiescent_rx)
+    let signal = tokio::time::timeout(Duration::from_secs(1), signal_rx.recv())
         .await
         .expect("quiescence should fire on channel close")
-        .expect("oneshot should not be dropped");
+        .expect("channel should not be closed");
+    assert!(matches!(signal, QuiescenceSignal::Quiescent));
 }
 
 /// Ready events are ignored by quiescence monitor (not the same signal).
 #[tokio::test]
 async fn test_quiescence_monitor_ignores_ready() {
     let (tx, rx) = mpsc::unbounded_channel();
-    let (quiescent_tx, mut quiescent_rx) = oneshot::channel();
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
 
-    tokio::spawn(quiescence_monitor(rx, quiescent_tx));
+    tokio::spawn(quiescence_monitor(rx, signal_tx));
 
     // Send Ready (should not trigger quiescence)
     tx.send(ServerEvent::Ready { request_id: 1 }).unwrap();
 
     // Should NOT fire
-    let result = tokio::time::timeout(Duration::from_millis(100), &mut quiescent_rx).await;
+    let result = tokio::time::timeout(Duration::from_millis(100), signal_rx.recv()).await;
     assert!(result.is_err(), "quiescence should NOT fire on Ready event");
 
     // Cleanup: drop sender to unblock the monitor
     drop(tx);
+}
+
+/// Quiescence monitor sends UnhandledFailure signal for unhandled failure events.
+#[tokio::test]
+async fn test_quiescence_monitor_sends_unhandled_failure() {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+
+    tokio::spawn(quiescence_monitor(rx, signal_tx));
+
+    // Send UnhandledFailure event
+    tx.send(ServerEvent::UnhandledFailure {
+        request_id: 1,
+        service: "web".to_string(),
+        exit_code: Some(1),
+    }).unwrap();
+
+    let signal = tokio::time::timeout(Duration::from_secs(1), signal_rx.recv())
+        .await
+        .expect("signal should arrive within 1s")
+        .expect("channel should not be closed");
+    assert!(matches!(signal, QuiescenceSignal::UnhandledFailure { ref service, exit_code } if service == "web" && exit_code == Some(1)));
+
+    // Monitor should continue (not return) — send Quiescent to end it
+    tx.send(ServerEvent::Quiescent { request_id: 1 }).unwrap();
+
+    let signal = tokio::time::timeout(Duration::from_secs(1), signal_rx.recv())
+        .await
+        .expect("quiescence should fire within 1s")
+        .expect("channel should not be closed");
+    assert!(matches!(signal, QuiescenceSignal::Quiescent));
 }

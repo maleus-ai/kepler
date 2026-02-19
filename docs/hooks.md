@@ -204,26 +204,55 @@ On process exit (not manual stop):
 
 ## Failure Handling
 
-When a hook in a list fails, subsequent hooks follow **implicit `success()`** semantics:
+When a hook step fails, subsequent steps follow **implicit `success()`** semantics:
 
-- Hooks **without** an `if` condition are skipped after a failure
-- Hooks **with** `if: "always()"` or `if: "failure()"` still run after a failure
-- The first error is propagated after all eligible hooks have run
+- Steps **without** an `if` condition are skipped after a failure
+- Steps **with** an `if` condition that evaluates to `true` still run after a failure (e.g., `if: "always()"` or `if: "failure()"`)
+
+A failure is only considered **handled** when `failure()` (no args) is called in the `if:` condition AND the step succeeds. This is an explicit acknowledgment of the failure. Using `always()` means "run this step no matter what" (cleanup), but it does **not** clear the failure.
 
 ```yaml
 hooks:
   pre_start:
     - run: echo "step 1" && false          # This fails
     - run: echo "step 2"                   # Skipped (implicit success())
-    - if: "always()"
-      run: echo "cleanup always runs"      # Runs
     - if: "failure()"
-      run: echo "error handler"            # Runs (previous hook failed)
-    - if: "success()"
-      run: echo "only on success"          # Skipped (same as no `if`)
+      run: echo "handle the failure"       # Runs — failure() called + succeeds → failure is handled
+    - run: echo "step 3"                   # Runs (failure was handled above)
 ```
 
-After all eligible hooks run, the first error is still returned to the caller.
+`always()` runs the step but does NOT handle the failure:
+
+```yaml
+hooks:
+  pre_start:
+    - run: echo "step 1" && false          # This fails
+    - if: "always()"
+      run: echo "cleanup always runs"      # Runs (cleanup), but failure NOT handled
+    # → Hook returns error (always() is not an explicit failure handler)
+```
+
+If no step calls `failure()` and succeeds, the original error propagates to the caller.
+
+```yaml
+hooks:
+  pre_start:
+    - run: echo "step 1" && false          # This fails
+    - if: "success()"
+      run: echo "only on success"          # Skipped — failure NOT handled
+    # → Hook returns error (no failure handler succeeded)
+```
+
+If a `failure()` step itself fails, the failure state continues and the original error propagates:
+
+```yaml
+hooks:
+  pre_start:
+    - run: echo "step 1" && false          # This fails (original error)
+    - if: "failure()"
+      run: echo "handler" && false         # Runs but also fails → failure NOT handled
+    # → Hook returns the original error
+```
 
 ---
 

@@ -75,4 +75,10 @@ pub enum ConfigEvent {
     Ready,
     /// All services settled — nothing more will change (for foreground mode exit)
     Quiescent,
+    /// A service failed and no other service handles the failure
+    /// (no `service_failed` or `service_stopped` dependency, and restart won't trigger)
+    UnhandledFailure {
+        service: String,
+        exit_code: Option<i32>,
+    },
 }

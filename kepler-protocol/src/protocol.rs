@@ -434,6 +434,12 @@ pub enum ServerEvent {
     Ready { request_id: u64 },
     /// All services settled — nothing more will change (for foreground mode exit)
     Quiescent { request_id: u64 },
+    /// A service failed with no handler (no `service_failed`/`service_stopped` dependency, won't restart)
+    UnhandledFailure {
+        request_id: u64,
+        service: String,
+        exit_code: Option<i32>,
+    },
 }
 
 impl ServerEvent {
@@ -443,6 +449,7 @@ impl ServerEvent {
             ServerEvent::Progress { request_id, .. } => *request_id,
             ServerEvent::Ready { request_id } => *request_id,
             ServerEvent::Quiescent { request_id } => *request_id,
+            ServerEvent::UnhandledFailure { request_id, .. } => *request_id,
         }
     }
 }

@@ -871,6 +871,33 @@ async fn handle_request(
             // Re-check Ready/Quiescent in case the signals fired before we subscribed
             handle.recheck_ready_quiescent().await;
 
+            // Replay any unhandled failures that occurred before we subscribed.
+            // Unlike Ready/Quiescent, UnhandledFailure is a one-time event that
+            // isn't re-emitted by recheck_ready_quiescent, so we scan current
+            // service states and emit for any that qualify.
+            for (name, svc_config) in &config.services {
+                if services.as_ref().is_none_or(|s| s.contains(name)) {
+                    let state = handle.get_service_state(name).await;
+                    if let Some(state) = &state {
+                        let exit_code = state.exit_code;
+                        let is_failure = match state.status {
+                            ServiceStatus::Failed | ServiceStatus::Killed => true,
+                            ServiceStatus::Exited => exit_code.is_some_and(|c| c != 0),
+                            _ => false,
+                        };
+                        if is_failure {
+                            let would_restart = svc_config.restart.as_static()
+                                .cloned()
+                                .unwrap_or_default()
+                                .should_restart_on_exit(exit_code);
+                            if !would_restart && !kepler_daemon::deps::is_failure_handled(name, &config.services) {
+                                progress.send_unhandled_failure(name.clone(), exit_code).await;
+                            }
+                        }
+                    }
+                }
+            }
+
             // Stream config events until client disconnects or channel closes
             loop {
                 tokio::select! {
@@ -895,6 +922,9 @@ async fn handle_request(
                             }
                             Some(ConfigEvent::Quiescent) => {
                                 progress.send_quiescent().await;
+                            }
+                            Some(ConfigEvent::UnhandledFailure { service, exit_code }) => {
+                                progress.send_unhandled_failure(service, exit_code).await;
                             }
                             None => break, // Channel closed (config unloaded)
                         }

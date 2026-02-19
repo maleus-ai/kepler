@@ -14,7 +14,7 @@ use crate::config::{KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, Sy
 pub type OutputTasks = (Option<JoinHandle<Option<Vec<String>>>>, Option<JoinHandle<()>>);
 use crate::errors::Result;
 use crate::events::{ServiceEvent, ServiceEventReceiver};
-use crate::lua_eval::EvalContext;
+use crate::lua_eval::{ConditionResult, EvalContext};
 use crate::logs::LogWriterConfig;
 use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
@@ -277,7 +277,7 @@ pub enum ConfigCommand {
     EvalIfCondition {
         condition: String,
         context: Box<EvalContext>,
-        reply: oneshot::Sender<Result<bool>>,
+        reply: oneshot::Sender<Result<ConditionResult>>,
     },
     /// Merge overrides into the stored sys_env, re-save snapshot, and clear resolved config cache
     MergeSysEnv {

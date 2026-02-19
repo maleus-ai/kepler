@@ -83,6 +83,20 @@ impl ProgressSender {
         }
     }
 
+    /// Send an UnhandledFailure event to the client. Fire-and-forget: errors are silently ignored.
+    pub async fn send_unhandled_failure(&self, service: String, exit_code: Option<i32>) {
+        let msg = ServerMessage::Event {
+            event: ServerEvent::UnhandledFailure {
+                request_id: self.request_id,
+                service,
+                exit_code,
+            },
+        };
+        if let Ok(bytes) = encode_server_message(&msg) {
+            let _ = self.write_tx.send(bytes).await;
+        }
+    }
+
     /// Wait until the client disconnects (the write channel is closed).
     pub async fn closed(&self) {
         self.write_tx.closed().await
