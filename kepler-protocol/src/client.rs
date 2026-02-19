@@ -186,13 +186,13 @@ impl Client {
     pub fn start(
         &self,
         config_path: PathBuf,
-        service: Option<String>,
+        services: Vec<String>,
         sys_env: Option<HashMap<String, String>>,
         no_deps: bool,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Start {
             config_path,
-            service,
+            services,
             sys_env,
             no_deps,
         })
