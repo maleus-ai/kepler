@@ -82,6 +82,8 @@ kepler start backend                     # Start a specific service
 kepler start -e MY_VAR=hello             # Override a system env var
 kepler start -e A=1 -e B=2              # Override multiple env vars
 kepler start --refresh-env               # Refresh all sys_env from current shell
+kepler start --no-abort-on-failure       # Don't stop on failure, just exit 1 at quiescence
+kepler start -d --wait --abort-on-failure  # Stop all services on failure in --wait mode
 ```
 
 | Flag | Description |
@@ -91,6 +93,8 @@ kepler start --refresh-env               # Refresh all sys_env from current shel
 | `--timeout <DURATION>` | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait` |
 | `-e, --override-envs <KEY=VALUE>` | Override specific system environment variables (repeatable). Can be combined with `--refresh-env` |
 | `-r, --refresh-env` | Replace all baked system environment variables with the current shell environment. Can be combined with `-e` |
+| `--abort-on-failure` | Stop all services on unhandled failure (requires `--wait`) |
+| `--no-abort-on-failure` | Don't stop services on unhandled failure (foreground mode only, incompatible with `-d`) |
 
 **Behavior by mode:**
 
@@ -100,6 +104,16 @@ kepler start --refresh-env               # Refresh all sys_env from current shel
 | `start -d` | Immediately | Returns |
 | `start -d --wait` | Startup cluster ready | Returns (deferred continue in background) |
 | `start -d --wait --timeout T` | Startup cluster ready OR timeout | Returns |
+
+**Unhandled failure behavior:**
+
+An "unhandled failure" occurs when a service fails (exits with non-zero code, is killed, or fails to start), won't restart, and no other service has a `service_failed` or `service_stopped` dependency on it. See [Service Lifecycle](service-lifecycle.md#unhandled-failure-detection) for details.
+
+| Mode | Default behavior | Override |
+|------|-----------------|----------|
+| Foreground (`start`) | Stop all services, exit 1 | `--no-abort-on-failure`: exit 1 at quiescence without stopping |
+| `start -d --wait` | Exit 1 (services left running) | `--abort-on-failure`: stop all services, then exit 1 |
+| `start -d` | No failure detection (fire-and-forget) | — |
 
 See [Service Lifecycle](service-lifecycle.md) for details on startup/deferred clusters and quiescence.
 
@@ -247,8 +261,8 @@ Durations are used for timeouts, health check intervals, and other time-based se
 
 | Code | Description |
 |------|-------------|
-| `0` | Success |
-| `1` | General error |
+| `0` | Success (all services completed normally, or all failures were handled) |
+| `1` | General error, or unhandled service failure detected |
 | `2` | Connection error (daemon not running) |
 
 ---

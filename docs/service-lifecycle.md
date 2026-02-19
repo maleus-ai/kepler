@@ -128,6 +128,57 @@ If a deferred service's dependency is permanently unsatisfied (the dependency ha
 
 ---
 
+## Unhandled Failure Detection
+
+Kepler detects **unhandled service failures** and exits with code 1 when they occur. This gives CI pipelines and scripts a clear signal that something went wrong.
+
+### What Is an Unhandled Failure?
+
+A failure is "unhandled" when **all** of these are true:
+
+1. A service reached a terminal failure state (**Failed**, **Killed**, or **Exited** with non-zero code)
+2. The service's restart policy will **not** restart it
+3. No other service has a `depends_on` with `service_failed` or `service_stopped` condition targeting this service
+
+This mirrors GitHub Actions semantics: a `service_failed` dependency acts like `if: failure()` — it's a failure handler. Without one, the failure propagates as an error exit.
+
+### Examples
+
+```yaml
+services:
+  # Unhandled failure — exits non-zero, no restart, no handler → exit 1
+  worker:
+    command: ["./worker"]
+    restart: no
+
+  # NOT an unhandled failure — restart policy will restart it
+  resilient:
+    command: ["./server"]
+    restart: always
+
+  # NOT an unhandled failure — handler service catches the failure
+  task:
+    command: ["./task"]
+    restart: no
+  error-handler:
+    command: ["./alert"]
+    depends_on:
+      task:
+        condition: service_failed
+```
+
+### Behavior by Mode
+
+| Mode | Default on unhandled failure | Override flag |
+|------|------------------------------|--------------|
+| Foreground (`kepler start`) | Stop all services + exit 1 | `--no-abort-on-failure`: just exit 1 at quiescence |
+| `kepler start -d --wait` | Exit 1 (services left running) | `--abort-on-failure`: stop all services + exit 1 |
+| `kepler start -d` | No detection (fire-and-forget) | — |
+
+See [CLI Reference](cli-reference.md#kepler-start) for flag details.
+
+---
+
 ## Restart Behavior
 
 ### Restart Policies

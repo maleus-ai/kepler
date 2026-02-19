@@ -167,7 +167,9 @@ fn test_always_returns_true() {
         hook: Some(HookEvalContext { had_failure: Some(true), ..Default::default() }),
         ..Default::default()
     };
-    assert!(eval.eval_condition("always()", &ctx).unwrap());
+    let result = eval.eval_condition("always()", &ctx).unwrap();
+    assert!(result.value);
+    assert!(!result.failure_checked);
 }
 
 #[test]
@@ -177,7 +179,7 @@ fn test_success_no_args_no_failure() {
         hook: Some(HookEvalContext { had_failure: Some(false), ..Default::default() }),
         ..Default::default()
     };
-    assert!(eval.eval_condition("success()", &ctx).unwrap());
+    assert!(eval.eval_condition("success()", &ctx).unwrap().value);
 }
 
 #[test]
@@ -187,7 +189,7 @@ fn test_success_no_args_after_failure() {
         hook: Some(HookEvalContext { had_failure: Some(true), ..Default::default() }),
         ..Default::default()
     };
-    assert!(!eval.eval_condition("success()", &ctx).unwrap());
+    assert!(!eval.eval_condition("success()", &ctx).unwrap().value);
 }
 
 #[test]
@@ -199,14 +201,18 @@ fn test_failure_no_args() {
         hook: Some(HookEvalContext { had_failure: Some(false), ..Default::default() }),
         ..Default::default()
     };
-    assert!(!eval.eval_condition("failure()", &ctx).unwrap());
+    let result = eval.eval_condition("failure()", &ctx).unwrap();
+    assert!(!result.value);
+    assert!(result.failure_checked);
 
     // After failure
     let ctx = EvalContext {
         hook: Some(HookEvalContext { had_failure: Some(true), ..Default::default() }),
         ..Default::default()
     };
-    assert!(eval.eval_condition("failure()", &ctx).unwrap());
+    let result = eval.eval_condition("failure()", &ctx).unwrap();
+    assert!(result.value);
+    assert!(result.failure_checked);
 }
 
 #[test]
@@ -224,7 +230,7 @@ fn test_success_with_dep_name() {
         deps,
         ..Default::default()
     };
-    assert!(eval.eval_condition("success('db')", &ctx).unwrap());
+    assert!(eval.eval_condition("success('db')", &ctx).unwrap().value);
 }
 
 #[test]
@@ -242,7 +248,7 @@ fn test_success_with_dep_name_failed() {
         deps,
         ..Default::default()
     };
-    assert!(!eval.eval_condition("success('db')", &ctx).unwrap());
+    assert!(!eval.eval_condition("success('db')", &ctx).unwrap().value);
 }
 
 #[test]
@@ -260,7 +266,10 @@ fn test_failure_with_dep_name() {
         deps,
         ..Default::default()
     };
-    assert!(eval.eval_condition("failure('db')", &ctx).unwrap());
+    let result = eval.eval_condition("failure('db')", &ctx).unwrap();
+    assert!(result.value);
+    // failure('db') is failure-with-arg, should NOT set failure_checked
+    assert!(!result.failure_checked);
 }
 
 #[test]
@@ -278,7 +287,7 @@ fn test_failure_with_dep_name_healthy() {
         deps,
         ..Default::default()
     };
-    assert!(!eval.eval_condition("failure('db')", &ctx).unwrap());
+    assert!(!eval.eval_condition("failure('db')", &ctx).unwrap().value);
 }
 
 #[test]
@@ -296,8 +305,8 @@ fn test_failure_with_nonzero_exit_code() {
         deps,
         ..Default::default()
     };
-    assert!(eval.eval_condition("failure('db')", &ctx).unwrap());
-    assert!(!eval.eval_condition("success('db')", &ctx).unwrap());
+    assert!(eval.eval_condition("failure('db')", &ctx).unwrap().value);
+    assert!(!eval.eval_condition("success('db')", &ctx).unwrap().value);
 }
 
 #[test]
@@ -315,7 +324,7 @@ fn test_skipped_with_dep_name() {
         deps,
         ..Default::default()
     };
-    assert!(eval.eval_condition("skipped('db')", &ctx).unwrap());
+    assert!(eval.eval_condition("skipped('db')", &ctx).unwrap().value);
 }
 
 #[test]
@@ -333,7 +342,7 @@ fn test_skipped_with_dep_not_skipped() {
         deps,
         ..Default::default()
     };
-    assert!(!eval.eval_condition("skipped('db')", &ctx).unwrap());
+    assert!(!eval.eval_condition("skipped('db')", &ctx).unwrap().value);
 }
 
 #[test]
@@ -352,10 +361,10 @@ fn test_deps_table_access() {
         ..Default::default()
     };
 
-    assert!(eval.eval_condition("deps.db.status == 'healthy'", &ctx).unwrap());
-    assert!(eval.eval_condition("deps.db.exit_code == 0", &ctx).unwrap());
-    assert!(eval.eval_condition("deps.db.initialized == true", &ctx).unwrap());
-    assert!(eval.eval_condition("deps.db.restart_count == 3", &ctx).unwrap());
+    assert!(eval.eval_condition("deps.db.status == 'healthy'", &ctx).unwrap().value);
+    assert!(eval.eval_condition("deps.db.exit_code == 0", &ctx).unwrap().value);
+    assert!(eval.eval_condition("deps.db.initialized == true", &ctx).unwrap().value);
+    assert!(eval.eval_condition("deps.db.restart_count == 3", &ctx).unwrap().value);
 }
 
 #[test]
@@ -373,7 +382,7 @@ fn test_deps_table_exit_code_nil() {
         deps,
         ..Default::default()
     };
-    assert!(eval.eval_condition("deps.db.exit_code == nil", &ctx).unwrap());
+    assert!(eval.eval_condition("deps.db.exit_code == nil", &ctx).unwrap().value);
 }
 
 #[test]
@@ -405,7 +414,7 @@ fn test_require_blocked() {
     // require should be nil everywhere
     let result: String = eval.eval(r#"return type(require)"#, &ctx, "test").unwrap();
     assert_eq!(result, "nil");
-    assert!(eval.eval_condition("require == nil", &ctx).unwrap());
+    assert!(eval.eval_condition("require == nil", &ctx).unwrap().value);
 }
 
 #[test]
@@ -413,11 +422,11 @@ fn test_condition_sandbox_allows_stdlib() {
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
 
-    assert!(eval.eval_condition("string.upper('hello') == 'HELLO'", &ctx).unwrap());
-    assert!(eval.eval_condition("math.max(1, 5, 3) == 5", &ctx).unwrap());
-    assert!(eval.eval_condition("type(42) == 'number'", &ctx).unwrap());
-    assert!(eval.eval_condition("tonumber('42') == 42", &ctx).unwrap());
-    assert!(eval.eval_condition("tostring(42) == '42'", &ctx).unwrap());
+    assert!(eval.eval_condition("string.upper('hello') == 'HELLO'", &ctx).unwrap().value);
+    assert!(eval.eval_condition("math.max(1, 5, 3) == 5", &ctx).unwrap().value);
+    assert!(eval.eval_condition("type(42) == 'number'", &ctx).unwrap().value);
+    assert!(eval.eval_condition("tonumber('42') == 42", &ctx).unwrap().value);
+    assert!(eval.eval_condition("tostring(42) == '42'", &ctx).unwrap().value);
 }
 
 #[test]
@@ -428,7 +437,7 @@ fn test_condition_sandbox_lua_block_functions() {
     eval.load_inline("function my_check() return true end").unwrap();
 
     let ctx = EvalContext::default();
-    assert!(eval.eval_condition("my_check()", &ctx).unwrap());
+    assert!(eval.eval_condition("my_check()", &ctx).unwrap().value);
 }
 
 #[test]
@@ -437,7 +446,7 @@ fn test_success_no_args_default_when_not_in_hook() {
     // hook_had_failure = None means not in a hook list context
     let ctx = EvalContext::default();
     // Should default to true (no failure)
-    assert!(eval.eval_condition("success()", &ctx).unwrap());
+    assert!(eval.eval_condition("success()", &ctx).unwrap().value);
 }
 
 #[test]
@@ -445,7 +454,42 @@ fn test_failure_no_args_default_when_not_in_hook() {
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
     // Should default to false (no failure)
-    assert!(!eval.eval_condition("failure()", &ctx).unwrap());
+    let result = eval.eval_condition("failure()", &ctx).unwrap();
+    assert!(!result.value);
+    assert!(result.failure_checked);
+}
+
+#[test]
+fn test_failure_with_arg_does_not_set_failure_checked() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut deps = HashMap::new();
+    deps.insert("db".to_string(), DepInfo {
+        status: "failed".to_string(),
+        exit_code: Some(1),
+        initialized: false,
+        restart_count: 0,
+        ..Default::default()
+    });
+    let ctx = EvalContext {
+        hook: Some(HookEvalContext { had_failure: Some(true), ..Default::default() }),
+        deps,
+        ..Default::default()
+    };
+
+    // failure('db') — with arg — should NOT set failure_checked
+    let result = eval.eval_condition("failure('db')", &ctx).unwrap();
+    assert!(result.value);
+    assert!(!result.failure_checked, "failure('db') should NOT set failure_checked");
+
+    // failure('db') or always() — neither calls failure() no-args
+    let result = eval.eval_condition("failure('db') or always()", &ctx).unwrap();
+    assert!(result.value);
+    assert!(!result.failure_checked, "failure('db') or always() should NOT set failure_checked");
+
+    // failure() — no args — SHOULD set failure_checked
+    let result = eval.eval_condition("failure()", &ctx).unwrap();
+    assert!(result.value);
+    assert!(result.failure_checked, "failure() should set failure_checked");
 }
 
 #[test]

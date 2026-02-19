@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{ConfigValue, DependsOn, RestartConfig, RestartPolicy};
+use crate::config::{ConfigValue, DependencyEntry, DependsOn, RestartConfig, RestartPolicy};
 
 fn make_service(deps: Vec<&str>) -> RawServiceConfig {
     let depends_on = if deps.is_empty() {
@@ -460,4 +460,107 @@ fn test_transient_skipped_not_transient() {
     let restart = RestartConfig::Simple(RestartPolicy::Always);
     let state = make_state_with_status(ServiceStatus::Skipped, None);
     assert!(!is_transient_satisfaction(&state, &restart), "Skipped should NOT be transient");
+}
+
+// --- is_failure_handled tests ---
+
+fn make_service_with_condition(dep_name: &str, condition: DependencyCondition) -> RawServiceConfig {
+    RawServiceConfig {
+        command: ConfigValue::wrap_vec(vec!["test".to_string()]).into(),
+        depends_on: DependsOn(vec![DependencyEntry::Extended(
+            HashMap::from([(
+                dep_name.to_string(),
+                DependencyConfig {
+                    condition,
+                    ..Default::default()
+                },
+            )]),
+        )]),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_failure_handled_by_service_failed() {
+    let mut services = HashMap::new();
+    services.insert("web".to_string(), make_service(vec![]));
+    services.insert("handler".to_string(), make_service_with_condition("web", DependencyCondition::ServiceFailed));
+
+    assert!(is_failure_handled("web", &services));
+}
+
+#[test]
+fn test_failure_handled_by_service_stopped() {
+    let mut services = HashMap::new();
+    services.insert("web".to_string(), make_service(vec![]));
+    services.insert("handler".to_string(), make_service_with_condition("web", DependencyCondition::ServiceStopped));
+
+    assert!(is_failure_handled("web", &services));
+}
+
+#[test]
+fn test_failure_not_handled_by_service_started() {
+    let mut services = HashMap::new();
+    services.insert("web".to_string(), make_service(vec![]));
+    services.insert("dependent".to_string(), make_service_with_condition("web", DependencyCondition::ServiceStarted));
+
+    assert!(!is_failure_handled("web", &services));
+}
+
+#[test]
+fn test_failure_not_handled_by_service_healthy() {
+    let mut services = HashMap::new();
+    services.insert("web".to_string(), make_service(vec![]));
+    services.insert("dependent".to_string(), make_service_with_condition("web", DependencyCondition::ServiceHealthy));
+
+    assert!(!is_failure_handled("web", &services));
+}
+
+#[test]
+fn test_failure_not_handled_by_service_completed() {
+    let mut services = HashMap::new();
+    services.insert("web".to_string(), make_service(vec![]));
+    services.insert("dependent".to_string(), make_service_with_condition("web", DependencyCondition::ServiceCompletedSuccessfully));
+
+    assert!(!is_failure_handled("web", &services));
+}
+
+#[test]
+fn test_failure_not_handled_no_deps() {
+    let mut services = HashMap::new();
+    services.insert("web".to_string(), make_service(vec![]));
+    services.insert("other".to_string(), make_service(vec![]));
+
+    assert!(!is_failure_handled("web", &services));
+}
+
+#[test]
+fn test_failure_not_handled_dep_on_different_service() {
+    let mut services = HashMap::new();
+    services.insert("web".to_string(), make_service(vec![]));
+    services.insert("db".to_string(), make_service(vec![]));
+    services.insert("handler".to_string(), make_service_with_condition("db", DependencyCondition::ServiceFailed));
+
+    // handler handles db's failure, not web's
+    assert!(!is_failure_handled("web", &services));
+    assert!(is_failure_handled("db", &services));
+}
+
+#[test]
+fn test_failure_handled_single_service() {
+    // Even the failing service itself is in the map — but nobody depends on it
+    let mut services = HashMap::new();
+    services.insert("web".to_string(), make_service(vec![]));
+
+    assert!(!is_failure_handled("web", &services));
+}
+
+#[test]
+fn test_failure_handled_by_simple_dep_is_not_handled() {
+    // Simple string deps default to service_started — not a failure handler
+    let mut services = HashMap::new();
+    services.insert("web".to_string(), make_service(vec![]));
+    services.insert("dependent".to_string(), make_service(vec!["web"]));
+
+    assert!(!is_failure_handled("web", &services));
 }

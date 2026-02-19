@@ -405,6 +405,7 @@ pub async fn run_global_hook(
 
     let mut had_failure = false;
     let mut first_error: Option<DaemonError> = None;
+    let mut failure_checked = false;
 
     for hook in &hook_list.0 {
         // If a previous hook failed and this hook has no `if` condition,
@@ -433,8 +434,10 @@ pub async fn run_global_hook(
                     deps: HashMap::new(),
                 };
                 match h.eval_if_condition(condition, eval_ctx).await {
-                    Ok(true) => {} // condition passed, run the hook
-                    Ok(false) => {
+                    Ok(result) if result.value => {
+                        failure_checked = result.failure_checked;
+                    }
+                    Ok(_) => {
                         debug!("Global hook {} skipped: if condition '{}' is falsy", hook_type.as_str(), condition);
                         continue;
                     }
@@ -486,6 +489,11 @@ pub async fn run_global_hook(
         };
         match run_hook_step(hook, &hook_params, &service_name, hook_type.as_str(), &mut eval_ctx, None).await {
             Ok(_) => {
+                if had_failure && failure_checked {
+                    first_error = None;
+                    had_failure = false;
+                    failure_checked = false;
+                }
                 emit_hook_event(params.progress, "global", ServicePhase::HookCompleted { hook: hook_name }).await;
             }
             Err(e) => {
@@ -547,6 +555,7 @@ pub async fn run_service_hook(
     let mut had_failure = false;
     let mut first_error: Option<DaemonError> = None;
     let mut hook_outputs: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut failure_checked = false;
 
     for hook in &hook_list.0 {
         // If a previous hook failed and this hook has no `if` condition,
@@ -601,8 +610,10 @@ pub async fn run_service_hook(
         if let Some(condition) = hook.condition()
             && let Some(h) = handle {
                 match h.eval_if_condition(condition, eval_ctx.clone()).await {
-                    Ok(true) => {} // condition passed, run the hook
-                    Ok(false) => {
+                    Ok(result) if result.value => {
+                        failure_checked = result.failure_checked;
+                    }
+                    Ok(_) => {
                         debug!("Hook {} for {} skipped: if condition '{}' is falsy", hook_type.as_str(), service_name, condition);
                         continue;
                     }
@@ -628,6 +639,16 @@ pub async fn run_service_hook(
 
         match run_hook_step(hook, params, service_name, hook_type.as_str(), &mut eval_ctx, output_capture).await {
             Ok(captured) => {
+                // If this step succeeded after a previous failure and `failure()` was
+                // called in the `if:` condition, the failure is considered "handled" —
+                // clear the error and resume normal execution.  Only `failure()` being
+                // called is an explicit acknowledgment; `always()` means "run no matter
+                // what" (cleanup), not "I'm handling this failure".
+                if had_failure && failure_checked {
+                    first_error = None;
+                    had_failure = false;
+                    failure_checked = false;
+                }
                 // If this step had output capture and a step name, store the results
                 if let Some(step_name) = hook.output()
                     && let Some(lines) = captured {

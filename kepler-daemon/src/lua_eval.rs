@@ -5,6 +5,16 @@
 
 use mlua::{FromLua, Lua, LuaSerdeExt, Result as LuaResult, Table, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+/// Result of evaluating a hook `if:` condition.
+#[derive(Debug, Clone)]
+pub struct ConditionResult {
+    pub value: bool,
+    /// Whether `failure()` (no args) was called during evaluation.
+    pub failure_checked: bool,
+}
 
 /// Pre-built Lua environment table with an updatable `env` sub-table.
 ///
@@ -222,14 +232,15 @@ impl LuaEvaluator {
         func.call(())
     }
 
-    /// Evaluate a condition expression and return whether it's truthy.
+    /// Evaluate a condition expression and return a `ConditionResult`.
     ///
     /// Uses an environment that additionally exposes status functions
     /// (`always()`, `success()`, `failure()`, `skipped()`) and a `deps` table.
     ///
-    /// Returns `true` unless the result is `nil` or `false`.
-    pub fn eval_condition(&self, code: &str, ctx: &EvalContext) -> LuaResult<bool> {
-        let env_table = self.build_condition_env_table(ctx)?;
+    /// The result's `value` is `true` unless the Lua result is `nil` or `false`.
+    /// The result's `failure_checked` is `true` if `failure()` (no args) was called.
+    pub fn eval_condition(&self, code: &str, ctx: &EvalContext) -> LuaResult<ConditionResult> {
+        let (env_table, failure_flag) = self.build_condition_env_table(ctx)?;
 
         let wrapped = format!("return {}", code);
         let chunk = self.lua.load(&wrapped);
@@ -239,7 +250,10 @@ impl LuaEvaluator {
             .into_function()?;
 
         let result: Value = func.call(())?;
-        Ok(!matches!(result, Value::Nil | Value::Boolean(false)))
+        Ok(ConditionResult {
+            value: !matches!(result, Value::Nil | Value::Boolean(false)),
+            failure_checked: failure_flag.load(Ordering::Relaxed),
+        })
     }
 
     /// Evaluate an inline `${{ expr }}$` expression and return the raw Lua value.
@@ -521,9 +535,12 @@ impl LuaEvaluator {
     ///   with arg: `true` if the named dependency failed/killed or exited non-zero.
     /// - `skipped(name)` — requires a dependency name, returns `true` if that dependency
     ///   has status "skipped".
-    fn build_condition_env_table(&self, ctx: &EvalContext) -> LuaResult<Table> {
+    fn build_condition_env_table(&self, ctx: &EvalContext) -> LuaResult<(Table, Arc<AtomicBool>)> {
         // Start with the base env table (service/hook, deps, env shortcut, global, __index→globals)
         let env_table = self.build_env_table(ctx)?;
+
+        // Flag to track whether `failure()` (no args) was called
+        let failure_checked_flag = Arc::new(AtomicBool::new(false));
 
         // --- Status functions ---
         let hook_had_failure = ctx.hook.as_ref().and_then(|h| h.had_failure);
@@ -563,10 +580,12 @@ impl LuaEvaluator {
 
         // failure(name?) — no args: hook_had_failure; with arg: dep is in failed state
         let deps_for_failure = deps.clone();
+        let failure_checked_for_closure = failure_checked_flag.clone();
         let failure_fn = self.lua.create_function(move |_, name: Option<String>| {
             match name {
                 None => {
                     // No args: returns true if a previous hook failed
+                    failure_checked_for_closure.store(true, Ordering::Relaxed);
                     Ok(hook_had_failure.unwrap_or(false))
                 }
                 Some(dep_name) => {
@@ -602,7 +621,7 @@ impl LuaEvaluator {
         })?;
         env_table.set("skipped", skipped_fn)?;
 
-        Ok(env_table)
+        Ok((env_table, failure_checked_flag))
     }
 
     /// Build the environment table for inline `${{ expr }}$` evaluation.

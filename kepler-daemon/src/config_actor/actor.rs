@@ -12,8 +12,8 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::config::{resolve_log_buffer_size, resolve_log_max_size, DependencyConfig, KeplerConfig, ServiceConfig};
-use crate::deps::{get_start_order, is_condition_met};
-use crate::lua_eval::EvalContext;
+use crate::deps::{get_start_order, is_condition_met, is_failure_handled};
+use crate::lua_eval::{ConditionResult, EvalContext};
 use crate::errors::{DaemonError, Result};
 use crate::events::{service_event_channel, ServiceEventMessage, ServiceEventSender};
 use crate::logs::{LogReader, LogWriterConfig, DEFAULT_BUFFER_SIZE};
@@ -31,7 +31,7 @@ use super::handle::ConfigActorHandle;
 struct LuaEvalRequest {
     condition: String,
     context: EvalContext,
-    reply: tokio::sync::oneshot::Sender<Result<bool>>,
+    reply: tokio::sync::oneshot::Sender<Result<ConditionResult>>,
 }
 
 /// Per-config actor state
@@ -396,7 +396,7 @@ impl ConfigActor {
         &mut self,
         condition: String,
         context: EvalContext,
-        reply: tokio::sync::oneshot::Sender<Result<bool>>,
+        reply: tokio::sync::oneshot::Sender<Result<ConditionResult>>,
     ) {
         if self.lua_eval_tx.is_none() {
             let (tx, mut rx) = mpsc::unbounded_channel::<LuaEvalRequest>();
@@ -446,6 +446,7 @@ impl ConfigActor {
                     evaluator.remove_interrupt();
                     let _ = req.reply.send(result);
                 }
+
             });
             self.lua_eval_tx = Some(tx);
         }
@@ -1143,6 +1144,32 @@ impl ConfigActor {
 
         // Notify global subscribers (CLI progress bars / Subscribe handler)
         self.notify_subscribers(ConfigEvent::StatusChange(change));
+
+        // Check for unhandled failure.
+        // Mirror the ServiceFailed dependency condition logic: Failed/Killed are always
+        // failures; Exited with non-zero exit code is also a failure.
+        let exit_code = self.services.get(service_name).and_then(|s| s.exit_code);
+        let is_failure = match status {
+            ServiceStatus::Failed | ServiceStatus::Killed => true,
+            ServiceStatus::Exited => exit_code.is_some_and(|c| c != 0),
+            _ => false,
+        };
+
+        if is_failure {
+            let would_restart = self.resolved_configs.get(service_name)
+                .map(|rc| rc.restart.should_restart_on_exit(exit_code))
+                .or_else(|| self.config.services.get(service_name)
+                    .map(|raw| raw.restart.as_static().cloned().unwrap_or_default()
+                        .should_restart_on_exit(exit_code)))
+                .unwrap_or(false);
+
+            if !would_restart && !is_failure_handled(service_name, &self.config.services) {
+                self.notify_subscribers(ConfigEvent::UnhandledFailure {
+                    service: service_name.to_string(),
+                    exit_code,
+                });
+            }
+        }
 
         // Reset Ready signal when a service enters Starting (no longer at target state)
         if status == ServiceStatus::Starting {

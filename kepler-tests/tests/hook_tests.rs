@@ -805,7 +805,8 @@ async fn test_hook_failure_skips_subsequent() {
     harness.stop_all().await.unwrap();
 }
 
-/// Hook with `if: "always()"` runs even after a previous failure
+/// Hook with `if: "always()"` runs after a failure but does NOT handle it
+/// (only `failure()` being called handles the failure)
 #[tokio::test]
 async fn test_hook_always_runs_after_failure() {
     let temp_dir = TempDir::new().unwrap();
@@ -839,7 +840,7 @@ async fn test_hook_always_runs_after_failure() {
         .unwrap();
 
     let result = harness.start_service("test").await;
-    assert!(result.is_err(), "Hook failure should still propagate");
+    assert!(result.is_err(), "always() does NOT handle the failure — error should propagate");
 
     let content = std::fs::read_to_string(&order_file).unwrap_or_default();
     let lines: Vec<&str> = content.lines().collect();
@@ -850,7 +851,7 @@ async fn test_hook_always_runs_after_failure() {
     harness.stop_all().await.unwrap();
 }
 
-/// Hook with `if: "failure()"` runs only after a previous failure
+/// Hook with `if: "failure()"` runs only after a previous failure and "handles" it
 #[tokio::test]
 async fn test_hook_failure_condition_runs() {
     let temp_dir = TempDir::new().unwrap();
@@ -884,7 +885,7 @@ async fn test_hook_failure_condition_runs() {
         .unwrap();
 
     let result = harness.start_service("test").await;
-    assert!(result.is_err(), "Hook failure should still propagate");
+    assert!(result.is_ok(), "Successful if: failure() step should handle the failure");
 
     let content = std::fs::read_to_string(&order_file).unwrap_or_default();
     let lines: Vec<&str> = content.lines().collect();
@@ -939,7 +940,56 @@ async fn test_hook_success_condition_skips_after_failure() {
     harness.stop_all().await.unwrap();
 }
 
-/// Hook error still propagates even when later hooks succeed
+/// Hook with `if: "true"` (no failure() call) does NOT handle the error —
+/// only `failure()` (no args) counts as explicit failure handling
+#[tokio::test]
+async fn test_hook_conditional_without_failure_call_does_not_handle() {
+    let temp_dir = TempDir::new().unwrap();
+    let order_file = temp_dir.path().join("order.txt");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![
+            HookCommand::script(format!("echo 'first' >> {} && exit 1", order_file.display())),
+            HookCommand::Script {
+                run: format!("echo 'conditional' >> {}", order_file.display()).into(),
+                common: HookCommon {
+                    // A condition that evaluates to true but does NOT call failure() —
+                    // the step runs and succeeds, but should NOT handle the failure
+                    condition: Some("true".to_string()).into(),
+                    ..Default::default()
+                },
+            },
+        ])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    let result = harness.start_service("test").await;
+    // `if: "true"` does NOT call failure(), so the error should propagate
+    assert!(result.is_err(), "Condition without failure() call should NOT handle the failure");
+
+    let content = std::fs::read_to_string(&order_file).unwrap_or_default();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 2, "Both hooks should have run");
+    assert_eq!(lines[0], "first");
+    assert_eq!(lines[1], "conditional");
+
+    harness.stop_all().await.unwrap();
+}
+
+/// Hook error still propagates when always() is used (only failure() handles)
 #[tokio::test]
 async fn test_hook_error_still_propagates() {
     let temp_dir = TempDir::new().unwrap();
@@ -973,10 +1023,10 @@ async fn test_hook_error_still_propagates() {
         .unwrap();
 
     let result = harness.start_service("test").await;
-    // Error should still propagate even though the always() hook succeeded
-    assert!(result.is_err(), "Original error should still propagate after all hooks run");
+    // always() does NOT handle the failure — error propagates
+    assert!(result.is_err(), "always() does NOT handle the failure — error should propagate");
 
-    // But both hooks should have run
+    // Both hooks should have run
     let content = std::fs::read_to_string(&order_file).unwrap_or_default();
     let lines: Vec<&str> = content.lines().collect();
     assert_eq!(lines.len(), 2, "Both hooks should have run");

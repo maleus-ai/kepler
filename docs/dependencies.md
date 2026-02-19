@@ -69,6 +69,8 @@ depends_on:
 
 All services are spawned at once and independently wait for their dependencies. Services blocked on unmet dependencies are in the **Waiting** state.
 
+> **Note**: A `service_failed` or `service_stopped` dependency acts as a **failure handler**. When a service fails and another service depends on it with one of these conditions, the failure is considered "handled" and does not trigger an unhandled failure exit. See [Unhandled Failure Detection](service-lifecycle.md#unhandled-failure-detection).
+
 ---
 
 ## Dependency Timeout
