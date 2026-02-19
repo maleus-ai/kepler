@@ -454,22 +454,6 @@ impl ServiceOrchestrator {
         // Transition: Waiting → Starting (dependencies satisfied)
         handle.set_service_status(service_name, ServiceStatus::Starting).await?;
 
-        // Build dependency state maps for evaluation context
-        let ctx_start = std::time::Instant::now();
-        let mut dep_infos = HashMap::new();
-        for (dep_name, _dep_config) in depends_on.iter() {
-            let dep_name_owned = dep_name.to_string();
-            if let Some(dep_state) = handle.get_service_state(dep_name).await {
-                dep_infos.insert(dep_name_owned, DepInfo {
-                    status: dep_state.status.as_str().to_string(),
-                    exit_code: dep_state.exit_code,
-                    initialized: dep_state.initialized,
-                    restart_count: dep_state.restart_count,
-                    env: dep_state.computed_env.clone(),
-                });
-            }
-        }
-
         // Build evaluation context (sys_env + deps).
         // env_file vars are loaded inside resolve_service (step 0) so that
         // !lua env_file tags are evaluated before environment.
@@ -477,6 +461,24 @@ impl ServiceOrchestrator {
         let config = handle.get_config().await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
         let config_dir = handle.get_config_dir().await;
+
+        // Build dependency state maps for evaluation context
+        let ctx_start = std::time::Instant::now();
+        let mut dep_infos = HashMap::new();
+        for (dep_name, _dep_config) in depends_on.iter() {
+            let dep_name_owned = dep_name.to_string();
+            if let Some(dep_state) = handle.get_service_state(dep_name).await {
+                let dep_outputs = crate::outputs::read_service_outputs(&config_dir, dep_name);
+                dep_infos.insert(dep_name_owned, DepInfo {
+                    status: dep_state.status.as_str().to_string(),
+                    exit_code: dep_state.exit_code,
+                    initialized: dep_state.initialized,
+                    restart_count: dep_state.restart_count,
+                    env: dep_state.computed_env.clone(),
+                    outputs: dep_outputs,
+                });
+            }
+        }
 
         // Pre-load env_file vars for plain string paths (handles state dir copy fallback).
         // For !lua env_file tags, this returns empty — resolve_service will handle them.
@@ -585,6 +587,11 @@ impl ServiceOrchestrator {
 
         // Run on_init hook if first time for this service
         let service_initialized = handle.is_service_initialized(service_name).await;
+
+        // Clear previous outputs for a fresh start
+        if let Err(e) = crate::outputs::clear_service_outputs(&config_dir, service_name) {
+            warn!("Failed to clear outputs for {}: {}", service_name, e);
+        }
 
         // Emit Start event
         handle.emit_event(service_name, ServiceEvent::Start).await;
@@ -698,12 +705,14 @@ impl ServiceOrchestrator {
         let mut dep_infos = HashMap::new();
         for (dep_name, _) in ctx.service_config.depends_on.iter() {
             if let Some(dep_state) = handle.get_service_state(dep_name).await {
+                let dep_outputs = crate::outputs::read_service_outputs(&config_dir, dep_name);
                 dep_infos.insert(dep_name.to_string(), DepInfo {
                     status: dep_state.status.as_str().to_string(),
                     exit_code: dep_state.exit_code,
                     initialized: dep_state.initialized,
                     restart_count: dep_state.restart_count,
                     env: dep_state.computed_env.clone(),
+                    outputs: dep_outputs,
                 });
             }
         }
@@ -1710,6 +1719,10 @@ impl ServiceOrchestrator {
             .emit_event(service_name, ServiceEvent::Exit { code: exit_code })
             .await;
 
+        // Take stdout/stderr capture tasks BEFORE record_process_exit,
+        // which removes the ProcessHandle (and its tasks) from the actor.
+        let output_tasks = handle.take_output_tasks(service_name).await;
+
         // Record process exit in state
         if let Err(e) = handle.record_process_exit(service_name, exit_code, signal).await {
             warn!("Failed to record process exit for {}: {}", service_name, e);
@@ -1847,18 +1860,92 @@ impl ServiceOrchestrator {
             // Wait for stdout/stderr capture tasks to finish flushing logs to disk.
             // The process has exited but the capture tasks may still be reading
             // remaining pipe data and writing it to log files.
-            let (stdout_task, stderr_task) = handle.take_output_tasks(service_name).await;
+            let (stdout_task, stderr_task) = output_tasks;
+            let mut captured_lines: Option<Vec<String>> = None;
             if let Some(task) = stdout_task {
-                let _ = tokio::time::timeout(
+                match tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     task,
-                ).await;
+                ).await {
+                    Ok(Ok(lines)) => { captured_lines = lines; }
+                    _ => {}
+                }
             }
             if let Some(task) = stderr_task {
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     task,
                 ).await;
+            }
+
+            // Process output capture: write captured KEY=VALUE lines to disk
+            let config_dir = handle.get_config_dir().await;
+            if let Some(lines) = captured_lines {
+                let process_outputs = crate::outputs::parse_capture_lines(&lines);
+                if !process_outputs.is_empty() {
+                    if let Err(e) = crate::outputs::write_process_outputs(&config_dir, service_name, &process_outputs) {
+                        warn!("Failed to write process outputs for {}: {}", service_name, e);
+                    }
+                }
+            }
+
+            // Resolve service `outputs:` declarations (if any)
+            // This happens after hooks and process have completed, so ctx.hooks.* is available.
+            if let Some(config) = handle.get_config().await {
+                if let Some(raw) = config.services.get(service_name) {
+                    if !raw.outputs.is_static_none() {
+                        // Build eval context with hook outputs for resolving ${{ }} expressions
+                        let hook_outputs = crate::outputs::read_all_hook_outputs(&config_dir, service_name);
+                        let process_outputs = crate::outputs::read_process_outputs(&config_dir, service_name);
+
+                        let eval_ctx = EvalContext {
+                            env: ctx.env.clone(),
+                            service_name: Some(service_name.to_string()),
+                            hooks: hook_outputs,
+                            ..Default::default()
+                        };
+
+                        let evaluator = match config.create_lua_evaluator() {
+                            Ok(e) => e,
+                            Err(e) => {
+                                warn!("Failed to create evaluator for outputs resolution: {}", e);
+                                // Continue without resolving outputs
+                                if was_actively_running {
+                                    let status = if signal.is_some() {
+                                        ServiceStatus::Killed
+                                    } else {
+                                        ServiceStatus::Exited
+                                    };
+                                    if let Err(e) = handle.set_service_status(service_name, status).await {
+                                        warn!("Failed to set {} to {:?}: {}", service_name, status, e);
+                                    }
+                                }
+                                return Ok(());
+                            }
+                        };
+
+                        match raw.outputs.resolve(&evaluator, &eval_ctx, handle.config_path(), &format!("{}.outputs", service_name)) {
+                            Ok(Some(declared_outputs)) => {
+                                // Merge: process outputs + declared outputs (declared take precedence)
+                                let mut final_outputs = process_outputs;
+                                final_outputs.extend(declared_outputs);
+                                if let Err(e) = crate::outputs::write_resolved_outputs(&config_dir, service_name, &final_outputs) {
+                                    warn!("Failed to write resolved outputs for {}: {}", service_name, e);
+                                }
+                            }
+                            Ok(None) => {
+                                // No declared outputs, but we may still have process outputs —
+                                // write them as resolved so dependents can read them
+                                if !crate::outputs::read_process_outputs(&config_dir, service_name).is_empty() {
+                                    // Process outputs are already available via read_service_outputs
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to resolve outputs for {}: {}", service_name, e);
+                            }
+                        }
+                    }
+                }
             }
 
             // Only update status if the service was actively running.
@@ -1966,6 +2053,8 @@ impl ServiceOrchestrator {
     ///
     /// Hooks are resolved here (not in `resolve_service`) so that `hook_name`
     /// is available in the `EvalContext` for `!lua` blocks.
+    ///
+    /// Returns `Ok(())` on success, writing any captured hook step outputs to disk.
     async fn run_service_hook(
         &self,
         ctx: &ServiceContext,
@@ -1990,6 +2079,14 @@ impl ServiceOrchestrator {
             ctx.global_log_config.as_ref(),
         );
 
+        // Read prior hook outputs from disk and set output_max_size
+        hook_params.all_hook_outputs = crate::outputs::read_all_hook_outputs(&ctx.config_dir, service_name);
+        if let Some(h) = handle {
+            if let Some(config) = h.get_config().await {
+                hook_params.output_max_size = config.output_max_size();
+            }
+        }
+
         // For static hooks, use resolved.hooks (already resolved in resolve_service).
         // For dynamic hooks (!lua / ${{ }}), resolve here with hook_name in context.
         // lua_code is hoisted so it outlives hook_params.lua_code (a borrowed reference).
@@ -2007,6 +2104,7 @@ impl ServiceOrchestrator {
                             initialized: dep_state.initialized,
                             restart_count: dep_state.restart_count,
                             env: dep_state.computed_env.clone(),
+                            ..Default::default()
                         });
                     }
                 }
@@ -2024,6 +2122,7 @@ impl ServiceOrchestrator {
                         initialized: dep_state.initialized,
                         restart_count: dep_state.restart_count,
                         env: dep_state.computed_env.clone(),
+                        ..Default::default()
                     });
                 }
             }
@@ -2059,7 +2158,7 @@ impl ServiceOrchestrator {
         };
         hook_params.lua_code = lua_code.as_deref();
 
-        run_service_hook(
+        let step_outputs = run_service_hook(
             &hooks,
             hook_type,
             service_name,
@@ -2068,7 +2167,22 @@ impl ServiceOrchestrator {
             handle,
         )
         .await
-        .map_err(|e| OrchestratorError::HookFailed(e.to_string()))
+        .map_err(|e| OrchestratorError::HookFailed(e.to_string()))?;
+
+        // Write captured step outputs to disk
+        for (step_name, outputs) in &step_outputs {
+            if let Err(e) = crate::outputs::write_hook_step_outputs(
+                &ctx.config_dir,
+                service_name,
+                hook_type.as_str(),
+                step_name,
+                outputs,
+            ) {
+                warn!("Failed to write hook step outputs for {}/{}/{}: {}", service_name, hook_type.as_str(), step_name, e);
+            }
+        }
+
+        Ok(())
     }
 
     /// Apply log retention for an event
@@ -2126,6 +2240,16 @@ impl ServiceOrchestrator {
         let resolved = ctx.resolved_config.as_ref()
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
+        // Build output capture config if service has `output: true`
+        let output_capture = if resolved.output == Some(true) {
+            let max_size = handle.get_config().await
+                .map(|c| c.output_max_size())
+                .unwrap_or(1024 * 1024);
+            Some(crate::process::OutputCaptureConfig { max_size })
+        } else {
+            None
+        };
+
         let spawn_params = SpawnServiceParams {
             service_name,
             service_config: resolved,
@@ -2134,6 +2258,7 @@ impl ServiceOrchestrator {
             handle: handle.clone(),
             exit_tx: self.exit_tx.clone(),
             global_log_config: ctx.global_log_config.as_ref(),
+            output_capture,
         };
 
         let process_handle = spawn_service(spawn_params)

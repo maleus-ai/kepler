@@ -8,7 +8,7 @@ use crate::env::build_hook_env;
 use crate::errors::{DaemonError, Result};
 use crate::logs::LogWriterConfig;
 use crate::lua_eval::{DepInfo, EvalContext};
-use crate::process::{spawn_blocking, BlockingMode, CommandSpec};
+use crate::process::{spawn_blocking, BlockingMode, CommandSpec, OutputCaptureConfig};
 use kepler_protocol::protocol::{ProgressEvent, ServicePhase};
 use kepler_protocol::server::ProgressSender;
 
@@ -53,6 +53,10 @@ pub struct ServiceHookParams<'a> {
     pub deps: HashMap<String, DepInfo>,
     /// Lua code from config's `lua:` block, for `${{ }}` evaluation in hook env
     pub lua_code: Option<&'a str>,
+    /// All hook outputs from prior phases: `hook_name -> step_name -> { key -> value }`
+    pub all_hook_outputs: HashMap<String, HashMap<String, HashMap<String, String>>>,
+    /// Maximum size in bytes for output capture per step
+    pub output_max_size: usize,
 }
 
 impl<'a> ServiceHookParams<'a> {
@@ -77,6 +81,8 @@ impl<'a> ServiceHookParams<'a> {
             global_log_config,
             deps: HashMap::new(),
             lua_code: None,
+            all_hook_outputs: HashMap::new(),
+            output_max_size: 1024 * 1024, // 1MB default
         }
     }
 }
@@ -184,8 +190,17 @@ impl ServiceHookType {
     }
 }
 
-/// Execute a hook command
-pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>, service: &str, hook_name: &str) -> Result<()> {
+/// Execute a hook command.
+///
+/// When `output_capture` is `Some`, `::output::KEY=VALUE` marker lines from stdout
+/// are captured and returned. Otherwise returns `None`.
+pub async fn run_hook(
+    hook: &HookCommand,
+    ctx: &HookRunContext<'_>,
+    service: &str,
+    hook_name: &str,
+    output_capture: Option<OutputCaptureConfig>,
+) -> Result<Option<Vec<String>>> {
     // Convert hook to program and args
     let program_and_args = match hook {
         HookCommand::Script { run, .. } => {
@@ -194,7 +209,7 @@ pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>, service: &st
         }
         HookCommand::Command { command, .. } => {
             if command.is_empty() {
-                return Ok(());
+                return Ok(None);
             }
             command.clone()
         }
@@ -254,6 +269,7 @@ pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>, service: &st
         log_service_name: ctx.service_name.to_string(),
         store_stdout: ctx.store_stdout,
         store_stderr: ctx.store_stderr,
+        output_capture,
     };
 
     let result = spawn_blocking(spec, mode).await?;
@@ -268,6 +284,13 @@ pub async fn run_hook(hook: &HookCommand, ctx: &HookRunContext<'_>, service: &st
             message,
         });
     }
+    Ok(result.captured_output)
+}
+
+/// Execute a hook command without output capture.
+/// Convenience wrapper around `run_hook` that discards captured output.
+pub async fn run_hook_simple(hook: &HookCommand, ctx: &HookRunContext<'_>, service: &str, hook_name: &str) -> Result<()> {
+    run_hook(hook, ctx, service, hook_name, None).await?;
     Ok(())
 }
 
@@ -352,6 +375,11 @@ pub async fn run_global_hook(
                 }
             }
 
+        // Warn if output is used on global hooks (not supported)
+        if hook.output().is_some() {
+            debug!("Global hook {} has 'output' field which is ignored for global hooks", hook_type.as_str());
+        }
+
         info!("Running global {} hook", hook_type.as_str());
         let hook_name = hook_type.as_str().to_string();
         emit_hook_event(params.progress, "global", ServicePhase::HookStarted { hook: hook_name.clone() }).await;
@@ -371,8 +399,8 @@ pub async fn run_global_hook(
             store_stderr,
             lua_code: params.lua_code,
         };
-        match run_hook(hook, &ctx, "global", hook_type.as_str()).await {
-            Ok(()) => {
+        match run_hook(hook, &ctx, "global", hook_type.as_str(), None).await {
+            Ok(_) => {
                 emit_hook_event(params.progress, "global", ServicePhase::HookCompleted { hook: hook_name }).await;
             }
             Err(e) => {
@@ -406,6 +434,9 @@ pub fn service_hook_log_name(service_name: &str, hook_type: ServiceHookType) -> 
 /// skipped when a previous hook in the list has failed. Hooks with
 /// `if: "always()"` or `if: "failure()"` still run after a failure.
 /// The first error is propagated after all eligible hooks have run.
+///
+/// Returns a map of `step_name -> { key -> value }` for steps that had
+/// `output: <step_name>` set and captured `::output::KEY=VALUE` lines.
 pub async fn run_service_hook(
     hooks: &Option<ServiceHooks>,
     hook_type: ServiceHookType,
@@ -413,19 +444,20 @@ pub async fn run_service_hook(
     params: &ServiceHookParams<'_>,
     progress: &Option<ProgressSender>,
     handle: Option<&ConfigActorHandle>,
-) -> Result<()> {
+) -> Result<HashMap<String, HashMap<String, String>>> {
     let hooks = match hooks {
         Some(h) => h,
-        None => return Ok(()),
+        None => return Ok(HashMap::new()),
     };
 
     let hook_list = match hook_type.get(hooks) {
         Some(list) if !list.0.is_empty() => list,
-        _ => return Ok(()),
+        _ => return Ok(HashMap::new()),
     };
 
     let mut had_failure = false;
     let mut first_error: Option<DaemonError> = None;
+    let mut hook_outputs: HashMap<String, HashMap<String, String>> = HashMap::new();
 
     for hook in &hook_list.0 {
         // If a previous hook failed and this hook has no `if` condition,
@@ -440,7 +472,7 @@ pub async fn run_service_hook(
             && let Some(h) = handle {
                 // Build runtime eval context from service state
                 let state = h.get_service_state(service_name).await;
-                let eval_ctx = EvalContext {
+                let mut eval_ctx = EvalContext {
                     env: params.env.clone(),
                     service_name: Some(service_name.to_string()),
                     hook_name: Some(hook_type.as_str().to_string()),
@@ -452,6 +484,15 @@ pub async fn run_service_hook(
                     deps: params.deps.clone(),
                     ..Default::default()
                 };
+                // Merge all_hook_outputs with current phase's hook_outputs into ctx.hooks
+                let mut hooks_ctx = params.all_hook_outputs.clone();
+                if !hook_outputs.is_empty() {
+                    hooks_ctx.entry(hook_type.as_str().to_string())
+                        .or_default()
+                        .extend(hook_outputs.clone());
+                }
+                eval_ctx.hooks = hooks_ctx;
+
                 match h.eval_if_condition(condition, eval_ctx).await {
                     Ok(true) => {} // condition passed, run the hook
                     Ok(false) => {
@@ -487,8 +528,23 @@ pub async fn run_service_hook(
             store_stderr,
             lua_code: params.lua_code,
         };
-        match run_hook(hook, &ctx, service_name, hook_type.as_str()).await {
-            Ok(()) => {
+
+        // Determine output capture for this step
+        let output_capture = hook.output().map(|_| OutputCaptureConfig {
+            max_size: params.output_max_size,
+        });
+
+        match run_hook(hook, &ctx, service_name, hook_type.as_str(), output_capture).await {
+            Ok(captured) => {
+                // If this step had output capture and a step name, store the results
+                if let Some(step_name) = hook.output() {
+                    if let Some(lines) = captured {
+                        let parsed = crate::outputs::parse_capture_lines(&lines);
+                        if !parsed.is_empty() {
+                            hook_outputs.insert(step_name.to_string(), parsed);
+                        }
+                    }
+                }
                 emit_hook_event(progress, service_name, ServicePhase::HookCompleted { hook: hook_name }).await;
             }
             Err(e) => {
@@ -510,5 +566,5 @@ pub async fn run_service_hook(
     if let Some(err) = first_error {
         return Err(err);
     }
-    Ok(())
+    Ok(hook_outputs)
 }

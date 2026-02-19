@@ -332,6 +332,7 @@ impl TestDaemonHarness {
             handle: self.handle.clone(),
             exit_tx: self.exit_tx.clone(),
             global_log_config: ctx.global_log_config.as_ref(),
+            output_capture: None,
         };
         let process_handle = spawn_service(spawn_params).await?;
 
@@ -632,6 +633,7 @@ impl TestDaemonHarness {
                     handle: handle.clone(),
                     exit_tx: exit_tx.clone(),
                     global_log_config: ctx.global_log_config.as_ref(),
+                    output_capture: None,
                 };
                 if let Ok(process_handle) = spawn_service(spawn_params).await {
                     handle
@@ -778,6 +780,7 @@ impl TestDaemonHarness {
                         handle: handle.clone(),
                         exit_tx: exit_tx.clone(),
                         global_log_config: ctx.global_log_config.as_ref(),
+                        output_capture: None,
                     };
                     if let Ok(process_handle) = spawn_service(spawn_params).await {
                         handle

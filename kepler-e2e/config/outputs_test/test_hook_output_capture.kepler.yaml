@@ -1,0 +1,14 @@
+# Test hook output capture: hook step with `output: setup` captures ::output:: markers
+# Markers should NOT appear in service logs
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  hook-output-service:
+    command: ["sh", "-c", "echo SERVICE_RUNNING; sleep 300"]
+    hooks:
+      pre_start:
+        run: "echo '::output::token=abc-123'; echo '::output::port=8080'; echo HOOK_VISIBLE_LINE"
+        output: setup

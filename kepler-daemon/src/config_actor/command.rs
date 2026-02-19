@@ -10,7 +10,8 @@ use super::context::{DiagnosticCounts, HealthCheckUpdate, ServiceContext, TaskHa
 use crate::config::{KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
 
 /// Stdout and stderr capture task handles taken from a process handle.
-pub type OutputTasks = (Option<JoinHandle<()>>, Option<JoinHandle<()>>);
+/// The stdout task returns `Option<Vec<String>>` (captured `KEY=VALUE` lines if output capture is enabled).
+pub type OutputTasks = (Option<JoinHandle<Option<Vec<String>>>>, Option<JoinHandle<()>>);
 use crate::errors::Result;
 use crate::events::{ServiceEvent, ServiceEventReceiver};
 use crate::lua_eval::EvalContext;

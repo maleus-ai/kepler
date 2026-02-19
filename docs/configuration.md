@@ -30,6 +30,7 @@ For a ready-to-run example, see [`example.kepler.yaml`](../example.kepler.yaml).
 kepler:
   sys_env: inherit       # Global sys_env policy (clear or inherit), default: inherit
   timeout: 30s           # Global default timeout for dependency waits
+  output_max_size: "1mb"   # Max output capture per step/process (default: 1mb)
   logs:
     buffer_size: 16384   # 16KB buffer for better write throughput
     max_size: "50MB"     # Truncate logs when they exceed this size
@@ -54,6 +55,17 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  migration:
+    command: ["./migrate.sh"]
+    restart: no
+    output: true                        # Capture ::output::KEY=VALUE from stdout
+    outputs:                            # Declare named outputs from hooks
+      db_version: ${{ ctx.hooks.pre_start.outputs.check.version }}
+    hooks:
+      pre_start:
+        - run: echo "::output::version=$(cat VERSION)"
+          output: check
 
   backend:
     working_dir: ./apps/backend
@@ -138,6 +150,7 @@ Settings under the `kepler:` namespace apply to all services unless overridden.
 | `timeout` | `duration` | none | Global default timeout for dependency waits. See [Dependencies](dependencies.md) |
 | `logs` | `object` | - | Global log settings. See [Log Management](log-management.md) |
 | `hooks` | `object` | - | Global lifecycle hooks. See [Hooks](hooks.md) |
+| `output_max_size` | `string` | `1mb` | Max output capture size per step/process (e.g., `"2mb"`, `"512kb"`). See [Outputs](outputs.md) |
 
 ### Global Log Settings
 
@@ -184,6 +197,8 @@ See [Hooks](hooks.md) for format, execution order, and examples.
 | `groups` | `string[]` | `[]` | Supplementary groups lockdown (Unix). Supports `${{ }}`. See [Privilege Dropping](privilege-dropping.md) |
 | `logs` | `object` | - | Log configuration. Supports `${{ }}` and `!lua`. See [Log Management](log-management.md) |
 | `limits` | `object` | - | Resource limits. See [Privilege Dropping](privilege-dropping.md) |
+| `output` | `bool` | `false` | Enable `::output::KEY=VALUE` capture from process stdout. Requires `restart: no`. See [Outputs](outputs.md) |
+| `outputs` | `object` | - | Named output declarations (expressions referencing hook/dep outputs). Requires `restart: no`. See [Outputs](outputs.md) |
 
 ### User Format
 
@@ -272,3 +287,4 @@ The `recreate` command:
 - [Log Management](log-management.md) -- Log storage and streaming
 - [File Watching](file-watching.md) -- Auto-restart on changes
 - [Privilege Dropping](privilege-dropping.md) -- User/group and limits
+- [Outputs](outputs.md) -- Output capture and cross-service output passing

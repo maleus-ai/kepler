@@ -13,7 +13,7 @@ mod spawn;
 mod validation;
 
 pub use command::CommandSpec;
-pub use spawn::{spawn_blocking, spawn_detached, BlockingMode, BlockingResult, DetachedResult};
+pub use spawn::{spawn_blocking, spawn_detached, BlockingMode, BlockingResult, DetachedResult, OutputCaptureConfig};
 pub use validation::{kill_process_by_pid, validate_running_process};
 
 use chrono::Utc;
@@ -46,6 +46,8 @@ pub struct SpawnServiceParams<'a> {
     pub handle: ConfigActorHandle,
     pub exit_tx: mpsc::Sender<ProcessExitEvent>,
     pub global_log_config: Option<&'a LogConfig>,
+    /// Optional output capture for `::output::KEY=VALUE` markers
+    pub output_capture: Option<OutputCaptureConfig>,
 }
 
 /// Spawn a service process with signal-based monitoring
@@ -58,6 +60,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         handle,
         exit_tx,
         global_log_config,
+        output_capture,
     } = params;
 
     let working_dir = service_config
@@ -114,6 +117,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         service_name.to_string(),
         store_stdout,
         store_stderr,
+        output_capture,
     )
     .await?;
 

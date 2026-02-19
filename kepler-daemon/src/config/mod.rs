@@ -190,6 +190,14 @@ pub struct RawServiceConfig {
     pub groups: ConfigValue<Vec<String>>,
     #[serde(default)]
     pub limits: ConfigValue<Option<ResourceLimits>>,
+    /// Whether to capture `::output::KEY=VALUE` markers from the service process stdout.
+    /// Only allowed on `restart: no` services.
+    #[serde(default, skip_serializing_if = "ConfigValue::is_static_none")]
+    pub output: ConfigValue<Option<bool>>,
+    /// Named output declarations that reference hook/process outputs via `${{ }}` expressions.
+    /// Only allowed on `restart: no` services.
+    #[serde(default, skip_serializing_if = "ConfigValue::is_static_none")]
+    pub outputs: ConfigValue<Option<HashMap<String, String>>>,
 }
 
 impl Default for RawServiceConfig {
@@ -210,6 +218,8 @@ impl Default for RawServiceConfig {
             user: ConfigValue::default(),
             groups: ConfigValue::default(),
             limits: ConfigValue::default(),
+            output: ConfigValue::default(),
+            outputs: ConfigValue::default(),
         }
     }
 }
@@ -432,6 +442,11 @@ pub struct KeplerGlobalConfig {
         serialize_with = "duration::serialize_optional_duration"
     )]
     pub timeout: Option<std::time::Duration>,
+
+    /// Maximum size for output capture per step/process (e.g. "1mb").
+    /// Defaults to 1MB if not specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_max_size: Option<String>,
 }
 
 /// Root configuration structure
@@ -489,6 +504,12 @@ pub struct ServiceConfig {
     /// Resource limits for the process
     #[serde(default)]
     pub limits: Option<ResourceLimits>,
+    /// Whether to capture `::output::KEY=VALUE` markers from process stdout
+    #[serde(default)]
+    pub output: Option<bool>,
+    /// Named output declarations (resolved after hooks/process complete)
+    #[serde(default)]
+    pub outputs: Option<HashMap<String, String>>,
 }
 
 // ============================================================================
@@ -816,6 +837,11 @@ impl KeplerConfig {
             raw.hooks.resolve(evaluator, ctx, config_path, &format!("{}.hooks", name))?
         };
 
+        let output = raw.output.resolve(evaluator, ctx, config_path, &format!("{}.output", name))?;
+        // outputs are resolved later after hooks/process complete (they reference ctx.hooks.*)
+        // For now, store None; the orchestrator will resolve them when outputs are available.
+        let outputs: Option<HashMap<String, String>> = None;
+
         Ok(ServiceConfig {
             condition,
             command,
@@ -831,6 +857,8 @@ impl KeplerConfig {
             user,
             groups,
             limits,
+            output,
+            outputs,
         })
     }
 
@@ -889,6 +917,25 @@ impl KeplerConfig {
             let restart = raw.restart.as_static().cloned().unwrap_or_default();
             if let Err(msg) = restart.validate() {
                 errors.push(format!("Service '{}': {}", name, msg));
+            }
+
+            // Validate output/outputs require restart: no
+            let is_restart_no = restart.policy() == &crate::config::restart::RestartPolicy::No;
+            if let Some(Some(true)) = raw.output.as_static() {
+                if !is_restart_no {
+                    errors.push(format!(
+                        "Service '{}': 'output: true' is only allowed on services with 'restart: no'",
+                        name
+                    ));
+                }
+            }
+            if let Some(Some(_)) = raw.outputs.as_static() {
+                if !is_restart_no {
+                    errors.push(format!(
+                        "Service '{}': 'outputs' is only allowed on services with 'restart: no'",
+                        name
+                    ));
+                }
             }
         }
 
@@ -955,6 +1002,17 @@ impl KeplerConfig {
     /// Get service names
     pub fn service_names(&self) -> Vec<String> {
         self.services.keys().cloned().collect()
+    }
+
+    /// Get the configured output_max_size in bytes, defaulting to 1MB.
+    pub fn output_max_size(&self) -> usize {
+        const DEFAULT_OUTPUT_MAX_SIZE: usize = 1024 * 1024; // 1MB
+        self.kepler
+            .as_ref()
+            .and_then(|k| k.output_max_size.as_ref())
+            .and_then(|s| parse_memory_limit(s).ok())
+            .map(|v| v as usize)
+            .unwrap_or(DEFAULT_OUTPUT_MAX_SIZE)
     }
 }
 

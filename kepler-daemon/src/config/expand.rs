@@ -217,7 +217,8 @@ fn evaluate_value_tree_inner(
             if let Value::Mapping(map) = value {
                 let keys: Vec<serde_yaml::Value> = map.keys().cloned().collect();
                 for key in keys {
-                    let is_depends_on = key.as_str() == Some("depends_on");
+                    let is_depends_on = key.as_str() == Some("depends_on")
+                        || key.as_str() == Some("outputs");
                     let child_path = if let Some(key_str) = key.as_str() {
                         if field_path.is_empty() {
                             key_str.to_string()

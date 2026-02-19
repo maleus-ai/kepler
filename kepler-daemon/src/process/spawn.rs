@@ -103,6 +103,12 @@ fn verify_binary_permissions(_path: &std::path::Path) -> bool {
 }
 
 
+/// Configuration for capturing `::output::KEY=VALUE` marker lines from stdout.
+#[derive(Debug, Clone)]
+pub struct OutputCaptureConfig {
+    pub max_size: usize,
+}
+
 /// Mode for blocking command execution
 #[derive(Debug)]
 pub enum BlockingMode {
@@ -116,6 +122,8 @@ pub enum BlockingMode {
         store_stdout: bool,
         /// Whether to store stderr output
         store_stderr: bool,
+        /// Optional output capture config for `::output::` marker lines
+        output_capture: Option<OutputCaptureConfig>,
     },
 }
 
@@ -123,12 +131,14 @@ pub enum BlockingMode {
 #[derive(Debug)]
 pub struct BlockingResult {
     pub exit_code: Option<i32>,
+    /// Captured `KEY=VALUE` lines from `::output::` markers (if output capture was enabled)
+    pub captured_output: Option<Vec<String>>,
 }
 
 /// Result of spawning a detached command
 pub struct DetachedResult {
     pub child: Child,
-    pub stdout_task: Option<JoinHandle<()>>,
+    pub stdout_task: Option<JoinHandle<Option<Vec<String>>>>,
     pub stderr_task: Option<JoinHandle<()>>,
 }
 
@@ -271,6 +281,10 @@ fn spawn_drain_task(
 /// Spawn a task that captures lines from a stream, optionally logging and writing to disk.
 ///
 /// - `log_to_tracing`: if true, also emits `info!` for each line (used by hooks)
+/// - `output_capture`: if Some, filters `::output::KEY=VALUE` lines and returns them
+///
+/// Returns `Some(Vec<String>)` of raw `KEY=VALUE` strings if output capture is enabled,
+/// `None` otherwise.
 fn spawn_capture_task(
     stream: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
     log_config: Option<LogWriterConfig>,
@@ -278,8 +292,14 @@ fn spawn_capture_task(
     log_stream: LogStream,
     should_store: bool,
     log_to_tracing: bool,
-) -> JoinHandle<()> {
+    output_capture: Option<OutputCaptureConfig>,
+) -> JoinHandle<Option<Vec<String>>> {
     tokio::spawn(async move {
+        let mut captured: Option<Vec<String>> = output_capture.as_ref().map(|_| Vec::new());
+        let max_size = output_capture.as_ref().map(|c| c.max_size).unwrap_or(0);
+        let mut captured_bytes: usize = 0;
+        let mut capture_overflow = false;
+
         if let Some(stream) = stream {
             let mut writer = if should_store {
                 log_config.map(|cfg| {
@@ -292,21 +312,47 @@ fn spawn_capture_task(
             let reader = BufReader::new(stream);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                // Check for ::output:: marker
+                if let Some(ref mut cap) = captured {
+                    if let Some(kv) = line.strip_prefix("::output::") {
+                        if kv.contains('=') {
+                            if !capture_overflow {
+                                let line_size = kv.len();
+                                if captured_bytes + line_size <= max_size {
+                                    cap.push(kv.to_string());
+                                    captured_bytes += line_size;
+                                } else {
+                                    capture_overflow = true;
+                                    warn!(
+                                        "[{}] Output capture exceeded max size ({}), ignoring further markers",
+                                        service_name, max_size
+                                    );
+                                }
+                            }
+                        } else {
+                            warn!(
+                                "[{}] Malformed output marker (missing '='): {}",
+                                service_name, line
+                            );
+                        }
+                        // Marker lines are NOT written to logs
+                        continue;
+                    }
+                }
+
                 if log_to_tracing {
                     info!(target: "hook", "[{}] {}", service_name, line);
                 }
                 if let Some(ref mut w) = writer {
                     w.write(&line);
-                    // Flush when the reader has no more buffered data (i.e., the
-                    // next next_line() call would need to wait for the process).
-                    // This ensures log lines become visible promptly while still
-                    // batching consecutive lines that arrive together.
                     if lines.get_ref().buffer().is_empty() {
                         w.flush();
                     }
                 }
             }
         }
+
+        captured
     })
 }
 
@@ -341,6 +387,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
 
             Ok(BlockingResult {
                 exit_code: status.code(),
+                captured_output: None,
             })
         }
         BlockingMode::WithLogging {
@@ -348,7 +395,9 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
             log_service_name,
             store_stdout,
             store_stderr,
+            output_capture,
         } => {
+            // Only capture output from stdout (not stderr)
             let stdout_handle = spawn_capture_task(
                 child.stdout.take(),
                 if store_stdout { log_config.clone() } else { None },
@@ -356,6 +405,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
                 LogStream::Stdout,
                 store_stdout,
                 true,
+                output_capture,
             );
             let stderr_handle = spawn_capture_task(
                 child.stderr.take(),
@@ -364,6 +414,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
                 LogStream::Stderr,
                 store_stderr,
                 true,
+                None, // No output capture on stderr
             );
 
             let status = child.wait().await.map_err(|e| DaemonError::ProcessSpawn {
@@ -371,11 +422,12 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
                 source: e,
             })?;
 
-            let _ = stdout_handle.await;
+            let captured_output = stdout_handle.await.ok().flatten();
             let _ = stderr_handle.await;
 
             Ok(BlockingResult {
                 exit_code: status.code(),
+                captured_output,
             })
         }
     }
@@ -388,6 +440,7 @@ pub async fn spawn_detached(
     log_service_name: String,
     store_stdout: bool,
     store_stderr: bool,
+    output_capture: Option<OutputCaptureConfig>,
 ) -> Result<DetachedResult> {
     let (mut cmd, program) = build_command(&spec)?;
 
@@ -407,18 +460,22 @@ pub async fn spawn_detached(
             LogStream::Stdout,
             store_stdout,
             false,
+            output_capture,
         )
     });
 
     let stderr_task = child.stderr.take().map(|stderr| {
-        spawn_capture_task(
+        let task = spawn_capture_task(
             Some(stderr),
             Some(log_config),
             log_service_name,
             LogStream::Stderr,
             store_stderr,
             false,
-        )
+            None, // No output capture on stderr
+        );
+        // Wrap to discard the unused Option<Vec<String>> return value
+        tokio::spawn(async move { let _ = task.await; })
     });
 
     Ok(DetachedResult {

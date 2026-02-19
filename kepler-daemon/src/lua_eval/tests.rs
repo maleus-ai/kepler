@@ -594,3 +594,110 @@ fn test_lua_eval_has_deps_and_env_shortcut() {
     let result: String = eval.eval(r#"return deps.db.status"#, &ctx, "test").unwrap();
     assert_eq!(result, "healthy");
 }
+
+// --- Hook outputs context tests ---
+
+#[test]
+fn test_ctx_hooks_access() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut hooks = HashMap::new();
+    let mut steps = HashMap::new();
+    steps.insert("step1".to_string(), HashMap::from([
+        ("token".to_string(), "abc".to_string()),
+    ]));
+    hooks.insert("pre_start".to_string(), steps);
+    let ctx = EvalContext { hooks, ..Default::default() };
+
+    let result: String = eval.eval(r#"return ctx.hooks.pre_start.outputs.step1.token"#, &ctx, "test").unwrap();
+    assert_eq!(result, "abc");
+}
+
+#[test]
+fn test_hooks_shortcut_access() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut hooks = HashMap::new();
+    let mut steps = HashMap::new();
+    steps.insert("step1".to_string(), HashMap::from([
+        ("token".to_string(), "abc".to_string()),
+    ]));
+    hooks.insert("pre_start".to_string(), steps);
+    let ctx = EvalContext { hooks, ..Default::default() };
+
+    let result: String = eval.eval(r#"return hooks.pre_start.outputs.step1.token"#, &ctx, "test").unwrap();
+    assert_eq!(result, "abc");
+}
+
+#[test]
+fn test_deps_outputs_access() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut deps = HashMap::new();
+    deps.insert("db".to_string(), DepInfo {
+        status: "healthy".to_string(),
+        outputs: HashMap::from([("port".to_string(), "8080".to_string())]),
+        ..Default::default()
+    });
+    let ctx = EvalContext { deps, ..Default::default() };
+
+    let result = eval.eval_inline_expr("deps.db.outputs.port", &ctx, "test").unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "8080");
+}
+
+#[test]
+fn test_deps_outputs_empty() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut deps = HashMap::new();
+    deps.insert("db".to_string(), DepInfo {
+        status: "healthy".to_string(),
+        outputs: HashMap::new(),
+        ..Default::default()
+    });
+    let ctx = EvalContext { deps, ..Default::default() };
+
+    let result = eval.eval_inline_expr("deps.db.outputs.key", &ctx, "test").unwrap();
+    assert!(result.is_nil(), "Missing output key should return nil, got: {:?}", result);
+}
+
+#[test]
+fn test_ctx_hooks_frozen() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut hooks = HashMap::new();
+    let mut steps = HashMap::new();
+    steps.insert("step1".to_string(), HashMap::from([
+        ("token".to_string(), "abc".to_string()),
+    ]));
+    hooks.insert("pre_start".to_string(), steps);
+    let ctx = EvalContext { hooks, ..Default::default() };
+
+    let result = eval.eval::<Value>(r#"ctx.hooks.pre_start.outputs.step1.new_key = "x""#, &ctx, "test");
+    assert!(result.is_err(), "Writing to hooks table should fail");
+}
+
+#[test]
+fn test_deps_outputs_frozen() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut deps = HashMap::new();
+    deps.insert("db".to_string(), DepInfo {
+        status: "healthy".to_string(),
+        outputs: HashMap::from([("port".to_string(), "8080".to_string())]),
+        ..Default::default()
+    });
+    let ctx = EvalContext { deps, ..Default::default() };
+
+    let result = eval.eval::<Value>(r#"deps.db.outputs.port = "9090""#, &ctx, "test");
+    assert!(result.is_err(), "Writing to deps outputs table should fail");
+}
+
+#[test]
+fn test_inline_expr_hooks_access() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut hooks = HashMap::new();
+    let mut steps = HashMap::new();
+    steps.insert("step1".to_string(), HashMap::from([
+        ("token".to_string(), "abc".to_string()),
+    ]));
+    hooks.insert("pre_start".to_string(), steps);
+    let ctx = EvalContext { hooks, ..Default::default() };
+
+    let result = eval.eval_inline_expr("hooks.pre_start.outputs.step1.token", &ctx, "test").unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "abc");
+}
