@@ -1422,6 +1422,9 @@ impl ServiceOrchestrator {
             warn!("Global pre_restart hook failed: {}", e);
         }
 
+        // Suppress Quiescent/Ready signals during the stop+start cycle
+        handle.set_startup_in_progress(true).await;
+
         // Phase 1: Run pre_restart hooks and stop (reverse dependency order)
         for service_name in &stop_order {
             // Get service context
@@ -1527,6 +1530,9 @@ impl ServiceOrchestrator {
                 }
             }
         }
+
+        // Re-enable Quiescent/Ready signals now that restart is complete
+        handle.set_startup_in_progress(false).await;
 
         // Run global post_restart hook for full restart
         if is_full_restart
