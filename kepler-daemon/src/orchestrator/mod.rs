@@ -117,6 +117,7 @@ impl ServiceOrchestrator {
         sys_env: Option<HashMap<String, String>>,
         config_owner: Option<(u32, u32)>,
         progress: Option<ProgressSender>,
+        no_deps: bool,
     ) -> Result<String, OrchestratorError> {
         // Get or create the config actor
         let handle = self
@@ -205,6 +206,8 @@ impl ServiceOrchestrator {
         // Start services
         if is_specific_service {
             // Start only the named service (no transitive deps)
+            // When a user explicitly names a service, skip the `if:` condition.
+            // When --no-deps is set, also skip dependency waiting.
             let mut started = Vec::new();
             for service_name in &services_to_start {
                 if handle.is_service_running(service_name).await {
@@ -212,7 +215,7 @@ impl ServiceOrchestrator {
                     continue;
                 }
 
-                match self.start_single_service_with_evaluator(&handle, service_name, &progress, Some(shared_evaluator.clone())).await {
+                match self.start_single_service_with_evaluator(&handle, service_name, &progress, Some(shared_evaluator.clone()), true, no_deps).await {
                     Ok(()) => started.push(service_name.clone()),
                     Err(OrchestratorError::StartupCancelled(_)) => {
                         debug!("Service {} startup was cancelled, skipping", service_name);
@@ -276,7 +279,7 @@ impl ServiceOrchestrator {
                 let evaluator_clone = shared_evaluator.clone();
                 tokio::spawn(async move {
                     if let Err(e) = self_clone.start_single_service_with_evaluator(
-                        &handle_clone, &service_name_clone, &progress_clone, Some(evaluator_clone),
+                        &handle_clone, &service_name_clone, &progress_clone, Some(evaluator_clone), false, false,
                     ).await {
                         warn!("Failed to start service {}: {}", service_name_clone, e);
                     }
@@ -368,6 +371,8 @@ impl ServiceOrchestrator {
         service_name: &str,
         progress: &Option<ProgressSender>,
         shared_evaluator: Option<SharedLuaEvaluator>,
+        skip_condition: bool,
+        no_deps: bool,
     ) -> Result<(), OrchestratorError> {
         // Atomically claim the service for startup
         if !handle.claim_service_start(service_name).await {
@@ -376,7 +381,7 @@ impl ServiceOrchestrator {
         }
 
         // Run the actual startup. If anything fails, mark as Skipped or Failed.
-        match self.execute_service_startup(handle, service_name, progress, shared_evaluator).await {
+        match self.execute_service_startup(handle, service_name, progress, shared_evaluator, skip_condition, no_deps).await {
             Ok(()) => Ok(()),
             Err(ref e @ OrchestratorError::DependencySkipped { ref dependency, .. }) => {
                 let reason = format!("dependency `{}` was skipped", dependency);
@@ -431,7 +436,7 @@ impl ServiceOrchestrator {
         handle: &ConfigActorHandle,
         service_name: &str,
     ) -> Result<(), OrchestratorError> {
-        self.start_single_service_with_evaluator(handle, service_name, &None, None).await
+        self.start_single_service_with_evaluator(handle, service_name, &None, None, false, false).await
     }
 
     /// Execute the actual service startup sequence (after claiming).
@@ -445,6 +450,8 @@ impl ServiceOrchestrator {
         service_name: &str,
         progress: &Option<ProgressSender>,
         shared_evaluator: Option<SharedLuaEvaluator>,
+        skip_condition: bool,
+        no_deps: bool,
     ) -> Result<(), OrchestratorError> {
         // Get service context (single round-trip — raw config + state)
         let ctx = handle
@@ -456,8 +463,11 @@ impl ServiceOrchestrator {
         let depends_on = ctx.service_config.depends_on.clone();
 
         // Wait for dependencies to satisfy their conditions (blocks while in Waiting state)
-        self.wait_for_dependencies(handle, service_name, &depends_on)
-            .await?;
+        // Skip when --no-deps is set (user explicitly chose to bypass dependency waiting)
+        if !no_deps {
+            self.wait_for_dependencies(handle, service_name, &depends_on)
+                .await?;
+        }
 
         // Transition: Waiting → Starting (dependencies satisfied)
         handle.set_service_status(service_name, ServiceStatus::Starting).await?;
@@ -583,7 +593,8 @@ impl ServiceOrchestrator {
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
         // Service-level `if` condition — already resolved to bool by resolve_service
-        if resolved.condition == Some(false) {
+        // Skip when the user explicitly named this service (skip_condition=true)
+        if !skip_condition && resolved.condition == Some(false) {
             let reason = "`if` condition evaluated to false".to_string();
             tracing::info!("Service {} skipped: {}", service_name, reason);
             if let Err(err) = handle.set_service_status_with_reason(
@@ -1316,6 +1327,7 @@ impl ServiceOrchestrator {
         &self,
         config_path: &Path,
         services: &[String],
+        no_deps: bool,
     ) -> Result<String, OrchestratorError> {
         info!("Restarting services for {:?} (preserving state)", config_path);
 
@@ -1358,17 +1370,25 @@ impl ServiceOrchestrator {
             return Ok("No running services to restart".to_string());
         }
 
-        // Sort services by dependency graph
-        // Start order: forward topological sort (dependencies first, then dependents)
-        // Stop order: reverse of start order (dependents first, then dependencies)
-        let filtered: HashMap<_, _> = config.services
-            .iter()
-            .filter(|(k, _)| services_to_restart.contains(k))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let start_order = get_start_order(&filtered).unwrap_or_else(|_| services_to_restart.clone());
-        let mut stop_order = start_order.clone();
-        stop_order.reverse();
+        // Sort services by dependency graph (unless --no-deps, which uses user-specified order)
+        let (start_order, stop_order) = if no_deps {
+            // --no-deps: use user-specified order for start, reverse for stop
+            let mut stop = services_to_restart.clone();
+            stop.reverse();
+            (services_to_restart.clone(), stop)
+        } else {
+            // Start order: forward topological sort (dependencies first, then dependents)
+            // Stop order: reverse of start order (dependents first, then dependencies)
+            let filtered: HashMap<_, _> = config.services
+                .iter()
+                .filter(|(k, _)| services_to_restart.contains(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let start = get_start_order(&filtered).unwrap_or_else(|_| services_to_restart.clone());
+            let mut stop = start.clone();
+            stop.reverse();
+            (start, stop)
+        };
 
         // Run global pre_restart hook for full restart
         if is_full_restart
@@ -1576,7 +1596,7 @@ impl ServiceOrchestrator {
         }
 
         // Start all services
-        self.start_services(config_path, None, sys_env, config_owner, progress).await?;
+        self.start_services(config_path, None, sys_env, config_owner, progress, false).await?;
 
         Ok(String::new())
     }

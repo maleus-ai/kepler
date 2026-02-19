@@ -32,17 +32,19 @@ fn roundtrip_envelope_start() {
             config_path: PathBuf::from("/tmp/test.yaml"),
             service: Some("web".into()),
             sys_env: Some(HashMap::from([("PATH".into(), "/usr/bin".into())])),
+            no_deps: true,
         },
     };
     let bytes = encode_envelope(&envelope).unwrap();
     let decoded = decode_envelope(&bytes[4..]).unwrap();
     assert_eq!(decoded.id, 7);
     match decoded.request {
-        Request::Start { config_path, service, sys_env } => {
+        Request::Start { config_path, service, sys_env, no_deps } => {
             assert_eq!(config_path, PathBuf::from("/tmp/test.yaml"));
             assert_eq!(service, Some("web".into()));
             assert!(sys_env.is_some());
             assert_eq!(sys_env.unwrap().get("PATH").unwrap(), "/usr/bin");
+            assert!(no_deps);
         }
         _ => panic!("Expected Start request"),
     }
@@ -81,13 +83,15 @@ fn roundtrip_envelope_restart() {
             config_path: PathBuf::from("/app/kepler.yaml"),
             services: vec!["api".into(), "web".into()],
             sys_env: None,
+            no_deps: true,
         },
     };
     let bytes = encode_envelope(&envelope).unwrap();
     let decoded = decode_envelope(&bytes[4..]).unwrap();
     match decoded.request {
-        Request::Restart { services, .. } => {
+        Request::Restart { services, no_deps, .. } => {
             assert_eq!(services, vec!["api".to_string(), "web".to_string()]);
+            assert!(no_deps);
         }
         _ => panic!("Expected Restart request"),
     }
@@ -456,6 +460,7 @@ fn request_variant_names() {
             config_path: PathBuf::new(),
             service: None,
             sys_env: None,
+            no_deps: false,
         }.variant_name(),
         "Start"
     );

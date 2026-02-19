@@ -1,0 +1,10 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  always-run:
+    command: ["sh", "-c", "echo ALWAYS_RUN_STARTED; sleep 300"]
+  never-run:
+    command: ["sh", "-c", "echo NEVER_RUN_STARTED; sleep 300"]
+    if: false

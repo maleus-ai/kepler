@@ -21,6 +21,9 @@ pub enum Commands {
         /// Timeout for --wait mode (e.g. "30s", "5m")
         #[arg(long, requires = "wait")]
         timeout: Option<String>,
+        /// Skip dependency waiting and `if:` condition (requires a specific service)
+        #[arg(long, requires = "service")]
+        no_deps: bool,
     },
     /// Stop services (requires daemon to be running)
     Stop {
@@ -47,6 +50,9 @@ pub enum Commands {
         /// Timeout for --wait mode (e.g. "30s", "5m")
         #[arg(long, requires = "wait")]
         timeout: Option<String>,
+        /// Skip dependency ordering (use specified order instead; requires service names)
+        #[arg(long)]
+        no_deps: bool,
     },
     /// Recreate config (stop, re-bake config snapshot, start)
     Recreate,

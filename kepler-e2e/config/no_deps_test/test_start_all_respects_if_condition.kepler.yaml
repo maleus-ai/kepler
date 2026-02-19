@@ -1,0 +1,10 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  normal-svc:
+    command: ["sh", "-c", "echo NORMAL_SVC_STARTED; sleep 300"]
+  disabled-svc:
+    command: ["sh", "-c", "echo DISABLED_SVC_STARTED; sleep 300"]
+    if: false

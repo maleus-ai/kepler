@@ -1,0 +1,15 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  base:
+    command: ["sh", "-c", "echo BASE_STARTED; sleep 300"]
+  mid:
+    command: ["sh", "-c", "echo MID_STARTED; sleep 300"]
+    depends_on:
+      - base
+  top:
+    command: ["sh", "-c", "echo TOP_STARTED; sleep 300"]
+    depends_on:
+      - mid
