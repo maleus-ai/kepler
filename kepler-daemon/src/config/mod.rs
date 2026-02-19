@@ -99,6 +99,14 @@ fn contains_dynamic_content(value: &serde_yaml::Value) -> bool {
 }
 
 
+impl<T> ConfigValue<Option<T>> {
+    /// Returns true if this value is statically known to be None.
+    /// Used for skip_serializing_if on optional fields that only exist on RawServiceConfig.
+    pub fn is_static_none(&self) -> bool {
+        matches!(self, ConfigValue::Static(None))
+    }
+}
+
 impl<T: Clone + DeserializeOwned> ConfigValue<T> {
     /// Returns the static value if available.
     pub fn as_static(&self) -> Option<&T> {
@@ -152,7 +160,10 @@ impl<T: Clone + DeserializeOwned> ConfigValue<T> {
 pub struct RawServiceConfig {
     #[serde(default, rename = "if")]
     pub condition: ConfigValue<Option<bool>>,
+    #[serde(default)]
     pub command: ConfigValue<Vec<String>>,
+    #[serde(default, skip_serializing_if = "ConfigValue::is_static_none")]
+    pub run: ConfigValue<Option<String>>,
     #[serde(default)]
     pub working_dir: ConfigValue<Option<PathBuf>>,
     #[serde(default)]
@@ -186,6 +197,7 @@ impl Default for RawServiceConfig {
         Self {
             condition: ConfigValue::default(),
             command: ConfigValue::Static(Vec::new()),
+            run: ConfigValue::default(),
             working_dir: ConfigValue::default(),
             environment: ConfigValue::default(),
             env_file: ConfigValue::default(),
@@ -295,6 +307,14 @@ impl RawServiceConfig {
         match &self.command {
             ConfigValue::Static(v) => !v.is_empty(),
             ConfigValue::Dynamic(_) => true, // dynamic commands are assumed present
+        }
+    }
+
+    /// Check if run is present (for validation).
+    pub fn has_run(&self) -> bool {
+        match &self.run {
+            ConfigValue::Static(v) => v.is_some(),
+            ConfigValue::Dynamic(_) => true, // dynamic run is assumed present
         }
     }
 }
@@ -769,7 +789,15 @@ impl KeplerConfig {
         let environment = raw.resolve_environment(evaluator, ctx, config_path, name)?;
 
         // Step 2: Resolve remaining fields
-        let command = raw.command.resolve(evaluator, ctx, config_path, &format!("{}.command", name))?;
+        let command = if raw.has_run() {
+            let run = raw.run.resolve(evaluator, ctx, config_path, &format!("{}.run", name))?;
+            match run {
+                Some(script) => vec!["sh".to_string(), "-c".to_string(), script],
+                None => Vec::new(),
+            }
+        } else {
+            raw.command.resolve(evaluator, ctx, config_path, &format!("{}.command", name))?
+        };
         let working_dir = raw.working_dir.resolve(evaluator, ctx, config_path, &format!("{}.working_dir", name))?;
         let condition = raw.condition.resolve(evaluator, ctx, config_path, &format!("{}.if", name))?;
         let user = raw.user.resolve(evaluator, ctx, config_path, &format!("{}.user", name))?;
@@ -817,10 +845,15 @@ impl KeplerConfig {
                 errors.push(e);
             }
 
-            // Check command is present and non-empty
-            if !raw.has_command() {
+            // Check that exactly one of command/run is specified
+            if raw.has_command() && raw.has_run() {
                 errors.push(format!(
-                    "Service '{}': 'command' is required and must be a non-empty array",
+                    "Service '{}': 'command' and 'run' are mutually exclusive",
+                    name
+                ));
+            } else if !raw.has_command() && !raw.has_run() {
+                errors.push(format!(
+                    "Service '{}': either 'command' or 'run' is required",
                     name
                 ));
             }

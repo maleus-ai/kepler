@@ -1,0 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  pipe-service:
+    run: "echo HELLO | tr A-Z a-z; sleep 300"

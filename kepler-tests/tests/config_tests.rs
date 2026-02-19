@@ -151,7 +151,7 @@ services:
     );
 }
 
-/// Error for empty command array
+/// Error for empty command array (neither command nor run present)
 #[test]
 fn test_validation_empty_command() {
     let temp_dir = TempDir::new().unwrap();
@@ -169,8 +169,8 @@ services:
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("command") && err.contains("empty"),
-        "Error should mention empty command: {}",
+        err.contains("either 'command' or 'run' is required"),
+        "Error should mention command or run required: {}",
         err
     );
 }
@@ -1166,4 +1166,136 @@ health_check_failures: 0
     assert_eq!(info.stopped_at, None);
     assert_eq!(info.signal, None);
     assert_eq!(info.exit_code, None);
+}
+
+// ============================================================================
+// Service `run` field tests
+// ============================================================================
+
+/// Service with `run` field loads correctly from YAML file
+#[test]
+fn test_run_field_loads_from_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    run: "echo hello && echo world"
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    let raw = &config.services["test"];
+    assert!(raw.has_run());
+    assert!(!raw.has_command());
+}
+
+/// Service with both `run` and `command` fails validation via file load
+#[test]
+fn test_run_and_command_mutually_exclusive_file_load() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    command: ["echo", "hello"]
+    run: "echo hello"
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let result = KeplerConfig::load_without_sys_env(&config_path);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("'command' and 'run' are mutually exclusive"),
+        "Error should mention mutual exclusivity: {}",
+        err
+    );
+}
+
+/// Service with neither `run` nor `command` fails validation via file load
+#[test]
+fn test_neither_run_nor_command_file_load() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    environment:
+      - FOO=bar
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let result = KeplerConfig::load_without_sys_env(&config_path);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("either 'command' or 'run' is required"),
+        "Error should mention command or run required: {}",
+        err
+    );
+}
+
+/// `run` field resolves to ["sh", "-c", "<script>"] via resolve_service
+#[test]
+fn test_run_field_resolves_to_sh_c_via_file_load() {
+    use kepler_daemon::lua_eval::EvalContext;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    run: "echo hello && sleep 3600"
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    let evaluator = config.create_lua_evaluator().unwrap();
+    let mut ctx = EvalContext::default();
+    let resolved = config
+        .resolve_service("test", &mut ctx, &evaluator, &config_path, None)
+        .unwrap();
+
+    assert_eq!(resolved.command, vec!["sh", "-c", "echo hello && sleep 3600"]);
+}
+
+/// Dynamic `run` field with ${{ }} resolves correctly
+#[test]
+fn test_run_field_dynamic_resolves() {
+    use kepler_daemon::lua_eval::EvalContext;
+    use std::collections::HashMap;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    run: "echo ${{ env.MY_VAR }}"
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    assert!(config.services["test"].run.is_dynamic());
+
+    let evaluator = config.create_lua_evaluator().unwrap();
+    let mut ctx = EvalContext {
+        env: HashMap::from([("MY_VAR".to_string(), "world".to_string())]),
+        ..Default::default()
+    };
+    let resolved = config
+        .resolve_service("test", &mut ctx, &evaluator, &config_path, None)
+        .unwrap();
+
+    assert_eq!(resolved.command, vec!["sh", "-c", "echo world"]);
 }

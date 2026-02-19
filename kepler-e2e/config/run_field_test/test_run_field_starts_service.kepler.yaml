@@ -1,0 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  run-service:
+    run: "echo 'run field works'; sleep 300"
