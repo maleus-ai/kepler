@@ -755,11 +755,13 @@ impl ConfigActor {
                 config,
                 computed_env,
                 working_dir,
+                env_file_vars,
             } => {
-                // Update service state with computed env and working dir
+                // Update service state with computed env, working dir, and env_file vars
                 if let Some(state) = self.services.get_mut(&service_name) {
                     state.computed_env = computed_env;
                     state.working_dir = working_dir;
+                    state.env_file_vars = env_file_vars;
                 }
                 // Cache the resolved config
                 self.resolved_configs.insert(service_name, *config);
@@ -997,6 +999,7 @@ impl ConfigActor {
             global_log_config: self.config.global_logs().cloned(),
             env: service_state.computed_env.clone(),
             working_dir: service_state.working_dir.clone(),
+            env_file_vars: service_state.env_file_vars.clone(),
         })
     }
 

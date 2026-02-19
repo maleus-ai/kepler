@@ -5,12 +5,12 @@ kepler:
 services:
   multi-svc-a:
     environment: !lua |
-      return {"SVC_NAME=" .. (ctx.service_name or "unknown")}
+      return {"SVC_NAME=" .. (service.name or "unknown")}
     command: ["sh", "-c", "echo SVC_NAME=$SVC_NAME && sleep 30"]
     restart: no
 
   multi-svc-b:
     environment: !lua |
-      return {"SVC_NAME=" .. (ctx.service_name or "unknown")}
+      return {"SVC_NAME=" .. (service.name or "unknown")}
     command: ["sh", "-c", "echo SVC_NAME=$SVC_NAME && sleep 30"]
     restart: no

@@ -329,7 +329,7 @@ Hook steps can capture structured output by adding the `output: <step_name>` fie
 Only steps with `output:` are scanned — steps without it have no capture overhead. The value of `output:` becomes the step name used in the access path:
 
 ```
-ctx.hooks.<hook_name>.outputs.<step_name>.<key>
+service.hooks.<hook_name>.outputs.<step_name>.<key>
 hooks.<hook_name>.outputs.<step_name>.<key>     # shortcut
 ```
 
@@ -423,7 +423,7 @@ services:
           output: gen_token
         - run: echo "Starting with token ${{ hooks.pre_start.outputs.gen_token.token }}$"
     outputs:
-      auth_token: ${{ ctx.hooks.pre_start.outputs.gen_token.token }}$
+      auth_token: ${{ service.hooks.pre_start.outputs.gen_token.token }}$
 ```
 
 ### Different User for Hooks

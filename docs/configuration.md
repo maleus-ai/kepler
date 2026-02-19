@@ -61,7 +61,7 @@ services:
     restart: no
     output: true                        # Capture ::output::KEY=VALUE from stdout
     outputs:                            # Declare named outputs from hooks
-      db_version: ${{ ctx.hooks.pre_start.outputs.check.version }}$
+      db_version: ${{ service.hooks.pre_start.outputs.check.version }}$
     hooks:
       pre_start:
         - run: echo "::output::version=$(cat VERSION)"

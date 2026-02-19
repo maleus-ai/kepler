@@ -268,7 +268,7 @@ A service is marked **Skipped** (instead of Failed) when it never ran due to dep
 
 | Cause | Example reason |
 |-------|---------------|
-| `if` condition false | `if` condition evaluated to false: `ctx.debug` |
+| `if` condition false | `if` condition evaluated to false: `service.debug` |
 | Dependency skipped (cascade) | dependency `web` was skipped |
 | Permanently unsatisfied | dependency exited with exit code Some(0), won't restart (policy: No) |
 | Structurally unreachable | `redis` has restart policy `always` — it will always restart, so `service_failed` can never be met |

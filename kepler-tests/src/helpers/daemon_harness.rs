@@ -201,11 +201,15 @@ impl TestDaemonHarness {
         full_env.extend(env_file_vars.clone());
 
         let mut eval_ctx = kepler_daemon::lua_eval::EvalContext {
-            sys_env: sys_env.clone(),
-            env_file: env_file_vars.clone(),
-            env: full_env,
-            service_name: Some(service_name.to_string()),
-            ..Default::default()
+            service: Some(kepler_daemon::lua_eval::ServiceEvalContext {
+                name: service_name.to_string(),
+                raw_env: sys_env.clone(),
+                env_file: env_file_vars.clone(),
+                env: full_env,
+                ..Default::default()
+            }),
+            hook: None,
+            deps: HashMap::new(),
         };
 
         // Create Lua evaluator with config's lua: block loaded
@@ -222,8 +226,8 @@ impl TestDaemonHarness {
         ).map_err(|e| format!("Failed to resolve service: {}", e))?;
 
         // Build computed_env: sys_env + env_file_vars + expanded service environment
-        let mut computed_env = sys_env;
-        computed_env.extend(env_file_vars);
+        let mut computed_env = sys_env.clone();
+        computed_env.extend(env_file_vars.clone());
         insert_env_entries(&mut computed_env, &resolved.environment);
 
         // Resolve working_dir
@@ -234,11 +238,13 @@ impl TestDaemonHarness {
             .unwrap_or_else(|| self.config_dir.clone());
 
         // Store resolved config + computed state in the actor
+        let svc_env_file = eval_ctx.service.as_ref().unwrap().env_file.clone();
         self.handle.store_resolved_config(
             service_name,
             resolved.clone(),
             computed_env.clone(),
             working_dir.clone(),
+            svc_env_file,
         ).await;
 
         // Update status to starting
@@ -257,6 +263,8 @@ impl TestDaemonHarness {
         let hook_params = ServiceHookParams {
             working_dir: &working_dir,
             env: &computed_env,
+            raw_env: &sys_env,
+            env_file_vars: &env_file_vars,
             log_config: Some(&ctx.log_config),
             service_user: resolved.user.as_deref(),
             service_groups: &resolved.groups,
@@ -434,9 +442,12 @@ impl TestDaemonHarness {
             .unwrap_or_else(|| self.config_dir.clone());
         let lua_evaluator = self.handle.get_config().await
             .and_then(|c| c.create_lua_evaluator().ok());
+        let raw_env = self.handle.get_sys_env().await;
         let hook_params = ServiceHookParams {
             working_dir: &working_dir,
             env: &ctx.env,
+            raw_env: &raw_env,
+            env_file_vars: &ctx.env_file_vars,
             log_config: Some(&ctx.log_config),
             service_user: resolved.user.as_deref(),
             service_groups: &resolved.groups,
@@ -487,9 +498,12 @@ impl TestDaemonHarness {
             .unwrap_or_else(|| self.config_dir.clone());
         let lua_evaluator = self.handle.get_config().await
             .and_then(|c| c.create_lua_evaluator().ok());
+        let raw_env = self.handle.get_sys_env().await;
         let hook_params = ServiceHookParams {
             working_dir: &working_dir,
             env: &ctx.env,
+            raw_env: &raw_env,
+            env_file_vars: &ctx.env_file_vars,
             log_config: Some(&ctx.log_config),
             service_user: resolved.user.as_deref(),
             service_groups: &resolved.groups,
@@ -588,9 +602,12 @@ impl TestDaemonHarness {
                     .and_then(|c| c.create_lua_evaluator().ok());
                 let config_path = handle.config_path().to_path_buf();
                 let config_dir = config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+                let raw_env = handle.get_sys_env().await;
                 let hook_params = ServiceHookParams {
                     working_dir: &working_dir,
                     env: &ctx.env,
+                    raw_env: &raw_env,
+                    env_file_vars: &ctx.env_file_vars,
                     log_config: Some(&ctx.log_config),
                     service_user: resolved.user.as_deref(),
                     service_groups: &resolved.groups,
@@ -725,9 +742,12 @@ impl TestDaemonHarness {
                     .and_then(|c| c.create_lua_evaluator().ok());
                 let config_path = handle.config_path().to_path_buf();
                 let config_dir = config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+                let raw_env = handle.get_sys_env().await;
                 let hook_params = ServiceHookParams {
                     working_dir: &working_dir,
                     env: &ctx.env,
+                    raw_env: &raw_env,
+                    env_file_vars: &ctx.env_file_vars,
                     log_config: Some(&ctx.log_config),
                     service_user: resolved.user.as_deref(),
                     service_groups: &resolved.groups,

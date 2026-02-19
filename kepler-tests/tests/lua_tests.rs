@@ -38,9 +38,13 @@ fn resolve_svc_with_env(
     config_path: &Path,
     sys_env: &HashMap<String, String>,
 ) -> kepler_daemon::config::ServiceConfig {
+    use kepler_daemon::lua_eval::ServiceEvalContext;
     let mut ctx = EvalContext {
-        sys_env: sys_env.clone(),
-        env: sys_env.clone(),
+        service: Some(ServiceEvalContext {
+            raw_env: sys_env.clone(),
+            env: sys_env.clone(),
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let evaluator = config.create_lua_evaluator().unwrap();
@@ -49,10 +53,14 @@ fn resolve_svc_with_env(
 
 /// Helper to attempt resolving a service config, returning an error string on failure.
 fn try_resolve_svc(config: &KeplerConfig, name: &str, config_path: &Path) -> Result<kepler_daemon::config::ServiceConfig, String> {
+    use kepler_daemon::lua_eval::ServiceEvalContext;
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     let mut ctx = EvalContext {
-        sys_env: sys_env.clone(),
-        env: sys_env,
+        service: Some(ServiceEvalContext {
+            raw_env: sys_env.clone(),
+            env: sys_env,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let evaluator = config.create_lua_evaluator().map_err(|e| e.to_string())?;
@@ -99,7 +107,7 @@ services:
     assert_eq!(service.command, vec!["echo", "hello", "world"]);
 }
 
-/// Test: !lua accesses ctx.env table
+/// Test: !lua accesses env table
 #[test]
 fn test_lua_env_access() {
     let _guard = ENV_LOCK.lock();
@@ -115,7 +123,7 @@ services:
   test:
     command: ["echo", "hello"]
     environment: !lua |
-      return {"MY_VAR=" .. (ctx.env.KEPLER_LUA_TEST_VAR or "default")}
+      return {"MY_VAR=" .. (env.KEPLER_LUA_TEST_VAR or "default")}
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
@@ -129,7 +137,7 @@ services:
     assert!(service.environment.contains(&"MY_VAR=test_value".to_string()));
 }
 
-/// Test: ctx.env table is read-only
+/// Test: env table is read-only
 #[test]
 fn test_lua_env_readonly() {
     let temp_dir = TempDir::new().unwrap();
@@ -139,7 +147,7 @@ services:
   test:
     command: ["echo", "hello"]
     working_dir: !lua |
-      ctx.env.NEW_VAR = "should fail"
+      env.NEW_VAR = "should fail"
       return "/tmp"
 "#;
 
@@ -201,7 +209,7 @@ services:
     assert!(service.environment.contains(&"SHARED=from_lua_block".to_string()));
 }
 
-/// Test: ctx.service_name variable is available
+/// Test: service.name variable is available
 #[test]
 fn test_lua_service_context() {
     let temp_dir = TempDir::new().unwrap();
@@ -211,7 +219,7 @@ services:
   myservice:
     command: ["echo", "hello"]
     environment: !lua |
-      return {"SERVICE_NAME=" .. ctx.service_name}
+      return {"SERVICE_NAME=" .. service.name}
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
@@ -265,7 +273,7 @@ services:
   test:
     command: ["echo", "hello"]
     environment: !lua |
-      if ctx.env.KEPLER_ENV == "production" then
+      if env.KEPLER_ENV == "production" then
         return {"LOG_LEVEL=warn"}
       else
         return {"LOG_LEVEL=debug"}
@@ -299,7 +307,7 @@ services:
     command: ["echo", "hello"]
     healthcheck:
       test: !lua |
-        local port = ctx.env.KEPLER_HEALTH_PORT or "80"
+        local port = env.KEPLER_HEALTH_PORT or "80"
         return {"sh", "-c", "curl -f http://localhost:" .. port .. "/health"}
       interval: 10s
       timeout: 5s
@@ -343,7 +351,7 @@ services:
     assert!(service.environment.contains(&"MAX=5".to_string()));
 }
 
-/// Test: env_file evaluation order (Lua sees system vars via ctx.sys_env)
+/// Test: env_file evaluation order (Lua sees system vars via service.raw_env)
 #[test]
 fn test_lua_env_file_evaluation_order() {
     let _guard = ENV_LOCK.lock();
@@ -358,7 +366,7 @@ services:
   test:
     command: ["echo", "hello"]
     env_file: !lua |
-      return ctx.sys_env.KEPLER_BASE_PATH .. "/.env"
+      return service.raw_env.KEPLER_BASE_PATH .. "/.env"
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
@@ -401,7 +409,7 @@ services:
       local result = {}
       local prefix = "KEPLER_BACKEND_"
       local new_prefix = "APP_"
-      for key, value in pairs(ctx.env) do
+      for key, value in pairs(env) do
         if string.sub(key, 1, #prefix) == prefix then
           local new_key = new_prefix .. string.sub(key, #prefix + 1)
           table.insert(result, new_key .. "=" .. value)
@@ -465,13 +473,13 @@ services:
 fn test_lua_nil_handling() {
     let temp_dir = TempDir::new().unwrap();
 
-    // When env var is not set, ctx.env.NONEXISTENT should be nil
+    // When env var is not set, env.NONEXISTENT should be nil
     let yaml = r#"
 services:
   test:
     command: ["echo", "hello"]
     environment: !lua |
-      local val = ctx.env.KEPLER_NONEXISTENT_VAR
+      local val = env.KEPLER_NONEXISTENT_VAR
       if val == nil then
         return {"STATUS=not_found"}
       else
@@ -564,9 +572,9 @@ fn test_lua_global_logs_config() {
 kepler:
   logs:
     max_size: !lua |
-      return ctx.env.KEPLER_LOG_MAX_SIZE or "10M"
+      return env.KEPLER_LOG_MAX_SIZE or "10M"
     buffer_size: !lua |
-      return tonumber(ctx.env.KEPLER_LOG_BUFFER) or 0
+      return tonumber(env.KEPLER_LOG_BUFFER) or 0
 
 services:
   test:
@@ -603,7 +611,7 @@ services:
     command: ["echo", "hello"]
     logs:
       max_size: !lua |
-        return ctx.env.KEPLER_SERVICE_MAX_SIZE or "20M"
+        return env.KEPLER_SERVICE_MAX_SIZE or "20M"
       buffer_size: !lua |
         return 0  -- sync writes for this service
 "#;
@@ -726,9 +734,9 @@ services:
     depends_on:
       database:
         condition: !lua |
-          return ctx.env.KEPLER_DEP_CONDITION or "service_started"
+          return env.KEPLER_DEP_CONDITION or "service_started"
         timeout: !lua |
-          return ctx.env.KEPLER_DEP_TIMEOUT or "30s"
+          return env.KEPLER_DEP_TIMEOUT or "30s"
         restart: !lua |
           return true
 "#;
@@ -774,7 +782,7 @@ services:
       cache:
         condition: service_started
         restart: !lua |
-          return ctx.env.KEPLER_USE_CACHE == "true"
+          return env.KEPLER_USE_CACHE == "true"
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();

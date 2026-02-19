@@ -58,7 +58,7 @@ pub struct HookCommon {
     #[serde(default, rename = "if")]
     pub condition: ConfigValue<Option<String>>,
     /// Output capture name. When set, `::output::KEY=VALUE` lines from stdout
-    /// are captured and made available as `ctx.hooks.<hook_name>.<output_name>.<key>`.
+    /// are captured and made available as `service.hooks.<hook_name>.<output_name>.<key>`.
     #[serde(default)]
     pub output: Option<String>,
     /// Resource limits for the hook process

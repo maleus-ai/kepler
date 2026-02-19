@@ -3,10 +3,10 @@ kepler:
     buffer_size: 0
 
 services:
-  ctx-readonly-service:
+  service-readonly-service:
     environment: !lua |
-      -- This should fail because ctx is read-only
-      ctx.service_name = "hacked"
+      -- This should fail because service is read-only
+      service.name = "hacked"
       return {"RESULT=should_not_reach"}
     command: ["sh", "-c", "echo $RESULT && sleep 30"]
     restart: no

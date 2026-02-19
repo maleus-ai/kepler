@@ -349,7 +349,7 @@ async fn test_lua_multiple_services_isolated_context() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that ctx.env table is read-only in !lua blocks
+/// Test that env table is read-only in !lua blocks
 #[tokio::test]
 async fn test_lua_env_readonly() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -362,7 +362,7 @@ async fn test_lua_env_readonly() -> E2eResult<()> {
     let _output = harness.start_services(&config_path).await?;
 
     // The service should end up in "failed" state because the Lua code
-    // tries to modify the frozen ctx.env table.
+    // tries to modify the frozen env table.
     harness
         .wait_for_service_status(&config_path, "readonly-service", "failed", Duration::from_secs(5))
         .await?;
@@ -371,11 +371,11 @@ async fn test_lua_env_readonly() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that ctx table is read-only in !lua blocks
+/// Test that service table is read-only in !lua blocks
 #[tokio::test]
-async fn test_lua_ctx_readonly() -> E2eResult<()> {
+async fn test_lua_service_readonly() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
-    let config_path = harness.load_config(TEST_MODULE, "test_lua_ctx_readonly")?;
+    let config_path = harness.load_config(TEST_MODULE, "test_lua_service_readonly")?;
 
     harness.start_daemon().await?;
 
@@ -384,18 +384,18 @@ async fn test_lua_ctx_readonly() -> E2eResult<()> {
     let _output = harness.start_services(&config_path).await?;
 
     // The service should end up in "failed" state because the Lua code
-    // tries to modify the frozen ctx table.
+    // tries to modify the frozen service table.
     harness
-        .wait_for_service_status(&config_path, "ctx-readonly-service", "failed", Duration::from_secs(5))
+        .wait_for_service_status(&config_path, "service-readonly-service", "failed", Duration::from_secs(5))
         .await?;
 
     harness.stop_daemon().await?;
     Ok(())
 }
 
-/// Test granular ctx.sys_env, ctx.env_file, and ctx.env separation
+/// Test granular service.raw_env, service.env_file, and env separation
 #[tokio::test]
-async fn test_lua_ctx_granular_env() -> E2eResult<()> {
+async fn test_lua_granular_env() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
 
     // Create env file with a variable
@@ -403,7 +403,7 @@ async fn test_lua_ctx_granular_env() -> E2eResult<()> {
 
     let config_path = harness.load_config_with_replacements(
         TEST_MODULE,
-        "test_lua_ctx_granular_env",
+        "test_lua_granular_env",
         &[("__ENV_FILE__", env_file.to_str().unwrap())],
     )?;
 

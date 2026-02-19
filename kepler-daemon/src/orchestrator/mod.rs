@@ -28,7 +28,7 @@ use crate::config::{resolve_log_retention, resolve_sys_env, DependsOn, GlobalHoo
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
 use crate::deps::{check_dependency_satisfied, get_start_order, get_stop_order, is_condition_unreachable_by_policy, is_dependency_permanently_unsatisfied, is_transient_satisfaction};
-use crate::lua_eval::{EvalContext, LuaEvaluator};
+use crate::lua_eval::{EvalContext, LuaEvaluator, ServiceEvalContext};
 use crate::events::{RestartReason, ServiceEvent};
 
 /// Shared Lua evaluator for cross-service global state within a single config.
@@ -507,16 +507,19 @@ impl ServiceOrchestrator {
 
         let state = handle.get_service_state(service_name).await;
         let mut eval_ctx = EvalContext {
-            sys_env: sys_env.clone(),
-            env_file: env_file_vars,
-            env: full_env,
-            service_name: Some(service_name.to_string()),
-            initialized: state.as_ref().map(|s| s.initialized),
-            restart_count: state.as_ref().map(|s| s.restart_count),
-            exit_code: state.as_ref().and_then(|s| s.exit_code),
-            status: state.as_ref().map(|s| s.status.as_str().to_string()),
+            service: Some(ServiceEvalContext {
+                name: service_name.to_string(),
+                raw_env: sys_env.clone(),
+                env_file: env_file_vars,
+                env: full_env,
+                initialized: state.as_ref().map(|s| s.initialized),
+                restart_count: state.as_ref().map(|s| s.restart_count),
+                exit_code: state.as_ref().and_then(|s| s.exit_code),
+                status: state.as_ref().map(|s| s.status.as_str().to_string()),
+                hooks: HashMap::new(),
+            }),
+            hook: None,
             deps: dep_infos,
-            ..Default::default()
         };
         debug!("[timeit] {} eval context built in {:?}", service_name, ctx_start.elapsed());
 
@@ -554,20 +557,22 @@ impl ServiceOrchestrator {
         };
         debug!("[timeit] {} resolve_service completed in {:?}", service_name, resolve_start.elapsed());
 
+        let svc_ctx = eval_ctx.service.as_ref().unwrap();
+
         // Build computed_env respecting sys_env policy.
-        // eval_ctx.env has sys_env + env_file + environment (needed for Lua evaluation).
-        // But with sys_env: clear, the process should NOT inherit sys_env vars.
+        // svc_ctx.env has raw_env + env_file + environment (needed for Lua evaluation).
+        // But with sys_env: clear, the process should NOT inherit raw_env vars.
         let sys_env_policy = resolve_sys_env(
             resolved.sys_env.as_ref(),
             config.global_sys_env(),
         );
         let computed_env = if sys_env_policy == SysEnvPolicy::Clear {
-            // Only env_file + environment entries (no inherited sys_env)
-            let mut env = eval_ctx.env_file.clone();
+            // Only env_file + environment entries (no inherited raw_env)
+            let mut env = svc_ctx.env_file.clone();
             crate::env::insert_env_entries(&mut env, &resolved.environment);
             env
         } else {
-            eval_ctx.env.clone()
+            svc_ctx.env.clone()
         };
 
         // Resolve working_dir
@@ -583,6 +588,7 @@ impl ServiceOrchestrator {
             resolved.clone(),
             computed_env.clone(),
             working_dir.clone(),
+            svc_ctx.env_file.clone(),
         ).await;
 
         // Re-fetch context with updated resolved config, env, and working_dir
@@ -747,16 +753,19 @@ impl ServiceOrchestrator {
         let service_state = handle.get_service_state(service_name).await;
 
         let mut eval_ctx = EvalContext {
-            sys_env: sys_env.clone(),
-            env_file: env_file_vars,
-            env: full_env,
-            service_name: Some(service_name.to_string()),
+            service: Some(ServiceEvalContext {
+                name: service_name.to_string(),
+                raw_env: sys_env.clone(),
+                env_file: env_file_vars,
+                env: full_env,
+                initialized: service_state.as_ref().map(|s| s.initialized),
+                restart_count: service_state.as_ref().map(|s| s.restart_count),
+                exit_code,
+                status: service_state.as_ref().map(|s| s.status.as_str().to_string()),
+                hooks: HashMap::new(),
+            }),
+            hook: None,
             deps: dep_infos,
-            restart_count: service_state.as_ref().map(|s| s.restart_count),
-            exit_code,
-            initialized: service_state.as_ref().map(|s| s.initialized),
-            status: service_state.as_ref().map(|s| s.status.as_str().to_string()),
-            ..Default::default()
         };
 
         // Create fresh evaluator and resolve
@@ -777,17 +786,19 @@ impl ServiceOrchestrator {
             default_user.as_deref(),
         ).map_err(|e| OrchestratorError::ConfigError(e.to_string()))?;
 
+        let svc_ctx = eval_ctx.service.as_ref().unwrap();
+
         // Build computed_env respecting sys_env policy
         let sys_env_policy = resolve_sys_env(
             resolved.sys_env.as_ref(),
             config.global_sys_env(),
         );
         let computed_env = if sys_env_policy == SysEnvPolicy::Clear {
-            let mut env = eval_ctx.env_file.clone();
+            let mut env = svc_ctx.env_file.clone();
             crate::env::insert_env_entries(&mut env, &resolved.environment);
             env
         } else {
-            eval_ctx.env.clone()
+            svc_ctx.env.clone()
         };
 
         let working_dir = resolved
@@ -802,6 +813,7 @@ impl ServiceOrchestrator {
             resolved,
             computed_env,
             working_dir,
+            svc_ctx.env_file.clone(),
         ).await;
 
         // Return refreshed context
@@ -1916,7 +1928,7 @@ impl ServiceOrchestrator {
             }
 
             // Resolve service `outputs:` declarations (if any)
-            // This happens after hooks and process have completed, so ctx.hooks.* is available.
+            // This happens after hooks and process have completed, so service.hooks.* is available.
             if let Some(config) = handle.get_config().await
                 && let Some(raw) = config.services.get(service_name)
                 && !raw.outputs.is_static_none() {
@@ -1925,10 +1937,14 @@ impl ServiceOrchestrator {
                         let process_outputs = crate::outputs::read_process_outputs(&state_dir, service_name);
 
                         let eval_ctx = EvalContext {
-                            env: ctx.env.clone(),
-                            service_name: Some(service_name.to_string()),
-                            hooks: hook_outputs,
-                            ..Default::default()
+                            service: Some(ServiceEvalContext {
+                                name: service_name.to_string(),
+                                env: ctx.env.clone(),
+                                hooks: hook_outputs,
+                                ..Default::default()
+                            }),
+                            hook: None,
+                            deps: HashMap::new(),
                         };
 
                         let evaluator = match config.create_lua_evaluator() {
@@ -2112,9 +2128,18 @@ impl ServiceOrchestrator {
         let evaluator = config.as_ref()
             .and_then(|c| c.create_lua_evaluator().ok());
 
+        // Get raw_env (sys_env from daemon/CLI) for hook context
+        let raw_env = if let Some(h) = handle {
+            h.get_sys_env().await
+        } else {
+            HashMap::new()
+        };
+
         let mut hook_params = ServiceHookParams {
             working_dir: &ctx.working_dir,
             env: &ctx.env,
+            raw_env: &raw_env,
+            env_file_vars: &ctx.env_file_vars,
             log_config: Some(&ctx.log_config),
             service_user: resolved.user.as_deref(),
             service_groups: &resolved.groups,

@@ -6,8 +6,8 @@ services:
   inject-service:
     env_file: __ENV_FILE__
     environment: !lua |
-      -- INJECTED_VAR should be available from ctx.env_file
-      local val = ctx.env_file.INJECTED_VAR or "NOT_FOUND"
+      -- INJECTED_VAR should be available from service.env_file
+      local val = service.env_file.INJECTED_VAR or "NOT_FOUND"
       return {"FROM_LUA=" .. val}
     command: ["sh", "-c", "echo FROM_LUA=$FROM_LUA && sleep 30"]
     restart: no

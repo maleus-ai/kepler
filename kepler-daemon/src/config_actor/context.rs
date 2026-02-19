@@ -36,6 +36,8 @@ pub struct ServiceContext {
     pub env: HashMap<String, String>,
     /// Pre-computed working directory from state
     pub working_dir: PathBuf,
+    /// Env vars loaded from env_file (before environment entries)
+    pub env_file_vars: HashMap<String, String>,
 }
 
 /// Diagnostic counts for resource cleanup verification.

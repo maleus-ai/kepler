@@ -1273,7 +1273,7 @@ services:
 /// Dynamic `run` field with ${{ }}$ resolves correctly
 #[test]
 fn test_run_field_dynamic_resolves() {
-    use kepler_daemon::lua_eval::EvalContext;
+    use kepler_daemon::lua_eval::{EvalContext, ServiceEvalContext};
     use std::collections::HashMap;
 
     let temp_dir = TempDir::new().unwrap();
@@ -1292,7 +1292,10 @@ services:
 
     let evaluator = config.create_lua_evaluator().unwrap();
     let mut ctx = EvalContext {
-        env: HashMap::from([("MY_VAR".to_string(), "world".to_string())]),
+        service: Some(ServiceEvalContext {
+            env: HashMap::from([("MY_VAR".to_string(), "world".to_string())]),
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let resolved = config

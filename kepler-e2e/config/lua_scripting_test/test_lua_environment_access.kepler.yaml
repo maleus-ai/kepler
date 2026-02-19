@@ -5,7 +5,7 @@ kepler:
 services:
   lua-env-service:
     command: !lua |
-      -- Access ctx.env table to get HOME
-      local home = ctx.env.HOME or "/tmp"
+      -- Access env table to get HOME
+      local home = env.HOME or "/tmp"
       -- Generate a command that proves we got env access
       return {"sh", "-c", "echo ENV_ACCESS_WORKS HOME=" .. home .. "; sleep 300"}

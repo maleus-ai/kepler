@@ -695,6 +695,7 @@ impl ConfigActorHandle {
         config: ServiceConfig,
         computed_env: HashMap<String, String>,
         working_dir: PathBuf,
+        env_file_vars: HashMap<String, String>,
     ) {
         if self
             .tx
@@ -703,6 +704,7 @@ impl ConfigActorHandle {
                 config: Box::new(config),
                 computed_env,
                 working_dir,
+                env_file_vars,
             })
             .await
             .is_err()

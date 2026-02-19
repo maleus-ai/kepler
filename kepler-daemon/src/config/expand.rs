@@ -5,7 +5,7 @@
 //! `LuaEvaluator` + `EvalContext` system.
 //!
 //! `${{ expr }}$` expressions are evaluated as Lua code via `eval_inline_expr`,
-//! which provides `env`, `ctx`, `deps`, `global`, and stdlib access.
+//! which provides `env`, `service`/`hook`, `deps`, `global`, and stdlib access.
 //! Unknown bare names resolve to nil (standard Lua behavior).
 //!
 //! Standalone `${{ expr }}$` (the entire string) preserves the Lua return type

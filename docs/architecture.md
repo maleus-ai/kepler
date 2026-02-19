@@ -405,7 +405,7 @@ Kepler uses `${{ expr }}$` inline Lua expressions for dynamic values in configur
 | `${{ env.VAR }}$` | Environment variable reference |
 | `${{ env.VAR or "default" }}$` | Default value if unset |
 | `${{ deps.svc.status }}$` | Dependency status |
-| `${{ ctx.service_name }}$` | Current service name |
+| `${{ service.name }}$` | Current service name |
 
 See [Inline Expressions](variable-expansion.md) for the user-facing reference.
 
@@ -493,17 +493,21 @@ The Lua environment provides a **restricted subset** of the standard library:
 
 | Symbol | Description |
 |--------|-------------|
-| `ctx.env` | Read-only full environment (system + env_file + service) |
-| `ctx.sys_env` | Read-only system environment only |
-| `ctx.env_file` | Read-only env_file variables only |
-| `ctx.service_name` | Current service name (nil if global) |
-| `ctx.hook_name` | Current hook name (nil outside hooks) |
+| `env` | Shortcut: `hook.env` in hook context, else `service.env` |
+| `service.env` | Read-only full environment (raw_env + env_file + environment) |
+| `service.raw_env` | Read-only inherited base environment (from daemon/CLI) |
+| `service.env_file` | Read-only env_file variables only |
+| `service.name` | Current service name (nil if global) |
+| `hook.name` | Current hook name (nil outside hooks) |
+| `hook.env` | Read-only full hook environment (raw_env + env_file + environment) |
+| `hook.raw_env` | Read-only inherited base environment (from parent service) |
+| `hook.env_file` | Read-only hook env_file variables only |
 | `global` | Mutable shared table for cross-block state |
 
 ### Security Measures
 
 - **Environment tables frozen** via metatable proxy pattern
-- **Writes to `ctx.*` tables raise runtime errors**
+- **Writes to `service.*` / `hook.*` tables raise runtime errors**
 - **Metatables protected** from removal
 - **`require()` is blocked** to prevent loading external modules
 
@@ -516,10 +520,10 @@ The Lua environment provides a **restricted subset** of the standard library:
 
 ### Execution Order
 
-Lua scripts run in a specific order that mirrors shell expansion, with `ctx.env` progressively building up:
+Lua scripts run in a specific order that mirrors shell expansion, with `env` progressively building up:
 
-| Order | Block | `ctx.env` contains |
-|-------|-------|-------------------|
+| Order | Block | `env` contains |
+|-------|-------|---------------|
 | 1 | `lua:` directive | System env only |
 | 2 | `env_file: !lua` | System env only |
 | 3 | `environment: !lua` | System env + env_file |
@@ -527,13 +531,13 @@ Lua scripts run in a specific order that mirrors shell expansion, with `ctx.env`
 
 **Details:**
 
-1. **`lua:` directive** runs first in global scope, defining functions available to all subsequent blocks. `ctx.env` contains only system environment variables.
+1. **`lua:` directive** runs first in global scope, defining functions available to all subsequent blocks. `env` contains only system environment variables.
 
-2. **`env_file: !lua`** blocks run next (if any). `ctx.env` still contains only system environment, since env_file hasn't been loaded yet.
+2. **`env_file: !lua`** blocks run next (if any). `env` still contains only system environment, since env_file hasn't been loaded yet.
 
-3. **`environment: !lua`** array blocks run after env_file is loaded. `ctx.env` now contains system env merged with env_file variables.
+3. **`environment: !lua`** array blocks run after env_file is loaded. `env` now contains system env merged with env_file variables.
 
-4. **All other `!lua` blocks** run in declaration order. `ctx.env` contains the full merged environment (system + env_file + environment array).
+4. **All other `!lua` blocks** run in declaration order. `env` contains the full merged environment (system + env_file + environment array).
 
 This ordering ensures that each stage has access to the variables it needs while maintaining deterministic evaluation.
 

@@ -17,27 +17,27 @@ services:
   api:
     env_file: __API_ENV_FILE__
     environment: !lua |
-      register_service(ctx.service_name)
-      local db_url = ctx.env_file.DATABASE_URL or "default_db"
+      register_service(service.name)
+      local db_url = service.env_file.DATABASE_URL or "default_db"
       return {
         "PORT=" .. next_port(),
-        "SERVICE=" .. ctx.service_name,
+        "SERVICE=" .. service.name,
         "DB_URL=" .. db_url
       }
     command: ["sh", "-c", "echo Starting $SERVICE on port $PORT with DB=$DB_URL && sleep 300"]
     healthcheck:
       test: !lua |
-        return {"sh", "-c", "curl -f http://localhost:" .. ctx.env.PORT .. "/health || exit 1"}
+        return {"sh", "-c", "curl -f http://localhost:" .. env.PORT .. "/health || exit 1"}
       interval: 10s
     hooks:
       pre_start:
         environment: !lua |
-          return {"HOOK=pre_start", "SVC=" .. (ctx.service_name or "none")}
+          return {"HOOK=pre_start", "SVC=" .. (service.name or "none")}
         run: "echo Hook $HOOK for $SVC >> __MARKER_FILE__"
     restart:
       policy: always
       watch: !lua |
-        local base = ctx.env_file.WATCH_DIR or "/app"
+        local base = service.env_file.WATCH_DIR or "/app"
         return {base .. "/**/*.rs"}
     logs:
       retention:
@@ -47,10 +47,10 @@ services:
     depends_on:
       - api
     environment: !lua |
-      register_service(ctx.service_name)
+      register_service(service.name)
       return {
         "PORT=" .. next_port(),
-        "SERVICE=" .. ctx.service_name,
+        "SERVICE=" .. service.name,
         "REGISTERED_SERVICES=" .. (function()
           local names = {}
           for k, _ in pairs(global.config.services) do
@@ -64,6 +64,6 @@ services:
     hooks:
       pre_start:
         environment: !lua |
-          return {"WORKER_HOOK=" .. (ctx.hook_name or "none")}
+          return {"WORKER_HOOK=" .. (hook.name or "none")}
         run: "echo Worker hook $WORKER_HOOK >> __MARKER_FILE__"
     restart: no

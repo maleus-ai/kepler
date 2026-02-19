@@ -241,7 +241,7 @@ async fn test_recreate_runs_init_hooks() -> E2eResult<()> {
         .wait_for_file_content(&marker_file, "STARTED", Duration::from_secs(5))
         .await?;
 
-    // Count initial ON_INIT calls (from pre_start with if: "not ctx.initialized")
+    // Count initial ON_INIT calls (from pre_start with if: "not service.initialized")
     let content = std::fs::read_to_string(&marker_file).unwrap_or_default();
     let init_count_1 = content.matches("ON_INIT").count();
     assert_eq!(init_count_1, 1, "pre_start with if condition should fire once on first start. Content: {}", content);

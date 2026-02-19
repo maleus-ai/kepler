@@ -25,20 +25,20 @@ fn test_lua_env_access() {
     let mut env = HashMap::new();
     env.insert("FOO".to_string(), "bar".to_string());
     let ctx = EvalContext {
-        env,
+        service: Some(ServiceEvalContext { env, ..Default::default() }),
         ..Default::default()
     };
 
-    let result: String = eval.eval(r#"return ctx.env.FOO"#, &ctx, "test").unwrap();
+    let result: String = eval.eval(r#"return service.env.FOO"#, &ctx, "test").unwrap();
     assert_eq!(result, "bar");
 }
 
 #[test]
 fn test_lua_env_readonly() {
     let eval = LuaEvaluator::new().unwrap();
-    let ctx = EvalContext::default();
+    let ctx = EvalContext { service: Some(ServiceEvalContext::default()), ..Default::default() };
 
-    let result = eval.eval::<Value>(r#"ctx.env.NEW = "value""#, &ctx, "test");
+    let result = eval.eval::<Value>(r#"service.env.NEW = "value""#, &ctx, "test");
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
@@ -65,11 +65,11 @@ fn test_lua_global_shared() {
 fn test_lua_service_context() {
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext {
-        service_name: Some("backend".to_string()),
+        service: Some(ServiceEvalContext { name: "backend".to_string(), ..Default::default() }),
         ..Default::default()
     };
 
-    let result: String = eval.eval(r#"return ctx.service_name"#, &ctx, "test").unwrap();
+    let result: String = eval.eval(r#"return service.name"#, &ctx, "test").unwrap();
     assert_eq!(result, "backend");
 }
 
@@ -123,12 +123,12 @@ fn test_lua_env_array_format() {
 fn test_lua_hook_context() {
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext {
-        service_name: Some("api".to_string()),
-        hook_name: Some("on_start".to_string()),
+        service: Some(ServiceEvalContext { name: "api".to_string(), ..Default::default() }),
+        hook: Some(HookEvalContext { name: "on_start".to_string(), ..Default::default() }),
         ..Default::default()
     };
 
-    let result: String = eval.eval(r#"return ctx.hook_name"#, &ctx, "test").unwrap();
+    let result: String = eval.eval(r#"return hook.name"#, &ctx, "test").unwrap();
     assert_eq!(result, "on_start");
 }
 
@@ -137,8 +137,8 @@ fn test_lua_nil_for_missing_context() {
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
 
-    // service_name should be nil when not set
-    let result: Value = eval.eval(r#"return ctx.service_name"#, &ctx, "test").unwrap();
+    // service should be nil when not set
+    let result: Value = eval.eval(r#"return service"#, &ctx, "test").unwrap();
     assert!(matches!(result, Value::Nil));
 }
 
@@ -164,7 +164,7 @@ fn test_lua_standard_library_available() {
 fn test_always_returns_true() {
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext {
-        hook_had_failure: Some(true),
+        hook: Some(HookEvalContext { had_failure: Some(true), ..Default::default() }),
         ..Default::default()
     };
     assert!(eval.eval_condition("always()", &ctx).unwrap());
@@ -174,7 +174,7 @@ fn test_always_returns_true() {
 fn test_success_no_args_no_failure() {
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext {
-        hook_had_failure: Some(false),
+        hook: Some(HookEvalContext { had_failure: Some(false), ..Default::default() }),
         ..Default::default()
     };
     assert!(eval.eval_condition("success()", &ctx).unwrap());
@@ -184,7 +184,7 @@ fn test_success_no_args_no_failure() {
 fn test_success_no_args_after_failure() {
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext {
-        hook_had_failure: Some(true),
+        hook: Some(HookEvalContext { had_failure: Some(true), ..Default::default() }),
         ..Default::default()
     };
     assert!(!eval.eval_condition("success()", &ctx).unwrap());
@@ -196,14 +196,14 @@ fn test_failure_no_args() {
 
     // No failure
     let ctx = EvalContext {
-        hook_had_failure: Some(false),
+        hook: Some(HookEvalContext { had_failure: Some(false), ..Default::default() }),
         ..Default::default()
     };
     assert!(!eval.eval_condition("failure()", &ctx).unwrap());
 
     // After failure
     let ctx = EvalContext {
-        hook_had_failure: Some(true),
+        hook: Some(HookEvalContext { had_failure: Some(true), ..Default::default() }),
         ..Default::default()
     };
     assert!(eval.eval_condition("failure()", &ctx).unwrap());
@@ -465,7 +465,7 @@ fn test_inline_expr_returns_string() {
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("FOO".to_string(), "bar".to_string());
-    let ctx = EvalContext { env, ..Default::default() };
+    let ctx = EvalContext { service: Some(ServiceEvalContext { env, ..Default::default() }), ..Default::default() };
 
     let result = eval.eval_inline_expr("env.FOO", &ctx, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "bar");
@@ -503,13 +503,13 @@ fn test_inline_expr_env_shortcut() {
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("MY_VAR".to_string(), "hello".to_string());
-    let ctx = EvalContext { env, ..Default::default() };
+    let ctx = EvalContext { service: Some(ServiceEvalContext { env, ..Default::default() }), ..Default::default() };
 
-    // env.MY_VAR should work as shortcut for ctx.env.MY_VAR
+    // env.MY_VAR should work as shortcut for service.env.MY_VAR
     let result = eval.eval_inline_expr("env.MY_VAR", &ctx, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "hello");
 
-    let result2 = eval.eval_inline_expr("ctx.env.MY_VAR", &ctx, "test").unwrap();
+    let result2 = eval.eval_inline_expr("service.env.MY_VAR", &ctx, "test").unwrap();
     assert_eq!(result2.as_str().unwrap().to_string(), "hello");
 }
 
@@ -535,7 +535,7 @@ fn test_inline_expr_bare_var_returns_nil() {
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("HOME".to_string(), "/home/user".to_string());
-    let ctx = EvalContext { env, ..Default::default() };
+    let ctx = EvalContext { service: Some(ServiceEvalContext { env, ..Default::default() }), ..Default::default() };
 
     // Bare variable names resolve to nil (standard Lua behavior)
     let result = eval.eval_inline_expr("HOME", &ctx, "test").unwrap();
@@ -586,7 +586,7 @@ fn test_lua_eval_has_deps_and_env_shortcut() {
         status: "healthy".to_string(),
         ..Default::default()
     });
-    let ctx = EvalContext { env, deps, ..Default::default() };
+    let ctx = EvalContext { service: Some(ServiceEvalContext { env, ..Default::default() }), deps, ..Default::default() };
 
     let result: String = eval.eval(r#"return env.FOO"#, &ctx, "test").unwrap();
     assert_eq!(result, "bar");
@@ -606,9 +606,9 @@ fn test_ctx_hooks_access() {
         ("token".to_string(), "abc".to_string()),
     ]));
     hooks.insert("pre_start".to_string(), steps);
-    let ctx = EvalContext { hooks, ..Default::default() };
+    let ctx = EvalContext { service: Some(ServiceEvalContext { hooks, ..Default::default() }), ..Default::default() };
 
-    let result: String = eval.eval(r#"return ctx.hooks.pre_start.outputs.step1.token"#, &ctx, "test").unwrap();
+    let result: String = eval.eval(r#"return service.hooks.pre_start.outputs.step1.token"#, &ctx, "test").unwrap();
     assert_eq!(result, "abc");
 }
 
@@ -621,7 +621,7 @@ fn test_hooks_shortcut_access() {
         ("token".to_string(), "abc".to_string()),
     ]));
     hooks.insert("pre_start".to_string(), steps);
-    let ctx = EvalContext { hooks, ..Default::default() };
+    let ctx = EvalContext { service: Some(ServiceEvalContext { hooks, ..Default::default() }), ..Default::default() };
 
     let result: String = eval.eval(r#"return hooks.pre_start.outputs.step1.token"#, &ctx, "test").unwrap();
     assert_eq!(result, "abc");
@@ -666,9 +666,9 @@ fn test_ctx_hooks_frozen() {
         ("token".to_string(), "abc".to_string()),
     ]));
     hooks.insert("pre_start".to_string(), steps);
-    let ctx = EvalContext { hooks, ..Default::default() };
+    let ctx = EvalContext { service: Some(ServiceEvalContext { hooks, ..Default::default() }), ..Default::default() };
 
-    let result = eval.eval::<Value>(r#"ctx.hooks.pre_start.outputs.step1.new_key = "x""#, &ctx, "test");
+    let result = eval.eval::<Value>(r#"service.hooks.pre_start.outputs.step1.new_key = "x""#, &ctx, "test");
     assert!(result.is_err(), "Writing to hooks table should fail");
 }
 
@@ -696,7 +696,7 @@ fn test_inline_expr_hooks_access() {
         ("token".to_string(), "abc".to_string()),
     ]));
     hooks.insert("pre_start".to_string(), steps);
-    let ctx = EvalContext { hooks, ..Default::default() };
+    let ctx = EvalContext { service: Some(ServiceEvalContext { hooks, ..Default::default() }), ..Default::default() };
 
     let result = eval.eval_inline_expr("hooks.pre_start.outputs.step1.token", &ctx, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "abc");
@@ -709,7 +709,7 @@ fn test_prepared_env_set_env_visible_in_lua() {
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("INITIAL".to_string(), "yes".to_string());
-    let ctx = EvalContext { env, ..Default::default() };
+    let ctx = EvalContext { service: Some(ServiceEvalContext { env, ..Default::default() }), ..Default::default() };
 
     let prepared = eval.prepare_env_mutable(&ctx).unwrap();
 
@@ -728,8 +728,8 @@ fn test_prepared_env_set_env_visible_in_lua() {
     let result = eval.eval_inline_expr_with_env("env.ADDED", &prepared.table, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "new_value");
 
-    // Also visible via ctx.env
-    let result = eval.eval_inline_expr_with_env("ctx.env.ADDED", &prepared.table, "test").unwrap();
+    // Also visible via service.env
+    let result = eval.eval_inline_expr_with_env("service.env.ADDED", &prepared.table, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "new_value");
 }
 
@@ -754,7 +754,7 @@ fn test_prepared_env_freeze_prevents_writes() {
 #[test]
 fn test_prepared_env_lua_cannot_mutate_frozen_env() {
     let eval = LuaEvaluator::new().unwrap();
-    let ctx = EvalContext::default();
+    let ctx = EvalContext { service: Some(ServiceEvalContext::default()), ..Default::default() };
 
     let prepared = eval.prepare_env_mutable(&ctx).unwrap();
     prepared.freeze_env();
@@ -769,7 +769,7 @@ fn test_eval_with_env_reuses_table() {
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("PORT".to_string(), "3000".to_string());
-    let ctx = EvalContext { env, ..Default::default() };
+    let ctx = EvalContext { service: Some(ServiceEvalContext { env, ..Default::default() }), ..Default::default() };
 
     let prepared = eval.prepare_env_mutable(&ctx).unwrap();
     prepared.freeze_env();
@@ -786,21 +786,21 @@ fn test_eval_with_env_reuses_table() {
 
 #[test]
 fn test_prepared_env_shallow_freeze() {
-    // Verify that freezing ctx_table (shallow) does NOT freeze the nested env table
+    // Verify that freezing service table (shallow) does NOT freeze the nested env table
     let eval = LuaEvaluator::new().unwrap();
-    let ctx = EvalContext::default();
+    let ctx = EvalContext { service: Some(ServiceEvalContext::default()), ..Default::default() };
 
     let prepared = eval.prepare_env_mutable(&ctx).unwrap();
 
     // ctx is frozen but env sub-table should still be writable from Rust
     prepared.set_env("KEY", "val").unwrap();
 
-    // Lua should not be able to reassign ctx.env (ctx is frozen)
-    let result = eval.eval_with_env::<Value>(r#"ctx.env = {}"#, &prepared.table, "test");
-    assert!(result.is_err(), "Lua should not be able to reassign ctx.env on frozen ctx");
+    // Lua should not be able to reassign service.env (service is frozen)
+    let result = eval.eval_with_env::<Value>(r#"service.env = {}"#, &prepared.table, "test");
+    assert!(result.is_err(), "Lua should not be able to reassign service.env on frozen service");
 
     // But the env sub-table entries should be accessible
-    let result = eval.eval_inline_expr_with_env("ctx.env.KEY", &prepared.table, "test").unwrap();
+    let result = eval.eval_inline_expr_with_env("service.env.KEY", &prepared.table, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "val");
 }
 
