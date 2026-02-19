@@ -68,6 +68,9 @@ pub enum ConfigCommand {
     GetConfigDir {
         reply: oneshot::Sender<PathBuf>,
     },
+    GetStateDir {
+        reply: oneshot::Sender<PathBuf>,
+    },
     GetLogConfig {
         reply: oneshot::Sender<LogWriterConfig>,
     },

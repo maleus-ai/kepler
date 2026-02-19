@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 
+use super::ConfigValue;
 use super::resources::parse_memory_limit;
 
 /// Log retention policy on service stop
@@ -80,13 +81,13 @@ pub struct LogConfig {
     pub retention: Option<LogRetentionConfig>,
     /// Maximum size of a single log file before truncation (e.g., "10M", "100K")
     /// If not specified, logs are unbounded (no truncation).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_size: Option<String>,
+    #[serde(default)]
+    pub max_size: ConfigValue<Option<String>>,
     /// Buffer size in bytes before flushing to disk.
     /// Default: 0 (synchronous writes, safest for crash recovery).
     /// 0 = write directly to disk (synchronous writes, safest for crash recovery).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub buffer_size: Option<usize>,
+    #[serde(default)]
+    pub buffer_size: ConfigValue<Option<usize>>,
 }
 
 impl LogConfig {
@@ -112,6 +113,8 @@ impl LogConfig {
 
     /// Parse max_size into bytes. Returns None if max_size is not specified (unbounded).
     pub fn max_size_bytes(&self) -> Option<u64> {
-        self.max_size.as_ref().and_then(|s| parse_memory_limit(s).ok())
+        self.max_size.as_static()
+            .and_then(|v| v.as_ref())
+            .and_then(|s| parse_memory_limit(s).ok())
     }
 }

@@ -226,9 +226,9 @@ async fn test_hook_user_override() {
     // Hook overrides the user with a different UID
     let hooks = ServiceHooks {
         pre_start: Some(HookList(vec![HookCommand::Script {
-            run: format!("id -u > {}", uid_marker_path.display()),
+            run: format!("id -u > {}", uid_marker_path.display()).into(),
             common: HookCommon {
-                user: Some(hook_user.to_string()), // Override service user with different UID
+                user: Some(hook_user.to_string()).into(), // Override service user with different UID
                 ..Default::default()
             },
         }])),
@@ -1544,9 +1544,9 @@ async fn test_default_user_hook_explicit_override() {
     // Hook explicitly sets user: "0" (root)
     let hooks = ServiceHooks {
         pre_start: Some(HookList(vec![HookCommand::Script {
-            run: format!("id -u > {}", uid_marker_path.display()),
+            run: format!("id -u > {}", uid_marker_path.display()).into(),
             common: HookCommon {
-                user: Some("0".to_string()),
+                user: Some("0".to_string()).into(),
                 ..Default::default()
             },
         }])),

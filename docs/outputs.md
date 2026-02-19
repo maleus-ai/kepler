@@ -181,10 +181,10 @@ Outputs are resolved in this order during a service lifecycle:
 
 ## Output Storage
 
-Outputs are persisted to disk under `<config_dir>/.kepler/outputs/<service>/`:
+Outputs are persisted to disk under the daemon's state directory at `<state_dir>/outputs/<service>/`:
 
 ```
-.kepler/outputs/
+outputs/
   producer/
     hooks/
       pre_start/

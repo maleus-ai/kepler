@@ -28,6 +28,8 @@ pub struct ServiceContext {
     /// None before a service has been started for the first time.
     pub resolved_config: Option<ServiceConfig>,
     pub config_dir: PathBuf,
+    /// State directory for daemon-managed data (outputs, logs, etc.)
+    pub state_dir: PathBuf,
     pub log_config: LogWriterConfig,
     pub global_log_config: Option<LogConfig>,
     /// Pre-computed environment variables from state

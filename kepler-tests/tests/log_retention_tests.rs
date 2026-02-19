@@ -1,6 +1,6 @@
 //! Log retention tests
 
-use kepler_daemon::config::{LogConfig, LogRetention, LogRetentionConfig, RawServiceConfig, ServiceConfig};
+use kepler_daemon::config::{ConfigValue, LogConfig, LogRetention, LogRetentionConfig, RawServiceConfig, ServiceConfig};
 use kepler_daemon::logs::LogStream;
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
@@ -170,8 +170,8 @@ async fn test_all_log_retention_events() {
             on_restart: Some(LogRetention::Retain),
             on_exit: Some(LogRetention::Retain),
         }),
-        max_size: None,
-        buffer_size: None,
+        max_size: ConfigValue::default(),
+        buffer_size: ConfigValue::default(),
     };
 
     let config = TestConfigBuilder::new()

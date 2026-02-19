@@ -8,10 +8,12 @@
 mod deps;
 mod duration;
 mod expand;
+pub mod expr;
 mod health;
 mod hooks;
 mod logs;
 mod lua;
+pub mod resolvable;
 mod resources;
 mod restart;
 
@@ -21,13 +23,13 @@ pub use deps::{
 };
 pub use duration::{format_duration, parse_duration};
 pub use expand::{
-    evaluate_environment_sequential, evaluate_environment_sequential_with_env,
     evaluate_expression_string, evaluate_expression_string_with_env,
     evaluate_value_tree, evaluate_value_tree_with_env, resolve_sys_env,
 };
 pub use health::HealthCheck;
 pub use hooks::{GlobalHooks, HookCommand, HookCommon, HookList, ServiceHooks};
 pub use logs::{LogConfig, LogRetention, LogRetentionConfig, LogStoreConfig};
+pub use resolvable::ResolvableCommand;
 pub use resources::{ResourceLimits, SysEnvPolicy, parse_memory_limit};
 pub use restart::{RestartConfig, RestartPolicy};
 
@@ -40,6 +42,11 @@ use tracing::warn;
 use crate::errors::{DaemonError, Result};
 use crate::lua_eval::{EvalContext, LuaEvaluator};
 
+pub use expr::DynamicExpr;
+
+/// Default maximum size for output capture per step/process (1 MB).
+pub const DEFAULT_OUTPUT_MAX_SIZE: usize = 1024 * 1024;
+
 // ============================================================================
 // ConfigValue<T> — static/dynamic field wrapper
 // ============================================================================
@@ -49,8 +56,15 @@ use crate::lua_eval::{EvalContext, LuaEvaluator};
 pub enum ConfigValue<T> {
     /// Value parsed successfully at config load time.
     Static(T),
-    /// Value contains `${{ }}$` or `!lua` — needs evaluation at service start time.
-    Dynamic(serde_yaml::Value),
+    /// Value contains `${{ }}$` or `!lua` — pre-parsed at config load time,
+    /// needs evaluation at service start time.
+    Dynamic(Box<DynamicExpr>),
+}
+
+impl<T> From<T> for ConfigValue<T> {
+    fn from(value: T) -> Self {
+        ConfigValue::Static(value)
+    }
 }
 
 impl<T: Default> Default for ConfigValue<T> {
@@ -66,7 +80,7 @@ impl<T: serde::Serialize> serde::Serialize for ConfigValue<T> {
     {
         match self {
             ConfigValue::Static(v) => v.serialize(serializer),
-            ConfigValue::Dynamic(v) => v.serialize(serializer),
+            ConfigValue::Dynamic(expr) => expr.to_yaml_value().serialize(serializer),
         }
     }
 }
@@ -77,29 +91,30 @@ impl<'de, T: DeserializeOwned> serde::Deserialize<'de> for ConfigValue<T> {
         D: serde::Deserializer<'de>,
     {
         let value = serde_yaml::Value::deserialize(deserializer)?;
-        if contains_dynamic_content(&value) {
-            Ok(ConfigValue::Dynamic(value))
-        } else {
-            serde_yaml::from_value::<T>(value)
+        match DynamicExpr::classify(&value) {
+            Some(expr) => Ok(ConfigValue::Dynamic(Box::new(expr))),
+            None => serde_yaml::from_value::<T>(value)
                 .map(ConfigValue::Static)
-                .map_err(serde::de::Error::custom)
+                .map_err(serde::de::Error::custom),
         }
     }
 }
 
-/// Check if a YAML value contains dynamic content (`!lua` tags or `${{ }}$` expressions).
-fn contains_dynamic_content(value: &serde_yaml::Value) -> bool {
-    use serde_yaml::Value;
-    match value {
-        Value::Tagged(t) if t.tag == "!lua" => true,
-        Value::Tagged(t) => contains_dynamic_content(&t.value),
-        Value::String(s) => s.contains("${{"),
-        Value::Mapping(m) => m.iter().any(|(k, v)| contains_dynamic_content(k) || contains_dynamic_content(v)),
-        Value::Sequence(s) => s.iter().any(contains_dynamic_content),
-        _ => false,
+
+impl<T> ConfigValue<T> {
+    /// Convert a `Vec<T>` into `Vec<ConfigValue<T>>` by wrapping each element in `Static`.
+    pub fn wrap_vec(v: Vec<T>) -> Vec<ConfigValue<T>> {
+        v.into_iter().map(ConfigValue::Static).collect()
+    }
+
+    /// Map the static value, preserving Dynamic variants unchanged.
+    pub fn map_static<U>(&self, f: impl FnOnce(&T) -> U) -> ConfigValue<U> {
+        match self {
+            ConfigValue::Static(v) => ConfigValue::Static(f(v)),
+            ConfigValue::Dynamic(expr) => ConfigValue::Dynamic(expr.clone()),
+        }
     }
 }
-
 
 impl<T> ConfigValue<Option<T>> {
     /// Returns true if this value is statically known to be None.
@@ -133,11 +148,14 @@ impl<T: Clone + DeserializeOwned> ConfigValue<T> {
     ) -> Result<T> {
         match self {
             ConfigValue::Static(v) => Ok(v.clone()),
-            ConfigValue::Dynamic(value) => {
+            ConfigValue::Dynamic(expr) => {
                 let start = std::time::Instant::now();
-                let mut value = value.clone();
-                evaluate_value_tree(&mut value, evaluator, ctx, config_path, field_path)?;
-                let result = serde_yaml::from_value(value).map_err(|e| {
+                let env_table = evaluator.prepare_env(ctx).map_err(|e| DaemonError::LuaError {
+                    path: config_path.to_path_buf(),
+                    message: format!("Error building Lua environment: {}", e),
+                })?;
+                let yaml_value = expr.evaluate(evaluator, &env_table, config_path, field_path)?;
+                let result = serde_yaml::from_value(yaml_value).map_err(|e| {
                     DaemonError::Config(format!("Failed to resolve '{}': {}", field_path, e))
                 });
                 tracing::debug!("[timeit] {} resolved in {:?}", field_path, start.elapsed());
@@ -160,11 +178,21 @@ impl<T: Clone + DeserializeOwned> ConfigValue<T> {
     ) -> Result<T> {
         match self {
             ConfigValue::Static(v) => Ok(v.clone()),
-            ConfigValue::Dynamic(value) => {
+            ConfigValue::Dynamic(expr) => {
                 let start = std::time::Instant::now();
-                let mut value = value.clone();
-                evaluate_value_tree_with_env(&mut value, evaluator, ctx, config_path, field_path, cached_env)?;
-                let result = serde_yaml::from_value(value).map_err(|e| {
+                let env_table = match cached_env {
+                    Some(t) => t.clone(),
+                    None => {
+                        let t = evaluator.prepare_env(ctx).map_err(|e| DaemonError::LuaError {
+                            path: config_path.to_path_buf(),
+                            message: format!("Error building Lua environment: {}", e),
+                        })?;
+                        *cached_env = Some(t.clone());
+                        t
+                    }
+                };
+                let yaml_value = expr.evaluate(evaluator, &env_table, config_path, field_path)?;
+                let result = serde_yaml::from_value(yaml_value).map_err(|e| {
                     DaemonError::Config(format!("Failed to resolve '{}': {}", field_path, e))
                 });
                 tracing::debug!("[timeit] {} resolved in {:?}", field_path, start.elapsed());
@@ -172,6 +200,65 @@ impl<T: Clone + DeserializeOwned> ConfigValue<T> {
             }
         }
     }
+}
+
+/// Resolve a `ConfigValue<Vec<ConfigValue<T>>>` into a flat `Vec<T>`.
+///
+/// If the outer ConfigValue is Dynamic (!lua), evaluates it to get a
+/// `serde_yaml::Value` sequence, deserializes as `Vec<ConfigValue<T>>`,
+/// then resolves each inner element. If the outer is Static, resolves
+/// each inner element directly.
+/// Get or lazily build a cached Lua env table.
+pub(crate) fn get_or_build_env(
+    evaluator: &LuaEvaluator,
+    ctx: &EvalContext,
+    config_path: &Path,
+    cached_env: &mut Option<mlua::Table>,
+) -> Result<mlua::Table> {
+    match cached_env {
+        Some(t) => Ok(t.clone()),
+        None => {
+            let t = evaluator.prepare_env(ctx).map_err(|e| DaemonError::LuaError {
+                path: config_path.to_path_buf(),
+                message: format!("Error building Lua environment: {}", e),
+            })?;
+            *cached_env = Some(t.clone());
+            Ok(t)
+        }
+    }
+}
+
+pub(crate) fn resolve_nested_vec<T: Clone + DeserializeOwned>(
+    cv: &ConfigValue<Vec<ConfigValue<T>>>,
+    evaluator: &LuaEvaluator,
+    ctx: &EvalContext,
+    config_path: &Path,
+    field_path: &str,
+    cached_env: &mut Option<mlua::Table>,
+) -> Result<Vec<T>> {
+    let items: Vec<ConfigValue<T>> = match cv {
+        ConfigValue::Static(entries) => entries.clone(),
+        ConfigValue::Dynamic(expr) => {
+            let env_table = get_or_build_env(evaluator, ctx, config_path, cached_env)?;
+            let yaml = expr.evaluate(evaluator, &env_table, config_path, field_path)?;
+            serde_yaml::from_value(yaml).map_err(|e| {
+                DaemonError::Config(format!("Failed to resolve '{}': {}", field_path, e))
+            })?
+        }
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            item.resolve_with_env(
+                evaluator,
+                ctx,
+                config_path,
+                &format!("{}[{}]", field_path, i),
+                cached_env,
+            )
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -190,13 +277,13 @@ pub struct RawServiceConfig {
     #[serde(default, rename = "if")]
     pub condition: ConfigValue<Option<bool>>,
     #[serde(default)]
-    pub command: ConfigValue<Vec<String>>,
+    pub command: ConfigValue<Vec<ConfigValue<String>>>,
     #[serde(default, skip_serializing_if = "ConfigValue::is_static_none")]
     pub run: ConfigValue<Option<String>>,
     #[serde(default)]
     pub working_dir: ConfigValue<Option<PathBuf>>,
     #[serde(default)]
-    pub environment: ConfigValue<Vec<String>>,
+    pub environment: ConfigValue<Vec<ConfigValue<String>>>,
     #[serde(default)]
     pub env_file: ConfigValue<Option<PathBuf>>,
     /// System environment inheritance policy (always static)
@@ -210,13 +297,13 @@ pub struct RawServiceConfig {
     #[serde(default)]
     pub healthcheck: ConfigValue<Option<HealthCheck>>,
     #[serde(default)]
-    pub hooks: ConfigValue<Option<ServiceHooks>>,
+    pub hooks: Option<ServiceHooks>,
     #[serde(default)]
     pub logs: ConfigValue<Option<LogConfig>>,
     #[serde(default)]
     pub user: ConfigValue<Option<String>>,
     #[serde(default)]
-    pub groups: ConfigValue<Vec<String>>,
+    pub groups: ConfigValue<Vec<ConfigValue<String>>>,
     #[serde(default)]
     pub limits: ConfigValue<Option<ResourceLimits>>,
     /// Whether to capture `::output::KEY=VALUE` markers from the service process stdout.
@@ -226,7 +313,7 @@ pub struct RawServiceConfig {
     /// Named output declarations that reference hook/process outputs via `${{ }}$` expressions.
     /// Only allowed on `restart: no` services.
     #[serde(default, skip_serializing_if = "ConfigValue::is_static_none")]
-    pub outputs: ConfigValue<Option<HashMap<String, String>>>,
+    pub outputs: ConfigValue<Option<HashMap<String, ConfigValue<String>>>>,
 }
 
 impl Default for RawServiceConfig {
@@ -236,16 +323,16 @@ impl Default for RawServiceConfig {
             command: ConfigValue::Static(Vec::new()),
             run: ConfigValue::default(),
             working_dir: ConfigValue::default(),
-            environment: ConfigValue::default(),
+            environment: ConfigValue::Static(Vec::new()),
             env_file: ConfigValue::default(),
             sys_env: None,
             restart: ConfigValue::default(),
             depends_on: DependsOn::default(),
             healthcheck: ConfigValue::default(),
-            hooks: ConfigValue::default(),
+            hooks: None,
             logs: ConfigValue::default(),
             user: ConfigValue::default(),
-            groups: ConfigValue::default(),
+            groups: ConfigValue::Static(Vec::new()),
             limits: ConfigValue::default(),
             output: ConfigValue::default(),
             outputs: ConfigValue::default(),
@@ -254,38 +341,7 @@ impl Default for RawServiceConfig {
 }
 
 impl RawServiceConfig {
-    /// Resolve environment entries sequentially, building up `ctx.env` as we go.
-    pub fn resolve_environment(
-        &self,
-        evaluator: &LuaEvaluator,
-        ctx: &mut EvalContext,
-        config_path: &Path,
-        name: &str,
-    ) -> Result<Vec<String>> {
-        match &self.environment {
-            ConfigValue::Static(entries) => {
-                for entry in entries {
-                    if let Some((k, v)) = entry.split_once('=') {
-                        ctx.env.insert(k.to_string(), v.to_string());
-                    }
-                }
-                Ok(entries.clone())
-            }
-            ConfigValue::Dynamic(value) => {
-                let mut value = value.clone();
-                // If !lua tag, evaluate first to produce a sequence
-                if matches!(&value, serde_yaml::Value::Tagged(t) if t.tag == "!lua") {
-                    evaluate_value_tree(&mut value, evaluator, ctx, config_path, &format!("{}.environment", name))?;
-                }
-                evaluate_environment_sequential(&mut value, evaluator, ctx, config_path, name)?;
-                serde_yaml::from_value(value).map_err(|e| {
-                    DaemonError::Config(format!("service '{}': {}", name, e))
-                })
-            }
-        }
-    }
-
-    /// Resolve environment entries using a `PreparedEnv` for env table reuse.
+    /// Resolve environment entries sequentially using a `PreparedEnv` for env table reuse.
     ///
     /// Static entries are added to both `ctx.env` and the live Lua env table.
     /// Dynamic entries with `${{ }}$` are evaluated using the pre-built env table.
@@ -298,37 +354,47 @@ impl RawServiceConfig {
         config_path: &Path,
         name: &str,
     ) -> Result<Vec<String>> {
-        match &self.environment {
-            ConfigValue::Static(entries) => {
-                for entry in entries {
-                    if let Some((k, v)) = entry.split_once('=') {
-                        ctx.env.insert(k.to_string(), v.to_string());
-                        prepared.set_env(k, v).map_err(|e| DaemonError::LuaError {
-                            path: config_path.to_path_buf(),
-                            message: format!("Error updating Lua env table: {}", e),
-                        })?;
-                    }
-                }
-                Ok(entries.clone())
-            }
-            ConfigValue::Dynamic(value) => {
-                let mut value = value.clone();
-                // If !lua tag, evaluate first to produce a sequence using cached env
-                if matches!(&value, serde_yaml::Value::Tagged(t) if t.tag == "!lua") {
-                    let mut cached = Some(prepared.table.clone());
-                    evaluate_value_tree_with_env(
-                        &mut value, evaluator, ctx, config_path,
-                        &format!("{}.environment", name), &mut cached,
-                    )?;
-                }
-                evaluate_environment_sequential_with_env(
-                    &mut value, evaluator, ctx, prepared, config_path, name,
+        // Get the inner Vec<ConfigValue<String>> — either directly or by evaluating
+        // a top-level !lua/${{ }}$ and deserializing the result.
+        let entries: Vec<ConfigValue<String>> = match &self.environment {
+            ConfigValue::Static(entries) => entries.clone(),
+            ConfigValue::Dynamic(expr) => {
+                let yaml = expr.evaluate(
+                    evaluator, &prepared.table, config_path,
+                    &format!("{}.environment", name),
                 )?;
-                serde_yaml::from_value(value).map_err(|e| {
+                serde_yaml::from_value(yaml).map_err(|e| {
                     DaemonError::Config(format!("service '{}': {}", name, e))
-                })
+                })?
             }
+        };
+
+        let mut result = Vec::with_capacity(entries.len());
+        for (i, entry) in entries.iter().enumerate() {
+            let resolved: String = match entry {
+                ConfigValue::Static(s) => s.clone(),
+                ConfigValue::Dynamic(expr) => {
+                    let yaml = expr.evaluate(
+                        evaluator, &prepared.table, config_path,
+                        &format!("{}.environment[{}]", name, i),
+                    )?;
+                    serde_yaml::from_value(yaml).map_err(|e| {
+                        DaemonError::Config(format!("{}.environment[{}]: {}", name, i, e))
+                    })?
+                }
+            };
+            // Add to both ctx.env and the live Lua env table
+            if let Some((k, v)) = resolved.split_once('=') {
+                ctx.env.insert(k.to_string(), v.to_string());
+                prepared.set_env(k, v).map_err(|e| DaemonError::LuaError {
+                    path: config_path.to_path_buf(),
+                    message: format!("Error updating Lua env table: {}", e),
+                })?;
+            }
+            result.push(resolved);
         }
+
+        Ok(result)
     }
 
     /// Resolve env_file, load the file, and populate ctx with its variables.
@@ -342,10 +408,13 @@ impl RawServiceConfig {
     ) -> Result<Option<PathBuf>> {
         let env_file: Option<PathBuf> = match &self.env_file {
             ConfigValue::Static(v) => v.clone(),
-            ConfigValue::Dynamic(value) => {
-                let mut value = value.clone();
-                evaluate_value_tree(&mut value, evaluator, ctx, config_path, &format!("{}.env_file", name))?;
-                serde_yaml::from_value(value).map_err(|e| {
+            ConfigValue::Dynamic(expr) => {
+                let env_table = evaluator.prepare_env(ctx).map_err(|e| DaemonError::LuaError {
+                    path: config_path.to_path_buf(),
+                    message: format!("Error building Lua environment: {}", e),
+                })?;
+                let yaml = expr.evaluate(evaluator, &env_table, config_path, &format!("{}.env_file", name))?;
+                serde_yaml::from_value(yaml).map_err(|e| {
                     DaemonError::Config(format!("Failed to resolve '{}.env_file': {}", name, e))
                 })?
             }
@@ -391,7 +460,7 @@ impl RawServiceConfig {
     pub fn has_command(&self) -> bool {
         match &self.command {
             ConfigValue::Static(v) => !v.is_empty(),
-            ConfigValue::Dynamic(_) => true, // dynamic commands are assumed present
+            ConfigValue::Dynamic(_) => true, // dynamic (!lua) commands are assumed present
         }
     }
 
@@ -482,8 +551,8 @@ pub fn resolve_log_buffer_size(
     default_buffer_size: usize,
 ) -> usize {
     service_logs
-        .and_then(|l| l.buffer_size)
-        .or_else(|| global_logs.and_then(|l| l.buffer_size))
+        .and_then(|l| l.buffer_size.as_static().and_then(|v| *v))
+        .or_else(|| global_logs.and_then(|l| l.buffer_size.as_static().and_then(|v| *v)))
         .unwrap_or(default_buffer_size)
 }
 
@@ -907,25 +976,39 @@ impl KeplerConfig {
                 None => Vec::new(),
             }
         } else {
-            raw.command.resolve_with_env(evaluator, ctx, config_path, &format!("{}.command", name), &mut shared_env)?
+            resolve_nested_vec(&raw.command, evaluator, ctx, config_path, &format!("{}.command", name), &mut shared_env)?
         };
         let working_dir = raw.working_dir.resolve_with_env(evaluator, ctx, config_path, &format!("{}.working_dir", name), &mut shared_env)?;
         let condition = raw.condition.resolve_with_env(evaluator, ctx, config_path, &format!("{}.if", name), &mut shared_env)?;
         let user = raw.user.resolve_with_env(evaluator, ctx, config_path, &format!("{}.user", name), &mut shared_env)?;
         // Apply default_user fallback for dynamic user fields that resolved to None
         let user = user.or_else(|| default_user.map(String::from));
-        let groups = raw.groups.resolve_with_env(evaluator, ctx, config_path, &format!("{}.groups", name), &mut shared_env)?;
-        let healthcheck = raw.healthcheck.resolve_with_env(evaluator, ctx, config_path, &format!("{}.healthcheck", name), &mut shared_env)?;
+        let groups = resolve_nested_vec(&raw.groups, evaluator, ctx, config_path, &format!("{}.groups", name), &mut shared_env)?;
+        let healthcheck: Option<HealthCheck> = raw.healthcheck.resolve_with_env(evaluator, ctx, config_path, &format!("{}.healthcheck", name), &mut shared_env)?;
+        // Resolve inner ConfigValue fields of HealthCheck
+        let healthcheck = healthcheck.map(|mut hc| -> crate::errors::Result<HealthCheck> {
+            hc.test = ConfigValue::Static(hc.test.resolve_with_env(evaluator, ctx, config_path, &format!("{}.healthcheck.test", name), &mut shared_env)?);
+            Ok(hc)
+        }).transpose()?;
         let limits = raw.limits.resolve_with_env(evaluator, ctx, config_path, &format!("{}.limits", name), &mut shared_env)?;
         let restart = raw.restart.resolve_with_env(evaluator, ctx, config_path, &format!("{}.restart", name), &mut shared_env)?;
-        let logs = raw.logs.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs", name), &mut shared_env)?;
-        // Dynamic hooks (`!lua` / `${{ }}$`) are deferred to execution time in
-        // `run_service_hook` where `hook_name` context is available.
-        let hooks = if raw.hooks.is_dynamic() {
-            None
-        } else {
-            raw.hooks.resolve_with_env(evaluator, ctx, config_path, &format!("{}.hooks", name), &mut shared_env)?
+        // Resolve inner ConfigValue fields of RestartConfig
+        let restart = match restart {
+            RestartConfig::Extended { policy, watch } => {
+                let resolved_patterns = resolve_nested_vec(&watch, evaluator, ctx, config_path, &format!("{}.restart.watch", name), &mut shared_env)?;
+                RestartConfig::Extended { policy, watch: ConfigValue::wrap_vec(resolved_patterns).into() }
+            }
+            simple => simple,
         };
+        let logs: Option<LogConfig> = raw.logs.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs", name), &mut shared_env)?;
+        // Resolve inner ConfigValue fields of LogConfig
+        let logs = logs.map(|mut l| -> crate::errors::Result<LogConfig> {
+            l.max_size = ConfigValue::Static(l.max_size.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs.max_size", name), &mut shared_env)?);
+            l.buffer_size = ConfigValue::Static(l.buffer_size.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs.buffer_size", name), &mut shared_env)?);
+            Ok(l)
+        }).transpose()?;
+        // hooks is not ConfigValue — inner ConfigValue fields are resolved per-step at execution time
+        let hooks = raw.hooks.clone();
 
         let output = raw.output.resolve_with_env(evaluator, ctx, config_path, &format!("{}.output", name), &mut shared_env)?;
         // outputs are resolved later after hooks/process complete (they reference ctx.hooks.*)
@@ -1011,22 +1094,20 @@ impl KeplerConfig {
 
             // Validate output/outputs require restart: no
             let is_restart_no = restart.policy() == &crate::config::restart::RestartPolicy::No;
-            if let Some(Some(true)) = raw.output.as_static() {
-                if !is_restart_no {
+            if let Some(Some(true)) = raw.output.as_static()
+                && !is_restart_no {
                     errors.push(format!(
                         "Service '{}': 'output: true' is only allowed on services with 'restart: no'",
                         name
                     ));
                 }
-            }
-            if let Some(Some(_)) = raw.outputs.as_static() {
-                if !is_restart_no {
+            if let Some(Some(_)) = raw.outputs.as_static()
+                && !is_restart_no {
                     errors.push(format!(
                         "Service '{}': 'outputs' is only allowed on services with 'restart: no'",
                         name
                     ));
                 }
-            }
         }
 
         if !errors.is_empty() {
@@ -1064,8 +1145,8 @@ impl KeplerConfig {
             && let Some(ref mut hooks) = kepler.hooks {
                 for hook_list in hooks.all_hooks_mut().flatten() {
                     for hook in &mut hook_list.0 {
-                        if hook.user().is_none() {
-                            hook.common_mut().user = Some(user_str.clone());
+                        if matches!(&hook.common().user, ConfigValue::Static(None)) {
+                            hook.common_mut().user = ConfigValue::Static(Some(user_str.clone()));
                         }
                     }
                 }
@@ -1096,7 +1177,6 @@ impl KeplerConfig {
 
     /// Get the configured output_max_size in bytes, defaulting to 1MB.
     pub fn output_max_size(&self) -> usize {
-        const DEFAULT_OUTPUT_MAX_SIZE: usize = 1024 * 1024; // 1MB
         self.kepler
             .as_ref()
             .and_then(|k| k.output_max_size.as_ref())

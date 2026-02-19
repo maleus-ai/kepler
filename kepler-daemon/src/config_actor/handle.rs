@@ -322,6 +322,20 @@ impl ConfigActorHandle {
         reply_rx.await.unwrap_or_else(|_| PathBuf::from("."))
     }
 
+    /// Get state directory (for outputs, logs, etc.)
+    pub async fn get_state_dir(&self) -> PathBuf {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ConfigCommand::GetStateDir { reply: reply_tx })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetStateDir");
+        }
+        reply_rx.await.unwrap_or_else(|_| PathBuf::from("."))
+    }
+
     /// Get log config
     pub async fn get_log_config(&self) -> Option<LogWriterConfig> {
         let (reply_tx, reply_rx) = oneshot::channel();

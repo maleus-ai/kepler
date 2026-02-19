@@ -29,7 +29,7 @@ async fn test_hook_output_capture_basic() {
             run: format!(
                 "echo '::output::token=abc-123' && echo '::output::host=localhost' && touch {}",
                 marker.marker_path("done").display()
-            ),
+            ).into(),
             common: HookCommon {
                 output: Some("step1".to_string()),
                 ..Default::default()

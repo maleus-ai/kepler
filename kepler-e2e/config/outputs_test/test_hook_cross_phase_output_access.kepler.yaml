@@ -1,0 +1,16 @@
+# Test that hook steps in a later phase can access outputs from an earlier phase.
+# pre_start emits outputs, post_start reads them via ${{ }}$.
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  cross-phase:
+    command: ["sh", "-c", "echo SERVICE_RUNNING && sleep 300"]
+    hooks:
+      pre_start:
+        - run: "echo '::output::setup_token=xyz-789' && echo '::output::setup_port=3000'"
+          output: init
+      post_start:
+        - run: "echo CROSS_PHASE_TOKEN=${{ hooks.pre_start.outputs.init.setup_token }}$ && echo CROSS_PHASE_PORT=${{ hooks.pre_start.outputs.init.setup_port }}$"

@@ -1,0 +1,20 @@
+# Test that hook steps within the same phase can access outputs from prior steps.
+# Step A emits outputs, Step B reads step A's output via ${{ }}$,
+# Step C emits its own outputs, Step D reads both step A and step C outputs.
+
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  accumulator:
+    command: ["sh", "-c", "echo SERVICE_STARTED && sleep 300"]
+    hooks:
+      pre_start:
+        - run: "echo '::output::token=secret-42' && echo '::output::host=localhost'"
+          output: step_a
+        - run: "echo STEP_B_TOKEN=${{ hooks.pre_start.outputs.step_a.token }}$ && echo STEP_B_HOST=${{ hooks.pre_start.outputs.step_a.host }}$"
+          output: step_b
+        - run: "echo '::output::combined=yes'"
+          output: step_c
+        - run: "echo STEP_D_ALL=${{ hooks.pre_start.outputs.step_a.token }}$-${{ hooks.pre_start.outputs.step_c.combined }}$"

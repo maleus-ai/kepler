@@ -10,7 +10,7 @@ fn make_service(deps: Vec<&str>) -> RawServiceConfig {
         serde_yaml::from_str(&yaml).unwrap()
     };
     RawServiceConfig {
-        command: ConfigValue::Static(vec!["test".to_string()]),
+        command: ConfigValue::wrap_vec(vec!["test".to_string()]).into(),
         depends_on,
         ..Default::default()
     }

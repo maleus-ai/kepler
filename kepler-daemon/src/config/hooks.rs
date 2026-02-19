@@ -3,6 +3,9 @@
 use serde::{Deserialize, Deserializer};
 use std::path::{Path, PathBuf};
 
+use super::ConfigValue;
+use super::resources::ResourceLimits;
+
 /// Global hooks that run at daemon lifecycle events
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -32,44 +35,94 @@ pub struct ServiceHooks {
     pub post_healthcheck_fail: Option<HookList>,
 }
 
-/// Common fields shared by both hook command variants
+/// Common fields shared by both hook command variants.
+///
+/// Fields are wrapped in `ConfigValue<T>` to support `${{ }}$` and `!lua` expressions,
+/// just like service config fields. The `output` field is not wrapped since it's just
+/// a step name label (not evaluated).
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookCommon {
     #[serde(default)]
-    pub user: Option<String>,
+    pub user: ConfigValue<Option<String>>,
     #[serde(default)]
-    pub groups: Vec<String>,
+    pub groups: ConfigValue<Vec<ConfigValue<String>>>,
     #[serde(default)]
-    pub working_dir: Option<PathBuf>,
+    pub working_dir: ConfigValue<Option<PathBuf>>,
     #[serde(default)]
-    pub environment: Vec<String>,
+    pub environment: ConfigValue<Vec<ConfigValue<String>>>,
     #[serde(default)]
-    pub env_file: Option<PathBuf>,
+    pub env_file: ConfigValue<Option<PathBuf>>,
     /// Runtime Lua condition. When present, the hook is only executed if this
     /// expression evaluates to a truthy value at runtime.
     #[serde(default, rename = "if")]
-    pub condition: Option<String>,
+    pub condition: ConfigValue<Option<String>>,
     /// Output capture name. When set, `::output::KEY=VALUE` lines from stdout
     /// are captured and made available as `ctx.hooks.<hook_name>.<output_name>.<key>`.
     #[serde(default)]
     pub output: Option<String>,
+    /// Resource limits for the hook process
+    #[serde(default)]
+    pub limits: ConfigValue<Option<ResourceLimits>>,
 }
 
-/// Hook command - either a script or a command array
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+/// Hook command - either a script or a command array.
+///
+/// The `run`/`command` fields are wrapped in `ConfigValue<T>` for dynamic evaluation.
+///
+/// Uses a custom Deserialize impl instead of `#[serde(untagged)]` because serde's
+/// Content buffering (used by untagged enums) can't handle serde_yaml tagged values
+/// like `!lua`. By capturing `serde_yaml::Value` first and dispatching on keys, we
+/// avoid Content entirely.
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(untagged)]
 pub enum HookCommand {
     Script {
-        run: String,
+        run: ConfigValue<String>,
         #[serde(flatten)]
         common: HookCommon,
     },
     Command {
-        command: Vec<String>,
+        command: ConfigValue<Vec<ConfigValue<String>>>,
         #[serde(flatten)]
         common: HookCommon,
     },
+}
+
+impl<'de> Deserialize<'de> for HookCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut value = serde_yaml::Value::deserialize(deserializer)
+            .map_err(serde::de::Error::custom)?;
+        let mapping = value.as_mapping_mut().ok_or_else(|| {
+            serde::de::Error::custom("expected a mapping for hook command")
+        })?;
+
+        let run_key = serde_yaml::Value::String("run".to_string());
+        let cmd_key = serde_yaml::Value::String("command".to_string());
+
+        if let Some(run_value) = mapping.remove(&run_key) {
+            // Script variant: extract `run`, deserialize rest as HookCommon
+            let run: ConfigValue<String> = serde_yaml::from_value(run_value)
+                .map_err(serde::de::Error::custom)?;
+            let common: HookCommon = serde_yaml::from_value(value)
+                .map_err(serde::de::Error::custom)?;
+            Ok(HookCommand::Script { run, common })
+        } else if let Some(cmd_value) = mapping.remove(&cmd_key) {
+            // Command variant: extract `command`, deserialize rest as HookCommon
+            let command: ConfigValue<Vec<ConfigValue<String>>> =
+                serde_yaml::from_value(cmd_value).map_err(serde::de::Error::custom)?;
+            let common: HookCommon = serde_yaml::from_value(value)
+                .map_err(serde::de::Error::custom)?;
+            Ok(HookCommand::Command { command, common })
+        } else {
+            Err(serde::de::Error::custom(
+                "hook command must have either 'run' or 'command' key",
+            ))
+        }
+    }
 }
 
 /// A list of hook commands that deserializes from a single object or an array.
@@ -140,7 +193,7 @@ impl HookCommand {
     /// Create a simple script hook with just a run command.
     pub fn script(run: impl Into<String>) -> Self {
         HookCommand::Script {
-            run: run.into(),
+            run: run.into().into(),
             common: HookCommon::default(),
         }
     }
@@ -159,28 +212,40 @@ impl HookCommand {
         }
     }
 
+    /// Get the user field (static value only).
     pub fn user(&self) -> Option<&str> {
-        self.common().user.as_deref()
+        self.common().user.as_static().and_then(|v| v.as_deref())
     }
 
-    pub fn groups(&self) -> &[String] {
-        &self.common().groups
+    /// Get groups (static value only).
+    pub fn groups(&self) -> Vec<String> {
+        match self.common().groups.as_static() {
+            Some(items) => items.iter().filter_map(|v| v.as_static().cloned()).collect(),
+            None => Vec::new(),
+        }
     }
 
+    /// Get working_dir (static value only).
     pub fn working_dir(&self) -> Option<&Path> {
-        self.common().working_dir.as_deref()
+        self.common().working_dir.as_static().and_then(|v| v.as_deref())
     }
 
-    pub fn environment(&self) -> &[String] {
-        &self.common().environment
+    /// Get environment entries (static value only).
+    pub fn environment(&self) -> Vec<String> {
+        match self.common().environment.as_static() {
+            Some(items) => items.iter().filter_map(|v| v.as_static().cloned()).collect(),
+            None => Vec::new(),
+        }
     }
 
+    /// Get env_file path (static value only).
     pub fn env_file(&self) -> Option<&Path> {
-        self.common().env_file.as_deref()
+        self.common().env_file.as_static().and_then(|v| v.as_deref())
     }
 
+    /// Get condition string (static value only).
     pub fn condition(&self) -> Option<&str> {
-        self.common().condition.as_deref()
+        self.common().condition.as_static().and_then(|v| v.as_deref())
     }
 
     pub fn output(&self) -> Option<&str> {

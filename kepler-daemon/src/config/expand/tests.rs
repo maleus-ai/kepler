@@ -345,28 +345,6 @@ command: ["${{ env.HOME }}$/app"]
     assert_eq!(cmd[0].as_str().unwrap(), "/home/user/app");
 }
 
-#[test]
-fn test_sequential_environment_evaluation() {
-    let eval = LuaEvaluator::new().unwrap();
-    let mut env = HashMap::new();
-    env.insert("BASE".to_string(), "hello".to_string());
-    let mut ctx = EvalContext {
-        env,
-        ..Default::default()
-    };
-    let path = test_path();
-
-    let yaml = r#"
-- FIRST=${{ env.BASE }}$_world
-- SECOND=${{ env.FIRST }}$_again
-"#;
-    let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-    evaluate_environment_sequential(&mut value, &eval, &mut ctx, &path, "test").unwrap();
-
-    let seq = value.as_sequence().unwrap();
-    assert_eq!(seq[0].as_str().unwrap(), "FIRST=hello_world");
-    assert_eq!(seq[1].as_str().unwrap(), "SECOND=hello_world_again");
-}
 
 #[test]
 fn test_standalone_expression_type_preservation() {
@@ -507,31 +485,6 @@ command: !lua 'return {"echo", ctx.env.PORT}'
     assert!(cached_env.is_some(), "Cache should be populated by !lua tag");
 }
 
-#[test]
-fn test_sequential_env_with_prepared_env() {
-    let eval = LuaEvaluator::new().unwrap();
-    let mut env = HashMap::new();
-    env.insert("BASE".to_string(), "hello".to_string());
-    let mut ctx = EvalContext { env, ..Default::default() };
-    let path = test_path();
-
-    let prepared = eval.prepare_env_mutable(&ctx).unwrap();
-
-    let yaml = r#"
-- FIRST=${{ env.BASE }}$_world
-- SECOND=${{ env.FIRST }}$_again
-"#;
-    let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-    evaluate_environment_sequential_with_env(&mut value, &eval, &mut ctx, &prepared, &path, "test").unwrap();
-
-    let seq = value.as_sequence().unwrap();
-    assert_eq!(seq[0].as_str().unwrap(), "FIRST=hello_world");
-    assert_eq!(seq[1].as_str().unwrap(), "SECOND=hello_world_again");
-
-    // Verify ctx.env was updated
-    assert_eq!(ctx.env.get("FIRST").unwrap(), "hello_world");
-    assert_eq!(ctx.env.get("SECOND").unwrap(), "hello_world_again");
-}
 
 // ============================================================================
 // Nested braces tests (previously broken with old }} delimiter)
