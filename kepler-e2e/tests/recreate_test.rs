@@ -444,6 +444,12 @@ async fn test_restart_hook_order() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "test-svc", "running", Duration::from_secs(10))
         .await?;
 
+    // Wait for initial post_start hook to complete before clearing markers,
+    // otherwise it may race and write POST_START after the file is deleted.
+    harness
+        .wait_for_file_content(&marker_file, "POST_START", Duration::from_secs(5))
+        .await?;
+
     // Clear the marker file
     std::fs::remove_file(&marker_file).ok();
 
