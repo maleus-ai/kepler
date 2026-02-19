@@ -112,12 +112,16 @@ async fn run() -> Result<()> {
     let sys_env: HashMap<String, String> = std::env::vars().collect();
 
     match cli.command {
-        Commands::Start { service, detach, wait, timeout, no_deps } => {
+        Commands::Start { services, detach, wait, timeout, no_deps } => {
+            if no_deps && services.is_empty() {
+                eprintln!("Error: --no-deps requires specifying at least one service");
+                std::process::exit(1);
+            }
             if detach && wait {
                 // -d --wait: Fire start, subscribe for progress, exit when all ready
                 let (progress_rx, sub_future) = client.subscribe(
                     canonical_path.clone(),
-                    service.as_ref().map(|s| vec![s.clone()]),
+                    if services.is_empty() { None } else { Some(services.clone()) },
                 )?;
                 // Fire off start (don't await — daemon runs to completion on its own).
                 // send_request_with_progress enqueues immediately; we drive the future
@@ -125,7 +129,7 @@ async fn run() -> Result<()> {
                 let (_start_progress_rx, start_future) = client.send_request(
                     kepler_protocol::protocol::Request::Start {
                         config_path: canonical_path,
-                        service,
+                        services,
                         sys_env: Some(sys_env),
                         no_deps,
                     },
@@ -150,23 +154,24 @@ async fn run() -> Result<()> {
                 }
             } else if detach {
                 // -d: Fire start, exit immediately
-                let (_progress_rx, response_future) = client.start(canonical_path, service, Some(sys_env), no_deps)?;
+                let (_progress_rx, response_future) = client.start(canonical_path, services, Some(sys_env), no_deps)?;
                 let response = response_future.await?;
                 handle_response(response);
             } else {
                 // Foreground: fire start (don't await response), follow logs until quiescent.
                 // send_request enqueues the request; we race the response against log following.
+                let log_service = if services.len() == 1 { Some(services[0].as_str()) } else { None };
                 let (_start_progress_rx, start_future) = client.send_request(
                     kepler_protocol::protocol::Request::Start {
                         config_path: canonical_path.clone(),
-                        service: service.clone(),
+                        services: services.clone(),
                         sys_env: Some(sys_env),
                         no_deps,
                     },
                 )?;
                 foreground_with_logs(
                     start_future,
-                    follow_logs_until_quiescent(&client, &canonical_path, service.as_deref()),
+                    follow_logs_until_quiescent(&client, &canonical_path, log_service),
                 ).await?;
             }
         }

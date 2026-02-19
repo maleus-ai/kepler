@@ -326,7 +326,7 @@ async fn handle_request(
 
         Request::Start {
             config_path,
-            service,
+            services,
             sys_env,
             no_deps,
         } => {
@@ -335,7 +335,7 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
             match orchestrator
-                .start_services(&config_path, service.as_deref(), sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps)
+                .start_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps)
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),

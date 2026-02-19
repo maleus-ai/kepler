@@ -10,8 +10,9 @@ pub enum Commands {
 
     /// Start services (requires daemon to be running)
     Start {
-        /// Specific service to start (starts all if not specified)
-        service: Option<String>,
+        /// Services to start (starts all if none specified)
+        #[arg(value_name = "SERVICE")]
+        services: Vec<String>,
         /// Detach and return immediately (don't follow logs)
         #[arg(short, long)]
         detach: bool,
@@ -21,8 +22,8 @@ pub enum Commands {
         /// Timeout for --wait mode (e.g. "30s", "5m")
         #[arg(long, requires = "wait")]
         timeout: Option<String>,
-        /// Skip dependency waiting and `if:` condition (requires a specific service)
-        #[arg(long, requires = "service")]
+        /// Skip dependency waiting and `if:` condition (requires service names)
+        #[arg(long)]
         no_deps: bool,
     },
     /// Stop services (requires daemon to be running)

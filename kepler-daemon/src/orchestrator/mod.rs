@@ -113,7 +113,7 @@ impl ServiceOrchestrator {
     pub async fn start_services(
         &self,
         config_path: &Path,
-        service_filter: Option<&str>,
+        services: &[String],
         sys_env: Option<HashMap<String, String>>,
         config_owner: Option<(u32, u32)>,
         progress: Option<ProgressSender>,
@@ -133,14 +133,15 @@ impl ServiceOrchestrator {
             .await
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
-        let services_to_start = match service_filter {
-            Some(name) => {
+        let (services_to_start, is_specific_service) = if !services.is_empty() {
+            for name in services {
                 if !config.services.contains_key(name) {
-                    return Err(OrchestratorError::ServiceNotFound(name.to_string()));
+                    return Err(OrchestratorError::ServiceNotFound(name.clone()));
                 }
-                vec![name.to_string()]
             }
-            None => get_start_order(&config.services)?,
+            (services.to_vec(), true)
+        } else {
+            (get_start_order(&config.services)?, false)
         };
 
         // Check if any services need starting.
@@ -181,8 +182,6 @@ impl ServiceOrchestrator {
 
         // Fetch stored sys_env once for all global hooks in this method
         let stored_env = handle.get_sys_env().await;
-
-        let is_specific_service = service_filter.is_some();
 
         // Only run global hooks for full start (not specific service)
         if !is_specific_service {
@@ -1596,7 +1595,7 @@ impl ServiceOrchestrator {
         }
 
         // Start all services
-        self.start_services(config_path, None, sys_env, config_owner, progress, false).await?;
+        self.start_services(config_path, &[], sys_env, config_owner, progress, false).await?;
 
         Ok(String::new())
     }

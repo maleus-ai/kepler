@@ -300,6 +300,11 @@ async fn test_start_no_deps_without_service_fails() -> E2eResult<()> {
         "start --no-deps without a service should fail. stdout: {}\nstderr: {}",
         output.stdout, output.stderr
     );
+    assert!(
+        output.stderr_contains("--no-deps requires"),
+        "Error message should mention --no-deps requires services. stderr: {}",
+        output.stderr
+    );
 
     harness.stop_daemon().await?;
     Ok(())

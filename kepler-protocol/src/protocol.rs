@@ -58,12 +58,13 @@ pub enum Request {
     Start {
         /// Path to the config file
         config_path: PathBuf,
-        /// Service name (None = all services)
-        service: Option<String>,
+        /// Services to start (empty = all services)
+        #[serde(default)]
+        services: Vec<String>,
         /// System environment variables captured from CLI
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
-        /// Skip dependency waiting and `if:` condition (requires specific service)
+        /// Skip dependency waiting and `if:` condition (requires specific services)
         #[serde(default)]
         no_deps: bool,
     },

@@ -30,7 +30,7 @@ fn roundtrip_envelope_start() {
         id: 7,
         request: Request::Start {
             config_path: PathBuf::from("/tmp/test.yaml"),
-            service: Some("web".into()),
+            services: vec!["web".into()],
             sys_env: Some(HashMap::from([("PATH".into(), "/usr/bin".into())])),
             no_deps: true,
         },
@@ -39,9 +39,9 @@ fn roundtrip_envelope_start() {
     let decoded = decode_envelope(&bytes[4..]).unwrap();
     assert_eq!(decoded.id, 7);
     match decoded.request {
-        Request::Start { config_path, service, sys_env, no_deps } => {
+        Request::Start { config_path, services, sys_env, no_deps } => {
             assert_eq!(config_path, PathBuf::from("/tmp/test.yaml"));
-            assert_eq!(service, Some("web".into()));
+            assert_eq!(services, vec!["web".to_string()]);
             assert!(sys_env.is_some());
             assert_eq!(sys_env.unwrap().get("PATH").unwrap(), "/usr/bin");
             assert!(no_deps);
@@ -458,7 +458,7 @@ fn request_variant_names() {
     assert_eq!(
         Request::Start {
             config_path: PathBuf::new(),
-            service: None,
+            services: vec![],
             sys_env: None,
             no_deps: false,
         }.variant_name(),
