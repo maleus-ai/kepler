@@ -3,7 +3,7 @@ kepler:
     buffer_size: 0
   hooks:
     pre_start:
-      if: "not ctx.initialized"
+      if: "not service.initialized"
       run: |
         echo "ON_INIT_RAN" >> __MARKER_FILE__
 

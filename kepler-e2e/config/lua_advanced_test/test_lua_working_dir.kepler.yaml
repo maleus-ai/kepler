@@ -6,6 +6,6 @@ services:
   lua-wd-service:
     env_file: __ENV_FILE__
     working_dir: !lua |
-      return ctx.env.WORK_DIR or "/tmp"
+      return env.WORK_DIR or "/tmp"
     command: ["sh", "-c", "pwd && sleep 30"]
     restart: no

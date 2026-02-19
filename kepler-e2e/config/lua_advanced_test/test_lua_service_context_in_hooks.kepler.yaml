@@ -8,6 +8,6 @@ services:
     hooks:
       pre_start:
         environment: !lua |
-          return {"SERVICE_NAME=" .. (ctx.service_name or "nil")}
+          return {"SERVICE_NAME=" .. (service.name or "nil")}
         run: "echo SERVICE=$SERVICE_NAME >> __MARKER_FILE__"
     restart: no

@@ -6,7 +6,7 @@ use crate::config::{resolve_log_store, GlobalHooks, HookCommand, HookList, LogCo
 use crate::config_actor::ConfigActorHandle;
 use crate::errors::{DaemonError, Result};
 use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
-use crate::lua_eval::{DepInfo, EvalContext, LuaEvaluator};
+use crate::lua_eval::{DepInfo, EvalContext, HookEvalContext, LuaEvaluator, ServiceEvalContext};
 use crate::process::{spawn_blocking, BlockingMode, OutputCaptureConfig};
 use kepler_protocol::protocol::{ProgressEvent, ServicePhase};
 use kepler_protocol::server::ProgressSender;
@@ -29,6 +29,10 @@ async fn emit_hook_event(
 pub struct ServiceHookParams<'a> {
     pub working_dir: &'a Path,
     pub env: &'a HashMap<String, String>,
+    /// Base env before transforms (daemon/CLI env for services)
+    pub raw_env: &'a HashMap<String, String>,
+    /// Service's env_file vars
+    pub env_file_vars: &'a HashMap<String, String>,
     pub log_config: Option<&'a LogWriterConfig>,
     pub service_user: Option<&'a str>,
     pub service_groups: &'a [String],
@@ -412,10 +416,18 @@ pub async fn run_global_hook(
             && let Some(h) = params.handle {
                 let initialized = h.is_config_initialized().await;
                 let eval_ctx = EvalContext {
-                    env: params.env.clone(),
-                    initialized: Some(initialized),
-                    hook_had_failure: Some(had_failure),
-                    ..Default::default()
+                    service: Some(ServiceEvalContext {
+                        initialized: Some(initialized),
+                        ..Default::default()
+                    }),
+                    hook: Some(HookEvalContext {
+                        name: hook_type.as_str().to_string(),
+                        raw_env: params.env.clone(),
+                        env_file: HashMap::new(),
+                        env: params.env.clone(),
+                        had_failure: Some(had_failure),
+                    }),
+                    deps: HashMap::new(),
                 };
                 match h.eval_if_condition(condition, eval_ctx).await {
                     Ok(true) => {} // condition passed, run the hook
@@ -444,6 +456,8 @@ pub async fn run_global_hook(
         let hook_params = ServiceHookParams {
             working_dir: params.working_dir,
             env: params.env,
+            raw_env: params.env,
+            env_file_vars: &HashMap::new(),
             log_config: params.log_config,
             service_user: None,
             service_groups: &[],
@@ -457,8 +471,15 @@ pub async fn run_global_hook(
             config_dir: None,
         };
         let mut eval_ctx = EvalContext {
-            env: params.env.clone(),
-            ..Default::default()
+            service: None,
+            hook: Some(HookEvalContext {
+                name: hook_type.as_str().to_string(),
+                raw_env: params.env.clone(),
+                env_file: HashMap::new(),
+                env: params.env.clone(),
+                had_failure: Some(had_failure),
+            }),
+            deps: HashMap::new(),
         };
         match run_hook_step(hook, &hook_params, &service_name, hook_type.as_str(), &mut eval_ctx, None).await {
             Ok(_) => {
@@ -538,7 +559,7 @@ pub async fn run_service_hook(
         } else {
             None
         };
-        // Merge all_hook_outputs with current phase's hook_outputs into ctx.hooks.
+        // Merge all_hook_outputs with current phase's hook_outputs into service.hooks.
         // Avoid cloning all_hook_outputs when it's empty.
         let hooks_ctx = if params.all_hook_outputs.is_empty() && hook_outputs.is_empty() {
             HashMap::new()
@@ -552,17 +573,25 @@ pub async fn run_service_hook(
             ctx
         };
         let mut eval_ctx = EvalContext {
-            env: params.env.clone(),
-            service_name: Some(service_name.to_string()),
-            hook_name: Some(hook_type.as_str().to_string()),
-            initialized: state.as_ref().map(|s| s.initialized),
-            restart_count: state.as_ref().map(|s| s.restart_count),
-            exit_code: state.as_ref().and_then(|s| s.exit_code),
-            status: state.as_ref().map(|s| s.status.as_str().to_string()),
-            hook_had_failure: Some(had_failure),
+            service: Some(ServiceEvalContext {
+                name: service_name.to_string(),
+                raw_env: params.raw_env.clone(),
+                env_file: params.env_file_vars.clone(),
+                env: params.env.clone(),
+                initialized: state.as_ref().map(|s| s.initialized),
+                restart_count: state.as_ref().map(|s| s.restart_count),
+                exit_code: state.as_ref().and_then(|s| s.exit_code),
+                status: state.as_ref().map(|s| s.status.as_str().to_string()),
+                hooks: hooks_ctx,
+            }),
+            hook: Some(HookEvalContext {
+                name: hook_type.as_str().to_string(),
+                raw_env: params.env.clone(),
+                env_file: HashMap::new(),
+                env: params.env.clone(),
+                had_failure: Some(had_failure),
+            }),
             deps: params.deps.clone(),
-            hooks: hooks_ctx,
-            ..Default::default()
         };
 
         // Evaluate runtime `if` condition if present

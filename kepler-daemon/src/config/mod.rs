@@ -343,7 +343,7 @@ impl Default for RawServiceConfig {
 impl RawServiceConfig {
     /// Resolve environment entries sequentially using a `PreparedEnv` for env table reuse.
     ///
-    /// Static entries are added to both `ctx.env` and the live Lua env table.
+    /// Static entries are added to both the active env and the live Lua env table.
     /// Dynamic entries with `${{ }}$` are evaluated using the pre-built env table.
     /// The `PreparedEnv`'s env sub-table is updated in-place as entries are resolved.
     pub fn resolve_environment_with_env(
@@ -383,9 +383,9 @@ impl RawServiceConfig {
                     })?
                 }
             };
-            // Add to both ctx.env and the live Lua env table
+            // Add to both active env and the live Lua env table
             if let Some((k, v)) = resolved.split_once('=') {
-                ctx.env.insert(k.to_string(), v.to_string());
+                ctx.active_env_mut().insert(k.to_string(), v.to_string());
                 prepared.set_env(k, v).map_err(|e| DaemonError::LuaError {
                     path: config_path.to_path_buf(),
                     message: format!("Error updating Lua env table: {}", e),
@@ -430,8 +430,8 @@ impl RawServiceConfig {
                 match crate::env::load_env_file(&ef_path) {
                     Ok(vars) => {
                         for (k, v) in &vars {
-                            ctx.env_file.insert(k.clone(), v.clone());
-                            ctx.env.insert(k.clone(), v.clone());
+                            ctx.active_env_file_mut().insert(k.clone(), v.clone());
+                            ctx.active_env_mut().insert(k.clone(), v.clone());
                         }
                     }
                     Err(e) => {
@@ -787,7 +787,11 @@ impl KeplerConfig {
         // can call user-defined functions. depends_on must be static for the dep
         // graph, so we evaluate it eagerly here (before RawServiceConfig parsing).
         let sys_env_ctx = EvalContext {
-            env: sys_env.clone(),
+            service: Some(crate::lua_eval::ServiceEvalContext {
+                raw_env: sys_env.clone(),
+                env: sys_env.clone(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -839,8 +843,12 @@ impl KeplerConfig {
                     }
 
                     let ctx = EvalContext {
-                        env: sys_env.clone(),
-                        service_name: Some(name.to_string()),
+                        service: Some(crate::lua_eval::ServiceEvalContext {
+                            name: name.to_string(),
+                            raw_env: sys_env.clone(),
+                            env: sys_env.clone(),
+                            ..Default::default()
+                        }),
                         ..Default::default()
                     };
                     match dep_val {
@@ -926,7 +934,7 @@ impl KeplerConfig {
     /// in the correct order.
     ///
     /// Evaluation order:
-    /// 0. Resolve `env_file` → load file → populate ctx.env_file + ctx.env
+    /// 0. Resolve `env_file` → load file → populate active env_file + active env
     /// 1. Build PreparedEnv (env sub-table unfrozen)
     /// 2. Resolve `environment` sequentially using PreparedEnv (updates Lua env in-place)
     /// 3. Freeze env sub-table
@@ -946,8 +954,10 @@ impl KeplerConfig {
 
         let config_dir = config_path.parent().unwrap_or(Path::new("."));
 
-        // Ensure service_name is set in context
-        ctx.service_name = Some(name.to_string());
+        // Ensure service name is set in context
+        if let Some(ref mut svc) = ctx.service {
+            svc.name = name.to_string();
+        }
 
         // Step 0: Resolve env_file and load its variables (one-off, builds own env if dynamic)
         let env_file = raw.resolve_env_file(evaluator, ctx, config_path, config_dir, name)?;
@@ -1011,7 +1021,7 @@ impl KeplerConfig {
         let hooks = raw.hooks.clone();
 
         let output = raw.output.resolve_with_env(evaluator, ctx, config_path, &format!("{}.output", name), &mut shared_env)?;
-        // outputs are resolved later after hooks/process complete (they reference ctx.hooks.*)
+        // outputs are resolved later after hooks/process complete (they reference service.hooks.*)
         // For now, store None; the orchestrator will resolve them when outputs are available.
         let outputs: Option<HashMap<String, String>> = None;
 

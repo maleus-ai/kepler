@@ -39,7 +39,7 @@ kepler:
       on_start: clear
   hooks:
     pre_start:
-      - if: "not ctx.initialized"
+      - if: "not service.initialized"
         run: echo "global on_init"
         environment:
           - KEPLER_PHASE=init
@@ -86,7 +86,7 @@ services:
         on_exit: retain
     hooks:
       pre_start:
-        - if: "not ctx.initialized"
+        - if: "not service.initialized"
           run: echo "postgres on_init"
         - command: ["sh", "-c", "echo postgres pre_start"]
       post_start:
@@ -119,7 +119,7 @@ services:
     command: ["sh", "-c", "echo RabbitMQ starting; exec sleep 300"]
     restart: always
     environment: !lua |
-      return svc_env(ctx.service_name, {"AMQP_PORT=" .. next_port()})
+      return svc_env(service.name, {"AMQP_PORT=" .. next_port()})
     healthcheck:
       test: ["true"]
       interval: 1s
@@ -158,7 +158,7 @@ services:
       rabbitmq:
         condition: service_healthy
     environment: !lua |
-      return svc_env(ctx.service_name, nil)
+      return svc_env(service.name, nil)
 
   # ═══════════════════════════════════════════════════════════════════
   # TIER 3: Core (4 services, mixed deps, hooks, Lua)
@@ -183,7 +183,7 @@ services:
       start_period: 1s
     hooks:
       pre_start:
-        - if: "not ctx.initialized"
+        - if: "not service.initialized"
           run: echo "auth on_init"
         - run: echo "auth pre_start"
       post_start:
@@ -349,8 +349,8 @@ services:
       retries: 3
       start_period: 1s
     environment: !lua |
-      register_service(ctx.service_name)
-      return svc_env(ctx.service_name, nil)
+      register_service(service.name)
+      return svc_env(service.name, nil)
 
   report-service:
     command: ["sh", "-c", "echo Report generated; exit 0"]
@@ -382,7 +382,7 @@ services:
       pre_start:
         run: echo "metrics pre_start"
         environment: !lua |
-          return {"METRICS_SVC=" .. ctx.service_name, "METRICS_HOOK=" .. ctx.hook_name}
+          return {"METRICS_SVC=" .. service.name, "METRICS_HOOK=" .. hook.name}
 
   dashboard:
     command: !lua |

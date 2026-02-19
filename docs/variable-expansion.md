@@ -24,9 +24,9 @@ Kepler supports inline Lua expressions in configuration values using `${{ expr }
 | `${{ deps.svc.status }}$`      | Reference dependency status        |
 | `${{ deps.svc.outputs.key }}$` | Reference a dependency's output value |
 | `${{ hooks.pre_start.outputs.step1.token }}$` | Reference a hook step output |
-| `${{ ctx.service_name }}$`     | Reference the current service name |
+| `${{ service.name }}$`         | Reference the current service name |
 
-Expressions are evaluated as Lua code with access to `env`, `ctx`, `deps`, `global`, and built-in libraries (`json`, `yaml`).
+Expressions are evaluated as Lua code with access to `env`, `service`, `hook`, `deps`, `hooks`, `global`, and built-in libraries (`json`, `yaml`).
 
 ---
 
@@ -66,7 +66,7 @@ All `${{ }}$` expressions in service config are evaluated **at service start tim
 
 - Expressions re-evaluate on every service start/restart
 - `deps` information is available (dependency status, env, etc.)
-- Runtime context like `ctx.restart_count` is available
+- Runtime context like `service.restart_count` is available
 
 The following fields support `${{ }}$`:
 
@@ -125,32 +125,49 @@ user: ${{ env.SERVICE_USER or "nobody" }}$
 
 ### Available Variables
 
+#### Service Context
+
 | Variable                  | Description                                                |
 | ------------------------- | ---------------------------------------------------------- |
-| `env.VAR`                 | Full merged environment (sys_env + env_file + environment) |
-| `ctx.env.VAR`             | Same as `env.VAR` (full environment)                       |
-| `ctx.sys_env.VAR`         | System environment only                                    |
-| `ctx.env_file.VAR`        | env_file variables only                                    |
-| `ctx.service_name`        | Current service name                                       |
-| `ctx.restart_count`       | Number of times the service has restarted                  |
-| `ctx.initialized`         | Whether the service has been initialized                   |
-| `ctx.exit_code`           | Last exit code (if restarting)                             |
-| `ctx.status`              | Current service status                                     |
+| `env.VAR`                 | Shortcut: `hook.env` in hook context, else `service.env`   |
+| `service.name`            | Current service name                                       |
+| `service.raw_env.VAR`     | Inherited base environment (from daemon/CLI)               |
+| `service.env_file.VAR`    | Service env_file variables only                            |
+| `service.env.VAR`         | Full merged environment (raw_env + env_file + environment) |
+| `service.restart_count`   | Number of times the service has restarted                  |
+| `service.initialized`     | Whether the service has been initialized                   |
+| `service.exit_code`       | Last exit code (if restarting)                             |
+| `service.status`          | Current service status                                     |
+| `service.hooks.HOOK.outputs.STEP.KEY` | Hook step output value. See [Outputs](outputs.md) |
+
+#### Hook Context
+
+| Variable                  | Description                                                |
+| ------------------------- | ---------------------------------------------------------- |
+| `hook.name`               | Current hook name                                          |
+| `hook.raw_env.VAR`        | Inherited base environment (from parent service)           |
+| `hook.env_file.VAR`       | Hook env_file variables only                               |
+| `hook.env.VAR`            | Full merged environment (raw_env + env_file + environment) |
+| `hook.had_failure`        | Whether a previous hook step has failed                    |
+
+#### Shortcuts and Shared Tables
+
+| Variable                  | Description                                                |
+| ------------------------- | ---------------------------------------------------------- |
+| `hooks.HOOK.outputs.STEP.KEY` | Shortcut for `service.hooks.HOOK.outputs.STEP.KEY`    |
 | `deps.NAME.status`        | Dependency status (`"running"`, `"healthy"`, etc.)         |
 | `deps.NAME.exit_code`     | Dependency's last exit code                                |
 | `deps.NAME.initialized`   | Whether dependency has been initialized                    |
 | `deps.NAME.restart_count` | Dependency's restart count                                 |
 | `deps.NAME.env.VAR`       | A variable from a dependency's environment                 |
 | `deps.NAME.outputs.KEY`   | A named output from a dependency service. See [Outputs](outputs.md) |
-| `ctx.hooks.HOOK.outputs.STEP.KEY` | Hook step output value (available after hook runs). See [Outputs](outputs.md) |
-| `hooks.HOOK.outputs.STEP.KEY` | Shortcut for `ctx.hooks.HOOK.outputs.STEP.KEY` |
 | `global`                  | Shared mutable table (set via `lua:` directive)            |
 | `json.parse(str)`        | Deserialize a JSON string into a Lua value                 |
 | `json.stringify(val, pretty?)` | Serialize a Lua value to JSON (`true` for indented)   |
 | `yaml.parse(str)`        | Deserialize a YAML string into a Lua value                 |
 | `yaml.stringify(val)`    | Serialize a Lua value to a YAML string                     |
 
-> **Note:** Bare variable names like `${{ HOME }}$` resolve to nil. To access environment variables, use `env.HOME` or `ctx.env.HOME`.
+> **Note:** Bare variable names like `${{ HOME }}$` resolve to nil. To access environment variables, use `env.HOME` or `service.env.HOME`.
 
 ---
 
@@ -235,7 +252,7 @@ services:
 ```yaml
 services:
   app:
-    command: ${{ ctx.restart_count > 0 and {"./app", "--recovery"} or {"./app"} }}$
+    command: ${{ service.restart_count > 0 and {"./app", "--recovery"} or {"./app"} }}$
 ```
 
 ### Using Global Lua Functions

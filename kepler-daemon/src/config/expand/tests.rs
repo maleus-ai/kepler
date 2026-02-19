@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn make_evaluator_and_ctx() -> (LuaEvaluator, EvalContext) {
+    use crate::lua_eval::ServiceEvalContext;
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("HOME".to_string(), "/home/user".to_string());
@@ -10,7 +11,10 @@ fn make_evaluator_and_ctx() -> (LuaEvaluator, EvalContext) {
     env.insert("DB_HOST".to_string(), "localhost".to_string());
     env.insert("APP_PORT".to_string(), "8080".to_string());
     let ctx = EvalContext {
-        env,
+        service: Some(ServiceEvalContext {
+            env,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     (eval, ctx)
@@ -373,17 +377,21 @@ fn test_standalone_expression_type_preservation() {
 
 #[test]
 fn test_lua_tag_in_tree() {
+    use crate::lua_eval::ServiceEvalContext;
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("PORT".to_string(), "8080".to_string());
     let ctx = EvalContext {
-        env,
+        service: Some(ServiceEvalContext {
+            env,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let path = test_path();
 
     let yaml = r#"
-command: !lua 'return {"echo", ctx.env.PORT}'
+command: !lua 'return {"echo", service.env.PORT}'
 "#;
     let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
     evaluate_value_tree(&mut value, &eval, &ctx, &path, "test").unwrap();
@@ -395,11 +403,15 @@ command: !lua 'return {"echo", ctx.env.PORT}'
 
 #[test]
 fn test_bare_var_in_inline_resolves_to_nil() {
+    use crate::lua_eval::ServiceEvalContext;
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("HOME".to_string(), "/home/user".to_string());
     let ctx = EvalContext {
-        env,
+        service: Some(ServiceEvalContext {
+            env,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let path = test_path();
@@ -466,15 +478,22 @@ fn test_evaluate_value_tree_with_env_shared_cache() {
 
 #[test]
 fn test_evaluate_value_tree_with_env_lua_tag_uses_cache() {
+    use crate::lua_eval::ServiceEvalContext;
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("PORT".to_string(), "8080".to_string());
-    let ctx = EvalContext { env, ..Default::default() };
+    let ctx = EvalContext {
+        service: Some(ServiceEvalContext {
+            env,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let path = test_path();
     let mut cached_env: Option<mlua::Table> = None;
 
     let yaml = r#"
-command: !lua 'return {"echo", ctx.env.PORT}'
+command: !lua 'return {"echo", service.env.PORT}'
 "#;
     let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
     evaluate_value_tree_with_env(&mut value, &eval, &ctx, &path, "test", &mut cached_env).unwrap();

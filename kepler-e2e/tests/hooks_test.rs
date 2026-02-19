@@ -7,7 +7,7 @@ use std::time::Duration;
 
 const TEST_MODULE: &str = "hooks_test";
 
-/// Test that global pre_start with `if: "not ctx.initialized"` runs once at first start
+/// Test that global pre_start with `if: "not service.initialized"` runs once at first start
 #[tokio::test]
 async fn test_global_on_init_runs_once() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;

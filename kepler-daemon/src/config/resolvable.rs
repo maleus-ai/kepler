@@ -77,12 +77,12 @@ impl<'a> ResolvableCommand<'a> {
     /// Resolve all ConfigValue fields and return a CommandSpec.
     ///
     /// Resolution pipeline:
-    /// 1. Resolve `env_file` → load env file variables into `ctx.env`
+    /// 1. Resolve `env_file` → load env file variables into active env
     /// 2. Build `PreparedEnv`, resolve environment sequentially
     /// 3. Freeze env table
     /// 4. Resolve remaining fields (command/run, working_dir, user, groups, limits)
     /// 5. Absolutize working_dir relative to `config_dir`
-    /// 6. Build process env from `ctx.env`
+    /// 6. Build process env from active env
     /// 7. Return `CommandSpec`
     ///
     /// The `clear_env` parameter controls whether the spawned process inherits
@@ -124,8 +124,8 @@ impl<'a> ResolvableCommand<'a> {
                 match crate::env::load_env_file(&resolved_path) {
                     Ok(vars) => {
                         for (k, v) in &vars {
-                            ctx.env_file.insert(k.clone(), v.clone());
-                            ctx.env.insert(k.clone(), v.clone());
+                            ctx.active_env_file_mut().insert(k.clone(), v.clone());
+                            ctx.active_env_mut().insert(k.clone(), v.clone());
                         }
                     }
                     Err(e) => {
@@ -175,9 +175,9 @@ impl<'a> ResolvableCommand<'a> {
                     })?
                 }
             };
-            // Add to both ctx.env and the live Lua env table
+            // Add to both active env and the live Lua env table
             if let Some((k, v)) = resolved.split_once('=') {
-                ctx.env.insert(k.to_string(), v.to_string());
+                ctx.active_env_mut().insert(k.to_string(), v.to_string());
                 prepared.set_env(k, v).map_err(|e| DaemonError::LuaError {
                     path: config_path.to_path_buf(),
                     message: format!("Error updating Lua env table: {}", e),
@@ -235,8 +235,8 @@ impl<'a> ResolvableCommand<'a> {
             .map(|wd| if wd.is_relative() { config_dir.join(wd) } else { wd })
             .unwrap_or_else(|| config_dir.to_path_buf());
 
-        // Step 6: Build process env from ctx.env
-        let process_env = ctx.env.clone();
+        // Step 6: Build process env from active env
+        let process_env = ctx.active_env().clone();
 
         // Step 7: Return CommandSpec
         Ok(CommandSpec::with_all_options(

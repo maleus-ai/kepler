@@ -22,7 +22,7 @@ Kepler supports passing structured data between lifecycle hooks, service process
 
 There are two ways to capture outputs, and one way to declare them:
 
-1. **Hook step outputs** — Add `output: <step_name>` to a hook step. Lines matching `::output::KEY=VALUE` on stdout are captured and available as `ctx.hooks.<hook_name>.outputs.<step_name>.<key>`.
+1. **Hook step outputs** — Add `output: <step_name>` to a hook step. Lines matching `::output::KEY=VALUE` on stdout are captured and available as `service.hooks.<hook_name>.outputs.<step_name>.<key>` (or `hooks.<hook_name>.outputs.<step_name>.<key>` shortcut).
 
 2. **Service process outputs** — Set `output: true` on a service. Lines matching `::output::KEY=VALUE` on the process stdout are captured on exit and available to dependent services as `deps['<name>'].outputs.<key>`.
 
@@ -71,7 +71,7 @@ services:
       pre_start:
         - run: echo "::output::token=$(generate-token)"
           output: gen_token
-        - run: echo "Using token ${{ ctx.hooks.pre_start.outputs.gen_token.token }}$"
+        - run: echo "Using token ${{ hooks.pre_start.outputs.gen_token.token }}$"
 ```
 
 - Only steps with `output:` have their stdout scanned for markers
@@ -82,7 +82,7 @@ services:
 ### Access Pattern
 
 ```
-ctx.hooks.<hook_name>.outputs.<step_name>.<key>
+service.hooks.<hook_name>.outputs.<step_name>.<key>
 ```
 
 A shortcut is also available:
@@ -128,7 +128,7 @@ services:
         - run: echo "::output::token=$(generate-token)"
           output: setup
     outputs:
-      auth_token: ${{ ctx.hooks.pre_start.outputs.setup.token }}$
+      auth_token: ${{ service.hooks.pre_start.outputs.setup.token }}$
 ```
 
 - Resolved **after process exit** (when all hook outputs are available)
@@ -271,7 +271,7 @@ services:
         - run: echo "::output::token=$(generate-token)"
           output: init
     outputs:
-      auth_token: ${{ ctx.hooks.pre_start.outputs.init.token }}$
+      auth_token: ${{ service.hooks.pre_start.outputs.init.token }}$
 
   app:
     command: ["./app"]
@@ -318,7 +318,7 @@ services:
         - run: echo "::output::summary=Worker finished successfully"
           output: report
     outputs:
-      result: ${{ "processed:" .. (ctx.hooks.post_exit.outputs.report.summary or "unknown") }}$
+      result: ${{ "processed:" .. (service.hooks.post_exit.outputs.report.summary or "unknown") }}$
       status: override_from_declaration  # overrides process "status=done"
 
   aggregator:

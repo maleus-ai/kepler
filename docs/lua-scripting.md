@@ -55,14 +55,14 @@ Best for complex logic, conditionals, and multi-line computations:
 services:
   app:
     command: !lua |
-      if ctx.restart_count > 0 then
+      if service.restart_count > 0 then
         return {"./app", "--recovery-mode"}
       else
         return {"./app"}
       end
     environment: !lua |
       local env = {"NODE_ENV=production"}
-      if ctx.env.DEBUG then
+      if env.DEBUG then
         table.insert(env, "LOG_LEVEL=debug")
       end
       return env
@@ -91,10 +91,10 @@ The `!lua` YAML tag allows full Lua code blocks that return a value:
 services:
   backend:
     command: !lua |
-      return {"node", "server.js", "--port", tostring(ctx.env.PORT or 8080)}
+      return {"node", "server.js", "--port", tostring(env.PORT or 8080)}
     environment: !lua |
       local result = {"NODE_ENV=production"}
-      if ctx.env.DEBUG then
+      if env.DEBUG then
         table.insert(result, "DEBUG=true")
       end
       return result
@@ -111,22 +111,42 @@ Lua scripts can return:
 
 ## Available Context
 
-Every `!lua` block and `${{ }}$` expression receives the same context:
+Every `!lua` block and `${{ }}$` expression receives context tables depending on the evaluation scope:
+
+### Service Context
+
+Available in service-level expressions and service hook contexts:
 
 | Variable | Description |
 |----------|-------------|
-| `env` | Shortcut for `ctx.env` (full merged environment) |
-| `ctx.env` | Read-only environment table (contents depend on evaluation stage) |
-| `ctx.sys_env` | Read-only system environment only |
-| `ctx.env_file` | Read-only env_file variables only |
-| `ctx.service_name` | Current service name (`nil` if in global context) |
-| `ctx.hook_name` | Current hook name (`nil` outside hooks) |
-| `ctx.restart_count` | Number of times the service has restarted |
-| `ctx.initialized` | Whether the service has been initialized |
-| `ctx.exit_code` | Last exit code (available during restart) |
-| `ctx.status` | Current service status |
-| `ctx.hooks` | Hook step outputs (`hook_name.outputs.step_name.key`). See [Outputs](outputs.md) |
-| `hooks` | Shortcut for `ctx.hooks` |
+| `service.name` | Current service name |
+| `service.raw_env` | Read-only inherited base environment (from daemon/CLI) |
+| `service.env_file` | Read-only env_file variables only |
+| `service.env` | Read-only full merged environment (raw_env + env_file + environment) |
+| `service.initialized` | Whether the service has been initialized |
+| `service.restart_count` | Number of times the service has restarted |
+| `service.exit_code` | Last exit code (available during restart) |
+| `service.status` | Current service status |
+| `service.hooks` | Hook step outputs (`hook_name.outputs.step_name.key`). See [Outputs](outputs.md) |
+
+### Hook Context
+
+Available in hook expressions:
+
+| Variable | Description |
+|----------|-------------|
+| `hook.name` | Current hook name |
+| `hook.raw_env` | Read-only inherited base environment (from parent service) |
+| `hook.env_file` | Read-only env_file variables only |
+| `hook.env` | Read-only full merged environment (raw_env + env_file + environment) |
+| `hook.had_failure` | Whether a previous hook step in the list has failed |
+
+### Shortcuts and Shared Tables
+
+| Variable | Description |
+|----------|-------------|
+| `env` | Shortcut: points to `hook.env` if in hook context, else `service.env` |
+| `hooks` | Shortcut for `service.hooks` |
 | `deps` | Dependency information table |
 | `global` | Shared mutable table for cross-block state |
 
@@ -194,9 +214,9 @@ The `kepler:` namespace (logs, hooks) and the `lua:` directive are evaluated **o
 Service-level `${{ }}$` and `!lua` are evaluated **at each service start**. This means:
 
 - **Re-evaluated on every start/restart** — not cached from the first start
-- **Full context available** — sys_env, env_file, environment, deps, restart_count
+- **Full context available** — raw_env, env_file, environment, deps, restart_count
 - **Dependencies resolved** — `deps` table reflects current dependency states
-- **Runtime-aware** — `ctx.restart_count`, `ctx.exit_code`, etc. are live values
+- **Runtime-aware** — `service.restart_count`, `service.exit_code`, etc. are live values
 
 To force re-evaluation of global config, use `kepler recreate`.
 
@@ -206,8 +226,8 @@ To force re-evaluation of global config, use `kepler recreate`.
 
 Within a service, evaluation happens in this order:
 
-| Order | What | `ctx.env` contains |
-|-------|------|-------------------|
+| Order | What | `env` contains |
+|-------|------|---------------|
 | 1 | `lua:` directive | System env only |
 | 2 | `env_file` path `${{ }}$` | System env only |
 | 3 | `environment` array `${{ }}$` | System env + env_file (sequential) |
@@ -321,8 +341,8 @@ The Lua environment provides a **restricted subset** of the standard library:
 
 ## Security Model
 
-- **Environment tables are frozen** — `ctx.env`, `ctx.sys_env`, `ctx.env_file` are read-only via Luau's `table.freeze`
-- **Writes to `ctx.*` raise runtime errors**
+- **Environment tables are frozen** — `service.env`, `service.raw_env`, `service.env_file`, `hook.env`, `hook.raw_env`, `hook.env_file` are read-only via Luau's `table.freeze`
+- **Writes to `service.*` / `hook.*` tables raise runtime errors**
 - **Metatables are protected** from removal
 - **`require()` is blocked** — external module loading is not permitted
 - **`${{ }}$` shares the same environment as `!lua`** — bare variable names resolve to nil (standard Lua behavior)
@@ -359,11 +379,11 @@ services:
   app:
     environment: !lua |
       local env = {"NODE_ENV=production"}
-      if ctx.env.ENABLE_METRICS then
+      if env.ENABLE_METRICS then
         table.insert(env, "METRICS=true")
         table.insert(env, "METRICS_PORT=9090")
       end
-      if ctx.env.DEBUG then
+      if env.DEBUG then
         table.insert(env, "LOG_LEVEL=debug")
       end
       return env
@@ -386,9 +406,9 @@ services:
         condition: service_healthy
       cache:
         condition: !lua |
-          return ctx.env.CACHE_CONDITION or "service_started"
+          return env.CACHE_CONDITION or "service_started"
         restart: !lua |
-          return ctx.env.USE_CACHE == "true"
+          return env.USE_CACHE == "true"
 ```
 
 ### Recovery Mode on Restart
@@ -396,9 +416,9 @@ services:
 ```yaml
 services:
   app:
-    command: ${{ ctx.restart_count > 0 and {"./app", "--recovery"} or {"./app"} }}$
+    command: ${{ service.restart_count > 0 and {"./app", "--recovery"} or {"./app"} }}$
     environment:
-      - RESTART_COUNT=${{ ctx.restart_count }}$
+      - RESTART_COUNT=${{ service.restart_count }}$
 ```
 
 ### Cross-Service Environment References
@@ -438,7 +458,7 @@ services:
 ## See Also
 
 - [Inline Expressions](variable-expansion.md) — `${{ expr }}$` syntax reference
-- [Environment Variables](environment-variables.md) — How `ctx.env` is built
+- [Environment Variables](environment-variables.md) — How `env` is built
 - [Configuration](configuration.md) — Full config reference
 - [Architecture](architecture.md#lua-scripting-security) — Internal sandbox implementation
 - [Outputs](outputs.md) — Hook step outputs, process outputs, and cross-service output passing

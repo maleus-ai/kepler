@@ -82,6 +82,8 @@ pub struct ServiceState {
     pub computed_env: HashMap<String, String>,
     /// Pre-computed working directory for this service
     pub working_dir: PathBuf,
+    /// Env vars loaded from env_file (before environment entries)
+    pub env_file_vars: HashMap<String, String>,
     /// Whether the service was healthy at some point (for service_unhealthy condition)
     pub was_healthy: bool,
     /// Reason for being skipped (set when status is Skipped)
@@ -104,6 +106,7 @@ impl Default for ServiceState {
             initialized: false,
             computed_env: HashMap::new(),
             working_dir: PathBuf::new(),
+            env_file_vars: HashMap::new(),
             was_healthy: false,
             skip_reason: None,
             fail_reason: None,
@@ -277,6 +280,7 @@ impl PersistedServiceState {
             initialized: self.initialized,
             computed_env,
             working_dir,
+            env_file_vars: HashMap::new(),
             was_healthy: self.was_healthy,
             skip_reason: self.skip_reason.clone(),
             fail_reason: self.fail_reason.clone(),

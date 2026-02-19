@@ -30,8 +30,11 @@ pub fn process_lua_scripts(
             // Process kepler.logs (with sys_env only, before services)
             if let Some(logs_value) = kepler_map.get_mut(Value::String("logs".to_string())) {
                 let ctx = EvalContext {
-                    sys_env: sys_env.clone(),
-                    env: sys_env.clone(),
+                    service: Some(crate::lua_eval::ServiceEvalContext {
+                        raw_env: sys_env.clone(),
+                        env: sys_env.clone(),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 };
                 super::expand::evaluate_value_tree(logs_value, evaluator, &ctx, config_path, "kepler.logs")?;
@@ -68,15 +71,18 @@ fn process_global_hooks_lua(
         .collect();
 
     let mut ctx = EvalContext {
-        sys_env: sys_env.clone(),
-        env: sys_env.clone(),
+        hook: Some(crate::lua_eval::HookEvalContext {
+            raw_env: sys_env.clone(),
+            env: sys_env.clone(),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
     for hook_name in hook_names {
         if let Some(hook_value) = hooks_map.get_mut(Value::String(hook_name.clone())) {
             let field_path = format!("kepler.hooks.{}", hook_name);
-            ctx.hook_name = Some(hook_name);
+            ctx.hook.as_mut().unwrap().name = hook_name;
             super::expand::evaluate_value_tree(hook_value, evaluator, &ctx, config_path, &field_path)?;
         }
     }

@@ -32,7 +32,7 @@ kepler:
       on_start: clear
   hooks:
     pre_start:
-      - if: "not ctx.initialized"
+      - if: "not service.initialized"
         run: echo "global on_init"
       - command: ["sh", "-c", "echo global pre_start"]
     post_start:
@@ -63,7 +63,7 @@ services:
         on_start: clear
     hooks:
       pre_start:
-        - if: "not ctx.initialized"
+        - if: "not service.initialized"
           run: echo "postgres on_init"
         - command: ["sh", "-c", "echo postgres pre_start"]
       post_start:
@@ -87,7 +87,7 @@ services:
     command: ["sh", "-c", "echo RabbitMQ starting; exec sleep 300"]
     restart: always
     environment: !lua |
-      return svc_env(ctx.service_name, {"AMQP_PORT=" .. next_port()})
+      return svc_env(service.name, {"AMQP_PORT=" .. next_port()})
     healthcheck:
       test: ["true"]
       interval: 1s
@@ -131,7 +131,7 @@ services:
       start_period: 1s
     hooks:
       pre_start:
-        - if: "not ctx.initialized"
+        - if: "not service.initialized"
           run: echo "auth on_init"
         - run: echo "auth pre_start"
       post_start:
@@ -257,7 +257,7 @@ services:
       pre_start:
         run: echo "metrics pre_start"
         environment: !lua |
-          return {"METRICS_SVC=" .. ctx.service_name}
+          return {"METRICS_SVC=" .. service.name}
 
   dashboard:
     command: !lua |

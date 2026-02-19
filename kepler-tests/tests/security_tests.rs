@@ -825,25 +825,28 @@ fn test_lua_debug_library_blocked() {
 /// on a frozen table throws a runtime error.
 #[test]
 fn test_lua_rawset_cannot_modify_env() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator, ServiceEvalContext};
     use std::collections::HashMap;
 
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext {
-        env: HashMap::from([("SECRET".into(), "original".into())]),
+        service: Some(ServiceEvalContext {
+            env: HashMap::from([("SECRET".into(), "original".into())]),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
     // First verify the value is accessible
-    let result: String = eval.eval(r#"return ctx.env.SECRET"#, &ctx, "test").unwrap();
+    let result: String = eval.eval(r#"return env.SECRET"#, &ctx, "test").unwrap();
     assert_eq!(result, "original");
 
     // rawset on a frozen table should error
     let code = r#"
         if rawset then
-            rawset(ctx.env, "SECRET", "hacked")
+            rawset(env, "SECRET", "hacked")
         end
-        return ctx.env.SECRET
+        return env.SECRET
     "#;
     let result = eval.eval::<mlua::Value>(code, &ctx, "test");
     // Either rawset throws on the frozen table, or if rawset is not available,
@@ -863,18 +866,21 @@ fn test_lua_rawset_cannot_modify_env() {
 /// Verify that frozen tables are protected from metatable access
 #[test]
 fn test_lua_getmetatable_frozen() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator, ServiceEvalContext};
     use std::collections::HashMap;
 
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext {
-        env: HashMap::from([("FOO".into(), "bar".into())]),
+        service: Some(ServiceEvalContext {
+            env: HashMap::from([("FOO".into(), "bar".into())]),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
     // On a Luau-frozen table, getmetatable returns nil (metatable is protected)
     let result: mlua::Value = eval
-        .eval(r#"return getmetatable(ctx.env)"#, &ctx, "test")
+        .eval(r#"return getmetatable(env)"#, &ctx, "test")
         .unwrap();
     assert!(
         matches!(result, mlua::Value::Nil),
@@ -883,19 +889,22 @@ fn test_lua_getmetatable_frozen() {
     );
 }
 
-/// Verify that ctx table itself is frozen
+/// Verify that service table itself is frozen
 #[test]
-fn test_lua_ctx_table_frozen() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+fn test_lua_service_table_frozen() {
+    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator, ServiceEvalContext};
 
     let eval = LuaEvaluator::new().unwrap();
-    let ctx = EvalContext::default();
+    let ctx = EvalContext {
+        service: Some(ServiceEvalContext::default()),
+        ..Default::default()
+    };
 
-    // Writing to ctx should raise an error
-    let result = eval.eval::<mlua::Value>(r#"ctx.injected = "hacked"; return nil"#, &ctx, "test");
+    // Writing to service should raise an error
+    let result = eval.eval::<mlua::Value>(r#"service.injected = "hacked"; return nil"#, &ctx, "test");
     assert!(
         result.is_err(),
-        "Writing to ctx should fail: ctx is frozen"
+        "Writing to service should fail: service is frozen"
     );
 }
 

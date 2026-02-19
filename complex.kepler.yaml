@@ -63,7 +63,7 @@ kepler:
 
   hooks:
     pre_start:
-      - if: not ctx.initialized
+      - if: not service.initialized
         run: echo "Global on_init — initializing platform"
         environment:
           - KEPLER_PHASE=init
@@ -118,7 +118,7 @@ services:
         on_exit: retain
     hooks:
       pre_start:
-        - if: not ctx.initialized
+        - if: not service.initialized
           run: echo "postgres on_init — creating data directory"
         - command: ["sh", "-c", "echo 'postgres pre_start — checking config'"]
       post_start:
@@ -168,7 +168,7 @@ services:
       ]
     restart: always
     environment: !lua |
-      return svc_env(ctx.service_name, {"AMQP_PORT=" .. next_port()})
+      return svc_env(service.name, {"AMQP_PORT=" .. next_port()})
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/rmq_ready"]
       interval: 3s
@@ -247,7 +247,7 @@ services:
         - if: always()
           run: echo "db-migration pre_start — always runs regardless of prior step outcome"
       post_exit:
-        - if: ctx.exit_code == 0
+        - if: service.exit_code == 0
           run: echo "db-migration post_exit — migration succeeded"
         - if: failure()
           run: echo "db-migration post_exit — a prior hook step failed, running cleanup"
@@ -315,15 +315,19 @@ services:
       consul:
         condition: service_healthy
     environment: !lua |
-      return svc_env(ctx.service_name, nil)
+      return svc_env(service.name, nil)
 
   # ═══════════════════════════════════════════════════════════════════════════
   # TIER 3: Core Services (5 services)
   # ═══════════════════════════════════════════════════════════════════════════
 
-  # 11. auth-service — 3 deps, ctx.restart_count, dep output access, hook dep state, global table
+  # 11. auth-service — 3 deps, service.restart_count, dep output access, hook dep state, global table
   auth-service:
-    command: ${{ ctx.restart_count > 0 and {"sh", "-c", "echo 'Auth service RESTARTING (attempt " .. ctx.restart_count .. ")'; touch /tmp/auth_ready; while true; do sleep 5; done"} or {"sh", "-c", "echo 'Auth service starting'; touch /tmp/auth_ready; while true; do sleep 5; done"} }}$
+    command: !lua |
+      if service.restart_count > 0 then
+        return {"sh", "-c", "echo 'Auth service RESTARTING (attempt " .. service.restart_count .. ")'; touch /tmp/auth_ready; while true; do sleep 5; done"}
+      end
+      return {"sh", "-c", "echo 'Auth service starting'; touch /tmp/auth_ready; while true; do sleep 5; done"}
     restart: always
     depends_on:
       - postgres:
@@ -335,7 +339,7 @@ services:
           condition: service_completed_successfully
     environment:
       - SCHEMA_VERSION=${{ deps["db-migration"].outputs.schema_version or "unknown" }}$
-      - RESTART_COUNT=${{ ctx.restart_count }}$
+      - RESTART_COUNT=${{ service.restart_count }}$
     healthcheck:
       test: ["sh", "-c", "test -f /tmp/auth_ready"]
       interval: 2s
@@ -344,11 +348,11 @@ services:
       start_period: 2s
     hooks:
       pre_start:
-        - if: not ctx.initialized
+        - if: not service.initialized
           run: echo "::output::jwt_key=rsa-256-init"
           output: init_keys
           environment: !lua |
-            track_init(ctx.service_name)
+            track_init(service.name)
             return {"INIT_PHASE=jwt_setup"}
         - run: echo "auth-service pre_start — schema=${{ deps['db-migration'].outputs.schema_version or 'n/a' }}$"
       post_start:
@@ -360,7 +364,8 @@ services:
       post_stop:
         command: ["sh", "-c", "echo 'auth-service post_stop — cleanup done'"]
       pre_restart:
-        run: echo "auth-service pre_restart — restart #${{ ctx.restart_count }}$, saving state"
+        run: |
+          echo "auth-service pre_restart — restart #${{ service.restart_count }}$, saving state"
       post_restart:
         run: echo "auth-service post_restart — state restored"
 
@@ -405,7 +410,7 @@ services:
           timeout: 2m
       - config-service:
           condition: service_healthy
-    env_file: ${{ ctx.sys_env.GATEWAY_ENV_FILE or ".env" }}$
+    env_file: ${{ service.raw_env.GATEWAY_ENV_FILE or ".env" }}$
     environment:
       - GATEWAY_VERSION=${{ global.platform_version }}$
     healthcheck:
@@ -436,7 +441,7 @@ services:
       retries: 3
       start_period: 2s
 
-  # 15. storage-service — Lua env, cross-service output access, ctx.status
+  # 15. storage-service — Lua env, cross-service output access, service.status
   storage-service:
     command:
       [
@@ -451,7 +456,7 @@ services:
       - minio-init:
           condition: service_completed_successfully
     environment: !lua |
-      return svc_env(ctx.service_name, {
+      return svc_env(service.name, {
         "STORAGE_BACKEND=s3",
         "AVAILABLE_BUCKETS=" .. (deps["minio-init"].outputs.buckets or "default")
       })
@@ -958,7 +963,7 @@ services:
       retries: 4
       start_period: 3s
 
-  # 39. alert-manager — Lua environment with ctx.hook_name and ctx.service_name
+  # 39. alert-manager — Lua environment with hook.name and service.name
   alert-manager:
     command:
       [
@@ -976,7 +981,7 @@ services:
       pre_start:
         run: echo "alert-manager pre_start"
         environment: !lua |
-          return {"ALERT_SVC=" .. ctx.service_name, "ALERT_HOOK=" .. ctx.hook_name}
+          return {"ALERT_SVC=" .. service.name, "ALERT_HOOK=" .. hook.name}
 
   # 40. dashboard — 4-dep fan-in, Lua command, healthcheck
   dashboard:
@@ -1019,9 +1024,9 @@ services:
       retries: 3
       start_period: 2s
     environment: !lua |
-      local label = track_init(ctx.service_name)
-      register_service(ctx.service_name)
-      return svc_env(ctx.service_name, {"INIT_LABEL=" .. label})
+      local label = track_init(service.name)
+      register_service(service.name)
+      return svc_env(service.name, {"INIT_LABEL=" .. label})
 
   # 42. trace-collector — Deep chain (5+ levels: rabbitmq→event-bus→gateway→trace-collector)
   trace-collector:
@@ -1155,7 +1160,7 @@ services:
           condition: service_failed
     hooks:
       pre_start:
-        - if: not ctx.initialized
+        - if: not service.initialized
           run: echo "::output::runbook_loaded=true"
           output: init_step
         - run: echo "emergency-shutdown pre_start — notifying oncall, runbook=${{ hooks.pre_start.outputs.init_step.runbook_loaded or 'skipped' }}$"
@@ -1164,10 +1169,10 @@ services:
         - if: always()
           run: echo "emergency-shutdown pre_start — final step always executes"
       post_exit:
-        - if: ctx.exit_code == 0
+        - if: service.exit_code == 0
           run: echo "emergency-shutdown post_exit — incident report filed successfully"
-        - if: ctx.exit_code ~= 0
-          run: echo "emergency-shutdown post_exit — shutdown failed with code ${{ ctx.exit_code }}$"
+        - if: service.exit_code ~= 0
+          run: echo "emergency-shutdown post_exit — shutdown failed with code ${{ service.exit_code }}$"
 
   # 50. post-mortem — run: form, embedded expressions, dep exit_code access
   post-mortem:
@@ -1192,7 +1197,7 @@ services:
         - command:
             ["sh", "-c", "echo 'post-mortem post_exit — archiving report'"]
         - if: always()
-          run: echo "post-mortem — final cleanup, status=${{ ctx.status }}$"
+          run: echo "post-mortem — final cleanup, status=${{ service.status }}$"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # TIER 8: Optional/Conditional (2 services)
@@ -1201,7 +1206,7 @@ services:
 
   # 51. profiler — Conditional service, only starts when ENABLE_PROFILING is set
   profiler:
-    if: ${{ ctx.env.ENABLE_PROFILING ~= nil }}$
+    if: ${{ env.ENABLE_PROFILING ~= nil }}$
     command:
       [
         "sh",

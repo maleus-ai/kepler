@@ -137,7 +137,7 @@ Kepler's Lua scripting uses a sandboxed Luau runtime with restricted capabilitie
 - No native library loading
 
 **Protected:**
-- Environment tables (`ctx.env`, `ctx.sys_env`, `ctx.env_file`) are frozen via metatable proxies
+- Environment tables (`service.env`, `service.raw_env`, `service.env_file`, `hook.env`, `hook.raw_env`, `hook.env_file`) are frozen via metatable proxies
 - Writes to frozen tables raise runtime errors
 - Metatables are protected from removal
 

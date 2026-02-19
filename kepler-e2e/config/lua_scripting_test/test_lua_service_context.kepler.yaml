@@ -5,6 +5,6 @@ kepler:
 services:
   lua-context-service:
     command: !lua |
-      -- The 'ctx.service_name' variable contains the service name
-      local svc_name = ctx.service_name or "unknown"
+      -- The 'service.name' variable contains the service name
+      local svc_name = service.name or "unknown"
       return {"sh", "-c", "echo SERVICE_NAME=" .. svc_name .. "; sleep 300"}

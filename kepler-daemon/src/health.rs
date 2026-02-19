@@ -186,9 +186,14 @@ async fn run_status_change_hook(
         let evaluator = config.as_ref()
             .and_then(|c| c.create_lua_evaluator().ok());
 
+        // Get raw_env (sys_env from daemon/CLI) for hook context
+        let raw_env = handle.get_sys_env().await;
+
         let hook_params = ServiceHookParams {
             working_dir: &ctx.working_dir,
             env: &ctx.env,
+            raw_env: &raw_env,
+            env_file_vars: &ctx.env_file_vars,
             log_config: Some(&ctx.log_config),
             service_user: resolved.user.as_deref(),
             service_groups: &resolved.groups,

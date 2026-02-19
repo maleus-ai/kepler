@@ -184,6 +184,7 @@ pub enum ConfigCommand {
         config: Box<ServiceConfig>,
         computed_env: HashMap<String, String>,
         working_dir: PathBuf,
+        env_file_vars: HashMap<String, String>,
     },
     ClearServiceLogs {
         service_name: String,
