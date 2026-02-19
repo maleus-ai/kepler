@@ -47,6 +47,20 @@ pub use expr::DynamicExpr;
 /// Default maximum size for output capture per step/process (1 MB).
 pub const DEFAULT_OUTPUT_MAX_SIZE: usize = 1024 * 1024;
 
+/// Determine which shell to use for `run:` scripts.
+/// Priority: $SHELL from sys_env → /bin/bash if it exists → sh
+pub fn resolve_shell(env: &HashMap<String, String>) -> String {
+    if let Some(shell) = env.get("SHELL") {
+        if !shell.is_empty() {
+            return shell.clone();
+        }
+    }
+    if std::path::Path::new("/bin/bash").exists() {
+        return "/bin/bash".to_string();
+    }
+    "sh".to_string()
+}
+
 // ============================================================================
 // ConfigValue<T> — static/dynamic field wrapper
 // ============================================================================
@@ -982,7 +996,10 @@ impl KeplerConfig {
         let command = if raw.has_run() {
             let run = raw.run.resolve_with_env(evaluator, ctx, config_path, &format!("{}.run", name), &mut shared_env)?;
             match run {
-                Some(script) => vec!["sh".to_string(), "-c".to_string(), script],
+                Some(script) => {
+                    let shell = resolve_shell(&ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default());
+                    vec![shell, "-c".to_string(), script]
+                },
                 None => Vec::new(),
             }
         } else {
