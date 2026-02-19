@@ -1,10 +1,15 @@
 //! Config parsing tests
 
-use kepler_daemon::config::{parse_duration, HookCommand, KeplerConfig};
+use kepler_daemon::config::{parse_duration, HookCommand, KeplerConfig, RawServiceConfig, ServiceConfig};
 use kepler_daemon::state::{ServiceState, ServiceStatus};
 use kepler_protocol::protocol::ServiceInfo;
 use std::time::Duration;
 use tempfile::TempDir;
+
+fn deser_svc(raw: &RawServiceConfig) -> ServiceConfig {
+    let val = serde_yaml::to_value(raw).unwrap();
+    serde_yaml::from_value(val).unwrap()
+}
 
 /// 10s, 5m, 1h, 100ms, 1d all parse correctly
 #[test]
@@ -46,7 +51,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let hc = config.services["test"].healthcheck.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let hc = svc.healthcheck.as_ref().unwrap();
     assert_eq!(hc.interval, Duration::from_secs(30)); // Default
     assert_eq!(hc.timeout, Duration::from_secs(30)); // Default
     assert_eq!(hc.retries, 3); // Default
@@ -74,7 +80,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let hc = config.services["test"].healthcheck.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let hc = svc.healthcheck.as_ref().unwrap();
     assert_eq!(hc.interval, Duration::from_secs(5));
     assert_eq!(hc.timeout, Duration::from_secs(10));
     assert_eq!(hc.retries, 5);
@@ -101,7 +108,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let hooks = config.services["test"].hooks.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let hooks = svc.hooks.as_ref().unwrap();
 
     assert!(hooks.post_healthcheck_success.is_some());
     assert!(hooks.post_healthcheck_fail.is_some());
@@ -185,7 +193,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let hooks = config.services["test"].hooks.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let hooks = svc.hooks.as_ref().unwrap();
     match &hooks.pre_start.as_ref().unwrap().0[0] {
         HookCommand::Script { run, .. } => {
             assert_eq!(run, "echo hello && echo world");
@@ -212,7 +221,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let hooks = config.services["test"].hooks.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let hooks = svc.hooks.as_ref().unwrap();
     match &hooks.pre_start.as_ref().unwrap().0[0] {
         HookCommand::Command { command, .. } => {
             assert_eq!(command, &vec!["echo", "hello", "world"]);
@@ -274,21 +284,19 @@ services:
 
     use kepler_daemon::config::RestartPolicy;
 
+    let no_restart = deser_svc(&config.services["no_restart"]);
+    let always_restart = deser_svc(&config.services["always_restart"]);
+    let on_failure = deser_svc(&config.services["on_failure"]);
+
     // Simple form uses policy() accessor
-    assert_eq!(config.services["no_restart"].restart.policy(), &RestartPolicy::No);
-    assert_eq!(
-        config.services["always_restart"].restart.policy(),
-        &RestartPolicy::Always
-    );
-    assert_eq!(
-        config.services["on_failure"].restart.policy(),
-        &RestartPolicy::OnFailure
-    );
+    assert_eq!(no_restart.restart.policy(), &RestartPolicy::No);
+    assert_eq!(always_restart.restart.policy(), &RestartPolicy::Always);
+    assert_eq!(on_failure.restart.policy(), &RestartPolicy::OnFailure);
 
     // Simple form has no watch patterns
-    assert!(config.services["no_restart"].restart.watch_patterns().is_empty());
-    assert!(config.services["always_restart"].restart.watch_patterns().is_empty());
-    assert!(config.services["on_failure"].restart.watch_patterns().is_empty());
+    assert!(no_restart.restart.watch_patterns().is_empty());
+    assert!(always_restart.restart.watch_patterns().is_empty());
+    assert!(on_failure.restart.watch_patterns().is_empty());
 }
 
 /// Restart policy parsing (extended form with just policy)
@@ -310,9 +318,10 @@ services:
 
     use kepler_daemon::config::RestartPolicy;
 
+    let svc = deser_svc(&config.services["always_restart"]);
     // Extended form with just policy (no watch)
-    assert_eq!(config.services["always_restart"].restart.policy(), &RestartPolicy::Always);
-    assert!(config.services["always_restart"].restart.watch_patterns().is_empty());
+    assert_eq!(svc.restart.policy(), &RestartPolicy::Always);
+    assert!(svc.restart.watch_patterns().is_empty());
 }
 
 /// Environment variable parsing
@@ -334,7 +343,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let env = &config.services["test"].environment;
+    let svc = deser_svc(&config.services["test"]);
+    let env = &svc.environment;
     assert_eq!(env.len(), 3);
     assert!(env.contains(&"FOO=bar".to_string()));
     assert!(env.contains(&"BAZ=qux".to_string()));
@@ -370,7 +380,8 @@ services:
     assert_eq!(global_logs.get_on_stop(), Some(LogRetention::Retain));
     assert_eq!(global_logs.get_on_start(), Some(LogRetention::Clear));
 
-    let service_logs = config.services["test"].logs.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let service_logs = svc.logs.as_ref().unwrap();
     assert_eq!(service_logs.get_on_restart(), Some(LogRetention::Retain));
 }
 
@@ -390,7 +401,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let working_dir = config.services["test"].working_dir.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let working_dir = svc.working_dir.as_ref().unwrap();
     assert_eq!(working_dir.to_string_lossy(), "/tmp/test");
 }
 
@@ -422,9 +434,12 @@ services:
     assert!(config.services.contains_key("backend"));
     assert!(config.services.contains_key("database"));
 
-    assert_eq!(config.services["frontend"].depends_on.names(), vec!["backend"]);
-    assert_eq!(config.services["backend"].depends_on.names(), vec!["database"]);
-    assert!(config.services["database"].depends_on.is_empty());
+    let frontend = deser_svc(&config.services["frontend"]);
+    let backend = deser_svc(&config.services["backend"]);
+    let database = deser_svc(&config.services["database"]);
+    assert_eq!(frontend.depends_on.names(), vec!["backend"]);
+    assert_eq!(backend.depends_on.names(), vec!["database"]);
+    assert!(database.depends_on.is_empty());
 }
 
 /// Watch patterns parse correctly (now under restart.watch)
@@ -448,7 +463,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let watch = config.services["test"].restart.watch_patterns();
+    let svc = deser_svc(&config.services["test"]);
+    let watch = svc.restart.watch_patterns();
     assert_eq!(watch.len(), 3);
     assert!(watch.contains(&"src/**/*.rs".to_string()));
     assert!(watch.contains(&"Cargo.toml".to_string()));
@@ -476,9 +492,10 @@ services:
 
     use kepler_daemon::config::RestartPolicy;
 
-    assert_eq!(config.services["test"].restart.policy(), &RestartPolicy::OnFailure);
-    assert_eq!(config.services["test"].restart.watch_patterns(), &["*.ts".to_string()]);
-    assert!(config.services["test"].restart.should_restart_on_file_change());
+    let svc = deser_svc(&config.services["test"]);
+    assert_eq!(svc.restart.policy(), &RestartPolicy::OnFailure);
+    assert_eq!(svc.restart.watch_patterns(), &["*.ts".to_string()]);
+    assert!(svc.restart.should_restart_on_file_change());
 }
 
 /// Restart config with watch but policy: no should fail validation
@@ -537,7 +554,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let hooks = config.services["test"].hooks.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let hooks = svc.hooks.as_ref().unwrap();
     assert!(hooks.pre_start.is_some());
     assert!(hooks.pre_stop.is_some());
     assert!(hooks.pre_restart.is_some());
@@ -574,25 +592,31 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
+    let web = deser_svc(&config.services["web"]);
+    let worker = deser_svc(&config.services["worker"]);
+    let database = deser_svc(&config.services["database"]);
+    let app = deser_svc(&config.services["app"]);
+    let no_user = deser_svc(&config.services["no_user"]);
+
     // User by name
-    assert_eq!(config.services["web"].user.as_deref(), Some("www-data"));
-    assert!(config.services["web"].groups.is_empty());
+    assert_eq!(web.user.as_deref(), Some("www-data"));
+    assert!(web.groups.is_empty());
 
     // User by numeric uid
-    assert_eq!(config.services["worker"].user.as_deref(), Some("1000"));
-    assert!(config.services["worker"].groups.is_empty());
+    assert_eq!(worker.user.as_deref(), Some("1000"));
+    assert!(worker.groups.is_empty());
 
     // User with explicit uid:gid
-    assert_eq!(config.services["database"].user.as_deref(), Some("999:999"));
-    assert!(config.services["database"].groups.is_empty());
+    assert_eq!(database.user.as_deref(), Some("999:999"));
+    assert!(database.groups.is_empty());
 
     // User with colon group and supplementary groups lockdown
-    assert_eq!(config.services["app"].user.as_deref(), Some("node:docker"));
-    assert_eq!(config.services["app"].groups, vec!["docker", "kepler"]);
+    assert_eq!(app.user.as_deref(), Some("node:docker"));
+    assert_eq!(app.groups, vec!["docker", "kepler"]);
 
     // No user specified
-    assert!(config.services["no_user"].user.is_none());
-    assert!(config.services["no_user"].groups.is_empty());
+    assert!(no_user.user.is_none());
+    assert!(no_user.groups.is_empty());
 }
 
 /// Hook user configuration parsing
@@ -620,7 +644,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let hooks = config.services["test"].hooks.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let hooks = svc.hooks.as_ref().unwrap();
 
     // on_start has no user override (inherits from service)
     let hook = &hooks.pre_start.as_ref().unwrap().0[0];
@@ -664,7 +689,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let hooks = config.services["test"].hooks.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let hooks = svc.hooks.as_ref().unwrap();
 
     // on_start has environment and env_file
     let hook = &hooks.pre_start.as_ref().unwrap().0[0];
@@ -798,7 +824,8 @@ services:
     assert_eq!(global_logs.get_on_stop(), Some(LogRetention::Clear));
 
     // Service retention via getter
-    let service_logs = config.services["test"].logs.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let service_logs = svc.logs.as_ref().unwrap();
     assert_eq!(service_logs.get_on_stop(), Some(LogRetention::Retain));
 }
 
@@ -825,8 +852,9 @@ services:
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
     assert_eq!(config.global_logs().unwrap().store, Some(LogStoreConfig::Simple(false)));
+    let svc = deser_svc(&config.services["test"]);
     assert_eq!(
-        config.services["test"].logs.as_ref().unwrap().store,
+        svc.logs.as_ref().unwrap().store,
         Some(LogStoreConfig::Simple(true))
     );
 }
@@ -859,7 +887,8 @@ services:
     assert!(global_store.store_stdout());
     assert!(!global_store.store_stderr());
 
-    let service_store = config.services["test"].logs.as_ref().unwrap().store.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let service_store = svc.logs.as_ref().unwrap().store.as_ref().unwrap();
     assert!(!service_store.store_stdout());
     assert!(service_store.store_stderr());
 }
@@ -898,7 +927,8 @@ services:
     std::fs::write(&config_path, yaml).unwrap();
     let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
 
-    let limits = config.services["test"].limits.as_ref().unwrap();
+    let svc = deser_svc(&config.services["test"]);
+    let limits = svc.limits.as_ref().unwrap();
     assert_eq!(limits.memory.as_deref(), Some("512M"));
     assert_eq!(limits.cpu_time, Some(60));
     assert_eq!(limits.max_fds, Some(1024));
@@ -943,9 +973,11 @@ fn test_max_message_size_constant() {
 /// Test that ServiceInfo includes exit_code for stopped services
 #[test]
 fn test_service_info_exit_code_stopped() {
-    let mut state = ServiceState::default();
-    state.status = ServiceStatus::Stopped;
-    state.exit_code = Some(0);
+    let state = ServiceState {
+        status: ServiceStatus::Stopped,
+        exit_code: Some(0),
+        ..Default::default()
+    };
 
     let info: ServiceInfo = (&state).into();
     assert_eq!(info.status, "stopped");
@@ -955,9 +987,11 @@ fn test_service_info_exit_code_stopped() {
 /// Test that ServiceInfo includes exit_code for failed services
 #[test]
 fn test_service_info_exit_code_failed() {
-    let mut state = ServiceState::default();
-    state.status = ServiceStatus::Failed;
-    state.exit_code = Some(1);
+    let state = ServiceState {
+        status: ServiceStatus::Failed,
+        exit_code: Some(1),
+        ..Default::default()
+    };
 
     let info: ServiceInfo = (&state).into();
     assert_eq!(info.status, "failed");
@@ -967,9 +1001,11 @@ fn test_service_info_exit_code_failed() {
 /// Test that ServiceInfo has None exit_code for running services
 #[test]
 fn test_service_info_exit_code_running() {
-    let mut state = ServiceState::default();
-    state.status = ServiceStatus::Running;
-    state.pid = Some(1234);
+    let state = ServiceState {
+        status: ServiceStatus::Running,
+        pid: Some(1234),
+        ..Default::default()
+    };
 
     let info: ServiceInfo = (&state).into();
     assert_eq!(info.status, "running");
@@ -979,9 +1015,11 @@ fn test_service_info_exit_code_running() {
 /// Test that signal-killed processes map to exit_code -1
 #[test]
 fn test_service_info_exit_code_signal_killed() {
-    let mut state = ServiceState::default();
-    state.status = ServiceStatus::Failed;
-    state.exit_code = None; // Signal-killed processes have no exit code
+    let state = ServiceState {
+        status: ServiceStatus::Failed,
+        exit_code: None, // Signal-killed processes have no exit code
+        ..Default::default()
+    };
 
     let info: ServiceInfo = (&state).into();
     assert_eq!(info.exit_code, None);
@@ -1030,10 +1068,12 @@ fn test_service_info_serialization_none_exit_code_roundtrips() {
 /// Test that Exited status converts to ServiceInfo correctly
 #[test]
 fn test_service_info_exited_status() {
-    let mut state = ServiceState::default();
-    state.status = ServiceStatus::Exited;
-    state.exit_code = Some(0);
-    state.stopped_at = Some(chrono::Utc::now());
+    let state = ServiceState {
+        status: ServiceStatus::Exited,
+        exit_code: Some(0),
+        stopped_at: Some(chrono::Utc::now()),
+        ..Default::default()
+    };
 
     let info: ServiceInfo = (&state).into();
     assert_eq!(info.status, "exited");
@@ -1045,10 +1085,12 @@ fn test_service_info_exited_status() {
 /// Test that signal is propagated to ServiceInfo
 #[test]
 fn test_service_info_signal_propagation() {
-    let mut state = ServiceState::default();
-    state.status = ServiceStatus::Failed;
-    state.signal = Some(9);
-    state.stopped_at = Some(chrono::Utc::now());
+    let state = ServiceState {
+        status: ServiceStatus::Failed,
+        signal: Some(9),
+        stopped_at: Some(chrono::Utc::now()),
+        ..Default::default()
+    };
 
     let info: ServiceInfo = (&state).into();
     assert_eq!(info.status, "failed");
@@ -1060,9 +1102,11 @@ fn test_service_info_signal_propagation() {
 /// Test that stopped_at is propagated to ServiceInfo
 #[test]
 fn test_service_info_stopped_at_propagation() {
-    let mut state = ServiceState::default();
-    state.status = ServiceStatus::Stopped;
-    state.stopped_at = Some(chrono::Utc::now());
+    let state = ServiceState {
+        status: ServiceStatus::Stopped,
+        stopped_at: Some(chrono::Utc::now()),
+        ..Default::default()
+    };
 
     let info: ServiceInfo = (&state).into();
     assert_eq!(info.status, "stopped");
@@ -1072,10 +1116,12 @@ fn test_service_info_stopped_at_propagation() {
 /// Test that running services have no stopped_at or signal
 #[test]
 fn test_service_info_running_no_stopped_fields() {
-    let mut state = ServiceState::default();
-    state.status = ServiceStatus::Running;
-    state.pid = Some(1234);
-    state.started_at = Some(chrono::Utc::now());
+    let state = ServiceState {
+        status: ServiceStatus::Running,
+        pid: Some(1234),
+        started_at: Some(chrono::Utc::now()),
+        ..Default::default()
+    };
 
     let info: ServiceInfo = (&state).into();
     assert_eq!(info.status, "running");

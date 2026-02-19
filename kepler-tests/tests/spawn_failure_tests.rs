@@ -1,3 +1,5 @@
+// MutexGuard held across await is intentional for env safety in tests
+#![allow(clippy::await_holding_lock)]
 //! Tests for spawn failure cleanup behavior
 //!
 //! Verifies that when a service fails to start (e.g. nonexistent working directory),
@@ -80,11 +82,10 @@ async fn test_start_with_nonexistent_working_dir_retries_without_hanging() {
     let handle = registry.get(&config_path).expect("Config should be loaded");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(state) = handle.get_service_state("bad-workdir").await {
-            if state.status == ServiceStatus::Failed {
+        if let Some(state) = handle.get_service_state("bad-workdir").await
+            && state.status == ServiceStatus::Failed {
                 break;
             }
-        }
         if tokio::time::Instant::now() > deadline {
             panic!("Service should have reached Failed status within timeout");
         }
@@ -146,11 +147,10 @@ async fn test_failed_config_remains_in_registry() {
     let handle = registry.get(&config_path).unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(state) = handle.get_service_state("bad-workdir").await {
-            if state.status == ServiceStatus::Failed {
+        if let Some(state) = handle.get_service_state("bad-workdir").await
+            && state.status == ServiceStatus::Failed {
                 break;
             }
-        }
         if tokio::time::Instant::now() > deadline {
             panic!("Service should have reached Failed status within timeout");
         }

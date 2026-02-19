@@ -218,25 +218,20 @@ fn test_clear_during_heavy_writes() {
 #[test]
 fn test_dependency_levels() {
     use kepler_daemon::deps::get_start_levels;
-    use kepler_daemon::config::{DependsOn, ServiceConfig};
+    use kepler_daemon::config::{ConfigValue, DependsOn, RawServiceConfig};
     use std::collections::HashMap;
 
-    fn make_service(deps: Vec<&str>) -> ServiceConfig {
-        ServiceConfig {
-            command: vec!["test".to_string()],
-            working_dir: None,
-            environment: vec![],
-            env_file: None,
-            sys_env: Default::default(),
-            restart: Default::default(),
-            depends_on: DependsOn::from(deps.into_iter().map(String::from).collect::<Vec<_>>()),
-            healthcheck: None,
-            hooks: None,
-            logs: None,
-            user: None,
-            groups: Vec::new(),
-            limits: None,
-            condition: None,
+    fn make_service(deps: Vec<&str>) -> RawServiceConfig {
+        let depends_on = if deps.is_empty() {
+            DependsOn::default()
+        } else {
+            let yaml = serde_yaml::to_string(&deps).unwrap();
+            serde_yaml::from_str(&yaml).unwrap()
+        };
+        RawServiceConfig {
+            command: ConfigValue::Static(vec!["test".to_string()]),
+            depends_on,
+            ..Default::default()
         }
     }
 
@@ -677,10 +672,8 @@ fn test_buffer_flushes_when_size_exceeded() {
     writer.write("B");
 
     // Check file size (may or may not exist yet)
-    let size_after_small = log_file
-        .exists()
-        .then(|| std::fs::metadata(&log_file).map(|m| m.len()).unwrap_or(0))
-        .unwrap_or(0);
+    let size_after_small = if log_file
+        .exists() { std::fs::metadata(&log_file).map(|m| m.len()).unwrap_or(0) } else { 0 };
 
     // Write enough to exceed buffer (each line is ~40+ bytes with timestamp)
     for i in 0..10 {

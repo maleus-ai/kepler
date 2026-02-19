@@ -8,7 +8,6 @@ How Kepler handles environment variables, including inheritance, expansion, and 
 - [Environment Inheritance](#environment-inheritance)
 - [Environment Sources](#environment-sources)
 - [Three-Stage Expansion](#three-stage-expansion)
-- [What is NOT Expanded](#what-is-not-expanded)
 - [Passing Values to Commands](#passing-values-to-commands)
 - [Security Considerations](#security-considerations)
 - [Examples](#examples)
@@ -62,9 +61,9 @@ services:
 
 Services receive their environment from these sources (highest to lowest priority):
 
-1. **`environment` array** -- Explicit variables in the service config
-2. **`env_file`** -- Variables loaded from the specified `.env` file
-3. **System environment** -- If `sys_env: inherit`, all env vars captured from the CLI environment at config load time
+1. **`environment` array** — Explicit variables in the service config
+2. **`env_file`** — Variables loaded from the specified `.env` file
+3. **System environment** — If `sys_env: inherit`, all env vars captured from the CLI environment at config load time
 
 Higher-priority sources override lower-priority ones when keys conflict.
 
@@ -72,32 +71,34 @@ Higher-priority sources override lower-priority ones when keys conflict.
 
 ## Three-Stage Expansion
 
-Shell-style variable expansion (`${VAR}`, `${VAR:-default}`, etc.) happens in three stages, each building on the previous context:
+Inline Lua expressions (`${{ expr }}`) are evaluated in three stages, each building on the previous context:
 
 ### Stage 1: env_file Path
 
-The `env_file` path is expanded using **system environment only**:
+The `env_file` path is expanded using **system environment only** (at config load time):
 
 ```yaml
-env_file: ${CONFIG_DIR}/.env    # ${CONFIG_DIR} resolved from system env
+env_file: ${{ env.CONFIG_DIR }}/.env    # env.CONFIG_DIR from system env
 ```
 
 ### Stage 2: environment Array
 
-The `environment` array entries are expanded using **system env + env_file variables**:
+The `environment` array entries are expanded **sequentially** using **system env + env_file variables** (at service start time). Each entry's result is added to the context for subsequent entries:
 
 ```yaml
 environment:
-  - DB_URL=postgres://${DB_HOST}/mydb    # ${DB_HOST} from system env or .env file
+  - BASE_DIR=/opt/app
+  - DB_URL=postgres://${{ env.DB_HOST }}/mydb    # DB_HOST from system env or .env file
+  - CONFIG=${{ env.BASE_DIR }}/config             # BASE_DIR from the entry above
 ```
 
 ### Stage 3: Other Fields
 
-Remaining config fields are expanded using **system env + env_file + environment array**:
+Remaining config fields are expanded using **system env + env_file + environment array + deps**:
 
 ```yaml
-working_dir: ${APP_DIR}         # Can reference vars from environment array
-user: ${SERVICE_USER}
+working_dir: ${{ env.APP_DIR }}         # Can reference vars from environment array
+user: ${{ env.SERVICE_USER or "nobody" }}
 ```
 
 ### Summary
@@ -105,37 +106,27 @@ user: ${SERVICE_USER}
 | Stage | What is expanded | Expansion context |
 |-------|------------------|-------------------|
 | 1 | `env_file` path | System environment only |
-| 2 | `environment` array entries | System env + env_file variables |
-| 3 | `working_dir`, `user`, `groups`, `limits.memory`, `restart.watch` | System env + env_file + environment array |
+| 2 | `environment` array entries | System env + env_file variables (sequential) |
+| 3 | All other fields | System env + env_file + environment array + deps |
 
-See [Variable Expansion](variable-expansion.md) for the full syntax reference.
-
----
-
-## What is NOT Expanded
-
-These fields are intentionally **not** expanded at config time. The shell expands them at runtime using the process environment:
-
-- `command`
-- `hooks.run` / `hooks.command`
-- `healthcheck.test`
-
-This ensures commands work as users expect -- shell expansion at runtime -- and values are passed consistently through environment variables.
+See [Inline Expressions](variable-expansion.md) for the full syntax reference.
 
 ---
 
 ## Passing Values to Commands
 
-Since `command` is not expanded at config time, pass values via environment variables:
+You can use `${{ }}` expressions directly in command arrays, or pass values via environment variables for the shell to expand at runtime:
 
 ```yaml
 services:
   app:
-    command: ["sh", "-c", "echo Hello $NAME"]  # Shell expands at runtime
+    command: ["sh", "-c", "echo Hello $NAME"]  # Shell expands $NAME at runtime
     environment:
       - NAME=World                             # Set in process env
-      - DB_URL=postgres://${DB_HOST}/db        # Expanded at config time
+      - DB_URL=postgres://${{ env.DB_HOST }}/db  # Expanded at service start time
 ```
+
+Both approaches work. Use `${{ }}` when you want Kepler to resolve values at start time, and shell `$VAR` when you want the shell to resolve them at runtime.
 
 ---
 
@@ -186,7 +177,7 @@ services:
     environment:
       - PATH=/usr/bin:/bin       # Explicit PATH
       - NODE_ENV=production
-      - DATABASE_URL=${DB_URL}   # Expanded from system env at config time
+      - DATABASE_URL=${{ env.DB_URL }}   # Expanded from system env at start time
     env_file: .env               # Additional vars from file
 ```
 
@@ -198,9 +189,9 @@ services:
     command: ["./app"]
     sys_env: clear
     environment:
-      - PATH=${PATH}
-      - HOME=${HOME}
-      - USER=${USER}
+      - PATH=${{ env.PATH }}
+      - HOME=${{ env.HOME }}
+      - USER=${{ env.USER }}
       - NODE_ENV=production
 ```
 
@@ -215,11 +206,23 @@ services:
       - OVERRIDE=value    # Takes priority over .env values
 ```
 
+### Cross-Referencing Environment Entries
+
+```yaml
+services:
+  app:
+    command: ["./app"]
+    environment:
+      - APP_DIR=/opt/app
+      - CONFIG_PATH=${{ env.APP_DIR }}/config.yaml
+      - LOG_DIR=${{ env.APP_DIR }}/logs
+```
+
 ---
 
 ## See Also
 
-- [Variable Expansion](variable-expansion.md) -- Shell-style `${VAR}` syntax
-- [Lua Scripting](lua-scripting.md) -- Dynamic environment via `ctx.env`
-- [Configuration](configuration.md) -- Full config reference
-- [Security Model](security-model.md) -- Environment isolation as security feature
+- [Inline Expressions](variable-expansion.md) — `${{ expr }}` syntax reference
+- [Lua Scripting](lua-scripting.md) — Dynamic environment via `!lua` and `${{ }}`
+- [Configuration](configuration.md) — Full config reference
+- [Security Model](security-model.md) — Environment isolation as security feature

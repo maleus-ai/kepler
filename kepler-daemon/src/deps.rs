@@ -1,18 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::config::{DependencyCondition, DependencyConfig, RestartPolicy, ServiceConfig};
+use crate::config::{DependencyCondition, DependencyConfig, RawServiceConfig, RestartConfig, RestartPolicy};
 use crate::config_actor::ConfigActorHandle;
 use crate::errors::{DaemonError, Result};
 use crate::state::{ServiceState, ServiceStatus};
 
 /// Get the order in which services should be started (respecting dependencies)
 /// Returns services in topological order (dependencies first)
-pub fn get_start_order(services: &HashMap<String, ServiceConfig>) -> Result<Vec<String>> {
+pub fn get_start_order(services: &HashMap<String, RawServiceConfig>) -> Result<Vec<String>> {
     topological_sort(services)
 }
 
 /// Get the order in which services should be stopped (reverse of start order)
-pub fn get_stop_order(services: &HashMap<String, ServiceConfig>) -> Result<Vec<String>> {
+pub fn get_stop_order(services: &HashMap<String, RawServiceConfig>) -> Result<Vec<String>> {
     let mut order = topological_sort(services)?;
     order.reverse();
     Ok(order)
@@ -27,12 +27,12 @@ pub fn get_stop_order(services: &HashMap<String, ServiceConfig>) -> Result<Vec<S
 /// Returns: [[A, B], [C, D]]
 /// - Level 0: A, B (no deps, can start in parallel)
 /// - Level 1: C, D (depend only on level 0 services, can start in parallel after level 0)
-pub fn get_start_levels(services: &HashMap<String, ServiceConfig>) -> Result<Vec<Vec<String>>> {
+pub fn get_start_levels(services: &HashMap<String, RawServiceConfig>) -> Result<Vec<Vec<String>>> {
     let service_names: HashSet<_> = services.keys().cloned().collect();
 
     // Validate all dependencies exist
-    for (name, config) in services {
-        for dep in config.depends_on.names() {
+    for (name, raw) in services {
+        for dep in raw.depends_on.names() {
             if !service_names.contains(&dep) {
                 return Err(DaemonError::MissingDependency {
                     service: name.clone(),
@@ -48,7 +48,7 @@ pub fn get_start_levels(services: &HashMap<String, ServiceConfig>) -> Result<Vec
 
     fn compute_level(
         name: &str,
-        services: &HashMap<String, ServiceConfig>,
+        services: &HashMap<String, RawServiceConfig>,
         levels: &mut HashMap<String, usize>,
         computed: &mut HashSet<String>,
         stack: &mut HashSet<String>,
@@ -66,11 +66,11 @@ pub fn get_start_levels(services: &HashMap<String, ServiceConfig>) -> Result<Vec
 
         stack.insert(name.to_string());
 
-        let config = services.get(name).ok_or_else(|| {
+        let raw = services.get(name).ok_or_else(|| {
             DaemonError::ServiceNotFound(name.to_string())
         })?;
 
-        let dep_names = config.depends_on.names();
+        let dep_names = raw.depends_on.names();
         let level = if dep_names.is_empty() {
             0
         } else {
@@ -112,12 +112,12 @@ pub fn get_start_levels(services: &HashMap<String, ServiceConfig>) -> Result<Vec
 }
 
 /// Perform topological sort using Kahn's algorithm
-fn topological_sort(services: &HashMap<String, ServiceConfig>) -> Result<Vec<String>> {
+fn topological_sort(services: &HashMap<String, RawServiceConfig>) -> Result<Vec<String>> {
     let service_names: HashSet<_> = services.keys().cloned().collect();
 
     // Validate all dependencies exist
-    for (name, config) in services {
-        for dep in config.depends_on.names() {
+    for (name, raw) in services {
+        for dep in raw.depends_on.names() {
             if !service_names.contains(&dep) {
                 return Err(DaemonError::MissingDependency {
                     service: name.clone(),
@@ -137,8 +137,8 @@ fn topological_sort(services: &HashMap<String, ServiceConfig>) -> Result<Vec<Str
         dependents.insert(name.clone(), Vec::new());
     }
 
-    for (name, config) in services {
-        for dep in config.depends_on.names() {
+    for (name, raw) in services {
+        for dep in raw.depends_on.names() {
             // name depends on dep, so increment in_degree of name
             *in_degree.get_mut(name).ok_or_else(|| {
                 DaemonError::Internal(format!("unknown service '{}' in dependency graph", name))
@@ -203,7 +203,7 @@ fn topological_sort(services: &HashMap<String, ServiceConfig>) -> Result<Vec<Str
 /// (the service itself and all its transitive dependencies)
 pub fn get_service_with_deps(
     service: &str,
-    services: &HashMap<String, ServiceConfig>,
+    services: &HashMap<String, RawServiceConfig>,
 ) -> Result<Vec<String>> {
     if !services.contains_key(service) {
         return Err(DaemonError::ServiceNotFound(service.to_string()));
@@ -224,7 +224,7 @@ pub fn get_service_with_deps(
 
 fn collect_deps(
     service: &str,
-    services: &HashMap<String, ServiceConfig>,
+    services: &HashMap<String, RawServiceConfig>,
     needed: &mut HashSet<String>,
 ) -> Result<()> {
     if needed.contains(service) {
@@ -233,8 +233,8 @@ fn collect_deps(
 
     needed.insert(service.to_string());
 
-    if let Some(config) = services.get(service) {
-        for dep in config.depends_on.names() {
+    if let Some(raw) = services.get(service) {
+        for dep in raw.depends_on.names() {
             if !services.contains_key(&dep) {
                 return Err(DaemonError::MissingDependency {
                     service: service.to_string(),
@@ -253,12 +253,12 @@ fn collect_deps(
 /// This is the shared condition-matching logic used by both async `check_dependency_satisfied`
 /// and the synchronous `is_condition_satisfied_sync` inside the actor.
 ///
-/// When `dep_service_config` is `Some`, applies transient exit filtering: if the dep exited
+/// When `dep_restart_config` is `Some`, applies transient exit filtering: if the dep exited
 /// but its restart policy will restart it, terminal-state conditions are NOT considered met.
 pub fn is_condition_met(
     state: &ServiceState,
     dep_config: &DependencyConfig,
-    dep_service_config: Option<&ServiceConfig>,
+    dep_restart_config: Option<&RestartConfig>,
 ) -> bool {
     // If the dependency is Skipped and allow_skipped is true, treat as satisfied
     if state.status == ServiceStatus::Skipped && dep_config.allow_skipped {
@@ -312,11 +312,10 @@ pub fn is_condition_met(
 
     // Filter transient exits: if dep exited but will restart, the condition is only
     // transiently satisfied. Stopped is excluded (explicitly stopped = won't restart).
-    if let Some(dep_svc_config) = dep_service_config {
-        if is_transient_satisfaction(state, dep_svc_config) {
+    if let Some(restart_config) = dep_restart_config
+        && is_transient_satisfaction(state, restart_config) {
             return false;
         }
-    }
 
     true
 }
@@ -348,7 +347,7 @@ pub async fn is_dependency_permanently_unsatisfied(
     dep_name: &str,
     dep_config: &DependencyConfig,
     handle: &ConfigActorHandle,
-    dep_service_config: &ServiceConfig,
+    dep_restart_config: &RestartConfig,
 ) -> bool {
     let state = match handle.get_service_state(dep_name).await {
         Some(s) => s,
@@ -371,7 +370,7 @@ pub async fn is_dependency_permanently_unsatisfied(
     }
 
     // Check if the restart policy would restart the service
-    !dep_service_config.restart.should_restart_on_exit(state.exit_code)
+    !dep_restart_config.should_restart_on_exit(state.exit_code)
 }
 
 /// Check if a dependency condition is structurally unreachable given the dep's restart policy.
@@ -432,17 +431,17 @@ pub fn is_condition_unreachable_by_policy(
 /// user and will NOT be restarted by the restart policy.
 ///
 /// Returns true if the condition satisfaction is transient and should be ignored.
-pub fn is_transient_satisfaction(dep_state: &ServiceState, dep_service_config: &ServiceConfig) -> bool {
+pub fn is_transient_satisfaction(dep_state: &ServiceState, restart_config: &RestartConfig) -> bool {
     matches!(dep_state.status, ServiceStatus::Exited | ServiceStatus::Killed | ServiceStatus::Failed)
-        && dep_service_config.restart.should_restart_on_exit(dep_state.exit_code)
+        && restart_config.should_restart_on_exit(dep_state.exit_code)
 }
 
 /// Detect dependency cycles in the service configuration
-pub fn detect_cycles(services: &HashMap<String, ServiceConfig>) -> Result<()> {
+pub fn detect_cycles(services: &HashMap<String, RawServiceConfig>) -> Result<()> {
     // Validate all dependencies exist first
     let service_names: HashSet<_> = services.keys().cloned().collect();
-    for (name, config) in services {
-        for dep in config.depends_on.names() {
+    for (name, raw) in services {
+        for dep in raw.depends_on.names() {
             if !service_names.contains(&dep) {
                 return Err(DaemonError::MissingDependency {
                     service: name.clone(),
@@ -460,24 +459,20 @@ pub fn detect_cycles(services: &HashMap<String, ServiceConfig>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DependsOn, RestartConfig, RestartPolicy};
+    use crate::config::{ConfigValue, DependsOn, RestartConfig, RestartPolicy};
 
-    fn make_service(deps: Vec<&str>) -> ServiceConfig {
-        ServiceConfig {
-            condition: None,
-            command: vec!["test".to_string()],
-            working_dir: None,
-            environment: vec![],
-            env_file: None,
-            sys_env: Default::default(),
-            restart: RestartConfig::default(),
-            depends_on: DependsOn::from(deps.into_iter().map(String::from).collect::<Vec<_>>()),
-            healthcheck: None,
-            hooks: None,
-            logs: None,
-            user: None,
-            groups: Vec::new(),
-            limits: None,
+    fn make_service(deps: Vec<&str>) -> RawServiceConfig {
+        let depends_on = if deps.is_empty() {
+            DependsOn::default()
+        } else {
+            // Parse from YAML to get correct DependsOn
+            let yaml = serde_yaml::to_string(&deps).unwrap();
+            serde_yaml::from_str(&yaml).unwrap()
+        };
+        RawServiceConfig {
+            command: ConfigValue::Static(vec!["test".to_string()]),
+            depends_on,
+            ..Default::default()
         }
     }
 
@@ -816,34 +811,28 @@ mod tests {
 
     // --- Restart policy interaction with permanently unsatisfied deps ---
 
-    fn make_service_with_restart(deps: Vec<&str>, policy: RestartPolicy) -> ServiceConfig {
-        let mut svc = make_service(deps);
-        svc.restart = RestartConfig::Simple(policy);
-        svc
-    }
-
     #[test]
     fn test_restart_no_wont_restart() {
-        let svc = make_service_with_restart(vec![], RestartPolicy::No);
-        assert!(!svc.restart.should_restart_on_exit(Some(0)));
-        assert!(!svc.restart.should_restart_on_exit(Some(1)));
-        assert!(!svc.restart.should_restart_on_exit(None));
+        let restart = RestartConfig::Simple(RestartPolicy::No);
+        assert!(!restart.should_restart_on_exit(Some(0)));
+        assert!(!restart.should_restart_on_exit(Some(1)));
+        assert!(!restart.should_restart_on_exit(None));
     }
 
     #[test]
     fn test_restart_always_will_restart() {
-        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
-        assert!(svc.restart.should_restart_on_exit(Some(0)));
-        assert!(svc.restart.should_restart_on_exit(Some(1)));
-        assert!(svc.restart.should_restart_on_exit(None));
+        let restart = RestartConfig::Simple(RestartPolicy::Always);
+        assert!(restart.should_restart_on_exit(Some(0)));
+        assert!(restart.should_restart_on_exit(Some(1)));
+        assert!(restart.should_restart_on_exit(None));
     }
 
     #[test]
     fn test_restart_on_failure_only_on_nonzero() {
-        let svc = make_service_with_restart(vec![], RestartPolicy::OnFailure);
-        assert!(!svc.restart.should_restart_on_exit(Some(0)), "Exit 0 should not restart");
-        assert!(svc.restart.should_restart_on_exit(Some(1)), "Exit 1 should restart");
-        assert!(svc.restart.should_restart_on_exit(None), "Signal kill (None) should restart");
+        let restart = RestartConfig::Simple(RestartPolicy::OnFailure);
+        assert!(!restart.should_restart_on_exit(Some(0)), "Exit 0 should not restart");
+        assert!(restart.should_restart_on_exit(Some(1)), "Exit 1 should restart");
+        assert!(restart.should_restart_on_exit(None), "Signal kill (None) should restart");
     }
 
     // --- Transient exit satisfaction tests ---
@@ -858,78 +847,78 @@ mod tests {
 
     #[test]
     fn test_transient_exited_restart_always() {
-        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let restart = RestartConfig::Simple(RestartPolicy::Always);
         let state = make_state_with_status(ServiceStatus::Exited, Some(0));
-        assert!(is_transient_satisfaction(&state, &svc), "Exited(0) + restart:always should be transient");
+        assert!(is_transient_satisfaction(&state, &restart), "Exited(0) + restart:always should be transient");
 
         let state = make_state_with_status(ServiceStatus::Exited, Some(1));
-        assert!(is_transient_satisfaction(&state, &svc), "Exited(1) + restart:always should be transient");
+        assert!(is_transient_satisfaction(&state, &restart), "Exited(1) + restart:always should be transient");
     }
 
     #[test]
     fn test_transient_exited_restart_no() {
-        let svc = make_service_with_restart(vec![], RestartPolicy::No);
+        let restart = RestartConfig::Simple(RestartPolicy::No);
         let state = make_state_with_status(ServiceStatus::Exited, Some(0));
-        assert!(!is_transient_satisfaction(&state, &svc), "Exited(0) + restart:no should NOT be transient");
+        assert!(!is_transient_satisfaction(&state, &restart), "Exited(0) + restart:no should NOT be transient");
 
         let state = make_state_with_status(ServiceStatus::Exited, Some(1));
-        assert!(!is_transient_satisfaction(&state, &svc), "Exited(1) + restart:no should NOT be transient");
+        assert!(!is_transient_satisfaction(&state, &restart), "Exited(1) + restart:no should NOT be transient");
     }
 
     #[test]
     fn test_transient_exited_restart_on_failure() {
-        let svc = make_service_with_restart(vec![], RestartPolicy::OnFailure);
+        let restart = RestartConfig::Simple(RestartPolicy::OnFailure);
 
         // Exit 1 → will restart → transient
         let state = make_state_with_status(ServiceStatus::Exited, Some(1));
-        assert!(is_transient_satisfaction(&state, &svc), "Exited(1) + restart:on-failure should be transient");
+        assert!(is_transient_satisfaction(&state, &restart), "Exited(1) + restart:on-failure should be transient");
 
         // Exit 0 → won't restart → permanent
         let state = make_state_with_status(ServiceStatus::Exited, Some(0));
-        assert!(!is_transient_satisfaction(&state, &svc), "Exited(0) + restart:on-failure should NOT be transient");
+        assert!(!is_transient_satisfaction(&state, &restart), "Exited(0) + restart:on-failure should NOT be transient");
     }
 
     #[test]
     fn test_transient_killed_restart_always() {
-        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let restart = RestartConfig::Simple(RestartPolicy::Always);
         let state = make_state_with_status(ServiceStatus::Killed, None);
-        assert!(is_transient_satisfaction(&state, &svc), "Killed + restart:always should be transient");
+        assert!(is_transient_satisfaction(&state, &restart), "Killed + restart:always should be transient");
     }
 
     #[test]
     fn test_transient_failed_restart_always() {
-        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let restart = RestartConfig::Simple(RestartPolicy::Always);
         let state = make_state_with_status(ServiceStatus::Failed, None);
-        assert!(is_transient_satisfaction(&state, &svc), "Failed + restart:always should be transient");
+        assert!(is_transient_satisfaction(&state, &restart), "Failed + restart:always should be transient");
     }
 
     #[test]
     fn test_transient_stopped_never_transient() {
         // Stopped means explicitly stopped by user — never transient regardless of restart policy
-        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let restart = RestartConfig::Simple(RestartPolicy::Always);
         let state = make_state_with_status(ServiceStatus::Stopped, Some(0));
-        assert!(!is_transient_satisfaction(&state, &svc), "Stopped + restart:always should NOT be transient");
+        assert!(!is_transient_satisfaction(&state, &restart), "Stopped + restart:always should NOT be transient");
     }
 
     #[test]
     fn test_transient_running_not_transient() {
         // Running is not a terminal state — transient filter doesn't apply
-        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let restart = RestartConfig::Simple(RestartPolicy::Always);
         let state = make_state_with_status(ServiceStatus::Running, None);
-        assert!(!is_transient_satisfaction(&state, &svc), "Running should NOT be transient");
+        assert!(!is_transient_satisfaction(&state, &restart), "Running should NOT be transient");
     }
 
     #[test]
     fn test_transient_waiting_not_transient() {
-        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let restart = RestartConfig::Simple(RestartPolicy::Always);
         let state = make_state_with_status(ServiceStatus::Waiting, None);
-        assert!(!is_transient_satisfaction(&state, &svc), "Waiting should NOT be transient");
+        assert!(!is_transient_satisfaction(&state, &restart), "Waiting should NOT be transient");
     }
 
     #[test]
     fn test_transient_skipped_not_transient() {
-        let svc = make_service_with_restart(vec![], RestartPolicy::Always);
+        let restart = RestartConfig::Simple(RestartPolicy::Always);
         let state = make_state_with_status(ServiceStatus::Skipped, None);
-        assert!(!is_transient_satisfaction(&state, &svc), "Skipped should NOT be transient");
+        assert!(!is_transient_satisfaction(&state, &restart), "Skipped should NOT be transient");
     }
 }

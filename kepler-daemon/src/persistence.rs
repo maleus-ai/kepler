@@ -1,10 +1,13 @@
 //! Configuration persistence layer for Docker-like immutable config snapshots.
 //!
 //! This module provides persistence for configuration snapshots, allowing the daemon to:
-//! - Snapshot expanded configs (with resolved env vars) at first service start
-//! - Restore configs on daemon restart without re-expanding environment variables
+//! - Snapshot raw configs at first service start
+//! - Restore configs on daemon restart
 //! - Track source config paths for existence checks
 //! - Persist service runtime state across daemon restarts
+//!
+//! The snapshot stores only the inputs to expansion, not the outputs.
+//! Expansion always runs lazily at service start time, even on restore.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,23 +15,19 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-use crate::config::{KeplerConfig, ServiceConfig};
+use crate::config::KeplerConfig;
 use crate::errors::{DaemonError, Result};
 use crate::state::PersistedConfigState;
 
-/// Expanded configuration snapshot with resolved environment variables.
+/// Configuration snapshot with raw (unexpanded) service configs.
 ///
-/// This snapshot captures the complete resolved state of a configuration
-/// at the time of first service start, including all computed environment
-/// variables and working directories for each service.
+/// This snapshot captures the raw configuration at the time of first service start.
+/// Expansion happens lazily at each service start, using sys_env from the snapshot
+/// and env_files from the state directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpandedConfigSnapshot {
-    /// The expanded configuration (with env vars already resolved in the env fields)
+    /// The raw configuration (services stored as serde_yaml::Value)
     pub config: KeplerConfig,
-    /// Pre-computed environment variables for each service
-    pub service_envs: HashMap<String, HashMap<String, String>>,
-    /// Pre-computed working directories for each service
-    pub service_working_dirs: HashMap<String, PathBuf>,
     /// Config directory (where the original config file was located)
     pub config_dir: PathBuf,
     /// Unix timestamp of when the snapshot was taken
@@ -38,12 +37,21 @@ pub struct ExpandedConfigSnapshot {
     /// UID of the CLI user who loaded this config (for per-request authorization)
     #[serde(default)]
     pub owner_uid: Option<u32>,
+    /// GID of the CLI user who loaded this config (for default user fallback)
+    #[serde(default)]
+    pub owner_gid: Option<u32>,
+
+    // Backward-compat fields from old snapshots (ignored, kept for deserialization)
+    #[serde(default, skip_serializing)]
+    pub service_envs: HashMap<String, HashMap<String, String>>,
+    #[serde(default, skip_serializing)]
+    pub service_working_dirs: HashMap<String, PathBuf>,
 }
 
 /// Persistence layer for a single config's state directory.
 ///
 /// Handles reading and writing:
-/// - `expanded_config.yaml`: Fully-expanded config with resolved env vars
+/// - `expanded_config.yaml`: Raw config snapshot for restoration
 /// - `state.json`: Service runtime state (internal, not user-facing)
 /// - `source_path.txt`: Original config path for existence check
 pub struct ConfigPersistence {
@@ -81,9 +89,6 @@ impl ConfigPersistence {
     }
 
     /// Save the expanded config snapshot to disk.
-    ///
-    /// This captures the configuration with all environment variables resolved,
-    /// along with the pre-computed environment and working directory for each service.
     pub fn save_expanded_config(&self, snapshot: &ExpandedConfigSnapshot) -> Result<()> {
         let path = self.expanded_config_path();
         let content = serde_yaml::to_string(snapshot).map_err(|e| {
@@ -116,9 +121,6 @@ impl ConfigPersistence {
     // =========================================================================
 
     /// Save the service state to disk.
-    ///
-    /// This persists runtime state (status, PID, etc.) for restoration
-    /// after daemon restart.
     pub fn save_state(&self, state: &PersistedConfigState) -> Result<()> {
         let path = self.state_path();
         let content = serde_json::to_string_pretty(state).map_err(|e| {
@@ -155,9 +157,6 @@ impl ConfigPersistence {
     // =========================================================================
 
     /// Save the original source config path to disk.
-    ///
-    /// This is used to check if the source config still exists when
-    /// discovering configs on daemon startup.
     pub fn save_source_path(&self, path: &Path) -> Result<()> {
         let dest = self.source_path_path();
         let content = path.to_string_lossy();
@@ -192,12 +191,10 @@ impl ConfigPersistence {
     ///
     /// This copies each service's env_file to the state directory so that
     /// the env_file values are preserved even if the original file is deleted.
-    /// The env_file is used both for:
-    /// 1. Expansion context (values used to expand ${VAR} in config fields)
-    /// 2. Runtime injection (all values injected into process environment)
+    /// Accepts typed service configs (env_file paths already eagerly expanded).
     pub fn copy_env_files(
         &self,
-        services: &HashMap<String, ServiceConfig>,
+        services: &HashMap<String, crate::config::RawServiceConfig>,
         config_dir: &Path,
     ) -> Result<()> {
         let env_files_dir = self.env_files_dir();
@@ -217,11 +214,15 @@ impl ConfigPersistence {
             std::fs::create_dir_all(&env_files_dir).map_err(|e| DaemonError::Internal(format!("Failed to create directory '{}': {}", env_files_dir.display(), e)))?;
         }
 
-        for (service_name, config) in services {
-            if let Some(ref env_file) = config.env_file {
+        for (service_name, raw) in services {
+            // Extract env_file from typed config (only if static/resolved)
+            let env_file_path = raw.env_file.as_static().and_then(|v| v.as_ref());
+
+            if let Some(env_file) = env_file_path {
+                let env_file = env_file.clone();
                 // Resolve the env_file path (relative to config dir, or absolute as-is)
                 let source = if env_file.is_relative() {
-                    config_dir.join(env_file)
+                    config_dir.join(&env_file)
                 } else {
                     env_file.clone()
                 };
@@ -278,9 +279,6 @@ impl ConfigPersistence {
     // =========================================================================
 
     /// Clear the snapshot files to force re-expansion on next start.
-    ///
-    /// This is called by the `recreate` command to force the config
-    /// to be re-read and environment variables to be re-expanded.
     pub fn clear_snapshot(&self) -> Result<()> {
         // Remove expanded config
         let expanded_path = self.expanded_config_path();
@@ -316,10 +314,6 @@ impl ConfigPersistence {
     // =========================================================================
 
     /// Write a file atomically with secure permissions (0o600 on Unix).
-    ///
-    /// Writes to a temporary file in the same directory, then atomically
-    /// renames it to the target path. This prevents corruption if the
-    /// process crashes mid-write.
     fn write_secure_file(&self, path: &Path, content: &[u8]) -> Result<()> {
         let parent = path.parent().ok_or_else(|| {
             DaemonError::Internal(format!("No parent directory for '{}'", path.display()))
@@ -384,6 +378,7 @@ sys_env: {}
 "#;
         let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(snapshot.owner_uid, None);
+        assert_eq!(snapshot.owner_gid, None);
     }
 
     #[test]
@@ -392,20 +387,21 @@ sys_env: {}
         let yaml_with_uid = r#"
 config:
   services: {}
-service_envs: {}
-service_working_dirs: {}
 config_dir: /tmp
 snapshot_time: 1700000000
 sys_env: {}
 owner_uid: 1000
+owner_gid: 1000
 "#;
         let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(yaml_with_uid).unwrap();
         assert_eq!(snapshot.owner_uid, Some(1000));
+        assert_eq!(snapshot.owner_gid, Some(1000));
 
         // Re-serialize and verify
         let reserialized = serde_yaml::to_string(&snapshot).unwrap();
         let reloaded: ExpandedConfigSnapshot = serde_yaml::from_str(&reserialized).unwrap();
         assert_eq!(reloaded.owner_uid, Some(1000));
+        assert_eq!(reloaded.owner_gid, Some(1000));
     }
 
     #[test]

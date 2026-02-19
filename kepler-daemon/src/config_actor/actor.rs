@@ -11,10 +11,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::config::{resolve_log_buffer_size, resolve_log_max_size, DependencyConfig, KeplerConfig};
+use crate::config::{resolve_log_buffer_size, resolve_log_max_size, DependencyConfig, KeplerConfig, ServiceConfig};
 use crate::deps::{get_start_order, is_condition_met};
 use crate::lua_eval::EvalContext;
-use crate::env::build_service_env;
 use crate::errors::{DaemonError, Result};
 use crate::events::{service_event_channel, ServiceEventMessage, ServiceEventSender};
 use crate::logs::{LogReader, LogWriterConfig, DEFAULT_BUFFER_SIZE};
@@ -45,6 +44,10 @@ pub struct ConfigActor {
     log_config: LogWriterConfig,
     initialized: bool,
 
+    /// Cached resolved (expanded) ServiceConfigs per service.
+    /// Populated after first service start via `StoreResolvedConfig`.
+    resolved_configs: HashMap<String, ServiceConfig>,
+
     // Process and task handles (moved from DaemonState)
     processes: HashMap<String, ProcessHandle>,
     watchers: HashMap<String, JoinHandle<()>>,
@@ -65,6 +68,8 @@ pub struct ConfigActor {
     sys_env: HashMap<String, String>,
     /// UID of the CLI user who loaded this config
     owner_uid: Option<u32>,
+    /// GID of the CLI user who loaded this config
+    owner_gid: Option<u32>,
 
     /// Subscriber registry for config events (used by Subscribe handler)
     subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ConfigEvent>>>>,
@@ -151,7 +156,7 @@ impl ConfigActor {
         let _ = persistence.save_source_path(&canonical_path);
 
         // Check if we have an existing expanded config snapshot
-        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_sys_env, owner_uid) =
+        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_sys_env, owner_uid, owner_gid) =
             if let Ok(Some(snapshot)) = persistence.load_expanded_config() {
                 info!(
                     "Restoring config from snapshot (taken at {})",
@@ -162,18 +167,15 @@ impl ConfigActor {
                 let persisted_state = persistence.load_state().ok().flatten();
 
                 // Restore service states from snapshot + persisted state
+                // computed_env and working_dir start empty — they are built lazily
+                // at service start time via ${{}} expansion.
                 let services = snapshot
                     .config
                     .services
                     .keys()
                     .map(|name| {
-                        let computed_env =
-                            snapshot.service_envs.get(name).cloned().unwrap_or_default();
-                        let working_dir = snapshot
-                            .service_working_dirs
-                            .get(name)
-                            .cloned()
-                            .unwrap_or_else(|| snapshot.config_dir.clone());
+                        let computed_env = HashMap::new();
+                        let working_dir = snapshot.config_dir.clone();
 
                         // Restore runtime state if available
                         let state = if let Some(ref ps) = persisted_state {
@@ -205,6 +207,7 @@ impl ConfigActor {
 
                 let restored_sys_env = snapshot.sys_env;
                 let owner_uid = snapshot.owner_uid;
+                let owner_gid = snapshot.owner_gid;
 
                 let config = snapshot.config;
 
@@ -217,6 +220,7 @@ impl ConfigActor {
                     true,  // restored from snapshot
                     restored_sys_env,
                     owner_uid,
+                    owner_gid,
                 )
             } else {
                 // No snapshot - parse fresh from source
@@ -276,28 +280,18 @@ impl ConfigActor {
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| PathBuf::from("."));
 
-                // Copy env_files to state directory before building service envs
-                // This is needed so build_service_env can find them in the state directory
+                // Copy env_files to state directory for snapshot self-containment
                 let _ = persistence.copy_env_files(&config.services, &config_dir);
 
-                // Initialize service states with pre-computed environment and working directory
-                // Note: The config is already "baked" with sys_env applied (if inherit policy)
+                // Initialize service states with empty computed_env and working_dir.
+                // These are built lazily at service start time via ${{}} expansion.
                 let services = config
                     .services
-                    .iter()
-                    .map(|(name, service_config)| {
-                        let working_dir = service_config
-                            .working_dir
-                            .as_ref()
-                            .map(|wd| config_dir.join(wd))
-                            .unwrap_or_else(|| config_dir.clone());
-
-                        let computed_env =
-                            build_service_env(service_config, name, &state_dir).unwrap_or_default();
-
+                    .keys()
+                    .map(|name| {
                         let state = ServiceState {
-                            computed_env,
-                            working_dir,
+                            computed_env: HashMap::new(),
+                            working_dir: config_dir.clone(),
                             ..Default::default()
                         };
                         (name.clone(), state)
@@ -313,6 +307,7 @@ impl ConfigActor {
                     false, // not restored from snapshot
                     resolved_sys_env,
                     config_owner.map(|(uid, _)| uid),
+                    config_owner.map(|(_, gid)| gid),
                 )
             };
 
@@ -327,7 +322,7 @@ impl ConfigActor {
         let dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), dep_watchers.clone(), owner_uid);
+        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), dep_watchers.clone(), owner_uid, owner_gid);
 
         let actor = ConfigActor {
             config_path: canonical_path,
@@ -337,6 +332,7 @@ impl ConfigActor {
             services,
             log_config,
             initialized,
+            resolved_configs: HashMap::new(),
             processes: HashMap::new(),
             watchers: HashMap::new(),
             health_checks: HashMap::new(),
@@ -347,6 +343,7 @@ impl ConfigActor {
             event_handler_spawned: false,
             sys_env: resolved_sys_env,
             owner_uid,
+            owner_gid,
             subscribers,
             dep_watchers,
             lua_eval_tx: None,
@@ -382,7 +379,7 @@ impl ConfigActor {
         while let Some(cmd) = self.rx.recv().await {
             // Handle EvalIfCondition directly — forwards to the worker, never blocks
             if let ConfigCommand::EvalIfCondition { condition, context, reply } = cmd {
-                self.handle_lua_eval(condition, context, reply);
+                self.handle_lua_eval(condition, *context, reply);
                 continue;
             }
             if self.process_command(cmd) {
@@ -420,8 +417,8 @@ impl ConfigActor {
                     }
                 };
 
-                if let Some(ref code) = config_lua {
-                    if let Err(e) = evaluator.load_inline(code) {
+                if let Some(ref code) = config_lua
+                    && let Err(e) = evaluator.load_inline(code) {
                         tracing::error!("Failed to load Lua code: {}", e);
                         // Drain remaining requests with error
                         while let Ok(req) = rx.try_recv() {
@@ -431,7 +428,6 @@ impl ConfigActor {
                         }
                         return;
                     }
-                }
 
                 while let Some(req) = rx.blocking_recv() {
                     // Set 10s interrupt watchdog for runtime conditions
@@ -751,6 +747,20 @@ impl ConfigActor {
                 }
                 let _ = reply.send(result);
             }
+            ConfigCommand::StoreResolvedConfig {
+                service_name,
+                config,
+                computed_env,
+                working_dir,
+            } => {
+                // Update service state with computed env and working dir
+                if let Some(state) = self.services.get_mut(&service_name) {
+                    state.computed_env = computed_env;
+                    state.working_dir = working_dir;
+                }
+                // Cache the resolved config
+                self.resolved_configs.insert(service_name, *config);
+            }
             ConfigCommand::ClearServiceLogs { service_name } => {
                 let reader = LogReader::new(self.log_config.logs_dir.clone());
                 reader.clear_service(&service_name);
@@ -833,6 +843,7 @@ impl ConfigActor {
                 if result.is_ok() {
                     self.snapshot_taken = false;
                     self.restored_from_snapshot = false;
+                    self.resolved_configs.clear();
                 }
                 let _ = reply.send(result);
             }
@@ -928,27 +939,17 @@ impl ConfigActor {
         self.persistence
             .copy_env_files(&self.config.services, &self.config_dir)?;
 
-        // Build the snapshot
-        let service_envs: HashMap<String, HashMap<String, String>> = self
-            .services
-            .iter()
-            .map(|(name, state)| (name.clone(), state.computed_env.clone()))
-            .collect();
-
-        let service_working_dirs: HashMap<String, PathBuf> = self
-            .services
-            .iter()
-            .map(|(name, state)| (name.clone(), state.working_dir.clone()))
-            .collect();
-
+        // Build the snapshot — stores only inputs to expansion (raw config + sys_env).
+        // computed_env and working_dir are built lazily at each service start.
         let snapshot = ExpandedConfigSnapshot {
             config: self.config.clone(),
-            service_envs,
-            service_working_dirs,
+            service_envs: Default::default(),
+            service_working_dirs: Default::default(),
             config_dir: self.config_dir.clone(),
             snapshot_time: chrono::Utc::now().timestamp(),
             sys_env: self.sys_env.clone(),
             owner_uid: self.owner_uid,
+            owner_gid: self.owner_gid,
         };
 
         // Save the snapshot
@@ -981,10 +982,12 @@ impl ConfigActor {
     /// Build a ServiceContext for a service (single round-trip)
     fn build_service_context(&self, service_name: &str) -> Option<ServiceContext> {
         let service_config = self.config.services.get(service_name)?.clone();
+        let resolved_config = self.resolved_configs.get(service_name).cloned();
         let service_state = self.services.get(service_name)?;
 
         Some(ServiceContext {
             service_config,
+            resolved_config,
             config_dir: self.config_dir.clone(),
             log_config: self.log_config.clone(),
             global_log_config: self.config.global_logs().cloned(),
@@ -1272,12 +1275,11 @@ impl ConfigActor {
 
         // Running states: check if healthcheck resolved (if applicable)
         if status.is_running() {
-            if let Some(svc_config) = self.config.services.get(service_name) {
-                if svc_config.healthcheck.is_some() {
+            if let Some(raw) = self.config.services.get(service_name)
+                && raw.has_healthcheck() {
                     // Healthy or Unhealthy means the healthcheck has resolved
                     return status == ServiceStatus::Healthy || status == ServiceStatus::Unhealthy;
                 }
-            }
             return true; // no healthcheck, Running is enough
         }
 
@@ -1287,9 +1289,9 @@ impl ConfigActor {
         // Waiting → check if this is a deferred wait (unsatisfied deps that are all stable)
         // vs "about to start" (all deps satisfied or no deps — will transition to Starting momentarily)
         if status == ServiceStatus::Waiting {
-            if let Some(svc_config) = self.config.services.get(service_name) {
+            if let Some(raw) = self.config.services.get(service_name) {
                 let mut has_unsatisfied_stable_dep = false;
-                for (dep_name, dep_config) in svc_config.depends_on.iter() {
+                for (dep_name, dep_config) in raw.depends_on.iter() {
                     if self.is_condition_satisfied_sync(dep_name, &dep_config) { continue; }
                     // Condition not met. Is dep still settling?
                     let dep_state = self.services.get(dep_name);
@@ -1298,15 +1300,16 @@ impl ConfigActor {
                         return false; // dep still settling → not ready yet
                     }
                     // Check if dep is terminal but will restart — still settling
-                    if let Some(ds) = dep_state {
-                        if matches!(ds.status, ServiceStatus::Exited | ServiceStatus::Killed | ServiceStatus::Failed) {
-                            if let Some(dep_svc_config) = self.config.services.get(dep_name) {
-                                if dep_svc_config.restart.should_restart_on_exit(ds.exit_code) {
+                    if let Some(ds) = dep_state
+                        && matches!(ds.status, ServiceStatus::Exited | ServiceStatus::Killed | ServiceStatus::Failed)
+                            && let Some(dep_raw) = self.config.services.get(dep_name) {
+                                let dep_restart = self.resolved_configs.get(dep_name)
+                                    .map(|rc| rc.restart.clone())
+                                    .unwrap_or_else(|| dep_raw.restart.as_static().cloned().unwrap_or_default());
+                                if dep_restart.should_restart_on_exit(ds.exit_code) {
                                     return false; // dep will restart → still settling
                                 }
                             }
-                        }
-                    }
                     // dep is in a stable state (Running/Healthy/Unhealthy/terminal-no-restart)
                     has_unsatisfied_stable_dep = true;
                 }
@@ -1356,9 +1359,9 @@ impl ConfigActor {
         // Waiting → check if this has unsatisfied deps that are all settled (condition will never be met)
         // vs "about to start" (all deps satisfied or no deps — will transition to Starting momentarily)
         if status == ServiceStatus::Waiting {
-            if let Some(svc_config) = self.config.services.get(service_name) {
+            if let Some(raw) = self.config.services.get(service_name) {
                 let mut has_unsatisfied_settled_dep = false;
-                for (dep_name, dep_config) in svc_config.depends_on.iter() {
+                for (dep_name, dep_config) in raw.depends_on.iter() {
                     if self.is_condition_satisfied_sync(dep_name, &dep_config) { continue; }
                     // Condition not met. Is dep settled?
                     if !settled_cache.get(dep_name).copied().unwrap_or(false) {
@@ -1378,8 +1381,10 @@ impl ConfigActor {
         if status.is_active() { return false; }
 
         // Terminal (Stopped, Failed, Exited, Killed)
-        let would_restart = self.config.services.get(service_name)
-            .map(|svc| svc.restart.should_restart_on_exit(state.exit_code))
+        let would_restart = self.resolved_configs.get(service_name)
+            .map(|rc| rc.restart.should_restart_on_exit(state.exit_code))
+            .or_else(|| self.config.services.get(service_name)
+                .map(|raw| raw.restart.as_static().cloned().unwrap_or_default().should_restart_on_exit(state.exit_code)))
             .unwrap_or(false);
 
         if !would_restart { return true; }
@@ -1391,12 +1396,12 @@ impl ConfigActor {
     /// Check if all dependencies for a service can still be satisfied.
     /// Returns false if any dep is settled but its condition is not met.
     fn are_deps_satisfiable(&self, service_name: &str, settled_cache: &HashMap<String, bool>) -> bool {
-        let svc_config = match self.config.services.get(service_name) {
-            Some(c) => c,
+        let raw = match self.config.services.get(service_name) {
+            Some(v) => v,
             None => return false,
         };
 
-        for (dep_name, dep_config) in svc_config.depends_on.iter() {
+        for (dep_name, dep_config) in raw.depends_on.iter() {
             if self.is_condition_satisfied_sync(dep_name, &dep_config) { continue; }
             // Condition not met. If dep is settled, it can never reach the required state.
             let dep_state = match self.services.get(dep_name) {
@@ -1421,8 +1426,11 @@ impl ConfigActor {
             None => return false,
         };
 
-        let dep_svc_config = self.config.services.get(dep_name);
-        is_condition_met(state, dep_config, dep_svc_config)
+        let dep_restart = self.resolved_configs.get(dep_name)
+            .map(|rc| rc.restart.clone())
+            .or_else(|| self.config.services.get(dep_name)
+                .map(|raw| raw.restart.as_static().cloned().unwrap_or_default()));
+        is_condition_met(state, dep_config, dep_restart.as_ref())
     }
 
     /// Cleanup all resources when shutting down

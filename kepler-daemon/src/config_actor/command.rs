@@ -7,7 +7,10 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use super::context::{DiagnosticCounts, HealthCheckUpdate, ServiceContext, TaskHandleType};
-use crate::config::{KeplerConfig, LogConfig, ServiceConfig, SysEnvPolicy};
+use crate::config::{KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
+
+/// Stdout and stderr capture task handles taken from a process handle.
+pub type OutputTasks = (Option<JoinHandle<()>>, Option<JoinHandle<()>>);
 use crate::errors::Result;
 use crate::events::{ServiceEvent, ServiceEventReceiver};
 use crate::lua_eval::EvalContext;
@@ -56,7 +59,7 @@ pub enum ConfigCommand {
     },
     GetServiceConfig {
         service_name: String,
-        reply: oneshot::Sender<Option<ServiceConfig>>,
+        reply: oneshot::Sender<Option<RawServiceConfig>>,
     },
     GetConfig {
         reply: oneshot::Sender<KeplerConfig>,
@@ -170,6 +173,14 @@ pub enum ConfigCommand {
         service_name: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Store the resolved (expanded) ServiceConfig for a service, and update
+    /// computed_env and working_dir in its ServiceState.
+    StoreResolvedConfig {
+        service_name: String,
+        config: Box<ServiceConfig>,
+        computed_env: HashMap<String, String>,
+        working_dir: PathBuf,
+    },
     ClearServiceLogs {
         service_name: String,
     },
@@ -190,7 +201,7 @@ pub enum ConfigCommand {
     /// Used by handle_exit() to join output tasks before setting terminal status.
     TakeOutputTasks {
         service_name: String,
-        reply: oneshot::Sender<(Option<JoinHandle<()>>, Option<JoinHandle<()>>)>,
+        reply: oneshot::Sender<OutputTasks>,
     },
 
     // === Task Handle Commands ===
@@ -260,7 +271,7 @@ pub enum ConfigCommand {
     /// Evaluate a runtime `if` condition using the Lua evaluator
     EvalIfCondition {
         condition: String,
-        context: EvalContext,
+        context: Box<EvalContext>,
         reply: oneshot::Sender<Result<bool>>,
     },
 }

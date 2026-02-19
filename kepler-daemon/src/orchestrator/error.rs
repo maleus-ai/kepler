@@ -23,6 +23,9 @@ pub enum OrchestratorError {
     #[error("{0}")]
     HookFailed(String),
 
+    #[error("Config error: {0}")]
+    ConfigError(String),
+
     #[error("IO error: {0}")]
     Io(String),
 

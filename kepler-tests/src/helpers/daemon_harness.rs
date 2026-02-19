@@ -1,13 +1,15 @@
 //! Test harness that manages daemon state without full binary
 
-use kepler_daemon::config::{KeplerConfig, LogRetention};
+use kepler_daemon::config::{KeplerConfig, LogRetention, RawServiceConfig, ServiceConfig, ServiceHooks};
 use kepler_daemon::config_actor::{ConfigActor, ConfigActorHandle, TaskHandleType};
+use kepler_daemon::env::{insert_env_entries, load_env_file};
 use kepler_daemon::health::spawn_health_checker;
 use kepler_daemon::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use kepler_daemon::logs::{BufferedLogWriter, LogReader, LogStream, LogWriterConfig, LogLine};
 use kepler_daemon::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
 use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -22,6 +24,61 @@ pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// umask is process-wide, so tests that temporarily change it must hold this
 /// lock to prevent other tests from creating files with unexpected permissions.
 pub static UMASK_LOCK: Mutex<()> = Mutex::new(());
+
+/// Resolve hooks for execution. Static hooks are returned directly from
+/// `resolved_config.hooks`. Dynamic hooks (`!lua` / `${{ }}`) are resolved
+/// at execution time with `hook_name` in the evaluation context.
+async fn resolve_hooks_for_execution(
+    handle: &ConfigActorHandle,
+    service_name: &str,
+    hook_type: ServiceHookType,
+    resolved: &ServiceConfig,
+    env: &HashMap<String, String>,
+) -> (Option<ServiceHooks>, Option<String>) {
+    if resolved.hooks.is_some() {
+        let lua_code = handle.get_config().await.and_then(|c| c.lua.clone());
+        return (resolved.hooks.clone(), lua_code);
+    }
+
+    let config = match handle.get_config().await {
+        Some(c) => c,
+        None => return (None, None),
+    };
+    let raw = match config.services.get(service_name) {
+        Some(r) => r,
+        None => return (None, None),
+    };
+
+    // Static raw hooks that resolved to None = no hooks configured
+    if raw.hooks.as_static().is_some() {
+        return (None, config.lua.clone());
+    }
+
+    // Dynamic hooks — resolve with hook_name in context
+    let evaluator = match config.create_lua_evaluator() {
+        Ok(e) => e,
+        Err(_) => return (None, config.lua.clone()),
+    };
+
+    let state = handle.get_service_state(service_name).await;
+    let eval_ctx = kepler_daemon::lua_eval::EvalContext {
+        env: env.clone(),
+        service_name: Some(service_name.to_string()),
+        hook_name: Some(hook_type.as_str().to_string()),
+        initialized: state.as_ref().map(|s| s.initialized),
+        restart_count: state.as_ref().map(|s| s.restart_count),
+        exit_code: state.as_ref().and_then(|s| s.exit_code),
+        status: state.as_ref().map(|s| s.status.as_str().to_string()),
+        ..Default::default()
+    };
+
+    let hooks = raw.hooks.resolve(
+        &evaluator, &eval_ctx, handle.config_path(),
+        &format!("{}.hooks", service_name),
+    ).unwrap_or(None);
+
+    (hooks, config.lua.clone())
+}
 
 /// Test harness for managing daemon state
 pub struct TestDaemonHarness {
@@ -173,6 +230,59 @@ impl TestDaemonHarness {
             .await
             .ok_or("Service not found")?;
 
+        // Build evaluation context and resolve service (evaluate ${{ }} + !lua + deserialize)
+        let sys_env = self.handle.get_sys_env().await;
+        let config = self.handle.get_config().await
+            .ok_or("Config not found")?;
+
+        // Load env_file vars (try state dir copy first, then original path)
+        let env_file_vars = self.load_service_env_file(service_name, &ctx.service_config);
+
+        // Build full accumulated env: sys_env + env_file
+        let mut full_env = sys_env.clone();
+        full_env.extend(env_file_vars.clone());
+
+        let mut eval_ctx = kepler_daemon::lua_eval::EvalContext {
+            sys_env: sys_env.clone(),
+            env_file: env_file_vars.clone(),
+            env: full_env,
+            service_name: Some(service_name.to_string()),
+            ..Default::default()
+        };
+
+        // Create Lua evaluator with config's lua: block loaded
+        let lua_evaluator = config.create_lua_evaluator()
+            .map_err(|e| format!("Failed to create Lua evaluator: {}", e))?;
+
+        // Resolve service: evaluate ${{ }} + !lua + deserialize to ServiceConfig
+        let resolved = config.resolve_service(
+            service_name,
+            &mut eval_ctx,
+            &lua_evaluator,
+            &self.config_path,
+            None,
+        ).map_err(|e| format!("Failed to resolve service: {}", e))?;
+
+        // Build computed_env: sys_env + env_file_vars + expanded service environment
+        let mut computed_env = sys_env;
+        computed_env.extend(env_file_vars);
+        insert_env_entries(&mut computed_env, &resolved.environment);
+
+        // Resolve working_dir
+        let working_dir = resolved
+            .working_dir
+            .as_ref()
+            .map(|wd| self.config_dir.join(wd))
+            .unwrap_or_else(|| self.config_dir.clone());
+
+        // Store resolved config + computed state in the actor
+        self.handle.store_resolved_config(
+            service_name,
+            resolved.clone(),
+            computed_env.clone(),
+            working_dir.clone(),
+        ).await;
+
         // Update status to starting
         let _ = self.handle
             .set_service_status(service_name, ServiceStatus::Starting)
@@ -183,13 +293,17 @@ impl TestDaemonHarness {
             .is_service_initialized(service_name)
             .await;
 
-        let hook_params = ServiceHookParams::from_service_context(
-            &ctx.service_config,
-            &ctx.working_dir,
-            &ctx.env,
+        let (hooks, lua_code) = resolve_hooks_for_execution(
+            &self.handle, service_name, ServiceHookType::PreStart, &resolved, &computed_env,
+        ).await;
+        let mut hook_params = ServiceHookParams::from_service_context(
+            &resolved,
+            &working_dir,
+            &computed_env,
             Some(&ctx.log_config),
             ctx.global_log_config.as_ref(),
         );
+        hook_params.lua_code = lua_code.as_deref();
 
         if should_run_init {
             // Mark as initialized
@@ -200,7 +314,7 @@ impl TestDaemonHarness {
 
         // Run on_start hook
         run_service_hook(
-            &ctx.service_config.hooks,
+            &hooks,
             ServiceHookType::PreStart,
             service_name,
             &hook_params,
@@ -212,7 +326,7 @@ impl TestDaemonHarness {
         // Spawn the process
         let spawn_params = SpawnServiceParams {
             service_name,
-            service_config: &ctx.service_config,
+            service_config: &resolved,
             config_dir: &ctx.config_dir,
             log_config: ctx.log_config.clone(),
             handle: self.handle.clone(),
@@ -239,11 +353,11 @@ impl TestDaemonHarness {
             .await;
 
         // Start file watcher if configured
-        if !ctx.service_config.restart.watch_patterns().is_empty() {
+        if !resolved.restart.watch_patterns().is_empty() {
             let watcher_handle = spawn_file_watcher(
                 self.config_path.clone(),
                 service_name.to_string(),
-                ctx.service_config.restart.watch_patterns().to_vec(),
+                resolved.restart.watch_patterns().to_vec(),
                 ctx.working_dir.clone(),
                 self.restart_tx.clone(),
             );
@@ -259,6 +373,41 @@ impl TestDaemonHarness {
         Ok(())
     }
 
+    /// Load env_file vars for a service, checking state dir copy first (for persistence).
+    fn load_service_env_file(&self, service_name: &str, raw_config: &RawServiceConfig) -> HashMap<String, String> {
+        let env_file_path = raw_config.env_file.as_static().and_then(|v| v.as_ref()).cloned();
+
+        if let Some(env_file_path) = env_file_path {
+
+            // Check state dir copy first (persisted env_file)
+            let state_copy = {
+                let config_hash = self.handle.config_hash().to_string();
+                let state_dir = self.config_dir.join(".kepler");
+                let dest_name = format!(
+                    "{}_{}",
+                    service_name,
+                    env_file_path.file_name().unwrap_or_default().to_string_lossy()
+                );
+                state_dir.join("configs").join(&config_hash).join("env_files").join(&dest_name)
+            };
+
+            let source = if state_copy.exists() {
+                state_copy
+            } else if env_file_path.is_relative() {
+                self.config_dir.join(&env_file_path)
+            } else {
+                env_file_path
+            };
+
+            if source.exists()
+                && let Ok(file_env) = load_env_file(&source) {
+                    return file_env;
+                }
+        }
+
+        HashMap::new()
+    }
+
     /// Start the health checker for a service
     pub async fn start_health_checker(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         let ctx = self.handle
@@ -266,7 +415,9 @@ impl TestDaemonHarness {
             .await
             .ok_or("Service not found")?;
 
-        if let Some(health_config) = ctx.service_config.healthcheck {
+        let resolved = ctx.resolved_config.as_ref().ok_or("Service not resolved")?;
+
+        if let Some(health_config) = resolved.healthcheck.clone() {
             let task_handle = spawn_health_checker(
                 service_name.to_string(),
                 health_config,
@@ -294,17 +445,23 @@ impl TestDaemonHarness {
             .await
             .ok_or("Service not found")?;
 
+        let resolved = ctx.resolved_config.as_ref().ok_or("Service not resolved")?;
+
         // Run on_stop hook
-        let hook_params = ServiceHookParams::from_service_context(
-            &ctx.service_config,
+        let (hooks, lua_code) = resolve_hooks_for_execution(
+            &self.handle, service_name, ServiceHookType::PreStop, resolved, &ctx.env,
+        ).await;
+        let mut hook_params = ServiceHookParams::from_service_context(
+            resolved,
             &ctx.working_dir,
             &ctx.env,
             Some(&ctx.log_config),
             ctx.global_log_config.as_ref(),
         );
+        hook_params.lua_code = lua_code.as_deref();
 
         run_service_hook(
-            &ctx.service_config.hooks,
+            &hooks,
             ServiceHookType::PreStop,
             service_name,
             &hook_params,
@@ -327,17 +484,23 @@ impl TestDaemonHarness {
             .await
             .ok_or("Service not found")?;
 
+        let resolved = ctx.resolved_config.as_ref().ok_or("Service not resolved")?;
+
         // Run on_stop hook
-        let hook_params = ServiceHookParams::from_service_context(
-            &ctx.service_config,
+        let (hooks, lua_code) = resolve_hooks_for_execution(
+            &self.handle, service_name, ServiceHookType::PreStop, resolved, &ctx.env,
+        ).await;
+        let mut hook_params = ServiceHookParams::from_service_context(
+            resolved,
             &ctx.working_dir,
             &ctx.env,
             Some(&ctx.log_config),
             ctx.global_log_config.as_ref(),
         );
+        hook_params.lua_code = lua_code.as_deref();
 
         run_service_hook(
-            &ctx.service_config.hooks,
+            &hooks,
             ServiceHookType::PreStop,
             service_name,
             &hook_params,
@@ -378,7 +541,7 @@ impl TestDaemonHarness {
         self.handle
             .get_service_config(service_name)
             .await
-            .map(|c| c.healthcheck.is_some())
+            .map(|c| c.has_healthcheck())
             .unwrap_or(false)
     }
 
@@ -402,17 +565,27 @@ impl TestDaemonHarness {
                     None => continue,
                 };
 
+                // Use resolved config (available after service has started)
+                let resolved = match ctx.resolved_config.as_ref() {
+                    Some(rc) => rc,
+                    None => continue,
+                };
+
                 // Run on_restart hook
-                let hook_params = ServiceHookParams::from_service_context(
-                    &ctx.service_config,
+                let (hooks, lua_code) = resolve_hooks_for_execution(
+                    &handle, &event.service_name, ServiceHookType::PreRestart, resolved, &ctx.env,
+                ).await;
+                let mut hook_params = ServiceHookParams::from_service_context(
+                    resolved,
                     &ctx.working_dir,
                     &ctx.env,
                     Some(&ctx.log_config),
                     ctx.global_log_config.as_ref(),
                 );
+                hook_params.lua_code = lua_code.as_deref();
 
                 let _ = run_service_hook(
-                    &ctx.service_config.hooks,
+                    &hooks,
                     ServiceHookType::PreRestart,
                     &event.service_name,
                     &hook_params,
@@ -426,7 +599,7 @@ impl TestDaemonHarness {
                     use kepler_daemon::config::resolve_log_retention;
 
                     let retention = resolve_log_retention(
-                        ctx.service_config.logs.as_ref(),
+                        resolved.logs.as_ref(),
                         ctx.global_log_config.as_ref(),
                         |l| l.get_on_restart(),
                         LogRetention::Retain,
@@ -453,7 +626,7 @@ impl TestDaemonHarness {
                 // Restart the service
                 let spawn_params = SpawnServiceParams {
                     service_name: &event.service_name,
-                    service_config: &ctx.service_config,
+                    service_config: resolved,
                     config_dir: &ctx.config_dir,
                     log_config: ctx.log_config.clone(),
                     handle: handle.clone(),
@@ -502,17 +675,27 @@ impl TestDaemonHarness {
                 // Record process exit in state
                 let _ = handle.record_process_exit(&event.service_name, event.exit_code, event.signal).await;
 
+                // Use resolved config (available after service has started)
+                let resolved = match ctx.resolved_config.as_ref() {
+                    Some(rc) => rc,
+                    None => continue,
+                };
+
                 // Run on_exit hook
-                let hook_params = ServiceHookParams::from_service_context(
-                    &ctx.service_config,
+                let (hooks, lua_code) = resolve_hooks_for_execution(
+                    &handle, &event.service_name, ServiceHookType::PostExit, resolved, &ctx.env,
+                ).await;
+                let mut hook_params = ServiceHookParams::from_service_context(
+                    resolved,
                     &ctx.working_dir,
                     &ctx.env,
                     Some(&ctx.log_config),
                     ctx.global_log_config.as_ref(),
                 );
+                hook_params.lua_code = lua_code.as_deref();
 
                 let _ = run_service_hook(
-                    &ctx.service_config.hooks,
+                    &hooks,
                     ServiceHookType::PostExit,
                     &event.service_name,
                     &hook_params,
@@ -526,7 +709,7 @@ impl TestDaemonHarness {
                     use kepler_daemon::config::resolve_log_retention;
 
                     let retention = resolve_log_retention(
-                        ctx.service_config.logs.as_ref(),
+                        resolved.logs.as_ref(),
                         ctx.global_log_config.as_ref(),
                         |l| l.get_on_exit(),
                         LogRetention::Retain,
@@ -543,15 +726,20 @@ impl TestDaemonHarness {
                 }
 
                 // Determine if we should restart
-                let should_restart = ctx.service_config.restart.should_restart_on_exit(event.exit_code);
+                let should_restart = ctx.service_config.restart.as_static().cloned().unwrap_or_default().should_restart_on_exit(event.exit_code);
 
                 if should_restart {
                     // Small delay before restart
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                     // Run on_restart hook
+                    let (restart_hooks, restart_lua_code) = resolve_hooks_for_execution(
+                        &handle, &event.service_name, ServiceHookType::PreRestart, resolved, &ctx.env,
+                    ).await;
+                    hook_params.lua_code = restart_lua_code.as_deref();
+
                     let _ = run_service_hook(
-                        &ctx.service_config.hooks,
+                        &restart_hooks,
                         ServiceHookType::PreRestart,
                         &event.service_name,
                         &hook_params,
@@ -565,7 +753,7 @@ impl TestDaemonHarness {
                         use kepler_daemon::config::resolve_log_retention;
 
                         let retention = resolve_log_retention(
-                            ctx.service_config.logs.as_ref(),
+                            resolved.logs.as_ref(),
                             ctx.global_log_config.as_ref(),
                             |l| l.get_on_restart(),
                             LogRetention::Retain,
@@ -584,7 +772,7 @@ impl TestDaemonHarness {
                     // Restart the service
                     let spawn_params = SpawnServiceParams {
                         service_name: &event.service_name,
-                        service_config: &ctx.service_config,
+                        service_config: resolved,
                         config_dir: &ctx.config_dir,
                         log_config: ctx.log_config.clone(),
                         handle: handle.clone(),

@@ -1,3 +1,5 @@
+// MutexGuard held across await is intentional for env/umask safety in tests
+#![allow(clippy::await_holding_lock)]
 //! Security feature tests for kepler-daemon
 //!
 //! This module tests security features including:
@@ -825,11 +827,12 @@ fn test_lua_debug_library_blocked() {
 fn test_lua_rawset_cannot_modify_env() {
     use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
     use std::collections::HashMap;
-    use std::path::PathBuf;
 
     let eval = LuaEvaluator::new().unwrap();
-    let mut ctx = EvalContext::default();
-    ctx.env = HashMap::from([("SECRET".into(), "original".into())]);
+    let ctx = EvalContext {
+        env: HashMap::from([("SECRET".into(), "original".into())]),
+        ..Default::default()
+    };
 
     // First verify the value is accessible
     let result: String = eval.eval(r#"return ctx.env.SECRET"#, &ctx, "test").unwrap();
@@ -862,11 +865,12 @@ fn test_lua_rawset_cannot_modify_env() {
 fn test_lua_getmetatable_frozen() {
     use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
     use std::collections::HashMap;
-    use std::path::PathBuf;
 
     let eval = LuaEvaluator::new().unwrap();
-    let mut ctx = EvalContext::default();
-    ctx.env = HashMap::from([("FOO".into(), "bar".into())]);
+    let ctx = EvalContext {
+        env: HashMap::from([("FOO".into(), "bar".into())]),
+        ..Default::default()
+    };
 
     // On a Luau-frozen table, getmetatable returns nil (metatable is protected)
     let result: mlua::Value = eval
@@ -1009,7 +1013,7 @@ async fn test_env_file_baked_changes_ignored() {
         .wait_for_marker_content("env_bake", Duration::from_secs(2))
         .await;
     assert!(
-        content.as_ref().map_or(false, |c| c.contains("original_value")),
+        content.as_ref().is_some_and(|c| c.contains("original_value")),
         "First run should have original value"
     );
 
@@ -1030,12 +1034,12 @@ async fn test_env_file_baked_changes_ignored() {
 
     // SECURITY PROPERTY: The baked value is used, not the modified file
     assert!(
-        content2.as_ref().map_or(false, |c| c.contains("original_value")),
+        content2.as_ref().is_some_and(|c| c.contains("original_value")),
         "After restart, should still use BAKED value 'original_value', not modified. Got: {:?}",
         content2
     );
     assert!(
-        !content2.as_ref().map_or(true, |c| c.contains("modified_value")),
+        !content2.as_ref().is_none_or(|c| c.contains("modified_value")),
         "Modified value should NOT appear - baking should protect against file changes"
     );
 
@@ -1085,7 +1089,7 @@ async fn test_config_baked_changes_ignored() {
         .wait_for_marker_content("config_bake", Duration::from_secs(2))
         .await;
     assert!(
-        content.as_ref().map_or(false, |c| c.contains("version=original")),
+        content.as_ref().is_some_and(|c| c.contains("version=original")),
         "First run should have original config"
     );
 
@@ -1105,7 +1109,7 @@ async fn test_config_baked_changes_ignored() {
 
     // Config should still be the original baked version
     assert!(
-        content2.as_ref().map_or(false, |c| c.contains("version=original")),
+        content2.as_ref().is_some_and(|c| c.contains("version=original")),
         "Restart should use baked config"
     );
 

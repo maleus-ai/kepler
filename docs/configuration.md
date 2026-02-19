@@ -16,9 +16,9 @@ Complete reference for Kepler's YAML configuration format.
 
 ## Overview
 
-Kepler uses YAML configuration files (default: `kepler.yaml` or `kepler.yml`). Configs are **baked** on first use -- environment variables are expanded, Lua scripts are evaluated, and the result is stored as an immutable snapshot.
+Kepler uses YAML configuration files (default: `kepler.yaml` or `kepler.yml`). Global config (the `kepler:` namespace) is evaluated eagerly at load time and stored as an immutable snapshot. Service config is evaluated **lazily at each service start** — `${{ }}` expressions and `!lua` tags are resolved with the full runtime context (environment, dependencies, restart count, etc.).
 
-To apply changes after baking, use `kepler recreate` (stops services, re-bakes, starts again).
+To re-evaluate global config after changes, use `kepler recreate` (stops services, re-reads config, starts again).
 
 For a ready-to-run example, see [`example.kepler.yaml`](../example.kepler.yaml).
 
@@ -96,7 +96,7 @@ services:
         condition: service_healthy
         timeout: 60s              # Wait up to 60s for backend health
     environment:
-      - VITE_API_URL=${BACKEND_URL}
+      - VITE_API_URL=${{ env.BACKEND_URL }}
     restart: always
     logs:
       retention:
@@ -169,20 +169,20 @@ See [Hooks](hooks.md) for format, execution order, and examples.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `command` | `string[]` | required | Command to run |
-| `working_dir` | `string` | config dir | Working directory |
-| `depends_on` | `string[]\|object` | `[]` | Service dependencies. See [Dependencies](dependencies.md) |
-| `environment` | `string[]` | `[]` | Environment variables (`KEY=value`). See [Environment Variables](environment-variables.md) |
-| `env_file` | `string` | - | Path to `.env` file |
+| `if` | `string` | - | Lua condition expression. When present, service is only started if truthy. |
+| `command` | `string[]` | required | Command to run. Supports `${{ }}` and `!lua`. |
+| `working_dir` | `string` | config dir | Working directory. Supports `${{ }}`. |
+| `depends_on` | `string[]\|object` | `[]` | Service dependencies. Service names must be static. Config fields (`condition`, `timeout`, `restart`, `exit_code`) support `!lua` and `${{ }}`. See [Dependencies](dependencies.md) |
+| `environment` | `string[]` | `[]` | Environment variables (`KEY=value`). Supports `${{ }}` (sequential). See [Environment Variables](environment-variables.md) |
+| `env_file` | `string` | - | Path to `.env` file. Supports `${{ }}` (system env only). |
 | `sys_env` | `string` | global | System env policy: `clear` or `inherit`. Inherits from `kepler.sys_env` if not set |
 | `restart` | `string\|object` | `no` | Restart policy. See [Restart Configuration](#restart-configuration) |
-| `healthcheck` | `object` | - | Health check config. See [Health Checks](health-checks.md) |
-| `hooks` | `object` | - | Service-specific hooks. See [Hooks](hooks.md) |
-| `user` | `string` | CLI user | User to run as (Unix). Supports `"name"`, `"uid"`, `"name:group"`, `"uid:gid"`. Defaults to the CLI user who loaded the config. See [Privilege Dropping](privilege-dropping.md) |
-| `groups` | `string[]` | `[]` | Supplementary groups lockdown (Unix). When empty, all groups are loaded via `initgroups`. See [Privilege Dropping](privilege-dropping.md) |
-| `logs` | `object` | - | Log configuration. See [Log Management](log-management.md) |
+| `healthcheck` | `object` | - | Health check config. Supports `${{ }}` and `!lua`. See [Health Checks](health-checks.md) |
+| `hooks` | `object` | - | Service-specific hooks. Supports `${{ }}` and `!lua`. See [Hooks](hooks.md) |
+| `user` | `string` | CLI user | User to run as (Unix). Supports `${{ }}`. Supports `"name"`, `"uid"`, `"name:group"`, `"uid:gid"`. Defaults to the CLI user who loaded the config. See [Privilege Dropping](privilege-dropping.md) |
+| `groups` | `string[]` | `[]` | Supplementary groups lockdown (Unix). Supports `${{ }}`. See [Privilege Dropping](privilege-dropping.md) |
+| `logs` | `object` | - | Log configuration. Supports `${{ }}` and `!lua`. See [Log Management](log-management.md) |
 | `limits` | `object` | - | Resource limits. See [Privilege Dropping](privilege-dropping.md) |
-| `wait` | `bool` | - | Override startup/deferred classification. See [Dependencies](dependencies.md) |
 
 ### User Format
 
@@ -241,9 +241,9 @@ Service names must:
 
 ## Config Immutability
 
-Once a config is baked (on first `kepler start`), the snapshot is immutable. Services always run using the baked snapshot, never the original config file.
+Once a config is loaded, the raw service definitions are stored as a snapshot. Global config (`kepler:` namespace, `lua:` directive) is evaluated once at load time. Service-level `${{ }}` expressions and `!lua` tags are re-evaluated **on every service start/restart** with the current runtime context.
 
-To apply config changes:
+To apply changes to the config file:
 
 ```bash
 kepler recreate
@@ -252,10 +252,9 @@ kepler recreate
 The `recreate` command:
 - Stops all running services with cleanup
 - Re-reads the original config file
-- Re-expands environment variables
-- Re-evaluates Lua scripts
-- Creates a new baked snapshot
-- Starts all services again
+- Re-evaluates global Lua code
+- Creates a new snapshot
+- Starts all services again (re-evaluating service-level expressions)
 
 ---
 
@@ -267,8 +266,8 @@ The `recreate` command:
 - [Hooks](hooks.md) -- Global and service hooks
 - [Health Checks](health-checks.md) -- Health check configuration
 - [Environment Variables](environment-variables.md) -- Env var handling
-- [Variable Expansion](variable-expansion.md) -- Shell-style expansion syntax
-- [Lua Scripting](lua-scripting.md) -- Dynamic config generation
+- [Inline Expressions](variable-expansion.md) -- `${{ expr }}` syntax reference
+- [Lua Scripting](lua-scripting.md) -- Dynamic config with `!lua` and `${{ }}`
 - [Log Management](log-management.md) -- Log storage and streaming
 - [File Watching](file-watching.md) -- Auto-restart on changes
 - [Privilege Dropping](privilege-dropping.md) -- User/group and limits

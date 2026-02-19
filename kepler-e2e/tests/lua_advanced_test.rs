@@ -193,7 +193,7 @@ async fn test_lua_working_dir() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test !lua in depends_on field
+/// Test depends_on ordering (depends_on is always static, not Lua-evaluated)
 #[tokio::test]
 async fn test_lua_depends_on() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -251,7 +251,7 @@ async fn test_lua_depends_on() -> E2eResult<()> {
     // (dependencies guarantee target starts first, but logs may have same-second timestamps)
     assert!(
         ts_target <= ts_source,
-        "Lua-generated depends_on should work. Target timestamp: {:?}, Source timestamp: {:?}",
+        "depends_on ordering should work. Target timestamp: {:?}, Source timestamp: {:?}",
         ts_target, ts_source
     );
 
@@ -357,15 +357,15 @@ async fn test_lua_env_readonly() -> E2eResult<()> {
 
     harness.start_daemon().await?;
 
-    // This should fail to start because the Lua code tries to modify ctx.env
-    let output = harness.start_services(&config_path).await?;
+    // Start services — full starts are async so the CLI may return success
+    // even if individual services fail during lazy resolution.
+    let _output = harness.start_services(&config_path).await?;
 
-    // The service should fail to load due to Lua error
-    assert!(
-        !output.success() || output.stderr_contains("read-only") || output.stderr_contains("error"),
-        "Modifying ctx.env should fail. exit: {}, stderr: {}",
-        output.exit_code, output.stderr
-    );
+    // The service should end up in "failed" state because the Lua code
+    // tries to modify the frozen ctx.env table.
+    harness
+        .wait_for_service_status(&config_path, "readonly-service", "failed", Duration::from_secs(5))
+        .await?;
 
     harness.stop_daemon().await?;
     Ok(())
@@ -379,15 +379,15 @@ async fn test_lua_ctx_readonly() -> E2eResult<()> {
 
     harness.start_daemon().await?;
 
-    // This should fail to start because the Lua code tries to modify ctx
-    let output = harness.start_services(&config_path).await?;
+    // Start services — full starts are async so the CLI may return success
+    // even if individual services fail during lazy resolution.
+    let _output = harness.start_services(&config_path).await?;
 
-    // The service should fail to load due to Lua error
-    assert!(
-        !output.success() || output.stderr_contains("read-only") || output.stderr_contains("error"),
-        "Modifying ctx should fail. exit: {}, stderr: {}",
-        output.exit_code, output.stderr
-    );
+    // The service should end up in "failed" state because the Lua code
+    // tries to modify the frozen ctx table.
+    harness
+        .wait_for_service_status(&config_path, "ctx-readonly-service", "failed", Duration::from_secs(5))
+        .await?;
 
     harness.stop_daemon().await?;
     Ok(())

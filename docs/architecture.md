@@ -396,56 +396,50 @@ depends_on:
 
 ## Environment Variable Handling
 
-### Shell Expansion Syntax
+### Inline Lua Expression Syntax
 
-Kepler supports shell-style variable expansion:
+Kepler uses `${{ expr }}` inline Lua expressions for dynamic values in configuration:
 
 | Syntax | Description |
 |--------|-------------|
-| `${VAR}` | Variable expansion |
-| `${VAR:-default}` | Default value if unset or empty |
-| `${VAR:+value}` | Conditional value (use if VAR is set) |
-| `~` | Home directory expansion |
+| `${{ env.VAR }}` | Environment variable reference |
+| `${{ env.VAR or "default" }}` | Default value if unset |
+| `${{ deps.svc.status }}` | Dependency status |
+| `${{ ctx.service_name }}` | Current service name |
 
-See [Variable Expansion](variable-expansion.md) for the user-facing reference.
+See [Inline Expressions](variable-expansion.md) for the user-facing reference.
 
 ### Three-Stage Expansion
 
-Shell expansion happens in three stages, each building on the previous context:
+Expression evaluation happens in three stages, each building on the previous context:
 
 ```mermaid
 flowchart TD
-    subgraph Stage1[Stage 1]
-        A[env_file path] --> B[Expand with system env]
+    subgraph Stage1[Stage 1 - Config Load Time]
+        A[env_file path] --> B[Evaluate with system env]
         B --> C[Load env_file content]
     end
-    subgraph Stage2[Stage 2]
+    subgraph Stage2[Stage 2 - Service Start Time]
         C --> D[environment array]
-        D --> E[Expand with system env + env_file]
+        D --> E[Evaluate sequentially with system env + env_file]
     end
-    subgraph Stage3[Stage 3]
+    subgraph Stage3[Stage 3 - Service Start Time]
         E --> F[All other fields]
-        F --> G[Expand with system env + env_file + environment]
+        F --> G[Evaluate with system env + env_file + environment + deps]
     end
 ```
 
-| Stage | What is expanded | Expansion context |
-|-------|------------------|-------------------|
-| 1 | `env_file` path | System environment only |
-| 2 | `environment` array entries | System env + env_file variables |
-| 3 | `working_dir`, `user`, `groups`, `limits.memory`, `restart.watch` | System env + env_file + environment array |
+| Stage | What is evaluated | Evaluation context |
+|-------|-------------------|-------------------|
+| 1 | `env_file` path | System environment only (config load time) |
+| 2 | `environment` array entries | System env + env_file variables (sequential, service start time) |
+| 3 | All other fields (`command`, `working_dir`, `user`, hooks, etc.) | System env + env_file + environment + deps (service start time) |
 
 See [Environment Variables](environment-variables.md) for the full reference.
 
-### What is NOT Expanded
+### What is NOT Evaluated
 
-These fields are intentionally **not** expanded at config time. The shell expands them at runtime using the process environment:
-
-- `command`
-- `hooks.run` / `hooks.command`
-- `healthcheck.test`
-
-This ensures commands work as users expect (shell expansion at runtime) and values are passed consistently through environment variables.
+`${{ }}` expressions and `!lua` tags are intentionally **not** evaluated for service names in `depends_on` — service names must be literal strings for dependency graph construction. However, dependency config fields (`condition`, `timeout`, `restart`, `exit_code`) **do** support `!lua` and `${{ }}`, evaluated eagerly at config load time.
 
 ### Environment Priority (Runtime)
 
@@ -680,7 +674,7 @@ sequenceDiagram
 | Secure file writing | `kepler-daemon/src/persistence.rs` | File permissions |
 | Socket security | `kepler-protocol/src/server.rs` | Group-based access control |
 | Config loading | `kepler-daemon/src/config_actor.rs` | Lifecycle management, event channels |
-| Env expansion | `kepler-daemon/src/config.rs` | Shell-style expansion, dependency types |
+| Env expansion | `kepler-daemon/src/config/expand.rs` | `${{ }}` inline Lua expression evaluation |
 | Env building | `kepler-daemon/src/env.rs` | Priority merging |
 | Lua evaluation | `kepler-daemon/src/lua_eval.rs` | Sandbox implementation |
 | Process spawning | `kepler-daemon/src/process.rs` | Security controls |

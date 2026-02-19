@@ -20,7 +20,9 @@ pub use deps::{
     ExitCodeFilter,
 };
 pub use duration::{format_duration, parse_duration};
-pub use expand::resolve_sys_env;
+pub use expand::{
+    evaluate_environment_sequential, evaluate_expression_string, evaluate_value_tree, resolve_sys_env,
+};
 pub use health::HealthCheck;
 pub use hooks::{GlobalHooks, HookCommand, HookCommon, HookList, ServiceHooks};
 pub use logs::{LogConfig, LogRetention, LogRetentionConfig, LogStoreConfig};
@@ -28,16 +30,273 @@ pub use resources::{ResourceLimits, SysEnvPolicy, parse_memory_limit};
 pub use restart::{RestartConfig, RestartPolicy};
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use crate::errors::{DaemonError, Result};
+use crate::lua_eval::{EvalContext, LuaEvaluator};
 
-/// Load environment variables from an env_file.
-/// Returns an empty HashMap if the file doesn't exist or can't be parsed.
-fn try_load_env_file(path: &Path) -> HashMap<String, String> {
-    crate::env::load_env_file(path).unwrap_or_default()
+// ============================================================================
+// ConfigValue<T> — static/dynamic field wrapper
+// ============================================================================
+
+/// A config field that may be statically known or require Lua evaluation.
+#[derive(Debug, Clone)]
+pub enum ConfigValue<T> {
+    /// Value parsed successfully at config load time.
+    Static(T),
+    /// Value contains `${{ }}` or `!lua` — needs evaluation at service start time.
+    Dynamic(serde_yaml::Value),
+}
+
+impl<T: Default> Default for ConfigValue<T> {
+    fn default() -> Self {
+        ConfigValue::Static(T::default())
+    }
+}
+
+impl<T: serde::Serialize> serde::Serialize for ConfigValue<T> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            ConfigValue::Static(v) => v.serialize(serializer),
+            ConfigValue::Dynamic(v) => v.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T: DeserializeOwned> serde::Deserialize<'de> for ConfigValue<T> {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_yaml::Value::deserialize(deserializer)?;
+        if contains_dynamic_content(&value) {
+            Ok(ConfigValue::Dynamic(value))
+        } else {
+            serde_yaml::from_value::<T>(value)
+                .map(ConfigValue::Static)
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+/// Check if a YAML value contains dynamic content (`!lua` tags or `${{ }}` expressions).
+fn contains_dynamic_content(value: &serde_yaml::Value) -> bool {
+    use serde_yaml::Value;
+    match value {
+        Value::Tagged(t) if t.tag == "!lua" => true,
+        Value::Tagged(t) => contains_dynamic_content(&t.value),
+        Value::String(s) => s.contains("${{"),
+        Value::Mapping(m) => m.iter().any(|(k, v)| contains_dynamic_content(k) || contains_dynamic_content(v)),
+        Value::Sequence(s) => s.iter().any(contains_dynamic_content),
+        _ => false,
+    }
+}
+
+
+impl<T: Clone + DeserializeOwned> ConfigValue<T> {
+    /// Returns the static value if available.
+    pub fn as_static(&self) -> Option<&T> {
+        match self {
+            ConfigValue::Static(v) => Some(v),
+            ConfigValue::Dynamic(_) => None,
+        }
+    }
+
+    /// Returns true if this value requires Lua evaluation.
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self, ConfigValue::Dynamic(_))
+    }
+
+    /// Resolve the value, evaluating Lua if needed.
+    pub fn resolve(
+        &self,
+        evaluator: &LuaEvaluator,
+        ctx: &EvalContext,
+        config_path: &Path,
+        field_path: &str,
+    ) -> Result<T> {
+        match self {
+            ConfigValue::Static(v) => Ok(v.clone()),
+            ConfigValue::Dynamic(value) => {
+                let start = std::time::Instant::now();
+                let mut value = value.clone();
+                evaluate_value_tree(&mut value, evaluator, ctx, config_path, field_path)?;
+                let result = serde_yaml::from_value(value).map_err(|e| {
+                    DaemonError::Config(format!("Failed to resolve '{}': {}", field_path, e))
+                });
+                tracing::debug!("[timeit] {} resolved in {:?}", field_path, start.elapsed());
+                result
+            }
+        }
+    }
+}
+
+// ============================================================================
+// RawServiceConfig — typed service config with ConfigValue fields
+// ============================================================================
+
+/// Per-service configuration with fields wrapped in `ConfigValue<T>`.
+///
+/// Fields are parsed at config load time. Static values are available immediately;
+/// dynamic values (containing `${{ }}` or `!lua`) are resolved lazily at service start time.
+///
+/// `depends_on` and `sys_env` are always static (not wrapped in ConfigValue).
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawServiceConfig {
+    #[serde(default, rename = "if")]
+    pub condition: ConfigValue<Option<bool>>,
+    pub command: ConfigValue<Vec<String>>,
+    #[serde(default)]
+    pub working_dir: ConfigValue<Option<PathBuf>>,
+    #[serde(default)]
+    pub environment: ConfigValue<Vec<String>>,
+    #[serde(default)]
+    pub env_file: ConfigValue<Option<PathBuf>>,
+    /// System environment inheritance policy (always static)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sys_env: Option<SysEnvPolicy>,
+    #[serde(default)]
+    pub restart: ConfigValue<RestartConfig>,
+    /// Dependencies (always static — used for dep graph before evaluation)
+    #[serde(default)]
+    pub depends_on: DependsOn,
+    #[serde(default)]
+    pub healthcheck: ConfigValue<Option<HealthCheck>>,
+    #[serde(default)]
+    pub hooks: ConfigValue<Option<ServiceHooks>>,
+    #[serde(default)]
+    pub logs: ConfigValue<Option<LogConfig>>,
+    #[serde(default)]
+    pub user: ConfigValue<Option<String>>,
+    #[serde(default)]
+    pub groups: ConfigValue<Vec<String>>,
+    #[serde(default)]
+    pub limits: ConfigValue<Option<ResourceLimits>>,
+}
+
+impl Default for RawServiceConfig {
+    fn default() -> Self {
+        Self {
+            condition: ConfigValue::default(),
+            command: ConfigValue::Static(Vec::new()),
+            working_dir: ConfigValue::default(),
+            environment: ConfigValue::default(),
+            env_file: ConfigValue::default(),
+            sys_env: None,
+            restart: ConfigValue::default(),
+            depends_on: DependsOn::default(),
+            healthcheck: ConfigValue::default(),
+            hooks: ConfigValue::default(),
+            logs: ConfigValue::default(),
+            user: ConfigValue::default(),
+            groups: ConfigValue::default(),
+            limits: ConfigValue::default(),
+        }
+    }
+}
+
+impl RawServiceConfig {
+    /// Resolve environment entries sequentially, building up `ctx.env` as we go.
+    pub fn resolve_environment(
+        &self,
+        evaluator: &LuaEvaluator,
+        ctx: &mut EvalContext,
+        config_path: &Path,
+        name: &str,
+    ) -> Result<Vec<String>> {
+        match &self.environment {
+            ConfigValue::Static(entries) => {
+                for entry in entries {
+                    if let Some((k, v)) = entry.split_once('=') {
+                        ctx.env.insert(k.to_string(), v.to_string());
+                    }
+                }
+                Ok(entries.clone())
+            }
+            ConfigValue::Dynamic(value) => {
+                let mut value = value.clone();
+                // If !lua tag, evaluate first to produce a sequence
+                if matches!(&value, serde_yaml::Value::Tagged(t) if t.tag == "!lua") {
+                    evaluate_value_tree(&mut value, evaluator, ctx, config_path, &format!("{}.environment", name))?;
+                }
+                evaluate_environment_sequential(&mut value, evaluator, ctx, config_path, name)?;
+                serde_yaml::from_value(value).map_err(|e| {
+                    DaemonError::Config(format!("service '{}': {}", name, e))
+                })
+            }
+        }
+    }
+
+    /// Resolve env_file, load the file, and populate ctx with its variables.
+    pub fn resolve_env_file(
+        &self,
+        evaluator: &LuaEvaluator,
+        ctx: &mut EvalContext,
+        config_path: &Path,
+        config_dir: &Path,
+        name: &str,
+    ) -> Result<Option<PathBuf>> {
+        let env_file: Option<PathBuf> = match &self.env_file {
+            ConfigValue::Static(v) => v.clone(),
+            ConfigValue::Dynamic(value) => {
+                let mut value = value.clone();
+                evaluate_value_tree(&mut value, evaluator, ctx, config_path, &format!("{}.env_file", name))?;
+                serde_yaml::from_value(value).map_err(|e| {
+                    DaemonError::Config(format!("Failed to resolve '{}.env_file': {}", name, e))
+                })?
+            }
+        };
+
+        if let Some(ref ef_str) = env_file {
+            let ef_path = if ef_str.is_relative() {
+                config_dir.join(ef_str)
+            } else {
+                ef_str.clone()
+            };
+            if ef_path.exists() {
+                match crate::env::load_env_file(&ef_path) {
+                    Ok(vars) => {
+                        for (k, v) in &vars {
+                            ctx.env_file.insert(k.clone(), v.clone());
+                            ctx.env.insert(k.clone(), v.clone());
+                        }
+                    }
+                    Err(e) => {
+                        return Err(DaemonError::Config(format!(
+                            "Failed to load env_file '{}' for service '{}': {}",
+                            ef_path.display(), name, e
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(env_file)
+    }
+
+    /// Check if a healthcheck is defined (for readiness computation).
+    /// Returns true if static and present, or if dynamic (assume yes).
+    pub fn has_healthcheck(&self) -> bool {
+        match &self.healthcheck {
+            ConfigValue::Static(h) => h.is_some(),
+            ConfigValue::Dynamic(_) => true, // assume yes if dynamic
+        }
+    }
+
+    /// Check if command is present (for validation).
+    pub fn has_command(&self) -> bool {
+        match &self.command {
+            ConfigValue::Static(v) => !v.is_empty(),
+            ConfigValue::Dynamic(_) => true, // dynamic commands are assumed present
+        }
+    }
 }
 
 /// Validate service name format
@@ -156,29 +415,32 @@ pub struct KeplerGlobalConfig {
 }
 
 /// Root configuration structure
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
+///
+/// Services are stored as typed `RawServiceConfig` with `ConfigValue<T>` fields.
+/// Static fields are available immediately; dynamic fields (containing `${{ }}` or `!lua`)
+/// are resolved lazily at service start time.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct KeplerConfig {
     /// Inline Lua code that runs in global scope to define functions
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lua: Option<String>,
 
     /// Global Kepler configuration (sys_env, logs, hooks)
-    #[serde(default)]
     pub kepler: Option<KeplerGlobalConfig>,
 
-    #[serde(default)]
-    pub services: HashMap<String, ServiceConfig>,
+    /// Typed service configurations (dynamic fields resolved at service start time)
+    pub services: HashMap<String, RawServiceConfig>,
 }
 
-/// Service configuration
+/// Service configuration (resolved from RawServiceConfig at service start time).
+///
+/// This struct contains the resolved values needed for spawning a service.
+/// All fields including hooks are resolved at service start time.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
-    /// Runtime Lua condition. When present, the service is only started if this
-    /// expression evaluates to a truthy value. Otherwise the service is Skipped.
+    /// Service condition. When `Some(false)`, the service is Skipped.
     #[serde(default, rename = "if")]
-    pub condition: Option<String>,
+    pub condition: Option<bool>,
     pub command: Vec<String>,
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
@@ -187,17 +449,11 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub env_file: Option<PathBuf>,
     /// System environment inheritance policy
-    /// - `clear`: Start with empty environment, only explicit vars are passed
-    /// - `inherit`: Inherit all system environment variables from the daemon
-    /// When not specified, inherits from global `kepler.sys_env`. If that is also
-    /// unset, defaults to `inherit`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sys_env: Option<SysEnvPolicy>,
     #[serde(default)]
     pub restart: RestartConfig,
-    /// Dependencies with optional conditions and timeouts
-    /// Simple form: `depends_on: [service-a, service-b]`
-    /// Extended form: `depends_on: [service-a, { service-b: { condition: service_healthy, timeout: 5m } }]`
+    /// Dependencies (always static)
     #[serde(default)]
     pub depends_on: DependsOn,
     #[serde(default)]
@@ -215,16 +471,20 @@ pub struct ServiceConfig {
     pub limits: Option<ResourceLimits>,
 }
 
+// ============================================================================
+// KeplerConfig implementation
+// ============================================================================
+
 impl KeplerConfig {
     /// Load configuration from a YAML file with system environment for baking.
     ///
     /// The `sys_env` parameter provides the system environment variables captured from the CLI.
     /// These are used for:
-    /// 1. Shell expansion of `${VAR}` references in the config
-    /// 2. Lua script evaluation context
-    /// 3. If `sys_env: inherit` policy, these vars are baked into the service's environment
+    /// 1. Expanding `${{ expr }}` references in env_file paths (eagerly, for snapshot self-containment)
+    /// 2. Lua script evaluation context (for global lua block and kepler namespace)
+    /// 3. At service start time, for `${{ expr }}` evaluation in service fields
     ///
-    /// After loading, the config is fully "baked" - no further sys_env access is needed.
+    /// Services are stored as raw YAML Values. Expansion happens lazily at service start time.
     /// Maximum config file size (10MB) to prevent OOM from accidentally large files
     const MAX_CONFIG_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
@@ -254,42 +514,199 @@ impl KeplerConfig {
             }
         })?;
 
-        // Get the config file's directory for resolving relative paths
-        let config_dir = path.parent().unwrap_or(Path::new("."));
-
-        // Check if there are any !lua tags in the content
-        let has_lua_tags = contents.contains("!lua");
-
-        let mut config: KeplerConfig = if has_lua_tags {
-            // Parse as raw YAML Value first to handle Lua tags
-            let de = serde_yaml::Deserializer::from_str(&contents);
-            let mut value: serde_yaml::Value =
-                serde_path_to_error::deserialize(de).map_err(|e| DaemonError::ConfigParse {
-                    path: path.to_path_buf(),
-                    source: e,
-                })?;
-
-            // Process Lua scripts with sys_env context
-            lua::process_lua_scripts(&mut value, config_dir, path, sys_env)?;
-
-            // Now deserialize the processed value with path tracking
-            serde_path_to_error::deserialize(value).map_err(|e| DaemonError::ConfigParse {
-                path: path.to_path_buf(),
-                source: e,
-            })?
-        } else {
-            // No Lua tags, parse directly with path tracking
-            let de = serde_yaml::Deserializer::from_str(&contents);
+        // Step 1: Parse entire YAML to raw Value
+        let de = serde_yaml::Deserializer::from_str(&contents);
+        let mut root: serde_yaml::Value =
             serde_path_to_error::deserialize(de).map_err(|e| DaemonError::ConfigParse {
                 path: path.to_path_buf(),
                 source: e,
-            })?
+            })?;
+
+        let root_map = root.as_mapping_mut().ok_or_else(|| {
+            DaemonError::Config(format!("Config file '{}' must be a YAML mapping", path.display()))
+        })?;
+
+        // Step 2: Extract and remove lua field
+        let lua = root_map
+            .remove(serde_yaml::Value::String("lua".into()))
+            .and_then(|v| v.as_str().map(String::from));
+
+        // Step 3: Create shared evaluator for config loading.
+        // This evaluator is used for both global !lua processing and
+        // eager expansion of env_file/${{ }} paths and depends_on.
+        let load_evaluator = LuaEvaluator::new().map_err(|e| DaemonError::Internal(
+            format!("Failed to create Lua evaluator: {}", e),
+        ))?;
+        if let Some(ref code) = lua {
+            load_evaluator.load_inline(code).map_err(|e| DaemonError::LuaError {
+                path: path.to_path_buf(),
+                message: format!("Error in lua: block: {}", e),
+            })?;
+        }
+
+        // Step 4: Process global lua block (execute to define functions)
+        // !lua tags in the kepler namespace are evaluated eagerly
+        let has_lua_tags = contents.contains("!lua");
+        if has_lua_tags {
+            lua::process_lua_scripts(&mut root, &load_evaluator, path, sys_env)?;
+        }
+
+        // Re-get root_map after potential mutation
+        let root_map = root.as_mapping_mut().ok_or_else(|| {
+            DaemonError::Config(format!("Config file '{}' must be a YAML mapping", path.display()))
+        })?;
+
+        // Step 5: Extract and deserialize kepler namespace (eagerly)
+        let kepler: Option<KeplerGlobalConfig> =
+            if let Some(kepler_val) = root_map.remove(serde_yaml::Value::String("kepler".into()))
+            {
+                let de_val = kepler_val;
+                Some(serde_path_to_error::deserialize(de_val).map_err(|e| {
+                    DaemonError::ConfigParse {
+                        path: path.to_path_buf(),
+                        source: e,
+                    }
+                })?)
+            } else {
+                None
+            };
+
+        // Step 6: Extract services mapping as raw Values
+        let services_value = root_map
+            .remove(serde_yaml::Value::String("services".into()))
+            .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+        let services_mapping = services_value.as_mapping().ok_or_else(|| {
+            DaemonError::Config(format!(
+                "Config file '{}': 'services' must be a mapping",
+                path.display()
+            ))
+        })?;
+
+        // Check for unknown root-level fields
+        // lua, kepler, and services have been removed above; nothing else should remain
+        for key in root_map.keys() {
+            if let Some(key_str) = key.as_str() {
+                return Err(DaemonError::Config(format!(
+                    "Configuration errors in {}:\n  - unknown field `{}` at root level",
+                    path.display(),
+                    key_str
+                )));
+            }
+        }
+
+        // Step 7: Eagerly expand env_file ${{ }} paths and depends_on !lua tags,
+        // then deserialize each service into RawServiceConfig.
+        //
+        // The evaluator has the lua: block loaded so that depends_on !lua blocks
+        // can call user-defined functions. depends_on must be static for the dep
+        // graph, so we evaluate it eagerly here (before RawServiceConfig parsing).
+        let sys_env_ctx = EvalContext {
+            env: sys_env.clone(),
+            ..Default::default()
         };
 
-        // Pre-compute all environment variable expansions using sys_env
-        config.resolve_environment(sys_env);
+        let mut services: HashMap<String, RawServiceConfig> = HashMap::new();
+        for (key, value) in services_mapping {
+            let name = key.as_str().ok_or_else(|| {
+                DaemonError::Config(format!(
+                    "Config file '{}': service names must be strings",
+                    path.display()
+                ))
+            })?;
 
-        // Validate the config
+            let mut value = value.clone();
+            if let Some(mapping) = value.as_mapping_mut() {
+                // Eagerly expand ${{ }} in env_file paths before parsing
+                if let Some(ef_val) = mapping.get_mut(serde_yaml::Value::String("env_file".into()))
+                    && let Some(ef_str) = ef_val.as_str()
+                        && ef_str.contains("${{") {
+                            let expanded = evaluate_expression_string(
+                                ef_str, &load_evaluator, &sys_env_ctx, path, "env_file",
+                            )?;
+                            *ef_val = serde_yaml::Value::String(expanded);
+                        }
+
+                // Eagerly evaluate !lua and ${{ }} inside depends_on config fields only.
+                // The depends_on structure itself (service names) must be static for the
+                // dependency graph. Only config fields (condition, timeout, restart, exit_code)
+                // can use !lua/${{ }}.
+                if let Some(dep_val) = mapping.get_mut(serde_yaml::Value::String("depends_on".into()))
+                {
+                    let field_path = format!("{}.depends_on", name);
+
+                    // Reject !lua/${{ }} at the depends_on level — structure must be static
+                    if let serde_yaml::Value::Tagged(t) = &dep_val {
+                        return Err(DaemonError::Config(format!(
+                            "Configuration errors in {}:\n  - {}: !{} is not allowed on depends_on itself \
+                            (dependency names must be static); use !lua/${{{{ }}}} inside dependency \
+                            config fields (condition, timeout, etc.) instead",
+                            path.display(), field_path, t.tag
+                        )));
+                    }
+                    if matches!(dep_val, serde_yaml::Value::String(s) if s.contains("${{")) {
+                        return Err(DaemonError::Config(format!(
+                            "Configuration errors in {}:\n  - {}: ${{{{ }}}} expressions are not allowed \
+                            on depends_on itself (dependency names must be static); use them inside \
+                            dependency config fields (condition, timeout, etc.) instead",
+                            path.display(), field_path
+                        )));
+                    }
+
+                    let ctx = EvalContext {
+                        env: sys_env.clone(),
+                        service_name: Some(name.to_string()),
+                        ..Default::default()
+                    };
+                    match dep_val {
+                        // Extended/map form: depends_on: { db: { condition: ..., timeout: ... } }
+                        serde_yaml::Value::Mapping(dep_map) => {
+                            for (_, config_val) in dep_map.iter_mut() {
+                                if config_val.is_mapping() {
+                                    evaluate_value_tree(config_val, &load_evaluator, &ctx, path,
+                                        &field_path)?;
+                                }
+                            }
+                        }
+                        // List form: depends_on: ["a", { b: { condition: ... } }]
+                        serde_yaml::Value::Sequence(seq) => {
+                            for entry in seq.iter_mut() {
+                                if let serde_yaml::Value::Mapping(entry_map) = entry {
+                                    for (_, config_val) in entry_map.iter_mut() {
+                                        if config_val.is_mapping() {
+                                            evaluate_value_tree(config_val, &load_evaluator, &ctx, path,
+                                                &field_path)?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Deserialize to RawServiceConfig — catches unknown fields and type errors at parse time.
+            // Uses serde_path_to_error for precise field paths in error messages.
+            let raw_config: RawServiceConfig = serde_path_to_error::deserialize(value).map_err(|e| {
+                DaemonError::Config(format!(
+                    "Configuration errors in {}:\n  - service '{}' at {}: {}",
+                    path.display(),
+                    name,
+                    e.path(),
+                    e.inner(),
+                ))
+            })?;
+            services.insert(name.to_string(), raw_config);
+        }
+
+        let config = KeplerConfig {
+            lua,
+            kepler,
+            services,
+        };
+
+        // Step 7: Validate the config
         config.validate(path)?;
 
         Ok(config)
@@ -304,60 +721,89 @@ impl KeplerConfig {
         Self::load(path, &HashMap::new())
     }
 
-    /// Pre-compute all environment variable expansions in the config.
-    /// This expands shell-style variable references using shellexpand,
-    /// supporting ${VAR}, ${VAR:-default}, ${VAR:+value}, and ~ expansion.
+    /// Create a fresh LuaEvaluator with this config's `lua:` code loaded.
     ///
-    /// For services with env_file:
-    /// 1. First expand env_file path using sys_env only
-    /// 2. Load env_file content
-    /// 3. Expand all other fields using env_file + sys_env as context
-    ///    (env_file overrides sys_env vars for expansion)
-    /// 4. Apply sys_env policy: if inherit, bake sys_env into environment array
-    fn resolve_environment(&mut self, sys_env: &HashMap<String, String>) {
-        // Get global sys_env policy
-        let global_sys_env_policy = self.global_sys_env().cloned();
-
-        // Process each service
-        for service in self.services.values_mut() {
-            // Step 1: Expand env_file PATH using sys_env only (empty context)
-            if let Some(ref mut ef) = service.env_file {
-                let expanded_path =
-                    expand::expand_with_context(&ef.to_string_lossy(), &HashMap::new(), sys_env);
-                *ef = PathBuf::from(expanded_path);
-            }
-
-            // Step 2: Load env_file if specified
-            let env_file_vars = if let Some(ref ef) = service.env_file {
-                try_load_env_file(ef)
-            } else {
-                HashMap::new()
-            };
-
-            // Step 3: Expand all other fields using env_file + sys_env as context
-            // (env_file overrides sys_env vars in the context)
-            expand::expand_service_config(service, &env_file_vars, sys_env);
-
-            // Step 4: Apply sys_env policy - bake sys_env into environment if inherit
-            let effective_policy =
-                expand::resolve_sys_env(service.sys_env.as_ref(), global_sys_env_policy.as_ref());
-            if effective_policy == SysEnvPolicy::Inherit {
-                // Prepend sys_env vars to environment array (service vars take priority)
-                let mut new_env: Vec<String> = sys_env
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect();
-                new_env.append(&mut service.environment);
-                service.environment = new_env;
-            }
+    /// Used by the orchestrator at service start time for `${{ }}` and `!lua` evaluation.
+    pub fn create_lua_evaluator(&self) -> Result<LuaEvaluator> {
+        let evaluator = LuaEvaluator::new()
+            .map_err(|e| DaemonError::Internal(format!("Failed to create Lua evaluator: {}", e)))?;
+        if let Some(code) = &self.lua {
+            evaluator.load_inline(code)
+                .map_err(|e| DaemonError::Internal(format!("Failed to load Lua code: {}", e)))?;
         }
+        Ok(evaluator)
+    }
 
-        // Process global hooks in kepler namespace (no env_file, just sys_env)
-        if let Some(ref mut kepler) = self.kepler
-            && let Some(ref mut hooks) = kepler.hooks
-        {
-            expand::expand_global_hooks(hooks, &HashMap::new(), sys_env);
-        }
+    /// Resolve a RawServiceConfig into a typed ServiceConfig.
+    ///
+    /// This is called at service start time with the full evaluation context
+    /// (sys_env + env_file + service env + deps). Each field is resolved individually
+    /// in the correct order.
+    ///
+    /// Evaluation order:
+    /// 0. Resolve `env_file` → load file → populate ctx.env_file + ctx.env
+    /// 1. Resolve `environment` sequentially (builds up ctx.env)
+    /// 2. Resolve remaining fields
+    pub fn resolve_service(
+        &self,
+        name: &str,
+        ctx: &mut EvalContext,
+        evaluator: &LuaEvaluator,
+        config_path: &Path,
+        default_user: Option<&str>,
+    ) -> Result<ServiceConfig> {
+        let raw = self
+            .services
+            .get(name)
+            .ok_or_else(|| DaemonError::ServiceNotFound(name.to_string()))?;
+
+        let config_dir = config_path.parent().unwrap_or(Path::new("."));
+
+        // Ensure service_name is set in context
+        ctx.service_name = Some(name.to_string());
+
+        // Step 0: Resolve env_file and load its variables
+        let env_file = raw.resolve_env_file(evaluator, ctx, config_path, config_dir, name)?;
+
+        // Step 1: Resolve environment sequentially (builds ctx.env)
+        let environment = raw.resolve_environment(evaluator, ctx, config_path, name)?;
+
+        // Step 2: Resolve remaining fields
+        let command = raw.command.resolve(evaluator, ctx, config_path, &format!("{}.command", name))?;
+        let working_dir = raw.working_dir.resolve(evaluator, ctx, config_path, &format!("{}.working_dir", name))?;
+        let condition = raw.condition.resolve(evaluator, ctx, config_path, &format!("{}.if", name))?;
+        let user = raw.user.resolve(evaluator, ctx, config_path, &format!("{}.user", name))?;
+        // Apply default_user fallback for dynamic user fields that resolved to None
+        let user = user.or_else(|| default_user.map(String::from));
+        let groups = raw.groups.resolve(evaluator, ctx, config_path, &format!("{}.groups", name))?;
+        let healthcheck = raw.healthcheck.resolve(evaluator, ctx, config_path, &format!("{}.healthcheck", name))?;
+        let limits = raw.limits.resolve(evaluator, ctx, config_path, &format!("{}.limits", name))?;
+        let restart = raw.restart.resolve(evaluator, ctx, config_path, &format!("{}.restart", name))?;
+        let logs = raw.logs.resolve(evaluator, ctx, config_path, &format!("{}.logs", name))?;
+        // Dynamic hooks (`!lua` / `${{ }}`) are deferred to execution time in
+        // `run_service_hook` where `hook_name` context is available.
+        let hooks = if raw.hooks.is_dynamic() {
+            None
+        } else {
+            raw.hooks.resolve(evaluator, ctx, config_path, &format!("{}.hooks", name))?
+        };
+
+        Ok(ServiceConfig {
+            condition,
+            command,
+            working_dir,
+            environment,
+            env_file,
+            sys_env: raw.sys_env.clone(),
+            restart,
+            depends_on: raw.depends_on.clone(),
+            healthcheck,
+            hooks,
+            logs,
+            user,
+            groups,
+            limits,
+        })
     }
 
     /// Validate the configuration
@@ -365,14 +811,14 @@ impl KeplerConfig {
         let mut errors = Vec::new();
 
         // Check each service
-        for (name, service) in &self.services {
+        for (name, raw) in &self.services {
             // Validate service name format
             if let Err(e) = validate_service_name(name) {
                 errors.push(e);
             }
 
-            // Check command is not empty
-            if service.command.is_empty() {
+            // Check command is present and non-empty
+            if !raw.has_command() {
                 errors.push(format!(
                     "Service '{}': 'command' is required and must be a non-empty array",
                     name
@@ -380,17 +826,17 @@ impl KeplerConfig {
             }
 
             // Check dependencies exist
-            for dep in service.depends_on.names() {
-                if !self.services.contains_key(&dep) {
+            for dep_name in raw.depends_on.names() {
+                if !self.services.contains_key(&dep_name) {
                     errors.push(format!(
                         "Service '{}': depends on '{}' which is not defined",
-                        name, dep
+                        name, dep_name
                     ));
                 }
             }
 
             // Warn if exit_code is used with conditions that don't support it
-            for (dep_name, dep_config) in service.depends_on.iter() {
+            for (dep_name, dep_config) in raw.depends_on.iter() {
                 if !dep_config.exit_code.is_empty() {
                     match dep_config.condition {
                         DependencyCondition::ServiceFailed
@@ -406,8 +852,9 @@ impl KeplerConfig {
                 }
             }
 
-            // Validate restart config
-            if let Err(msg) = service.restart.validate() {
+            // Validate restart config (use static or default)
+            let restart = raw.restart.as_static().cloned().unwrap_or_default();
+            if let Err(msg) = restart.validate() {
                 errors.push(format!("Service '{}': {}", name, msg));
             }
         }
@@ -427,11 +874,7 @@ impl KeplerConfig {
     ///
     /// When the CLI invoking user is not root (uid != 0), services and global hooks
     /// that don't specify an explicit `user:` field will default to running as the
-    /// CLI user instead of root. This is called after `KeplerConfig::load()` on
-    /// the fresh load path (not on snapshot restoration, where user is already baked).
-    ///
-    /// Service hooks are NOT baked here — they inherit from the service user via
-    /// `run_hook()` at runtime.
+    /// CLI user instead of root.
     pub fn resolve_default_user(&mut self, uid: u32, gid: u32) {
         // Root is already the daemon user — no change needed
         if uid == 0 {
@@ -440,15 +883,15 @@ impl KeplerConfig {
         let user_str = format!("{}:{}", uid, gid);
 
         // Bake into services
-        for service in self.services.values_mut() {
-            if service.user.is_none() {
-                service.user = Some(user_str.clone());
+        for raw in self.services.values_mut() {
+            if let ConfigValue::Static(None) = &raw.user {
+                raw.user = ConfigValue::Static(Some(user_str.clone()));
             }
         }
 
         // Bake into global hooks (they don't inherit from any service)
-        if let Some(ref mut kepler) = self.kepler {
-            if let Some(ref mut hooks) = kepler.hooks {
+        if let Some(ref mut kepler) = self.kepler
+            && let Some(ref mut hooks) = kepler.hooks {
                 for hook_list in hooks.all_hooks_mut().flatten() {
                     for hook in &mut hook_list.0 {
                         if hook.user().is_none() {
@@ -457,7 +900,6 @@ impl KeplerConfig {
                     }
                 }
             }
-        }
     }
 
     // === Accessor methods for kepler namespace ===
@@ -475,6 +917,37 @@ impl KeplerConfig {
     /// Get global sys_env policy
     pub fn global_sys_env(&self) -> Option<&SysEnvPolicy> {
         self.kepler.as_ref().and_then(|k| k.sys_env.as_ref())
+    }
+
+    /// Get service names
+    pub fn service_names(&self) -> Vec<String> {
+        self.services.keys().cloned().collect()
+    }
+}
+
+// Custom Deserialize for backward compatibility with snapshots
+impl<'de> serde::Deserialize<'de> for KeplerConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Helper struct for deserialization
+        #[derive(Deserialize)]
+        struct KeplerConfigHelper {
+            #[serde(default)]
+            lua: Option<String>,
+            #[serde(default)]
+            kepler: Option<KeplerGlobalConfig>,
+            #[serde(default)]
+            services: HashMap<String, RawServiceConfig>,
+        }
+
+        let helper = KeplerConfigHelper::deserialize(deserializer)?;
+        Ok(KeplerConfig {
+            lua: helper.lua,
+            kepler: helper.kepler,
+            services: helper.services,
+        })
     }
 }
 
@@ -494,7 +967,6 @@ mod tests {
 
     #[test]
     fn test_resolve_sys_env_service_overrides_global() {
-        // Service explicit setting (clear) should override global (inherit)
         let service_sys_env = Some(SysEnvPolicy::Clear);
         let global_sys_env = Some(SysEnvPolicy::Inherit);
         let result = resolve_sys_env(service_sys_env.as_ref(), global_sys_env.as_ref());
@@ -503,7 +975,6 @@ mod tests {
 
     #[test]
     fn test_resolve_sys_env_service_inherit_overrides_global_clear() {
-        // Service explicit setting (inherit) should override global (clear)
         let service_sys_env = Some(SysEnvPolicy::Inherit);
         let global_sys_env = Some(SysEnvPolicy::Clear);
         let result = resolve_sys_env(service_sys_env.as_ref(), global_sys_env.as_ref());
@@ -512,7 +983,6 @@ mod tests {
 
     #[test]
     fn test_resolve_sys_env_uses_global_when_service_unset() {
-        // When service doesn't specify sys_env (None), global should apply
         let global_sys_env = Some(SysEnvPolicy::Clear);
         let result = resolve_sys_env(None, global_sys_env.as_ref());
         assert_eq!(result, SysEnvPolicy::Clear);
@@ -520,7 +990,6 @@ mod tests {
 
     #[test]
     fn test_resolve_sys_env_falls_back_to_inherit() {
-        // When both service and global are unset, should default to Inherit
         let result = resolve_sys_env(None, None);
         assert_eq!(result, SysEnvPolicy::Inherit);
     }
@@ -540,18 +1009,11 @@ services:
 "#;
         let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
 
-        // Check kepler namespace
         assert!(config.kepler.is_some());
         let kepler = config.kepler.as_ref().unwrap();
-
-        // Check sys_env
         assert_eq!(kepler.sys_env, Some(SysEnvPolicy::Inherit));
-
-        // Check hooks
         assert!(kepler.hooks.is_some());
         assert!(kepler.hooks.as_ref().unwrap().pre_start.is_some());
-
-        // Check accessor methods
         assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));
         assert!(config.global_hooks().is_some());
     }
@@ -564,8 +1026,6 @@ services:
     command: ["./app"]
 "#;
         let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-
-        // No kepler namespace
         assert!(config.kepler.is_none());
         assert!(config.global_sys_env().is_none());
         assert!(config.global_logs().is_none());
@@ -573,569 +1033,56 @@ services:
     }
 
     #[test]
-    fn test_depends_on_simple_form() {
+    fn test_raw_service_config_depends_on() {
         let yaml = r#"
-services:
-  db:
-    command: ["./db"]
-  app:
-    command: ["./app"]
-    depends_on:
-      - db
+depends_on:
+  - db
+  - cache
+command: ["./app"]
 "#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-
-        let app = config.services.get("app").unwrap();
-        let dep_names = app.depends_on.names();
-        assert_eq!(dep_names, vec!["db"]);
-
-        // Default condition for simple form
-        let dep_config = app.depends_on.get("db").unwrap();
-        assert_eq!(dep_config.condition, DependencyCondition::ServiceStarted);
-        assert!(dep_config.timeout.is_none());
+        let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+        let deps = raw.depends_on.names();
+        assert!(deps.contains(&"db".to_string()));
+        assert!(deps.contains(&"cache".to_string()));
     }
 
     #[test]
-    fn test_depends_on_extended_form() {
+    fn test_raw_service_config_has_healthcheck() {
         let yaml = r#"
-services:
-  db:
-    command: ["./db"]
-  app:
-    command: ["./app"]
-    depends_on:
-      - db:
-          condition: service_healthy
-          timeout: 5m
+command: ["./app"]
+healthcheck:
+  test: ["curl", "localhost"]
+  interval: 1s
 "#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(raw.has_healthcheck());
 
-        let app = config.services.get("app").unwrap();
-        let dep_names = app.depends_on.names();
-        assert_eq!(dep_names, vec!["db"]);
-
-        let dep_config = app.depends_on.get("db").unwrap();
-        assert_eq!(dep_config.condition, DependencyCondition::ServiceHealthy);
-        assert_eq!(dep_config.timeout, Some(Duration::from_secs(300)));
+        let yaml_no_hc = r#"
+command: ["./app"]
+"#;
+        let raw_no_hc: RawServiceConfig = serde_yaml::from_str(yaml_no_hc).unwrap();
+        assert!(!raw_no_hc.has_healthcheck());
     }
 
     #[test]
-    fn test_depends_on_mixed_form() {
+    fn test_config_value_static_vs_dynamic() {
         let yaml = r#"
-services:
-  db:
-    command: ["./db"]
-  cache:
-    command: ["./cache"]
-  app:
-    command: ["./app"]
-    depends_on:
-      - db
-      - cache:
-          condition: service_healthy
+command: ["./app"]
+environment:
+  - FOO=bar
 "#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!raw.command.is_dynamic());
+        assert!(!raw.environment.is_dynamic());
 
-        let app = config.services.get("app").unwrap();
-        let dep_names = app.depends_on.names();
-        assert!(dep_names.contains(&"db".to_string()));
-        assert!(dep_names.contains(&"cache".to_string()));
-
-        // db uses default condition
-        let db_config = app.depends_on.get("db").unwrap();
-        assert_eq!(db_config.condition, DependencyCondition::ServiceStarted);
-
-        // cache uses explicit condition
-        let cache_config = app.depends_on.get("cache").unwrap();
-        assert_eq!(cache_config.condition, DependencyCondition::ServiceHealthy);
-    }
-
-    #[test]
-    fn test_depends_on_restart_true() {
-        // Docker Compose style: restart: true in depends_on
-        let yaml = r#"
-services:
-  db:
-    command: ["./db"]
-  app:
-    command: ["./app"]
-    depends_on:
-      db:
-        condition: service_healthy
-        restart: true
+        let yaml_dynamic = r#"
+command: ["./app", "${{ env.HOME }}"]
+environment:
+  - FOO=${{ env.HOME }}
 "#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-
-        let app = config.services.get("app").unwrap();
-        assert!(app.depends_on.should_restart_on_dependency("db"));
-        assert!(!app.depends_on.should_restart_on_dependency("other"));
-
-        let dep_config = app.depends_on.get("db").unwrap();
-        assert!(dep_config.restart);
-        assert_eq!(dep_config.condition, DependencyCondition::ServiceHealthy);
-    }
-
-    #[test]
-    fn test_depends_on_restart_false() {
-        // restart: false or not specified = no restart propagation
-        let yaml = r#"
-services:
-  db:
-    command: ["./db"]
-  app:
-    command: ["./app"]
-    depends_on:
-      db:
-        condition: service_started
-        restart: false
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-
-        let app = config.services.get("app").unwrap();
-        assert!(!app.depends_on.should_restart_on_dependency("db"));
-
-        let dep_config = app.depends_on.get("db").unwrap();
-        assert!(!dep_config.restart);
-    }
-
-    #[test]
-    fn test_depends_on_restart_default() {
-        // When restart is not specified, it defaults to false
-        let yaml = r#"
-services:
-  db:
-    command: ["./db"]
-  app:
-    command: ["./app"]
-    depends_on:
-      db:
-        condition: service_healthy
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-
-        let app = config.services.get("app").unwrap();
-        assert!(!app.depends_on.should_restart_on_dependency("db"));
-    }
-
-    #[test]
-    fn test_depends_on_restart_per_dependency() {
-        // Docker Compose style: restart can be different per dependency
-        let yaml = r#"
-services:
-  db:
-    command: ["./db"]
-  cache:
-    command: ["./cache"]
-  app:
-    command: ["./app"]
-    depends_on:
-      db:
-        condition: service_healthy
-        restart: true
-      cache:
-        condition: service_started
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-
-        let app = config.services.get("app").unwrap();
-        // db has restart: true
-        assert!(app.depends_on.should_restart_on_dependency("db"));
-        // cache doesn't have restart specified (defaults to false)
-        assert!(!app.depends_on.should_restart_on_dependency("cache"));
-
-        // Get all dependencies with restart enabled
-        let restart_deps = app.depends_on.dependencies_with_restart();
-        assert_eq!(restart_deps, vec!["db"]);
-    }
-
-    #[test]
-    fn test_depends_on_simple_no_restart() {
-        // Simple form doesn't support restart (backward compatible)
-        let yaml = r#"
-services:
-  db:
-    command: ["./db"]
-  app:
-    command: ["./app"]
-    depends_on:
-      - db
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-
-        let app = config.services.get("app").unwrap();
-        // Simple form = no restart
-        assert!(!app.depends_on.should_restart_on_dependency("db"));
-    }
-
-    #[test]
-    fn test_dependency_condition_service_completed_successfully() {
-        let yaml = r#"
-services:
-  init:
-    command: ["./init"]
-  app:
-    command: ["./app"]
-    depends_on:
-      - init:
-          condition: service_completed_successfully
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-
-        let app = config.services.get("app").unwrap();
-        let dep_config = app.depends_on.get("init").unwrap();
-        assert_eq!(
-            dep_config.condition,
-            DependencyCondition::ServiceCompletedSuccessfully
-        );
-    }
-
-    #[test]
-    fn test_depends_on_iter() {
-        let yaml = r#"
-services:
-  db:
-    command: ["./db"]
-  cache:
-    command: ["./cache"]
-  app:
-    command: ["./app"]
-    depends_on:
-      - db
-      - cache:
-          condition: service_healthy
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-
-        let app = config.services.get("app").unwrap();
-        let deps: Vec<_> = app.depends_on.iter().collect();
-        assert_eq!(deps.len(), 2);
-
-        // Find db and cache in the iteration
-        let db_entry = deps.iter().find(|(name, _)| *name == "db");
-        let cache_entry = deps.iter().find(|(name, _)| *name == "cache");
-
-        assert!(db_entry.is_some());
-        assert!(cache_entry.is_some());
-
-        assert_eq!(
-            db_entry.unwrap().1.condition,
-            DependencyCondition::ServiceStarted
-        );
-        assert_eq!(
-            cache_entry.unwrap().1.condition,
-            DependencyCondition::ServiceHealthy
-        );
-    }
-
-    #[test]
-    fn test_depends_on_service_unhealthy_condition() {
-        let yaml = r#"
-services:
-  monitor:
-    command: ["./monitor"]
-    healthcheck:
-      test: ["true"]
-      interval: 1s
-  alert:
-    command: ["./alert"]
-    depends_on:
-      monitor:
-        condition: service_unhealthy
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-        let alert = config.services.get("alert").unwrap();
-        let dep_config = alert.depends_on.get("monitor").unwrap();
-        assert_eq!(dep_config.condition, DependencyCondition::ServiceUnhealthy);
-    }
-
-    #[test]
-    fn test_depends_on_service_failed_condition() {
-        let yaml = r#"
-services:
-  worker:
-    command: ["./worker"]
-  handler:
-    command: ["./handler"]
-    depends_on:
-      worker:
-        condition: service_failed
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-        let handler = config.services.get("handler").unwrap();
-        let dep_config = handler.depends_on.get("worker").unwrap();
-        assert_eq!(dep_config.condition, DependencyCondition::ServiceFailed);
-        assert!(dep_config.exit_code.is_empty());
-    }
-
-    #[test]
-    fn test_depends_on_service_stopped_condition() {
-        let yaml = r#"
-services:
-  worker:
-    command: ["./worker"]
-  cleanup:
-    command: ["./cleanup"]
-    depends_on:
-      worker:
-        condition: service_stopped
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-        let cleanup = config.services.get("cleanup").unwrap();
-        let dep_config = cleanup.depends_on.get("worker").unwrap();
-        assert_eq!(dep_config.condition, DependencyCondition::ServiceStopped);
-    }
-
-    #[test]
-    fn test_exit_code_single_values() {
-        let yaml = r#"
-services:
-  worker:
-    command: ["./worker"]
-  handler:
-    command: ["./handler"]
-    depends_on:
-      worker:
-        condition: service_failed
-        exit_code:
-          - 1
-          - 5
-          - 42
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-        let handler = config.services.get("handler").unwrap();
-        let dep_config = handler.depends_on.get("worker").unwrap();
-        assert_eq!(dep_config.condition, DependencyCondition::ServiceFailed);
-        assert!(!dep_config.exit_code.is_empty());
-        assert!(dep_config.exit_code.matches(1));
-        assert!(dep_config.exit_code.matches(5));
-        assert!(dep_config.exit_code.matches(42));
-        assert!(!dep_config.exit_code.matches(2));
-        assert!(!dep_config.exit_code.matches(0));
-    }
-
-    #[test]
-    fn test_exit_code_ranges() {
-        let yaml = r#"
-services:
-  worker:
-    command: ["./worker"]
-  handler:
-    command: ["./handler"]
-    depends_on:
-      worker:
-        condition: service_failed
-        exit_code:
-          - '1:10'
-          - '21:42'
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-        let handler = config.services.get("handler").unwrap();
-        let dep_config = handler.depends_on.get("worker").unwrap();
-        assert!(dep_config.exit_code.matches(1));
-        assert!(dep_config.exit_code.matches(5));
-        assert!(dep_config.exit_code.matches(10));
-        assert!(!dep_config.exit_code.matches(11));
-        assert!(!dep_config.exit_code.matches(20));
-        assert!(dep_config.exit_code.matches(21));
-        assert!(dep_config.exit_code.matches(30));
-        assert!(dep_config.exit_code.matches(42));
-        assert!(!dep_config.exit_code.matches(43));
-    }
-
-    #[test]
-    fn test_exit_code_mixed() {
-        let yaml = r#"
-services:
-  worker:
-    command: ["./worker"]
-  handler:
-    command: ["./handler"]
-    depends_on:
-      worker:
-        condition: service_stopped
-        exit_code:
-          - '1:10'
-          - 42
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-        let handler = config.services.get("handler").unwrap();
-        let dep_config = handler.depends_on.get("worker").unwrap();
-        assert!(dep_config.exit_code.matches(1));
-        assert!(dep_config.exit_code.matches(10));
-        assert!(dep_config.exit_code.matches(42));
-        assert!(!dep_config.exit_code.matches(15));
-        assert!(!dep_config.exit_code.matches(0));
-    }
-
-    #[test]
-    fn test_exit_code_omitted_matches_all() {
-        let yaml = r#"
-services:
-  worker:
-    command: ["./worker"]
-  handler:
-    command: ["./handler"]
-    depends_on:
-      worker:
-        condition: service_failed
-"#;
-        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-        let handler = config.services.get("handler").unwrap();
-        let dep_config = handler.depends_on.get("worker").unwrap();
-        assert!(dep_config.exit_code.is_empty());
-        assert!(dep_config.exit_code.matches(0));
-        assert!(dep_config.exit_code.matches(1));
-        assert!(dep_config.exit_code.matches(-1));
-        assert!(dep_config.exit_code.matches(255));
-    }
-
-    #[test]
-    fn test_exit_code_invalid_range_start_gt_end() {
-        let yaml = r#"
-services:
-  worker:
-    command: ["./worker"]
-  handler:
-    command: ["./handler"]
-    depends_on:
-      worker:
-        condition: service_failed
-        exit_code:
-          - '10:1'
-"#;
-        let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_unknown_service_field_rejected() {
-        let yaml = r#"
-services:
-  app:
-    command: ["./app"]
-    unknown_field: true
-"#;
-        let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
-        assert!(
-            result.is_err(),
-            "unknown field under service should be rejected"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unknown field"),
-            "error should mention unknown field: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_unknown_hook_field_rejected() {
-        let yaml = r#"
-services:
-  app:
-    command: ["./app"]
-    hooks:
-      on_stop:
-        run: echo "stop"
-"#;
-        let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
-        assert!(
-            result.is_err(),
-            "on_stop is not a valid service hook and should be rejected"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unknown field"),
-            "error should mention unknown field: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_unknown_global_field_rejected() {
-        let yaml = r#"
-kepler:
-  unknown: true
-
-services:
-  app:
-    command: ["./app"]
-"#;
-        let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
-        assert!(
-            result.is_err(),
-            "unknown field under kepler should be rejected"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unknown field"),
-            "error should mention unknown field: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_unknown_root_field_rejected() {
-        let yaml = r#"
-services:
-  app:
-    command: ["./app"]
-version: "3"
-"#;
-        let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
-        assert!(
-            result.is_err(),
-            "unknown field at root level should be rejected"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unknown field"),
-            "error should mention unknown field: {}",
-            err
-        );
-    }
-
-    // ================================================================
-    // resolve_default_user tests
-    // ================================================================
-
-    #[test]
-    fn test_resolve_default_user_sets_services() {
-        let yaml = r#"
-services:
-  svc_a:
-    command: ["./a"]
-  svc_b:
-    command: ["./b"]
-    user: "root"
-"#;
-        let mut config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-        config.resolve_default_user(1000, 1000);
-
-        // svc_a had no user → should be baked
-        assert_eq!(
-            config.services.get("svc_a").unwrap().user,
-            Some("1000:1000".to_string())
-        );
-        // svc_b had explicit user → should NOT be overwritten
-        assert_eq!(
-            config.services.get("svc_b").unwrap().user,
-            Some("root".to_string())
-        );
-    }
-
-    #[test]
-    fn test_resolve_default_user_root_noop() {
-        let yaml = r#"
-services:
-  svc:
-    command: ["./svc"]
-"#;
-        let mut config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-        config.resolve_default_user(0, 0);
-
-        // Root is no-op — user stays None
-        assert_eq!(config.services.get("svc").unwrap().user, None);
+        let raw_dyn: RawServiceConfig = serde_yaml::from_str(yaml_dynamic).unwrap();
+        assert!(raw_dyn.command.is_dynamic());
+        assert!(raw_dyn.environment.is_dynamic());
     }
 
     #[test]
@@ -1157,21 +1104,34 @@ services:
         config.resolve_default_user(1000, 1000);
 
         let hooks = config.kepler.as_ref().unwrap().hooks.as_ref().unwrap();
-        // pre_start had no user → should be baked
-        assert_eq!(hooks.pre_start.as_ref().unwrap().0[0].user(), Some("1000:1000"));
-        // post_start had explicit user → should NOT be overwritten
-        assert_eq!(hooks.post_start.as_ref().unwrap().0[0].user(), Some("root"));
+        assert_eq!(
+            hooks.pre_start.as_ref().unwrap().0[0].user(),
+            Some("1000:1000")
+        );
+        assert_eq!(
+            hooks.post_start.as_ref().unwrap().0[0].user(),
+            Some("root")
+        );
     }
 
     #[test]
-    fn test_resolve_default_user_preserves_hook_user() {
+    fn test_resolve_default_user_root_noop() {
         let yaml = r#"
-kepler:
-  hooks:
-    pre_cleanup:
-      run: echo "cleanup"
-      user: "daemon"
+services:
+  svc:
+    command: ["./svc"]
+"#;
+        let mut config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        config.resolve_default_user(0, 0);
 
+        // Root is no-op — user stays None
+        let svc = config.services.get("svc").unwrap();
+        assert!(matches!(&svc.user, ConfigValue::Static(None)));
+    }
+
+    #[test]
+    fn test_resolve_default_user_bakes_into_services() {
+        let yaml = r#"
 services:
   svc:
     command: ["./svc"]
@@ -1179,188 +1139,100 @@ services:
         let mut config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
         config.resolve_default_user(1000, 1000);
 
-        let hooks = config.kepler.as_ref().unwrap().hooks.as_ref().unwrap();
-        // pre_cleanup had explicit user "daemon" → should NOT be overwritten
-        let hook_list = hooks.pre_cleanup.as_ref().unwrap();
-        assert_eq!(hook_list.0[0].user(), Some("daemon"));
+        let svc = config.services.get("svc").unwrap();
+        assert_eq!(svc.user.as_static().unwrap(), &Some("1000:1000".to_string()));
     }
 
     #[test]
-    fn test_service_pre_cleanup_hook_parses() {
+    fn test_resolve_service_dynamic_user_fallback_to_default() {
+        use crate::lua_eval::EvalContext;
+        use std::path::PathBuf;
+
+        // Dynamic user that resolves to nil → should fall back to default_user
         let yaml = r#"
 services:
-  app:
-    command: ["./app"]
-    hooks:
-      pre_cleanup:
-        run: echo "cleaning up"
+  svc:
+    command: ["./svc"]
+    user: "${{ nil }}"
 "#;
         let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-        let app = config.services.get("app").unwrap();
-        let hooks = app.hooks.as_ref().unwrap();
-        assert!(
-            hooks.pre_cleanup.is_some(),
-            "pre_cleanup hook should be parsed"
-        );
-    }
+        assert!(config.services.get("svc").unwrap().user.is_dynamic());
 
-    // ================================================================
-    // serde_path_to_error path tracking tests
-    // ================================================================
+        let evaluator = config.create_lua_evaluator().unwrap();
+        let config_path = PathBuf::from("/tmp/test.yaml");
+        let mut ctx = EvalContext::default();
 
-    /// Helper: deserialize with path tracking (same as production code path)
-    fn deserialize_config(
-        yaml: &str,
-    ) -> std::result::Result<KeplerConfig, serde_path_to_error::Error<serde_yaml::Error>> {
-        let de = serde_yaml::Deserializer::from_str(yaml);
-        serde_path_to_error::deserialize(de)
+        // With default_user → falls back
+        let resolved = config
+            .resolve_service("svc", &mut ctx, &evaluator, &config_path, Some("1000:1000"))
+            .unwrap();
+        assert_eq!(resolved.user, Some("1000:1000".to_string()));
     }
 
     #[test]
-    fn test_error_path_invalid_depends_on_format() {
-        // DependsOnFormat is #[serde(untagged)]: List | Map
-        // An integer is neither a list nor a map
+    fn test_resolve_service_dynamic_user_no_fallback_without_default() {
+        use crate::lua_eval::EvalContext;
+        use std::path::PathBuf;
+
+        // Dynamic user that resolves to nil, no default_user → stays None
         let yaml = r#"
 services:
-  app:
-    command: ["./app"]
-    depends_on: 42
+  svc:
+    command: ["./svc"]
+    user: "${{ nil }}"
 "#;
-        let err = deserialize_config(yaml).unwrap_err();
-        let path = err.path().to_string();
-        assert_eq!(
-            path, "services.app.depends_on",
-            "path should point to the depends_on field"
-        );
-        assert!(
-            err.inner()
-                .to_string()
-                .contains("data did not match any variant of untagged enum"),
-            "should be an untagged enum error: {}",
-            err
-        );
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let evaluator = config.create_lua_evaluator().unwrap();
+        let config_path = PathBuf::from("/tmp/test.yaml");
+        let mut ctx = EvalContext::default();
+
+        let resolved = config
+            .resolve_service("svc", &mut ctx, &evaluator, &config_path, None)
+            .unwrap();
+        assert_eq!(resolved.user, None);
     }
 
     #[test]
-    fn test_error_path_invalid_dependency_entry() {
-        // DependencyEntry is #[serde(untagged)]: Simple(String) | Extended(HashMap)
-        // An integer element in the list matches neither
+    fn test_resolve_service_dynamic_user_explicit_overrides_default() {
+        use crate::lua_eval::EvalContext;
+        use std::path::PathBuf;
+
+        // Dynamic user that resolves to an explicit value → default_user is NOT used
         let yaml = r#"
+lua: |
+  function get_user() return "nobody" end
+
 services:
-  app:
-    command: ["./app"]
-    depends_on:
-      - 42
+  svc:
+    command: ["./svc"]
+    user: "${{ get_user() }}"
 "#;
-        let err = deserialize_config(yaml).unwrap_err();
-        let path = err.path().to_string();
-        assert!(
-            path.starts_with("services.app.depends_on"),
-            "path should point to the depends_on field, got: {path}"
-        );
+        let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+        let evaluator = config.create_lua_evaluator().unwrap();
+        let config_path = PathBuf::from("/tmp/test.yaml");
+        let mut ctx = EvalContext::default();
+
+        let resolved = config
+            .resolve_service("svc", &mut ctx, &evaluator, &config_path, Some("1000:1000"))
+            .unwrap();
+        assert_eq!(resolved.user, Some("nobody".to_string()));
     }
 
     #[test]
-    fn test_error_path_invalid_hook_command() {
-        // HookCommand is #[serde(untagged)]: Script { run, .. } | Command { command, .. }
-        // An object with neither run nor command field
+    fn test_depends_on_lua_tag_rejected_with_clear_error() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("kepler.yaml");
         let yaml = r#"
 services:
-  app:
-    command: ["./app"]
-    hooks:
-      pre_start:
-        bad_field: "test"
+  svc:
+    command: ["./svc"]
+    depends_on: !lua |
+      return { "db" }
 "#;
-        let err = deserialize_config(yaml).unwrap_err();
-        let path = err.path().to_string();
-        assert!(
-            path.starts_with("services.app.hooks.pre_start"),
-            "path should point to the hook field, got: {path}"
-        );
-        assert!(
-            err.inner()
-                .to_string()
-                .contains("data did not match any variant of untagged enum"),
-            "should be an untagged enum error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_error_path_invalid_log_store_config() {
-        // LogStoreConfig is #[serde(untagged)]: Simple(bool) | Extended { stdout, stderr }
-        // A string is neither a bool nor an object
-        let yaml = r#"
-services:
-  app:
-    command: ["./app"]
-    logs:
-      store: "invalid"
-"#;
-        let err = deserialize_config(yaml).unwrap_err();
-        let path = err.path().to_string();
-        assert_eq!(
-            path, "services.app.logs.store",
-            "path should point to the store field"
-        );
-        assert!(
-            err.inner()
-                .to_string()
-                .contains("data did not match any variant of untagged enum"),
-            "should be an untagged enum error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_error_path_invalid_restart_config() {
-        // RestartConfig is #[serde(untagged)]: Simple(RestartPolicy) | Extended { policy, watch }
-        // A number is neither a valid policy string nor an object
-        let yaml = r#"
-services:
-  app:
-    command: ["./app"]
-    restart: 42
-"#;
-        let err = deserialize_config(yaml).unwrap_err();
-        let path = err.path().to_string();
-        assert_eq!(
-            path, "services.app.restart",
-            "path should point to the restart field"
-        );
-        assert!(
-            err.inner()
-                .to_string()
-                .contains("data did not match any variant of untagged enum"),
-            "should be an untagged enum error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_error_path_invalid_exit_code_entry() {
-        // ExitCodeEntry is #[serde(untagged)]: Range(String) | Single(i32)
-        // A boolean is neither a string nor an integer.
-        // This is nested inside DependsOnFormat (also untagged), so the outer
-        // enum error surfaces at the depends_on level.
-        let yaml = r#"
-services:
-  worker:
-    command: ["./worker"]
-  handler:
-    command: ["./handler"]
-    depends_on:
-      worker:
-        condition: service_failed
-        exit_code:
-          - true
-"#;
-        let err = deserialize_config(yaml).unwrap_err();
-        let path = err.path().to_string();
-        assert!(
-            path.starts_with("services.handler.depends_on"),
-            "path should include depends_on, got: {path}"
-        );
+        std::fs::write(&config_path, yaml).unwrap();
+        let err = KeplerConfig::load(&config_path, &HashMap::new()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("svc.depends_on"), "Error should mention field path, got: {}", msg);
+        assert!(msg.contains("!lua is not allowed on depends_on itself"), "Error should explain restriction, got: {}", msg);
     }
 }

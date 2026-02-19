@@ -1135,6 +1135,14 @@ enum StreamExitReason {
     ShutdownRequested,
 }
 
+/// Non-generic parameters for `stream_cursor_logs`.
+struct StreamCursorParams<'a> {
+    config_path: &'a Path,
+    service: Option<&'a str>,
+    no_hooks: bool,
+    mode: StreamMode,
+}
+
 /// Unified cursor-based log streaming loop.
 ///
 /// Generic over the client (real or mock) and shutdown/quiescence signals, enabling unit tests.
@@ -1145,15 +1153,12 @@ enum StreamExitReason {
 /// remaining logs before exiting.
 async fn stream_cursor_logs(
     client: &impl FollowClient,
-    config_path: &Path,
-    service: Option<&str>,
-    no_hooks: bool,
-    mode: StreamMode,
+    params: StreamCursorParams<'_>,
     shutdown: impl Future<Output = ()>,
     quiescence: impl Future<Output = ()>,
     mut on_batch: impl FnMut(&[Arc<str>], &[CursorLogEntry]),
 ) -> Result<StreamExitReason> {
-    let from_start = mode != StreamMode::Follow;
+    let from_start = params.mode != StreamMode::Follow;
     let mut cursor_id: Option<String> = None;
     tokio::pin!(shutdown);
     tokio::pin!(quiescence);
@@ -1161,7 +1166,7 @@ async fn stream_cursor_logs(
 
     loop {
         let log_response = client
-            .logs_cursor(config_path, service, cursor_id.as_deref(), from_start, no_hooks)
+            .logs_cursor(params.config_path, params.service, cursor_id.as_deref(), from_start, params.no_hooks)
             .await;
 
         let has_more_data;
@@ -1190,7 +1195,7 @@ async fn stream_cursor_logs(
                     // In UntilQuiescent mode, "Config not loaded" means either:
                     // 1. Startup race: config not loaded YET → retry
                     // 2. Config was unloaded (stop --clean) → quiescence future fires
-                    if mode == StreamMode::UntilQuiescent && message == "Config not loaded" {
+                    if params.mode == StreamMode::UntilQuiescent && message == "Config not loaded" {
                         tokio::select! {
                             biased;
                             _ = &mut shutdown => {
@@ -1215,7 +1220,7 @@ async fn stream_cursor_logs(
             }
         }
 
-        match mode {
+        match params.mode {
             StreamMode::All => {
                 if !has_more_data {
                     break;
@@ -1364,8 +1369,8 @@ async fn follow_logs_until_quiescent(
                     }
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {
                         // Fallback: poll status to handle missed events / daemon bugs
-                        if let Ok((_, resp_future)) = client.status(Some(config_path.clone())) {
-                            if let Ok(Response::Ok { data: Some(ResponseData::ServiceStatus(services)), .. }) = resp_future.await {
+                        if let Ok((_, resp_future)) = client.status(Some(config_path.clone()))
+                            && let Ok(Response::Ok { data: Some(ResponseData::ServiceStatus(services)), .. }) = resp_future.await {
                                 let all_terminal = services.values().all(|info| {
                                     matches!(info.status.as_str(), "stopped" | "exited" | "killed" | "failed" | "skipped")
                                 });
@@ -1373,7 +1378,6 @@ async fn follow_logs_until_quiescent(
                                     return;
                                 }
                             }
-                        }
                     }
                 }
             }
@@ -1382,10 +1386,12 @@ async fn follow_logs_until_quiescent(
 
     let exit_reason = stream_cursor_logs(
         client,
-        config_path,
-        service,
-        false,
-        StreamMode::UntilQuiescent,
+        StreamCursorParams {
+            config_path,
+            service,
+            no_hooks: false,
+            mode: StreamMode::UntilQuiescent,
+        },
         async { let _ = tokio::signal::ctrl_c().await; },
         quiescence_future,
         |service_table, entries| {
@@ -1476,10 +1482,12 @@ async fn handle_logs(
 
     stream_cursor_logs(
         client,
-        &config_path,
-        service.as_deref(),
-        no_hooks,
-        stream_mode,
+        StreamCursorParams {
+            config_path: &config_path,
+            service: service.as_deref(),
+            no_hooks,
+            mode: stream_mode,
+        },
         std::future::pending(),
         std::future::pending(),
         |service_table, entries| {
@@ -1759,16 +1767,14 @@ mod tests {
 
         // Fire quiescence after we've collected 3 lines
         let exit_reason = stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
             async { let _ = rx.await; },
             |st, entries| {
                 collect_batch(&mut collected, st, entries);
-                if collected.len() == 3 {
-                    if let Some(tx) = tx.take() {
+                if collected.len() == 3
+                    && let Some(tx) = tx.take() {
                         let _ = tx.send(());
                     }
-                }
             },
         ).await.unwrap();
 
@@ -1790,8 +1796,7 @@ mod tests {
 
         // Quiescence fires immediately — but logs should still be drained
         let exit_reason = stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
             async {},  // quiescence fires immediately
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
@@ -1815,16 +1820,14 @@ mod tests {
         let mut tx = Some(tx);
 
         let exit_reason = stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
             async { let _ = rx.await; },
             |st, entries| {
                 collect_batch(&mut collected, st, entries);
-                if collected.len() == 2 {
-                    if let Some(tx) = tx.take() {
+                if collected.len() == 2
+                    && let Some(tx) = tx.take() {
                         let _ = tx.send(());
                     }
-                }
             },
         ).await.unwrap();
 
@@ -1853,8 +1856,7 @@ mod tests {
 
         // Shutdown resolves immediately — the biased select picks it up after first cursor read
         let exit_reason = stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, async {},
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, async {},
             never_quiescent(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
@@ -1885,8 +1887,7 @@ mod tests {
 
         // Trigger shutdown after 3 batches are collected
         let exit_reason = stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent,
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent },
             async move { notify_clone.notified().await },
             never_quiescent(),
             |st, entries| {
@@ -1916,8 +1917,7 @@ mod tests {
         let mut collected = Vec::new();
 
         stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
             never_quiescent(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
@@ -1942,16 +1942,14 @@ mod tests {
         let (tx, rx) = oneshot::channel::<()>();
         let mut tx = Some(tx);
         let exit_reason = stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
             async { let _ = rx.await; },
             |st, entries| {
                 collect_batch(&mut collected, st, entries);
-                if !collected.is_empty() {
-                    if let Some(tx) = tx.take() {
+                if !collected.is_empty()
+                    && let Some(tx) = tx.take() {
                         let _ = tx.send(());
                     }
-                }
             },
         ).await.unwrap();
 
@@ -1970,8 +1968,7 @@ mod tests {
         let mut collected = Vec::new();
 
         stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
             never_quiescent(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
@@ -1994,8 +1991,7 @@ mod tests {
         let mut collected = Vec::new();
 
         let exit_reason = stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
             async {},  // quiescence fires immediately
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
@@ -2015,8 +2011,7 @@ mod tests {
         let mut collected = Vec::new();
 
         let exit_reason = stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, async {},
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, async {},
             never_quiescent(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
@@ -2247,16 +2242,14 @@ mod tests {
         let (tx, rx) = oneshot::channel::<()>();
         let mut tx = Some(tx);
         stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
             async { let _ = rx.await; },
             |st, entries| {
                 collect_batch(&mut collected, st, entries);
-                if !collected.is_empty() {
-                    if let Some(tx) = tx.take() {
+                if !collected.is_empty()
+                    && let Some(tx) = tx.take() {
                         let _ = tx.send(());
                     }
-                }
             },
         ).await.unwrap();
 
@@ -2274,8 +2267,7 @@ mod tests {
         let mut collected = Vec::new();
 
         let exit_reason = stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
             async {},  // quiescence fires immediately (config was unloaded)
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
@@ -2294,8 +2286,7 @@ mod tests {
         let mut collected = Vec::new();
 
         let exit_reason = stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, async {},  // shutdown fires immediately
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, async {},  // shutdown fires immediately
             never_quiescent(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
@@ -2314,8 +2305,7 @@ mod tests {
         let mut collected = Vec::new();
 
         let exit_reason = stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, async {},
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, async {},
             never_quiescent(),
             |st, entries| collect_batch(&mut collected, st, entries),
         ).await.unwrap();
@@ -2337,8 +2327,7 @@ mod tests {
         let (tx, rx) = oneshot::channel::<()>();
         let mut tx = Some(tx);
         stream_cursor_logs(
-            &mock, &config_path, None, false,
-            StreamMode::UntilQuiescent, never_shutdown(),
+            &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
             async { let _ = rx.await; },
             |st, entries| {
                 collect_batch(&mut collected, st, entries);

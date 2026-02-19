@@ -13,6 +13,8 @@ pub struct DepInfo {
     pub exit_code: Option<i32>,
     pub initialized: bool,
     pub restart_count: u32,
+    /// Dependency's computed environment variables
+    pub env: HashMap<String, String>,
 }
 
 /// Context passed to each Lua evaluation.
@@ -110,11 +112,71 @@ impl LuaEvaluator {
         Ok(!matches!(result, Value::Nil | Value::Boolean(false)))
     }
 
+    /// Evaluate an inline `${{ expr }}` expression and return the raw Lua value.
+    ///
+    /// Uses the same environment as `!lua` blocks: includes `ctx`, `deps`, `env`
+    /// shortcut, `global`, and a `__index` fallback to Lua globals.
+    pub fn eval_inline_expr(&self, expr: &str, ctx: &EvalContext, chunk_name: &str) -> LuaResult<Value> {
+        let env_table = self.build_inline_env_table(ctx)?;
+        let wrapped = format!("return ({})", expr);
+        let chunk = self.lua.load(&wrapped);
+        let func = chunk.set_name(chunk_name).set_environment(env_table).into_function()?;
+        func.call(())
+    }
+
+    /// Evaluate an inline `${{ expr }}` reusing a pre-built environment table.
+    ///
+    /// Avoids rebuilding the env table for each expression within the same evaluation context.
+    pub fn eval_inline_expr_with_env(&self, expr: &str, env_table: &Table, chunk_name: &str) -> LuaResult<Value> {
+        let wrapped = format!("return ({})", expr);
+        let chunk = self.lua.load(&wrapped);
+        let func = chunk.set_name(chunk_name).set_environment(env_table.clone()).into_function()?;
+        func.call(())
+    }
+
+    /// Build and return the environment table for inline `${{ }}` evaluation.
+    ///
+    /// Use this to build the table once, then pass it to `eval_inline_expr_with_env`
+    /// for each expression within the same context.
+    pub fn prepare_env(&self, ctx: &EvalContext) -> LuaResult<Table> {
+        self.build_env_table(ctx)
+    }
+
     /// Build the custom environment table for a `!lua` block.
+    ///
+    /// Includes `ctx`, `deps`, `env` (shortcut for `ctx.env`), `global`,
+    /// and a `__index` fallback to Lua globals (stdlib + user functions).
     fn build_env_table(&self, ctx: &EvalContext) -> LuaResult<Table> {
         let env_table = self.lua.create_table()?;
 
         // Create the `ctx` table with granular access
+        let ctx_table = self.build_ctx_table(ctx)?;
+        env_table.set("ctx", ctx_table.clone())?;
+
+        // Add `env` shortcut (alias for ctx.env)
+        let env_shortcut: Table = ctx_table.get("env")?;
+        env_table.set("env", env_shortcut)?;
+
+        // Add `deps` table (frozen, from ctx.deps)
+        let deps_table = self.build_deps_table(ctx)?;
+        env_table.set("deps", deps_table)?;
+
+        // Add `global` (shared mutable table)
+        let global: Table = self.lua.globals().get("global")?;
+        env_table.set("global", global)?;
+
+        // Set metatable with __index fallback to globals
+        // This allows access to functions defined in lua: block and standard library
+        let globals = self.lua.globals();
+        let meta = self.lua.create_table()?;
+        meta.set("__index", globals)?;
+        env_table.set_metatable(Some(meta));
+
+        Ok(env_table)
+    }
+
+    /// Build the `ctx` table used by all evaluation environments.
+    fn build_ctx_table(&self, ctx: &EvalContext) -> LuaResult<Table> {
         let ctx_table = self.lua.create_table()?;
 
         // Add ctx.sys_env (read-only)
@@ -156,64 +218,13 @@ impl LuaEvaluator {
         // Freeze ctx table using Luau's native table.freeze
         ctx_table.set_readonly(true);
 
-        env_table.set("ctx", ctx_table)?;
-
-        // Add `global` (shared mutable table)
-        let global: Table = self.lua.globals().get("global")?;
-        env_table.set("global", global)?;
-
-        // Set metatable with __index fallback to globals
-        // This allows access to functions defined in lua: block and standard library
-        let globals = self.lua.globals();
-        let meta = self.lua.create_table()?;
-        meta.set("__index", globals)?;
-        env_table.set_metatable(Some(meta));
-
-        Ok(env_table)
+        Ok(ctx_table)
     }
 
-    /// Build environment table for `if` condition evaluation.
+    /// Build the `deps` table (frozen) from context dependencies.
     ///
-    /// Same as `build_env_table` but additionally exposes:
-    /// - `deps` table (frozen, from `ctx.deps`)
-    /// - Status functions: `always()`, `success()`, `failure()`, `skipped()`
-    fn build_condition_env_table(&self, ctx: &EvalContext) -> LuaResult<Table> {
-        let env_table = self.lua.create_table()?;
-
-        // --- ctx table (same as build_env_table) ---
-        let ctx_table = self.lua.create_table()?;
-        let sys_env = self.create_frozen_env(&ctx.sys_env)?;
-        ctx_table.raw_set("sys_env", sys_env)?;
-        let env_file = self.create_frozen_env(&ctx.env_file)?;
-        ctx_table.raw_set("env_file", env_file)?;
-        let env = self.create_frozen_env(&ctx.env)?;
-        ctx_table.raw_set("env", env)?;
-        if let Some(ref service_name) = ctx.service_name {
-            ctx_table.raw_set("service_name", service_name.as_str())?;
-        }
-        if let Some(ref hook_name) = ctx.hook_name {
-            ctx_table.raw_set("hook_name", hook_name.as_str())?;
-        }
-        if let Some(initialized) = ctx.initialized {
-            ctx_table.raw_set("initialized", initialized)?;
-        }
-        if let Some(restart_count) = ctx.restart_count {
-            ctx_table.raw_set("restart_count", restart_count)?;
-        }
-        if let Some(exit_code) = ctx.exit_code {
-            ctx_table.raw_set("exit_code", exit_code)?;
-        }
-        if let Some(ref status) = ctx.status {
-            ctx_table.raw_set("status", status.as_str())?;
-        }
-        ctx_table.set_readonly(true);
-        env_table.set("ctx", ctx_table)?;
-
-        // --- global table ---
-        let global: Table = self.lua.globals().get("global")?;
-        env_table.set("global", global)?;
-
-        // --- deps table (frozen) ---
+    /// Each dep has: status, exit_code, initialized, restart_count, env (sub-table).
+    fn build_deps_table(&self, ctx: &EvalContext) -> LuaResult<Table> {
         let deps_table = self.lua.create_table()?;
         for (name, dep) in &ctx.deps {
             let dep_table = self.lua.create_table()?;
@@ -224,22 +235,43 @@ impl LuaEvaluator {
             }
             dep_table.raw_set("initialized", dep.initialized)?;
             dep_table.raw_set("restart_count", dep.restart_count)?;
+
+            // Add dep.env sub-table (frozen)
+            let dep_env = self.create_frozen_env(&dep.env)?;
+            dep_table.raw_set("env", dep_env)?;
+
             dep_table.set_readonly(true);
             deps_table.raw_set(name.as_str(), dep_table)?;
         }
         deps_table.set_readonly(true);
-        env_table.set("deps", deps_table)?;
+        Ok(deps_table)
+    }
+
+    /// Build environment table for `if` condition evaluation.
+    ///
+    /// Same as `build_env_table` but additionally exposes four status functions:
+    /// - `always()` — always returns `true`, unconditionally runs the hook.
+    /// - `success(name?)` — no arg: `true` if no previous hook in this chain failed;
+    ///   with arg: `true` if the named dependency is in a successful state (not failed/killed/skipped,
+    ///   exit code 0 or not yet exited).
+    /// - `failure(name?)` — no arg: `true` if a previous hook in this chain failed;
+    ///   with arg: `true` if the named dependency failed/killed or exited non-zero.
+    /// - `skipped(name)` — requires a dependency name, returns `true` if that dependency
+    ///   has status "skipped".
+    fn build_condition_env_table(&self, ctx: &EvalContext) -> LuaResult<Table> {
+        // Start with the base env table (ctx, deps, env shortcut, global, __index→globals)
+        let env_table = self.build_env_table(ctx)?;
 
         // --- Status functions ---
         let hook_had_failure = ctx.hook_had_failure;
-        let deps_clone = ctx.deps.clone();
+        let deps = std::sync::Arc::new(ctx.deps.clone());
 
         // always() — always returns true
         let always_fn = self.lua.create_function(|_, ()| Ok(true))?;
         env_table.set("always", always_fn)?;
 
         // success(name?) — no args: !hook_had_failure; with arg: dep is in successful state
-        let deps_for_success = deps_clone.clone();
+        let deps_for_success = deps.clone();
         let success_fn = self.lua.create_function(move |_, name: Option<String>| {
             match name {
                 None => {
@@ -267,7 +299,7 @@ impl LuaEvaluator {
         env_table.set("success", success_fn)?;
 
         // failure(name?) — no args: hook_had_failure; with arg: dep is in failed state
-        let deps_for_failure = deps_clone.clone();
+        let deps_for_failure = deps.clone();
         let failure_fn = self.lua.create_function(move |_, name: Option<String>| {
             match name {
                 None => {
@@ -295,7 +327,7 @@ impl LuaEvaluator {
         env_table.set("failure", failure_fn)?;
 
         // skipped(name) — requires string arg, returns true if dep is skipped
-        let deps_for_skipped = deps_clone;
+        let deps_for_skipped = deps;
         let skipped_fn = self.lua.create_function(move |_, name: String| {
             match deps_for_skipped.get(&name) {
                 Some(dep) => Ok(dep.status == "skipped"),
@@ -307,13 +339,17 @@ impl LuaEvaluator {
         })?;
         env_table.set("skipped", skipped_fn)?;
 
-        // Set metatable with __index fallback to globals
-        let globals = self.lua.globals();
-        let meta = self.lua.create_table()?;
-        meta.set("__index", globals)?;
-        env_table.set_metatable(Some(meta));
-
         Ok(env_table)
+    }
+
+    /// Build the environment table for inline `${{ expr }}` evaluation.
+    ///
+    /// Intentionally delegates to `build_env_table` so that `${{ expr }}` and
+    /// `!lua` blocks share the same environment (ctx, deps, env, global, stdlib).
+    /// This indirection exists so the two contexts can diverge in the future
+    /// without changing callers.
+    fn build_inline_env_table(&self, ctx: &EvalContext) -> LuaResult<Table> {
+        self.build_env_table(ctx)
     }
 
     /// Set an interrupt handler on the Lua VM for watchdog timeouts.
@@ -349,7 +385,7 @@ impl LuaEvaluator {
 /// Accepts two formats:
 /// - Array: `{"FOO=bar", "BAZ=qux"}`
 /// - Map: `{FOO="bar", BAZ="qux"}` -> converted to `["FOO=bar", "BAZ=qux"]`
-pub fn lua_table_to_env_vec(_lua: &Lua, value: Value) -> LuaResult<Vec<String>> {
+pub fn lua_table_to_env_vec(value: Value) -> LuaResult<Vec<String>> {
     match value {
         Value::Table(table) => {
             let mut result = Vec::new();
@@ -647,7 +683,7 @@ mod tests {
         let result: Value = eval
             .eval(r#"return {"FOO=bar", "BAZ=qux"}"#, &ctx, "test")
             .unwrap();
-        let vec = lua_table_to_env_vec(&eval.lua, result).unwrap();
+        let vec = lua_table_to_env_vec(result).unwrap();
 
         assert!(vec.contains(&"FOO=bar".to_string()));
         assert!(vec.contains(&"BAZ=qux".to_string()));
@@ -752,6 +788,7 @@ mod tests {
             exit_code: None,
             initialized: true,
             restart_count: 0,
+            ..Default::default()
         });
         let ctx = EvalContext {
             deps,
@@ -769,6 +806,7 @@ mod tests {
             exit_code: None,
             initialized: false,
             restart_count: 0,
+            ..Default::default()
         });
         let ctx = EvalContext {
             deps,
@@ -786,6 +824,7 @@ mod tests {
             exit_code: None,
             initialized: false,
             restart_count: 0,
+            ..Default::default()
         });
         let ctx = EvalContext {
             deps,
@@ -803,6 +842,7 @@ mod tests {
             exit_code: None,
             initialized: true,
             restart_count: 0,
+            ..Default::default()
         });
         let ctx = EvalContext {
             deps,
@@ -820,6 +860,7 @@ mod tests {
             exit_code: Some(1),
             initialized: true,
             restart_count: 0,
+            ..Default::default()
         });
         let ctx = EvalContext {
             deps,
@@ -838,6 +879,7 @@ mod tests {
             exit_code: None,
             initialized: false,
             restart_count: 0,
+            ..Default::default()
         });
         let ctx = EvalContext {
             deps,
@@ -855,6 +897,7 @@ mod tests {
             exit_code: None,
             initialized: true,
             restart_count: 0,
+            ..Default::default()
         });
         let ctx = EvalContext {
             deps,
@@ -872,6 +915,7 @@ mod tests {
             exit_code: Some(0),
             initialized: true,
             restart_count: 3,
+            ..Default::default()
         });
         let ctx = EvalContext {
             deps,
@@ -893,6 +937,7 @@ mod tests {
             exit_code: None,
             initialized: true,
             restart_count: 0,
+            ..Default::default()
         });
         let ctx = EvalContext {
             deps,
@@ -910,6 +955,7 @@ mod tests {
             exit_code: None,
             initialized: true,
             restart_count: 0,
+            ..Default::default()
         });
         let ctx = EvalContext {
             deps,
@@ -980,5 +1026,142 @@ mod tests {
         assert!(eval.eval_condition("success('nonexistent')", &ctx).is_err());
         assert!(eval.eval_condition("failure('nonexistent')", &ctx).is_err());
         assert!(eval.eval_condition("skipped('nonexistent')", &ctx).is_err());
+    }
+
+    // --- eval_inline_expr tests ---
+
+    #[test]
+    fn test_inline_expr_returns_string() {
+        let eval = LuaEvaluator::new().unwrap();
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let ctx = EvalContext { env, ..Default::default() };
+
+        let result = eval.eval_inline_expr("env.FOO", &ctx, "test").unwrap();
+        assert_eq!(result.as_str().unwrap().to_string(), "bar");
+    }
+
+    #[test]
+    fn test_inline_expr_returns_number() {
+        let eval = LuaEvaluator::new().unwrap();
+        let ctx = EvalContext::default();
+
+        let result = eval.eval_inline_expr("42", &ctx, "test").unwrap();
+        assert!(matches!(result, Value::Integer(42)));
+    }
+
+    #[test]
+    fn test_inline_expr_returns_bool() {
+        let eval = LuaEvaluator::new().unwrap();
+        let ctx = EvalContext::default();
+
+        let result = eval.eval_inline_expr("true", &ctx, "test").unwrap();
+        assert!(matches!(result, Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_inline_expr_returns_table() {
+        let eval = LuaEvaluator::new().unwrap();
+        let ctx = EvalContext::default();
+
+        let result = eval.eval_inline_expr("{1, 2, 3}", &ctx, "test").unwrap();
+        assert!(matches!(result, Value::Table(_)));
+    }
+
+    #[test]
+    fn test_inline_expr_env_shortcut() {
+        let eval = LuaEvaluator::new().unwrap();
+        let mut env = HashMap::new();
+        env.insert("MY_VAR".to_string(), "hello".to_string());
+        let ctx = EvalContext { env, ..Default::default() };
+
+        // env.MY_VAR should work as shortcut for ctx.env.MY_VAR
+        let result = eval.eval_inline_expr("env.MY_VAR", &ctx, "test").unwrap();
+        assert_eq!(result.as_str().unwrap().to_string(), "hello");
+
+        let result2 = eval.eval_inline_expr("ctx.env.MY_VAR", &ctx, "test").unwrap();
+        assert_eq!(result2.as_str().unwrap().to_string(), "hello");
+    }
+
+    #[test]
+    fn test_inline_expr_deps_env() {
+        let eval = LuaEvaluator::new().unwrap();
+        let mut dep_env = HashMap::new();
+        dep_env.insert("DB_URL".to_string(), "postgres://localhost".to_string());
+        let mut deps = HashMap::new();
+        deps.insert("db".to_string(), DepInfo {
+            status: "healthy".to_string(),
+            env: dep_env,
+            ..Default::default()
+        });
+        let ctx = EvalContext { deps, ..Default::default() };
+
+        let result = eval.eval_inline_expr("deps.db.env.DB_URL", &ctx, "test").unwrap();
+        assert_eq!(result.as_str().unwrap().to_string(), "postgres://localhost");
+    }
+
+    #[test]
+    fn test_inline_expr_bare_var_returns_nil() {
+        let eval = LuaEvaluator::new().unwrap();
+        let mut env = HashMap::new();
+        env.insert("HOME".to_string(), "/home/user".to_string());
+        let ctx = EvalContext { env, ..Default::default() };
+
+        // Bare variable names resolve to nil (standard Lua behavior)
+        let result = eval.eval_inline_expr("HOME", &ctx, "test").unwrap();
+        assert!(result.is_nil(), "Bare variable should resolve to nil, got: {:?}", result);
+
+        // Can use `or` to provide a default
+        let result = eval.eval_inline_expr("HOME or \"fallback\"", &ctx, "test").unwrap();
+        assert_eq!(result.as_str().unwrap().to_string(), "fallback");
+    }
+
+    #[test]
+    fn test_inline_expr_or_default() {
+        let eval = LuaEvaluator::new().unwrap();
+        let ctx = EvalContext::default();
+
+        // env.MISSING is nil, so `or "default"` should return "default"
+        let result = eval.eval_inline_expr("env.MISSING or \"default\"", &ctx, "test").unwrap();
+        assert_eq!(result.as_str().unwrap().to_string(), "default");
+    }
+
+    #[test]
+    fn test_inline_expr_stdlib_available() {
+        let eval = LuaEvaluator::new().unwrap();
+        let ctx = EvalContext::default();
+
+        let result = eval.eval_inline_expr("string.upper('hello')", &ctx, "test").unwrap();
+        assert_eq!(result.as_str().unwrap().to_string(), "HELLO");
+    }
+
+    #[test]
+    fn test_inline_expr_lua_block_functions() {
+        let eval = LuaEvaluator::new().unwrap();
+        eval.load_inline("function greet(name) return 'hello ' .. name end").unwrap();
+
+        let ctx = EvalContext::default();
+        let result = eval.eval_inline_expr("greet('world')", &ctx, "test").unwrap();
+        assert_eq!(result.as_str().unwrap().to_string(), "hello world");
+    }
+
+    #[test]
+    fn test_lua_eval_has_deps_and_env_shortcut() {
+        // Verify that !lua blocks also get deps and env shortcut
+        let eval = LuaEvaluator::new().unwrap();
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let mut deps = HashMap::new();
+        deps.insert("db".to_string(), DepInfo {
+            status: "healthy".to_string(),
+            ..Default::default()
+        });
+        let ctx = EvalContext { env, deps, ..Default::default() };
+
+        let result: String = eval.eval(r#"return env.FOO"#, &ctx, "test").unwrap();
+        assert_eq!(result, "bar");
+
+        let result: String = eval.eval(r#"return deps.db.status"#, &ctx, "test").unwrap();
+        assert_eq!(result, "healthy");
     }
 }

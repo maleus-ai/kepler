@@ -10,8 +10,8 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 - **Health checks** -- Docker-compatible health check configuration
 - **Lifecycle hooks** -- Run commands at init, start, stop, restart, cleanup, and health transitions
 - **File watching** -- Automatic service restart on file changes
-- **Environment isolation** -- Controlled env with shell-style `${VAR}` expansion and `.env` file support
-- **Lua scripting** -- Dynamic config generation with sandboxed Luau
+- **Environment isolation** -- Controlled env with `${{ }}` inline Lua expressions and `.env` file support
+- **Lua scripting** -- Dynamic config generation with `!lua` tags and `${{ }}` expressions
 - **Privilege dropping** -- Run services as specific users/groups with resource limits
 - **Colored persistent logs** -- Real-time streaming with per-service colors, persisted to disk
 
@@ -97,7 +97,7 @@ For a ready-to-run example, see [`example.kepler.yaml`](example.kepler.yaml).
 ### Configuration Features
 
 - [Environment Variables](docs/environment-variables.md) -- Three-stage expansion, inheritance
-- [Variable Expansion](docs/variable-expansion.md) -- Shell-style `${VAR}` syntax
+- [Inline Expressions](docs/variable-expansion.md) -- `${{ expr }}` syntax reference
 - [Lua Scripting](docs/lua-scripting.md) -- Luau sandbox, context, examples
 - [Log Management](docs/log-management.md) -- Storage, buffering, retention, streaming
 - [File Watching](docs/file-watching.md) -- Auto-restart on file changes

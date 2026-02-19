@@ -5,6 +5,6 @@ kepler:
 services:
   workdir-service:
     env_file: __ENV_FILE__
-    working_dir: ${CUSTOM_WORK_DIR}
+    working_dir: ${{ env.CUSTOM_WORK_DIR }}
     command: ["sh", "-c", "pwd && sleep 30"]
     restart: no

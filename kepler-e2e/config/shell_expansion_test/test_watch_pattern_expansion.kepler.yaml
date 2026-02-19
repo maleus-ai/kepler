@@ -9,4 +9,4 @@ services:
     restart:
       policy: always
       watch:
-        - "${SRC_DIR}/**/*.txt"
+        - "${{ env.SRC_DIR }}/**/*.txt"
