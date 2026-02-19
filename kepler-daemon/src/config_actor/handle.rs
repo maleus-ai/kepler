@@ -989,6 +989,25 @@ impl ConfigActorHandle {
         }
     }
 
+    // === Environment Override ===
+
+    /// Merge overrides into the stored sys_env, re-save snapshot, and clear resolved config cache.
+    pub async fn merge_sys_env(&self, overrides: HashMap<String, String>) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ConfigCommand::MergeSysEnv {
+                overrides,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send MergeSysEnv");
+        }
+        let _ = reply_rx.await;
+    }
+
     // === Lua Evaluation ===
 
     /// Evaluate a runtime `if` condition using the Lua evaluator.

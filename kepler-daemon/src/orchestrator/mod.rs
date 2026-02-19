@@ -118,12 +118,18 @@ impl ServiceOrchestrator {
         config_owner: Option<(u32, u32)>,
         progress: Option<ProgressSender>,
         no_deps: bool,
+        override_envs: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
         // Get or create the config actor
         let handle = self
             .registry
             .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner)
             .await?;
+
+        // Merge override envs into stored sys_env if provided
+        if let Some(overrides) = override_envs {
+            handle.merge_sys_env(overrides).await;
+        }
 
         let config_dir = handle.get_config_dir().await;
 
@@ -1339,6 +1345,7 @@ impl ServiceOrchestrator {
         config_path: &Path,
         services: &[String],
         no_deps: bool,
+        override_envs: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
         info!("Restarting services for {:?} (preserving state)", config_path);
 
@@ -1351,6 +1358,11 @@ impl ServiceOrchestrator {
         // Get handle - must already be loaded
         let handle = self.registry.get(&config_path.to_path_buf())
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
+
+        // Merge override envs into stored sys_env if provided
+        if let Some(overrides) = override_envs {
+            handle.merge_sys_env(overrides).await;
+        }
 
         let config = handle
             .get_config()
@@ -1613,7 +1625,7 @@ impl ServiceOrchestrator {
         }
 
         // Start all services
-        self.start_services(config_path, &[], sys_env, config_owner, progress, false).await?;
+        self.start_services(config_path, &[], sys_env, config_owner, progress, false, None).await?;
 
         Ok(String::new())
     }

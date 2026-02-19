@@ -189,12 +189,14 @@ impl Client {
         services: Vec<String>,
         sys_env: Option<HashMap<String, String>>,
         no_deps: bool,
+        override_envs: Option<HashMap<String, String>>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Start {
             config_path,
             services,
             sys_env,
             no_deps,
+            override_envs,
         })
     }
 
@@ -221,12 +223,14 @@ impl Client {
         services: Vec<String>,
         sys_env: Option<HashMap<String, String>>,
         no_deps: bool,
+        override_envs: Option<HashMap<String, String>>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Restart {
             config_path,
             services,
             sys_env,
             no_deps,
+            override_envs,
         })
     }
 

@@ -25,6 +25,12 @@ pub enum Commands {
         /// Skip dependency waiting and `if:` condition (requires service names)
         #[arg(long)]
         no_deps: bool,
+        /// Override system environment variables (KEY=VALUE, repeatable)
+        #[arg(short = 'e', long = "override-envs", value_name = "KEY=VALUE")]
+        override_envs: Vec<String>,
+        /// Refresh all system environment variables from the current shell
+        #[arg(short = 'r', long)]
+        refresh_env: bool,
     },
     /// Stop services (requires daemon to be running)
     Stop {
@@ -54,6 +60,12 @@ pub enum Commands {
         /// Skip dependency ordering (use specified order instead; requires service names)
         #[arg(long)]
         no_deps: bool,
+        /// Override system environment variables (KEY=VALUE, repeatable)
+        #[arg(short = 'e', long = "override-envs", value_name = "KEY=VALUE")]
+        override_envs: Vec<String>,
+        /// Refresh all system environment variables from the current shell
+        #[arg(short = 'r', long)]
+        refresh_env: bool,
     },
     /// Recreate config (stop, re-bake config snapshot, start)
     Recreate,

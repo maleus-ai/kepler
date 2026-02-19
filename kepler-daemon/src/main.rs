@@ -329,13 +329,14 @@ async fn handle_request(
             services,
             sys_env,
             no_deps,
+            override_envs,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
             match orchestrator
-                .start_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps)
+                .start_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps, override_envs)
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -495,6 +496,7 @@ async fn handle_request(
             services,
             sys_env: _,
             no_deps,
+            override_envs,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -580,7 +582,7 @@ async fn handle_request(
 
             // Run restart_services (blocks until done)
             let result = orchestrator
-                .restart_services(&config_path, &services, no_deps)
+                .restart_services(&config_path, &services, no_deps, override_envs)
                 .await;
 
             // Brief sleep to drain remaining events, then abort forwarding task

@@ -1,0 +1,11 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+# Test config for override-envs feature.
+# The service prints specific env vars so tests can verify their values.
+services:
+  env-printer:
+    command: ["sh", "-c", "echo OVERRIDE_A=${OVERRIDE_A:-EMPTY} OVERRIDE_B=${OVERRIDE_B:-EMPTY} && sleep 30"]
+    sys_env: inherit
+    restart: no

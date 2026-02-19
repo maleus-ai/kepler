@@ -79,6 +79,9 @@ kepler start -d                          # Detach immediately
 kepler start -d --wait                   # Block until startup cluster ready
 kepler start -d --wait --timeout 30s     # Block with timeout
 kepler start backend                     # Start a specific service
+kepler start -e MY_VAR=hello             # Override a system env var
+kepler start -e A=1 -e B=2              # Override multiple env vars
+kepler start --refresh-env               # Refresh all sys_env from current shell
 ```
 
 | Flag | Description |
@@ -86,6 +89,8 @@ kepler start backend                     # Start a specific service
 | `-d, --detach` | Return immediately, startup runs in background |
 | `--wait` | Block until startup cluster is ready (requires `-d`) |
 | `--timeout <DURATION>` | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait` |
+| `-e, --override-envs <KEY=VALUE>` | Override specific system environment variables (repeatable). Can be combined with `--refresh-env` |
+| `-r, --refresh-env` | Replace all baked system environment variables with the current shell environment. Can be combined with `-e` |
 
 **Behavior by mode:**
 
@@ -118,7 +123,7 @@ See [Hooks](hooks.md) for details on cleanup hooks.
 
 ### `kepler restart`
 
-Restart services. Supports the same `-d`, `--wait`, and `--timeout` flags as `start`.
+Restart services. Supports the same `-d`, `--wait`, `--timeout`, `-e`, and `--refresh-env` flags as `start`.
 
 ```bash
 kepler restart                           # Restart, follow logs (Ctrl+C stops)
@@ -126,6 +131,8 @@ kepler restart -d                        # Restart detached
 kepler restart -d --wait                 # Block until restart complete
 kepler restart -d --wait --timeout 30s   # Block with timeout
 kepler restart backend worker            # Restart specific services
+kepler restart -e MY_VAR=new_value       # Restart with overridden env var
+kepler restart --refresh-env             # Restart with refreshed shell env
 ```
 
 ### `kepler recreate`

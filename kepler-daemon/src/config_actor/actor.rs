@@ -927,6 +927,32 @@ impl ConfigActor {
                 // Handled in run() before process_command — should never reach here
                 unreachable!("EvalIfCondition handled in run() loop");
             }
+            ConfigCommand::MergeSysEnv { overrides, reply } => {
+                // Merge overrides into sys_env
+                self.sys_env.extend(overrides);
+
+                // Re-save snapshot with updated sys_env
+                if self.snapshot_taken {
+                    let snapshot = ExpandedConfigSnapshot {
+                        config: self.config.clone(),
+                        service_envs: Default::default(),
+                        service_working_dirs: Default::default(),
+                        config_dir: self.config_dir.clone(),
+                        snapshot_time: chrono::Utc::now().timestamp(),
+                        sys_env: self.sys_env.clone(),
+                        owner_uid: self.owner_uid,
+                        owner_gid: self.owner_gid,
+                    };
+                    if let Err(e) = self.persistence.save_expanded_config(&snapshot) {
+                        warn!("Failed to re-save snapshot after MergeSysEnv: {}", e);
+                    }
+                }
+
+                // Clear resolved config cache so services re-resolve with new env
+                self.resolved_configs.clear();
+
+                let _ = reply.send(());
+            }
         }
         false
     }

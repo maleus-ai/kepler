@@ -130,6 +130,36 @@ Both approaches work. Use `${{ }}$` when you want Kepler to resolve values at st
 
 ---
 
+## Runtime Environment Overrides
+
+By default, system environment variables are captured once from the CLI at config load time and baked into the config snapshot. To change them without a full `recreate`, use the `-e` or `--refresh-env` flags on `start` or `restart`.
+
+### Override Specific Variables (`-e`)
+
+Use `-e KEY=VALUE` (repeatable) to merge specific overrides into the stored `sys_env`:
+
+```bash
+kepler start -e DB_HOST=newhost -e DB_PORT=5433
+kepler restart -e API_KEY=updated_key
+```
+
+Overrides are merged into the existing `sys_env` — keys not specified are preserved. The updated `sys_env` is persisted to the on-disk snapshot, so subsequent `restart` (without `-e`) will still use the overridden values.
+
+### Refresh All Variables (`--refresh-env`)
+
+Use `--refresh-env` to replace the entire baked `sys_env` with the current shell environment:
+
+```bash
+kepler start --refresh-env
+kepler restart --refresh-env
+```
+
+This is useful when your shell environment has changed significantly and you want services to pick up all new values without doing a full `recreate`.
+
+`--refresh-env` and `-e` can be combined: the CLI environment is refreshed first, then `-e` overrides are applied on top.
+
+---
+
 ## Security Considerations
 
 **Default inheritance (`sys_env: inherit`):**
