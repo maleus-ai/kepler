@@ -369,7 +369,8 @@ services:
     let resolved = config
         .resolve_service("svc", &mut ctx, &evaluator, &config_path, None)
         .unwrap();
-    assert_eq!(resolved.command, vec!["sh", "-c", "echo hello && echo world"]);
+    let expected_shell = super::resolve_shell(&ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default());
+    assert_eq!(resolved.command, vec![expected_shell, "-c".to_string(), "echo hello && echo world".to_string()]);
 }
 
 #[test]

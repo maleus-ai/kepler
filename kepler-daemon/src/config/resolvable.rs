@@ -202,7 +202,10 @@ impl<'a> ResolvableCommand<'a> {
                 &format!("{}.run", field_prefix), &mut shared_env,
             )?;
             match run {
-                Some(script) => vec!["sh".to_string(), "-c".to_string(), script],
+                Some(script) => {
+                    let shell = super::resolve_shell(&ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default());
+                    vec![shell, "-c".to_string(), script]
+                },
                 None => Vec::new(),
             }
         } else {

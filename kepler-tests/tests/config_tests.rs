@@ -1267,7 +1267,8 @@ services:
         .resolve_service("test", &mut ctx, &evaluator, &config_path, None)
         .unwrap();
 
-    assert_eq!(resolved.command, vec!["sh", "-c", "echo hello && sleep 3600"]);
+    let expected_shell = kepler_daemon::config::resolve_shell(&ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default());
+    assert_eq!(resolved.command, vec![expected_shell, "-c".to_string(), "echo hello && sleep 3600".to_string()]);
 }
 
 /// Dynamic `run` field with ${{ }}$ resolves correctly
@@ -1302,5 +1303,6 @@ services:
         .resolve_service("test", &mut ctx, &evaluator, &config_path, None)
         .unwrap();
 
-    assert_eq!(resolved.command, vec!["sh", "-c", "echo world"]);
+    let expected_shell = kepler_daemon::config::resolve_shell(&ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default());
+    assert_eq!(resolved.command, vec![expected_shell, "-c".to_string(), "echo world".to_string()]);
 }

@@ -256,7 +256,10 @@ async fn run_hook_static(
                 .ok_or_else(|| DaemonError::Config(
                     format!("Hook {}.{}: dynamic 'run' requires a Lua evaluator", service_name, hook_name)
                 ))?;
-            vec!["sh".to_string(), "-c".to_string(), run_str.clone()]
+            {
+                let shell = crate::config::resolve_shell(params.raw_env);
+                vec![shell, "-c".to_string(), run_str.clone()]
+            }
         }
         HookCommand::Command { command, .. } => {
             let items = command.as_static()
