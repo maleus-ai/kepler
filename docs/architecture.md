@@ -480,6 +480,8 @@ The Lua environment provides a **restricted subset** of the standard library:
 | `tonumber`, `tostring` | `loadfile`, `dofile` - Arbitrary file loading |
 | `pairs`, `ipairs` | `debug` - Debug library |
 | `type`, `select`, `unpack` | `package.loadlib` - Native library loading |
+| `json` - JSON parse/stringify | |
+| `yaml` - YAML parse/stringify | |
 
 **No filesystem access**: Scripts cannot read, write, or modify files on disk.
 

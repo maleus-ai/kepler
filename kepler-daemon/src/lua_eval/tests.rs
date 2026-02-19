@@ -803,3 +803,138 @@ fn test_prepared_env_shallow_freeze() {
     let result = eval.eval_inline_expr_with_env("ctx.env.KEY", &prepared.table, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "val");
 }
+
+// --- json/yaml stdlib tests ---
+
+#[test]
+fn test_json_parse_object() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result: Value = eval.eval(r#"local t = json.parse('{"a":1,"b":"hello"}'); return t.a"#, &ctx, "test").unwrap();
+    assert!(matches!(result, Value::Integer(1)));
+}
+
+#[test]
+fn test_json_parse_array() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result: Value = eval.eval(r#"local t = json.parse('[1,2,3]'); return t[1]"#, &ctx, "test").unwrap();
+    assert!(matches!(result, Value::Integer(1)));
+}
+
+#[test]
+fn test_json_parse_error() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result = eval.eval::<Value>(r#"return json.parse('invalid')"#, &ctx, "test");
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("json.parse"), "Error should mention json.parse: {}", err);
+}
+
+#[test]
+fn test_json_stringify() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result: String = eval.eval(r#"return json.stringify({a = 1})"#, &ctx, "test").unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["a"], 1);
+}
+
+#[test]
+fn test_json_stringify_pretty() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result: String = eval.eval(r#"return json.stringify({a = 1}, true)"#, &ctx, "test").unwrap();
+    assert!(result.contains('\n'), "Pretty JSON should contain newlines: {}", result);
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["a"], 1);
+}
+
+#[test]
+fn test_json_roundtrip() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result: String = eval.eval(
+        r#"
+        local original = '{"name":"test","count":42,"active":true}'
+        local parsed = json.parse(original)
+        return json.stringify(parsed)
+        "#,
+        &ctx,
+        "test",
+    ).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["name"], "test");
+    assert_eq!(parsed["count"], 42);
+    assert_eq!(parsed["active"], true);
+}
+
+#[test]
+fn test_yaml_parse() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result: Value = eval.eval(r#"local t = yaml.parse('a: 1\nb: hello'); return t.b"#, &ctx, "test").unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "hello");
+}
+
+#[test]
+fn test_yaml_parse_error() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result = eval.eval::<Value>(r#"return yaml.parse('a: [invalid')"#, &ctx, "test");
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("yaml.parse"), "Error should mention yaml.parse: {}", err);
+}
+
+#[test]
+fn test_yaml_stringify() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result: String = eval.eval(r#"return yaml.stringify({a = 1})"#, &ctx, "test").unwrap();
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
+    assert_eq!(parsed["a"], serde_yaml::Value::Number(serde_yaml::Number::from(1)));
+}
+
+#[test]
+fn test_yaml_roundtrip() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result: String = eval.eval(
+        r#"
+        local original = 'name: test\ncount: 42'
+        local parsed = yaml.parse(original)
+        return yaml.stringify(parsed)
+        "#,
+        &ctx,
+        "test",
+    ).unwrap();
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
+    assert_eq!(parsed["name"], serde_yaml::Value::String("test".to_string()));
+    assert_eq!(parsed["count"], serde_yaml::Value::Number(serde_yaml::Number::from(42)));
+}
+
+#[test]
+fn test_json_yaml_available_in_inline() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result = eval.eval_inline_expr(r#"json.stringify({x = 1})"#, &ctx, "test").unwrap();
+    let s = result.as_str().unwrap().to_string();
+    let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(parsed["x"], 1);
+
+    let result = eval.eval_inline_expr(r#"yaml.stringify({x = 1})"#, &ctx, "test").unwrap();
+    assert!(result.as_str().is_some(), "yaml.stringify should return a string");
+}

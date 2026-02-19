@@ -3,7 +3,7 @@
 //! This module provides the `LuaEvaluator` struct which manages a Lua state
 //! and allows evaluation of `!lua` tagged values in configs.
 
-use mlua::{FromLua, Lua, Result as LuaResult, Table, Value};
+use mlua::{FromLua, Lua, LuaSerdeExt, Result as LuaResult, Table, Value};
 use std::collections::HashMap;
 
 /// Pre-built Lua environment table with an updatable `env` sub-table.
@@ -107,6 +107,50 @@ impl LuaEvaluator {
 
         // Remove `require` from globals to prevent loading external modules
         lua.globals().set("require", Value::Nil)?;
+
+        // Register json stdlib
+        let json_table = lua.create_table()?;
+        json_table.set(
+            "parse",
+            lua.create_function(|lua, s: String| {
+                let v: serde_json::Value = serde_json::from_str(&s)
+                    .map_err(|e| mlua::Error::RuntimeError(format!("json.parse: {}", e)))?;
+                lua.to_value(&v)
+            })?,
+        )?;
+        json_table.set(
+            "stringify",
+            lua.create_function(|lua, (val, pretty): (Value, Option<bool>)| {
+                let v: serde_json::Value = lua.from_value(val)?;
+                if pretty.unwrap_or(false) {
+                    serde_json::to_string_pretty(&v)
+                } else {
+                    serde_json::to_string(&v)
+                }
+                .map_err(|e| mlua::Error::RuntimeError(format!("json.stringify: {}", e)))
+            })?,
+        )?;
+        lua.globals().set("json", json_table)?;
+
+        // Register yaml stdlib
+        let yaml_table = lua.create_table()?;
+        yaml_table.set(
+            "parse",
+            lua.create_function(|lua, s: String| {
+                let v: serde_yaml::Value = serde_yaml::from_str(&s)
+                    .map_err(|e| mlua::Error::RuntimeError(format!("yaml.parse: {}", e)))?;
+                lua.to_value(&v)
+            })?,
+        )?;
+        yaml_table.set(
+            "stringify",
+            lua.create_function(|lua, val: Value| {
+                let v: serde_yaml::Value = lua.from_value(val)?;
+                serde_yaml::to_string(&v)
+                    .map_err(|e| mlua::Error::RuntimeError(format!("yaml.stringify: {}", e)))
+            })?,
+        )?;
+        lua.globals().set("yaml", yaml_table)?;
 
         Ok(Self { lua })
     }

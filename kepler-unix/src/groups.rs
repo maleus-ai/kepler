@@ -42,7 +42,7 @@ pub fn getgrouplist(user: &CStr, base_gid: u32) -> Result<Vec<u32>, nix::errno::
             groups.resize(new_len, 0);
         } else {
             groups.truncate(ngroups as usize);
-            return Ok(groups.to_vec());
+            return Ok(groups.iter().map(|&g| g as u32).collect());
         }
     }
 }
