@@ -26,7 +26,7 @@ Kepler supports inline Lua expressions in configuration values using `${{ expr }
 | `${{ hooks.pre_start.outputs.step1.token }}$` | Reference a hook step output |
 | `${{ ctx.service_name }}$`     | Reference the current service name |
 
-Expressions are evaluated as Lua code with access to `env`, `ctx`, `deps`, and `global`.
+Expressions are evaluated as Lua code with access to `env`, `ctx`, `deps`, `global`, and built-in libraries (`json`, `yaml`).
 
 ---
 
@@ -145,6 +145,10 @@ user: ${{ env.SERVICE_USER or "nobody" }}$
 | `ctx.hooks.HOOK.outputs.STEP.KEY` | Hook step output value (available after hook runs). See [Outputs](outputs.md) |
 | `hooks.HOOK.outputs.STEP.KEY` | Shortcut for `ctx.hooks.HOOK.outputs.STEP.KEY` |
 | `global`                  | Shared mutable table (set via `lua:` directive)            |
+| `json.parse(str)`        | Deserialize a JSON string into a Lua value                 |
+| `json.stringify(val, pretty?)` | Serialize a Lua value to JSON (`true` for indented)   |
+| `yaml.parse(str)`        | Deserialize a YAML string into a Lua value                 |
+| `yaml.stringify(val)`    | Serialize a Lua value to a YAML string                     |
 
 > **Note:** Bare variable names like `${{ HOME }}$` resolve to nil. To access environment variables, use `env.HOME` or `ctx.env.HOME`.
 

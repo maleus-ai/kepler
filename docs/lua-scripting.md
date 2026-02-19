@@ -14,6 +14,7 @@ Kepler supports dynamic config generation with sandboxed Luau scripts via the `!
 - [Evaluation Timing](#evaluation-timing)
 - [Execution Order](#execution-order)
 - [Type Conversion](#type-conversion)
+- [Built-in Libraries](#built-in-libraries)
 - [Sandbox Restrictions](#sandbox-restrictions)
 - [Security Model](#security-model)
 - [Examples](#examples)
@@ -252,6 +253,49 @@ environment:
 
 ---
 
+## Built-in Libraries
+
+In addition to the Lua standard library, Kepler provides `json` and `yaml` modules for parsing and generating structured data formats.
+
+### `json`
+
+| Function | Description |
+|----------|-------------|
+| `json.parse(str)` | Deserialize a JSON string into a Lua value (table, number, string, boolean, nil) |
+| `json.stringify(value, pretty?)` | Serialize a Lua value to a JSON string. Pass `true` as second argument for indented output |
+
+```yaml
+environment: !lua |
+  local data = json.parse('{"host": "localhost", "port": 5432}')
+  return {
+    "DB_HOST=" .. data.host,
+    "DB_PORT=" .. tostring(data.port),
+  }
+
+  # Or generate JSON for a service config
+  # CONFIG_JSON=${{ json.stringify({log_level = "info", workers = 4}) }}$
+```
+
+### `yaml`
+
+| Function | Description |
+|----------|-------------|
+| `yaml.parse(str)` | Deserialize a YAML string into a Lua value |
+| `yaml.stringify(value)` | Serialize a Lua value to a YAML string |
+
+```yaml
+environment: !lua |
+  local config = yaml.parse('host: localhost\nport: 5432')
+  return {
+    "DB_HOST=" .. config.host,
+    "DB_PORT=" .. tostring(config.port),
+  }
+```
+
+Both libraries are available in all contexts: `!lua` blocks, `${{ }}$` inline expressions, `if` conditions, and the `lua:` directive.
+
+---
+
 ## Sandbox Restrictions
 
 The Lua environment provides a **restricted subset** of the standard library:
@@ -264,6 +308,8 @@ The Lua environment provides a **restricted subset** of the standard library:
 | `tonumber`, `tostring` | `os.remove`, `os.rename` — File operations |
 | `pairs`, `ipairs` | `loadfile`, `dofile` — Arbitrary file loading |
 | `type`, `select`, `unpack` | `debug` — Debug library |
+| `json` — JSON parse/stringify | |
+| `yaml` — YAML parse/stringify | |
 
 **No filesystem access**: Scripts cannot read, write, or modify files on disk.
 
