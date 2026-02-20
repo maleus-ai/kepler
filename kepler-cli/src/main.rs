@@ -478,7 +478,6 @@ async fn foreground_with_logs(
     tokio::pin!(request_future);
     tokio::pin!(log_future);
     let mut request_done = false;
-    let mut saved_error: Option<CliError> = None;
     loop {
         // biased: poll log_future first so its internal subscribe_events() call
         // queues the Subscribe request before request_future queues Start.
@@ -486,19 +485,19 @@ async fn foreground_with_logs(
         tokio::select! {
             biased;
             result = &mut log_future => {
-                if let Some(err) = saved_error {
-                    return Err(err);
-                }
                 return result;
             }
             result = &mut request_future, if !request_done => {
                 request_done = true;
                 match result {
                     Ok(Response::Error { message }) => {
-                        saved_error = Some(CliError::Server(message));
+                        // Request failed (e.g. config parse error).
+                        // Return immediately — the log future will never
+                        // reach quiescence for a config that failed to load.
+                        return Err(CliError::Server(message));
                     }
                     Err(e) => {
-                        saved_error = Some(e.into());
+                        return Err(e.into());
                     }
                     Ok(_) => {
                         // Request succeeded; keep following logs until quiescence
