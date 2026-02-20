@@ -53,6 +53,7 @@ depends_on:
 | `timeout` | `duration` | none | Max time to wait for condition. If unset, waits indefinitely |
 | `restart` | `bool` | `false` | Restart this service when dependency restarts |
 | `exit_code` | `list` | none | Exit code filter for `service_failed`/`service_stopped` |
+| `allow_skipped` | `bool` | `false` | Treat a skipped dependency as satisfied instead of cascading the skip |
 
 ---
 
@@ -280,6 +281,38 @@ Skip reasons are visible in:
 - `start -d --wait` progress: `Skipped: reason`
 
 Skipped services are excluded from `stop --clean` cleanup.
+
+### Preventing Skip Cascading
+
+By default, when a dependency is skipped, the dependent service is also skipped. Use `allow_skipped: true` to break this cascade — the skipped dependency is treated as satisfied, and the dependent service starts normally.
+
+```yaml
+services:
+  profiler:
+    if: ${{ env.ENABLE_PROFILING ~= nil }}$
+    command: ["./profiler"]
+    restart: no
+
+  dashboard:
+    command: ["./dashboard"]
+    depends_on:
+      profiler:
+        condition: service_completed_successfully
+        allow_skipped: true    # Start even if profiler is skipped
+```
+
+Without `allow_skipped`, if `profiler` is skipped (because `ENABLE_PROFILING` is not set), `dashboard` would also be skipped. With `allow_skipped: true`, `dashboard` starts regardless.
+
+You can check whether a dependency was skipped in hooks using the `skipped()` function:
+
+```yaml
+    hooks:
+      pre_start:
+        - if: ${{ skipped('profiler') }}$
+          run: echo "Profiler was skipped — running without profiling"
+        - if: ${{ success('profiler') }}$
+          run: echo "Profiler completed — profiling data available"
+```
 
 ---
 
