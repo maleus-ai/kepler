@@ -1,6 +1,6 @@
 //! Hook execution tests
 
-use kepler_daemon::config::{ConfigValue, HookCommand, HookCommon, HookList, ServiceHooks};
+use kepler_daemon::config::{ConfigValue, DynamicExpr, HookCommand, HookCommon, HookList, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -818,7 +818,7 @@ async fn test_hook_always_runs_after_failure() {
             HookCommand::Script {
                 run: format!("echo 'always' >> {}", order_file.display()).into(),
                 common: HookCommon {
-                    condition: Some("always()".to_string()).into(),
+                    condition: ConfigValue::Dynamic(Box::new(DynamicExpr::Expression("always()".to_string()))),
                     ..Default::default()
                 },
             },
@@ -863,7 +863,7 @@ async fn test_hook_failure_condition_runs() {
             HookCommand::Script {
                 run: format!("echo 'on_failure' >> {}", order_file.display()).into(),
                 common: HookCommon {
-                    condition: Some("failure()".to_string()).into(),
+                    condition: ConfigValue::Dynamic(Box::new(DynamicExpr::Expression("failure()".to_string()))),
                     ..Default::default()
                 },
             },
@@ -908,7 +908,7 @@ async fn test_hook_success_condition_skips_after_failure() {
             HookCommand::Script {
                 run: format!("echo 'on_success' >> {}", order_file.display()).into(),
                 common: HookCommon {
-                    condition: Some("success()".to_string()).into(),
+                    condition: ConfigValue::Dynamic(Box::new(DynamicExpr::Expression("success()".to_string()))),
                     ..Default::default()
                 },
             },
@@ -955,7 +955,7 @@ async fn test_hook_conditional_without_failure_call_does_not_handle() {
                 common: HookCommon {
                     // A condition that evaluates to true but does NOT call failure() —
                     // the step runs and succeeds, but should NOT handle the failure
-                    condition: Some("true".to_string()).into(),
+                    condition: ConfigValue::Dynamic(Box::new(DynamicExpr::Expression("true".to_string()))),
                     ..Default::default()
                 },
             },
@@ -1001,7 +1001,7 @@ async fn test_hook_error_still_propagates() {
             HookCommand::Script {
                 run: format!("echo 'cleanup' >> {}", order_file.display()).into(),
                 common: HookCommon {
-                    condition: Some("always()".to_string()).into(),
+                    condition: ConfigValue::Dynamic(Box::new(DynamicExpr::Expression("always()".to_string()))),
                     ..Default::default()
                 },
             },

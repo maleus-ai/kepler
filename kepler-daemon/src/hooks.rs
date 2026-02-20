@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::{debug, error, info};
 
-use crate::config::{resolve_log_store, GlobalHooks, HookCommand, HookList, LogConfig, ResolvableCommand, ServiceHooks};
+use crate::config::{resolve_log_store, ConfigValue, GlobalHooks, HookCommand, HookList, LogConfig, ResolvableCommand, ServiceHooks};
 use crate::config_actor::ConfigActorHandle;
 use crate::errors::{DaemonError, Result};
 use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
@@ -408,45 +408,55 @@ pub async fn run_global_hook(
     let mut failure_checked = false;
 
     for hook in &hook_list.0 {
-        // If a previous hook failed and this hook has no `if` condition,
-        // skip it (implicit success() semantics)
-        if had_failure && hook.condition().is_none() {
-            debug!("Global hook {} skipped: previous hook failed (implicit success())", hook_type.as_str());
-            continue;
-        }
-
-        // Evaluate runtime `if` condition if present
-        if let Some(condition) = hook.condition()
-            && let Some(h) = params.handle {
-                let initialized = h.is_config_initialized().await;
-                let eval_ctx = EvalContext {
-                    service: Some(ServiceEvalContext {
-                        initialized: Some(initialized),
-                        ..Default::default()
-                    }),
-                    hook: Some(HookEvalContext {
-                        name: hook_type.as_str().to_string(),
-                        raw_env: params.env.clone(),
-                        env_file: HashMap::new(),
-                        env: params.env.clone(),
-                        had_failure: Some(had_failure),
-                    }),
-                    deps: HashMap::new(),
-                };
-                match h.eval_if_condition(condition, eval_ctx).await {
-                    Ok(result) if result.value => {
-                        failure_checked = result.failure_checked;
-                    }
-                    Ok(_) => {
-                        debug!("Global hook {} skipped: if condition '{}' is falsy", hook_type.as_str(), condition);
-                        continue;
-                    }
-                    Err(e) => {
-                        error!("Global hook {} if-condition error: {}", hook_type.as_str(), e);
-                        continue;
+        // Evaluate the `if` condition (ConfigValue-based)
+        match hook.condition_value() {
+            ConfigValue::Static(None) => {
+                // No condition — implicit success(): skip if previous hook failed
+                if had_failure {
+                    debug!("Global hook {} skipped: previous hook failed (implicit success())", hook_type.as_str());
+                    continue;
+                }
+            }
+            ConfigValue::Static(Some(false)) => {
+                debug!("Global hook {} skipped: if condition is static false", hook_type.as_str());
+                continue;
+            }
+            ConfigValue::Static(Some(true)) => {
+                // Always run, failure_checked stays false
+            }
+            ConfigValue::Dynamic(expr) => {
+                if let Some(h) = params.handle {
+                    let initialized = h.is_config_initialized().await;
+                    let eval_ctx = EvalContext {
+                        service: Some(ServiceEvalContext {
+                            initialized: Some(initialized),
+                            ..Default::default()
+                        }),
+                        hook: Some(HookEvalContext {
+                            name: hook_type.as_str().to_string(),
+                            raw_env: params.env.clone(),
+                            env_file: HashMap::new(),
+                            env: params.env.clone(),
+                            had_failure: Some(had_failure),
+                        }),
+                        deps: HashMap::new(),
+                    };
+                    match h.eval_if_condition(expr, eval_ctx).await {
+                        Ok(result) if result.value => {
+                            failure_checked = result.failure_checked;
+                        }
+                        Ok(_) => {
+                            debug!("Global hook {} skipped: if condition is falsy", hook_type.as_str());
+                            continue;
+                        }
+                        Err(e) => {
+                            error!("Global hook {} if-condition error: {}", hook_type.as_str(), e);
+                            continue;
+                        }
                     }
                 }
             }
+        }
 
         // Warn if output is used on global hooks (not supported)
         if hook.output().is_some() {
@@ -558,13 +568,6 @@ pub async fn run_service_hook(
     let mut failure_checked = false;
 
     for hook in &hook_list.0 {
-        // If a previous hook failed and this hook has no `if` condition,
-        // skip it (implicit success() semantics)
-        if had_failure && hook.condition().is_none() {
-            debug!("Hook {} for {} skipped: previous hook failed (implicit success())", hook_type.as_str(), service_name);
-            continue;
-        }
-
         // Build EvalContext once per hook step — reused for both condition and execution.
         let state = if let Some(h) = handle {
             h.get_service_state(service_name).await
@@ -606,23 +609,40 @@ pub async fn run_service_hook(
             deps: params.deps.clone(),
         };
 
-        // Evaluate runtime `if` condition if present
-        if let Some(condition) = hook.condition()
-            && let Some(h) = handle {
-                match h.eval_if_condition(condition, eval_ctx.clone()).await {
-                    Ok(result) if result.value => {
-                        failure_checked = result.failure_checked;
-                    }
-                    Ok(_) => {
-                        debug!("Hook {} for {} skipped: if condition '{}' is falsy", hook_type.as_str(), service_name, condition);
-                        continue;
-                    }
-                    Err(e) => {
-                        error!("Hook {} for {} if-condition error: {}", hook_type.as_str(), service_name, e);
-                        continue;
+        // Evaluate the `if` condition (ConfigValue-based)
+        match hook.condition_value() {
+            ConfigValue::Static(None) => {
+                // No condition — implicit success(): skip if previous hook failed
+                if had_failure {
+                    debug!("Hook {} for {} skipped: previous hook failed (implicit success())", hook_type.as_str(), service_name);
+                    continue;
+                }
+            }
+            ConfigValue::Static(Some(false)) => {
+                debug!("Hook {} for {} skipped: if condition is static false", hook_type.as_str(), service_name);
+                continue;
+            }
+            ConfigValue::Static(Some(true)) => {
+                // Always run, failure_checked stays false
+            }
+            ConfigValue::Dynamic(expr) => {
+                if let Some(h) = handle {
+                    match h.eval_if_condition(expr, eval_ctx.clone()).await {
+                        Ok(result) if result.value => {
+                            failure_checked = result.failure_checked;
+                        }
+                        Ok(_) => {
+                            debug!("Hook {} for {} skipped: if condition is falsy", hook_type.as_str(), service_name);
+                            continue;
+                        }
+                        Err(e) => {
+                            error!("Hook {} for {} if-condition error: {}", hook_type.as_str(), service_name, e);
+                            continue;
+                        }
                     }
                 }
             }
+        }
 
         info!(
             "Running {} hook for service {}",

@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use super::context::{DiagnosticCounts, HealthCheckUpdate, ServiceContext, TaskHandleType};
-use crate::config::{KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
+use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
 
 /// Stdout and stderr capture task handles taken from a process handle.
 /// The stdout task returns `Option<Vec<String>>` (captured `KEY=VALUE` lines if output capture is enabled).
@@ -275,7 +275,7 @@ pub enum ConfigCommand {
     },
     /// Evaluate a runtime `if` condition using the Lua evaluator
     EvalIfCondition {
-        condition: String,
+        expr: Box<DynamicExpr>,
         context: Box<EvalContext>,
         reply: oneshot::Sender<Result<ConditionResult>>,
     },

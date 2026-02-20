@@ -55,8 +55,10 @@ pub struct HookCommon {
     pub env_file: ConfigValue<Option<PathBuf>>,
     /// Runtime Lua condition. When present, the hook is only executed if this
     /// expression evaluates to a truthy value at runtime.
+    /// Supports static bools (`if: true`/`if: false`) and dynamic expressions
+    /// (`if: ${{ expr }}$` / `if: !lua ...`).
     #[serde(default, rename = "if")]
-    pub condition: ConfigValue<Option<String>>,
+    pub condition: ConfigValue<Option<bool>>,
     /// Output capture name. When set, `::output::KEY=VALUE` lines from stdout
     /// are captured and made available as `service.hooks.<hook_name>.<output_name>.<key>`.
     #[serde(default)]
@@ -243,9 +245,9 @@ impl HookCommand {
         self.common().env_file.as_static().and_then(|v| v.as_deref())
     }
 
-    /// Get condition string (static value only).
-    pub fn condition(&self) -> Option<&str> {
-        self.common().condition.as_static().and_then(|v| v.as_deref())
+    /// Get the condition ConfigValue (for matching on Static/Dynamic variants).
+    pub fn condition_value(&self) -> &ConfigValue<Option<bool>> {
+        &self.common().condition
     }
 
     pub fn output(&self) -> Option<&str> {
