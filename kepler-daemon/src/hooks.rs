@@ -164,6 +164,7 @@ async fn run_hook_step(
     params: &ServiceHookParams<'_>,
     service_name: &str,
     hook_name: &str,
+    step_index: usize,
     eval_ctx: &mut EvalContext,
     output_capture: Option<OutputCaptureConfig>,
 ) -> Result<Option<Vec<String>>> {
@@ -211,7 +212,7 @@ async fn run_hook_step(
         );
 
         // Spawn using blocking mode with logging
-        let log_name = format!("{}.{}", service_name, hook_name);
+        let log_name = format!("{}.{}.{}", service_name, hook_name, step_index);
         let (store_stdout, store_stderr) = resolve_log_store(params.service_log_config, params.global_log_config);
         let mode = BlockingMode::WithLogging {
             log_config: params.log_config.cloned(),
@@ -236,7 +237,7 @@ async fn run_hook_step(
         Ok(result.captured_output)
     } else {
         // Fallback: no evaluator available, use static values only (legacy path for global hooks)
-        run_hook_static(hook, params, service_name, hook_name, output_capture).await
+        run_hook_static(hook, params, service_name, hook_name, step_index, output_capture).await
     }
 }
 
@@ -247,6 +248,7 @@ async fn run_hook_static(
     params: &ServiceHookParams<'_>,
     service_name: &str,
     hook_name: &str,
+    step_index: usize,
     output_capture: Option<OutputCaptureConfig>,
 ) -> Result<Option<Vec<String>>> {
     // Convert hook to program and args (static only)
@@ -342,7 +344,7 @@ async fn run_hook_static(
         effective_groups,
     );
 
-    let log_name = format!("{}.{}", service_name, hook_name);
+    let log_name = format!("{}.{}.{}", service_name, hook_name, step_index);
     let (store_stdout, store_stderr) = resolve_log_store(params.service_log_config, params.global_log_config);
     let mode = BlockingMode::WithLogging {
         log_config: params.log_config.cloned(),
@@ -407,7 +409,7 @@ pub async fn run_global_hook(
     let mut first_error: Option<DaemonError> = None;
     let mut failure_checked = false;
 
-    for hook in &hook_list.0 {
+    for (step_idx, hook) in hook_list.0.iter().enumerate() {
         // Evaluate the `if` condition (ConfigValue-based)
         match hook.condition_value() {
             ConfigValue::Static(None) => {
@@ -497,7 +499,7 @@ pub async fn run_global_hook(
             }),
             deps: HashMap::new(),
         };
-        match run_hook_step(hook, &hook_params, &service_name, hook_type.as_str(), &mut eval_ctx, None).await {
+        match run_hook_step(hook, &hook_params, "global", hook_type.as_str(), step_idx + 1, &mut eval_ctx, None).await {
             Ok(_) => {
                 if had_failure && failure_checked {
                     first_error = None;
@@ -567,7 +569,7 @@ pub async fn run_service_hook(
     let mut hook_outputs: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut failure_checked = false;
 
-    for hook in &hook_list.0 {
+    for (step_idx, hook) in hook_list.0.iter().enumerate() {
         // Build EvalContext once per hook step — reused for both condition and execution.
         let state = if let Some(h) = handle {
             h.get_service_state(service_name).await
@@ -657,7 +659,7 @@ pub async fn run_service_hook(
             max_size: params.output_max_size,
         });
 
-        match run_hook_step(hook, params, service_name, hook_type.as_str(), &mut eval_ctx, output_capture).await {
+        match run_hook_step(hook, params, service_name, hook_type.as_str(), step_idx + 1, &mut eval_ctx, output_capture).await {
             Ok(captured) => {
                 // If this step succeeded after a previous failure and `failure()` was
                 // called in the `if:` condition, the failure is considered "handled" —
