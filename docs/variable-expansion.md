@@ -103,20 +103,27 @@ The available context depends on the evaluation stage:
 env_file: ${{ env.CONFIG_DIR }}$/.env    # Only system env available
 ```
 
-### Stage 2: environment Array (service start time)
+### Stage 2: environment (service start time)
 
-Evaluated **sequentially** — each entry's result is added to the context for subsequent entries:
+Evaluated **sequentially** — each entry's result is added to the context for subsequent entries. Both sequence and mapping formats are supported:
 
 ```yaml
+# Sequence format
 environment:
   - BASE_DIR=/opt/app
   - CONFIG=${{ env.BASE_DIR }}$/config   # Can reference BASE_DIR from previous entry
   - DB_HOST=${{ env.DB_HOST or "localhost" }}$
+
+# Mapping format (equivalent)
+environment:
+  BASE_DIR: /opt/app
+  CONFIG: ${{ env.BASE_DIR }}$/config
+  DB_HOST: ${{ env.DB_HOST or "localhost" }}$
 ```
 
 ### Stage 3: Other Fields (service start time)
 
-All remaining fields are evaluated with the full context (system env + env_file + environment array + deps):
+All remaining fields are evaluated with the full context (system env + env_file + environment + deps):
 
 ```yaml
 working_dir: ${{ env.APP_DIR }}$

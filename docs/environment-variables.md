@@ -61,7 +61,7 @@ services:
 
 Services receive their environment from these sources (highest to lowest priority):
 
-1. **`environment` array** — Explicit variables in the service config
+1. **`environment`** — Explicit variables in the service config (sequence or mapping format)
 2. **`env_file`** — Variables loaded from the specified `.env` file
 3. **System environment** — If `sys_env: inherit`, all env vars captured from the CLI environment at config load time
 
@@ -81,9 +81,11 @@ The `env_file` path is expanded using **system environment only** (at config loa
 env_file: ${{ env.CONFIG_DIR }}$/.env    # env.CONFIG_DIR from system env
 ```
 
-### Stage 2: environment Array
+### Stage 2: environment
 
-The `environment` array entries are expanded **sequentially** using **system env + env_file variables** (at service start time). Each entry's result is added to the context for subsequent entries:
+The `environment` entries are expanded **sequentially** using **system env + env_file variables** (at service start time). Each entry's result is added to the context for subsequent entries.
+
+**Sequence format** (list of `KEY=VALUE` strings):
 
 ```yaml
 environment:
@@ -91,6 +93,17 @@ environment:
   - DB_URL=postgres://${{ env.DB_HOST }}$/mydb    # DB_HOST from system env or .env file
   - CONFIG=${{ env.BASE_DIR }}$/config             # BASE_DIR from the entry above
 ```
+
+**Mapping format** (key-value pairs):
+
+```yaml
+environment:
+  BASE_DIR: /opt/app
+  DB_URL: postgres://${{ env.DB_HOST }}$/mydb
+  CONFIG: ${{ env.BASE_DIR }}$/config
+```
+
+Both formats are equivalent. The mapping format is often more readable, especially for static values. Values can be strings, numbers, booleans, or null (empty value). Dynamic values (`${{ }}$` and `!lua`) are supported in both formats.
 
 ### Stage 3: Other Fields
 
@@ -106,10 +119,56 @@ user: ${{ env.SERVICE_USER or "nobody" }}$
 | Stage | What is expanded | Expansion context |
 |-------|------------------|-------------------|
 | 1 | `env_file` path | System environment only |
-| 2 | `environment` array entries | System env + env_file variables (sequential) |
-| 3 | All other fields | System env + env_file + environment array + deps |
+| 2 | `environment` entries | System env + env_file variables (sequential) |
+| 3 | All other fields | System env + env_file + environment + deps |
 
 See [Inline Expressions](variable-expansion.md) for the full syntax reference.
+
+---
+
+## Dynamic Environment with Lua
+
+The entire `environment` field can be set dynamically using `!lua` or `${{ }}$`. Lua functions can return either format:
+
+**Returning a table (map format)** — keys become variable names:
+
+```yaml
+lua: |
+  function app_env()
+    return {APP_NAME="myapp", PORT="8080", DEBUG="true"}
+  end
+
+services:
+  app:
+    command: ["./app"]
+    environment: ${{ app_env() }}$
+```
+
+**Returning an array (sequence format)** — each element is a `KEY=VALUE` string:
+
+```yaml
+lua: |
+  function app_env()
+    return {"APP_NAME=myapp", "PORT=8080", "DEBUG=true"}
+  end
+
+services:
+  app:
+    command: ["./app"]
+    environment: ${{ app_env() }}$
+```
+
+Both return formats are equivalent. The table format is often more natural in Lua.
+
+You can also use `!lua` for the same effect:
+
+```yaml
+services:
+  app:
+    command: ["./app"]
+    environment: !lua |
+      return {APP_NAME="myapp", PORT=tostring(8000 + 80)}
+```
 
 ---
 
@@ -201,6 +260,8 @@ services:
 
 ### Isolated Environment
 
+Sequence format:
+
 ```yaml
 services:
   app:
@@ -211,6 +272,20 @@ services:
       - NODE_ENV=production
       - DATABASE_URL=${{ env.DB_URL }}$   # Expanded from system env at start time
     env_file: .env               # Additional vars from file
+```
+
+Mapping format (equivalent):
+
+```yaml
+services:
+  app:
+    command: ["./app"]
+    sys_env: clear
+    environment:
+      PATH: /usr/bin:/bin
+      NODE_ENV: production
+      DATABASE_URL: ${{ env.DB_URL }}$
+    env_file: .env
 ```
 
 ### Selective Passthrough (with clear)
@@ -245,9 +320,9 @@ services:
   app:
     command: ["./app"]
     environment:
-      - APP_DIR=/opt/app
-      - CONFIG_PATH=${{ env.APP_DIR }}$/config.yaml
-      - LOG_DIR=${{ env.APP_DIR }}$/logs
+      APP_DIR: /opt/app
+      CONFIG_PATH: ${{ env.APP_DIR }}$/config.yaml
+      LOG_DIR: ${{ env.APP_DIR }}$/logs
 ```
 
 ---

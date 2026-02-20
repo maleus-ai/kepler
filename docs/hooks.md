@@ -87,8 +87,8 @@ hooks:
     run: ./notify.sh
     user: admin                    # Run as specific user
     working_dir: ./scripts         # Override working directory
-    environment:
-      - SETUP_MODE=full
+    environment:                   # Sequence or mapping format
+      SETUP_MODE: full
     env_file: .env.hooks
 ```
 
@@ -99,7 +99,7 @@ hooks:
 | `if` | `bool` or `${{ expr }}$` / `!lua` | Condition expression. Hook only runs if truthy. Supports static bools and dynamic Lua expressions. See [Status Functions](#status-functions) |
 | `user` | `string` | User to run hook as (overrides service default) |
 | `working_dir` | `string` | Working directory (overrides service default) |
-| `environment` | `string[]` | Additional environment variables |
+| `environment` | `string[]\|object` | Additional environment variables (sequence or mapping format) |
 | `env_file` | `string` | Additional env file to load |
 | `output` | `string` | Output step name. Enables `::output::KEY=VALUE` capture on this step's stdout. See [Outputs](outputs.md) |
 

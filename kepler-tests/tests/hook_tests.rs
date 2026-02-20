@@ -1,6 +1,6 @@
 //! Hook execution tests
 
-use kepler_daemon::config::{ConfigValue, DynamicExpr, HookCommand, HookCommon, HookList, ServiceHooks};
+use kepler_daemon::config::{ConfigValue, DynamicExpr, EnvironmentEntries, HookCommand, HookCommon, HookList, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -367,7 +367,7 @@ async fn test_hook_own_environment_variables() {
         pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!("echo \"HOOK_VAR=$HOOK_VAR\" >> {}", marker_path.display()).into(),
             common: HookCommon {
-                environment: ConfigValue::wrap_vec(vec!["HOOK_VAR=from_hook".to_string()]).into(),
+                environment: EnvironmentEntries(ConfigValue::wrap_vec(vec!["HOOK_VAR=from_hook".to_string()])).into(),
                 ..Default::default()
             },
         }])),
@@ -473,7 +473,7 @@ async fn test_hook_env_overrides_service_env() {
         pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!("echo SHARED_VAR=$(printenv SHARED_VAR) >> {}", marker_path.display()).into(),
             common: HookCommon {
-                environment: ConfigValue::wrap_vec(vec!["SHARED_VAR=from_hook".to_string()]).into(),
+                environment: EnvironmentEntries(ConfigValue::wrap_vec(vec!["SHARED_VAR=from_hook".to_string()])).into(),
                 ..Default::default()
             },
         }])),
@@ -523,7 +523,7 @@ async fn test_hook_env_expansion_with_service_env() {
         pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!("echo \"COMBINED=$COMBINED\" >> {}", marker_path.display()).into(),
             common: HookCommon {
-                environment: ConfigValue::wrap_vec(vec!["COMBINED=${{ env.SERVICE_VAR }}$_plus_hook".to_string()]).into(),
+                environment: EnvironmentEntries(ConfigValue::wrap_vec(vec!["COMBINED=${{ env.SERVICE_VAR }}$_plus_hook".to_string()])).into(),
                 ..Default::default()
             },
         }])),
@@ -590,7 +590,7 @@ async fn test_hook_env_priority() {
                 marker_path.display()
             ).into(),
             common: HookCommon {
-                environment: ConfigValue::wrap_vec(vec!["VAR3=hook_env".to_string()]).into(),
+                environment: EnvironmentEntries(ConfigValue::wrap_vec(vec!["VAR3=hook_env".to_string()])).into(),
                 env_file: Some(hook_env_file).into(),
                 ..Default::default()
             },

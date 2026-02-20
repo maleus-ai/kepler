@@ -65,8 +65,9 @@ services:
       database:
         condition: service_healthy  # Wait for DB to be healthy
         restart: true               # Restart backend if DB restarts
-    environment:
-      - DATABASE_URL=postgres://localhost:5432/app
+    environment:                    # Mapping format (KEY: value)
+      DATABASE_URL: postgres://localhost:5432/app
+      NODE_ENV: production
     env_file: .env
     restart:
       policy: on-failure
@@ -159,7 +160,7 @@ See [Log Management](log-management.md) for full details.
 | `run` | `string` | - | Shell script to run (via `sh -c`). Supports `${{ }}$` and `!lua`. Mutually exclusive with `command`. |
 | `working_dir` | `string` | config dir | Working directory. Supports `${{ }}$`. |
 | `depends_on` | `string[]\|object` | `[]` | Service dependencies. Service names must be static. Config fields (`condition`, `timeout`, `restart`, `exit_code`, `allow_skipped`) support `!lua` and `${{ }}$`. See [Dependencies](dependencies.md) |
-| `environment` | `string[]` | `[]` | Environment variables (`KEY=value`). Supports `${{ }}$` (sequential). See [Environment Variables](environment-variables.md) |
+| `environment` | `string[]\|object` | `[]` | Environment variables. Accepts a sequence of `KEY=value` strings or a mapping of `KEY: value` pairs. Supports `${{ }}$` (sequential) and `!lua`. See [Environment Variables](environment-variables.md) |
 | `env_file` | `string` | - | Path to `.env` file. Supports `${{ }}$` (system env only). |
 | `sys_env` | `string` | global | System env policy: `clear` or `inherit`. Inherits from `kepler.sys_env` if not set |
 | `restart` | `string\|object` | `no` | Restart policy. See [Restart Configuration](#restart-configuration) |

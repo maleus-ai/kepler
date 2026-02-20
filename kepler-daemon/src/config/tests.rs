@@ -128,7 +128,7 @@ environment:
     let cmd_items = raw_dyn.command.as_static().unwrap();
     assert!(!cmd_items[0].is_dynamic());
     assert!(cmd_items[1].is_dynamic());
-    let env_items = raw_dyn.environment.as_static().unwrap();
+    let env_items = &raw_dyn.environment.as_static().unwrap().0;
     assert!(env_items[0].is_dynamic());
 
     // Top-level !lua makes the outer ConfigValue dynamic
@@ -502,4 +502,255 @@ services:
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     assert!(config.validate(Path::new("test.yaml")).is_ok());
+}
+
+// ============================================================================
+// EnvironmentEntries map format tests
+// ============================================================================
+
+#[test]
+fn test_environment_map_format_static_strings() {
+    let yaml = r#"
+command: ["./app"]
+environment:
+  FOO: bar
+  BAZ: qux
+"#;
+    let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+    let entries = &raw.environment.as_static().unwrap().0;
+    assert_eq!(entries.len(), 2);
+    // Map ordering may vary, so check both are present
+    let statics: Vec<String> = entries.iter().filter_map(|e| e.as_static().cloned()).collect();
+    assert!(statics.contains(&"FOO=bar".to_string()), "Expected FOO=bar, got: {:?}", statics);
+    assert!(statics.contains(&"BAZ=qux".to_string()), "Expected BAZ=qux, got: {:?}", statics);
+}
+
+#[test]
+fn test_environment_map_format_number_and_bool() {
+    let yaml = r#"
+command: ["./app"]
+environment:
+  PORT: 8080
+  DEBUG: true
+  EMPTY:
+"#;
+    let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+    let entries = &raw.environment.as_static().unwrap().0;
+    assert_eq!(entries.len(), 3);
+    let statics: Vec<String> = entries.iter().filter_map(|e| e.as_static().cloned()).collect();
+    assert!(statics.contains(&"PORT=8080".to_string()), "Expected PORT=8080, got: {:?}", statics);
+    assert!(statics.contains(&"DEBUG=true".to_string()), "Expected DEBUG=true, got: {:?}", statics);
+    assert!(statics.contains(&"EMPTY=".to_string()), "Expected EMPTY=, got: {:?}", statics);
+}
+
+#[test]
+fn test_environment_map_format_dynamic_value() {
+    let yaml = r#"
+command: ["./app"]
+environment:
+  HOME: "${{ env.HOME }}$"
+"#;
+    let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+    let entries = &raw.environment.as_static().unwrap().0;
+    assert_eq!(entries.len(), 1);
+    // Should be dynamic (Interpolated with KEY= prefix + Expression)
+    assert!(entries[0].is_dynamic(), "Map value with ${{{{ }}}}$ should be dynamic");
+}
+
+#[test]
+fn test_environment_map_format_embedded_dynamic() {
+    let yaml = r#"
+command: ["./app"]
+environment:
+  GREETING: "hello_${{ env.USER }}$_world"
+"#;
+    let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+    let entries = &raw.environment.as_static().unwrap().0;
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].is_dynamic(), "Map value with embedded ${{{{ }}}}$ should be dynamic");
+}
+
+#[test]
+fn test_environment_map_format_lua_value() {
+    let yaml = r#"
+command: ["./app"]
+environment:
+  COMPUTED: !lua |
+    return "value_from_lua"
+"#;
+    let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+    let entries = &raw.environment.as_static().unwrap().0;
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].is_dynamic(), "Map value with !lua should be dynamic");
+}
+
+#[test]
+fn test_environment_null_is_empty() {
+    let yaml = r#"
+command: ["./app"]
+environment:
+"#;
+    let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+    let entries = &raw.environment.as_static().unwrap().0;
+    assert!(entries.is_empty(), "Null environment should deserialize to empty vec");
+}
+
+#[test]
+fn test_environment_sequence_still_works() {
+    let yaml = r#"
+command: ["./app"]
+environment:
+  - FOO=bar
+  - BAZ=qux
+"#;
+    let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
+    let entries = &raw.environment.as_static().unwrap().0;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].as_static().unwrap(), "FOO=bar");
+    assert_eq!(entries[1].as_static().unwrap(), "BAZ=qux");
+}
+
+#[test]
+fn test_environment_map_resolves_correctly() {
+    use crate::lua_eval::{EvalContext, ServiceEvalContext};
+    use std::path::PathBuf;
+
+    let yaml = r#"
+lua: |
+  function get_port() return 8080 end
+
+services:
+  svc:
+    command: ["./app"]
+    environment:
+      STATIC_VAR: hello
+      DYNAMIC_VAR: "${{ get_port() }}$"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let evaluator = config.create_lua_evaluator().unwrap();
+    let config_path = PathBuf::from("/tmp/test.yaml");
+    let mut ctx = EvalContext {
+        service: Some(ServiceEvalContext::default()),
+        ..Default::default()
+    };
+
+    let resolved = config
+        .resolve_service("svc", &mut ctx, &evaluator, &config_path, None)
+        .unwrap();
+    assert!(resolved.environment.contains(&"STATIC_VAR=hello".to_string()),
+        "Expected STATIC_VAR=hello in {:?}", resolved.environment);
+    assert!(resolved.environment.contains(&"DYNAMIC_VAR=8080".to_string()),
+        "Expected DYNAMIC_VAR=8080 in {:?}", resolved.environment);
+}
+
+#[test]
+fn test_environment_lua_returns_table_as_map() {
+    use crate::lua_eval::{EvalContext, ServiceEvalContext};
+
+    // Top-level !lua returns a Lua table {FOO="bar", PORT="8080"}
+    // This should be deserialized as a mapping → EnvironmentEntries
+    let yaml = r#"
+lua: |
+  function get_env()
+    return {FOO="bar", PORT="8080"}
+  end
+
+services:
+  svc:
+    command: ["./app"]
+    environment: !lua |
+      return get_env()
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    let evaluator = config.create_lua_evaluator().unwrap();
+    let mut ctx = EvalContext {
+        service: Some(ServiceEvalContext::default()),
+        ..Default::default()
+    };
+
+    let resolved = config
+        .resolve_service("svc", &mut ctx, &evaluator, &config_path, None)
+        .unwrap();
+    assert!(resolved.environment.contains(&"FOO=bar".to_string()),
+        "Expected FOO=bar in {:?}", resolved.environment);
+    assert!(resolved.environment.contains(&"PORT=8080".to_string()),
+        "Expected PORT=8080 in {:?}", resolved.environment);
+}
+
+#[test]
+fn test_environment_expression_returns_table_as_map() {
+    use crate::lua_eval::{EvalContext, ServiceEvalContext};
+
+    // Top-level ${{ }}$ returns a Lua table → deserialized as mapping → EnvironmentEntries
+    let yaml = r#"
+lua: |
+  function build_env()
+    return {APP_NAME="myapp", DEBUG="true"}
+  end
+
+services:
+  svc:
+    command: ["./app"]
+    environment: "${{ build_env() }}$"
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    let evaluator = config.create_lua_evaluator().unwrap();
+    let mut ctx = EvalContext {
+        service: Some(ServiceEvalContext::default()),
+        ..Default::default()
+    };
+
+    let resolved = config
+        .resolve_service("svc", &mut ctx, &evaluator, &config_path, None)
+        .unwrap();
+    assert!(resolved.environment.contains(&"APP_NAME=myapp".to_string()),
+        "Expected APP_NAME=myapp in {:?}", resolved.environment);
+    assert!(resolved.environment.contains(&"DEBUG=true".to_string()),
+        "Expected DEBUG=true in {:?}", resolved.environment);
+}
+
+#[test]
+fn test_environment_lua_returns_array_of_strings() {
+    use crate::lua_eval::{EvalContext, ServiceEvalContext};
+
+    // Lua returns {"FOO=bar", "PORT=8080"} (array of KEY=VALUE strings)
+    // This should be deserialized as a sequence → EnvironmentEntries
+    let yaml = r#"
+lua: |
+  function get_env()
+    return {"FOO=bar", "PORT=8080"}
+  end
+
+services:
+  svc:
+    command: ["./app"]
+    environment: !lua |
+      return get_env()
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    let evaluator = config.create_lua_evaluator().unwrap();
+    let mut ctx = EvalContext {
+        service: Some(ServiceEvalContext::default()),
+        ..Default::default()
+    };
+
+    let resolved = config
+        .resolve_service("svc", &mut ctx, &evaluator, &config_path, None)
+        .unwrap();
+    assert!(resolved.environment.contains(&"FOO=bar".to_string()),
+        "Expected FOO=bar in {:?}", resolved.environment);
+    assert!(resolved.environment.contains(&"PORT=8080".to_string()),
+        "Expected PORT=8080 in {:?}", resolved.environment);
 }
