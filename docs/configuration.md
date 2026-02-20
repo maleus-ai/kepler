@@ -20,7 +20,7 @@ Kepler uses YAML configuration files (default: `kepler.yaml` or `kepler.yml`). G
 
 To re-evaluate global config after changes, use `kepler recreate` (stops services, re-reads config, starts again).
 
-For a ready-to-run example, see [`example.kepler.yaml`](../example.kepler.yaml).
+For a ready-to-run example, see [`example.kepler.yaml`](../examples/example.kepler.yaml).
 
 ---
 
