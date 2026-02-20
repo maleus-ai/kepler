@@ -346,11 +346,7 @@ impl TestDaemonHarness {
                 self.restart_tx.clone(),
             );
             self.handle
-                .store_task_handle(
-                    service_name,
-                    TaskHandleType::FileWatcher,
-                    watcher_handle,
-                )
+                .store_file_watcher(service_name, watcher_handle)
                 .await;
         }
 

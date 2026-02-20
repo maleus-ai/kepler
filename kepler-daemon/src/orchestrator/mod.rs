@@ -1264,11 +1264,9 @@ impl ServiceOrchestrator {
 
         // Phase 1: Run pre_restart hooks and stop (reverse dependency order)
         for service_name in &stop_order {
-            // Cancel file watcher early so hooks that modify watched files
+            // Suppress file watcher early so hooks that modify watched files
             // don't queue spurious restart events.
-            handle
-                .cancel_task_handle(service_name, TaskHandleType::FileWatcher)
-                .await;
+            handle.suppress_file_watcher(service_name).await;
 
             // Get service context
             let ctx = match handle.get_service_context(service_name).await {
@@ -1478,11 +1476,9 @@ impl ServiceOrchestrator {
             )
             .await;
 
-        // Cancel file watcher early so hooks that modify watched files
+        // Suppress file watcher early so hooks that modify watched files
         // don't queue spurious restart events.
-        handle
-            .cancel_task_handle(service_name, TaskHandleType::FileWatcher)
-            .await;
+        handle.suppress_file_watcher(service_name).await;
 
         // Get service context
         let ctx = handle
@@ -1695,11 +1691,9 @@ impl ServiceOrchestrator {
                 restart_policy
             );
 
-            // Cancel file watcher before hooks run so that hook file modifications
+            // Suppress file watcher before hooks run so that hook file modifications
             // don't queue spurious restart events.
-            handle
-                .cancel_task_handle(service_name, TaskHandleType::FileWatcher)
-                .await;
+            handle.suppress_file_watcher(service_name).await;
 
             // Run pre_restart hook
             if let Err(e) = self
@@ -2247,15 +2241,27 @@ impl ServiceOrchestrator {
         // Start file watcher if configured
         let watch_patterns = resolved.restart.watch_patterns();
         if !watch_patterns.is_empty() {
-            let task_handle = spawn_file_watcher(
-                handle.config_path().to_path_buf(),
-                service_name.to_string(),
-                watch_patterns,
-                ctx.working_dir.clone(),
-                self.restart_tx.clone(),
-            );
+            let resumed = handle
+                .resume_file_watcher(service_name, watch_patterns.clone(), ctx.working_dir.clone())
+                .await;
+            if !resumed {
+                // Patterns changed or no existing watcher — create a new one
+                handle
+                    .cancel_task_handle(service_name, TaskHandleType::FileWatcher)
+                    .await;
+                let watcher_handle = spawn_file_watcher(
+                    handle.config_path().to_path_buf(),
+                    service_name.to_string(),
+                    watch_patterns,
+                    ctx.working_dir.clone(),
+                    self.restart_tx.clone(),
+                );
+                handle.store_file_watcher(service_name, watcher_handle).await;
+            }
+        } else {
+            // No watch patterns — cancel any leftover suppressed watcher
             handle
-                .store_task_handle(service_name, TaskHandleType::FileWatcher, task_handle)
+                .cancel_task_handle(service_name, TaskHandleType::FileWatcher)
                 .await;
         }
     }

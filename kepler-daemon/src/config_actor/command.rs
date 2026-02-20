@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 
 use super::context::{DiagnosticCounts, HealthCheckUpdate, ServiceContext, TaskHandleType};
 use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
+use crate::watcher::FileWatcherHandle;
 
 /// Stdout and stderr capture task handles taken from a process handle.
 /// The stdout task returns `Option<Vec<String>>` (captured `KEY=VALUE` lines if output capture is enabled).
@@ -218,6 +219,25 @@ pub enum ConfigCommand {
     CancelTaskHandle {
         service_name: String,
         handle_type: TaskHandleType,
+    },
+
+    // === File Watcher Suppress/Resume Commands ===
+    /// Suppress the file watcher for a service (discard events without teardown)
+    SuppressFileWatcher {
+        service_name: String,
+    },
+    /// Try to resume an existing file watcher. Replies true if resumed, false if
+    /// patterns/working_dir changed or no watcher exists (caller must create a new one).
+    ResumeFileWatcher {
+        service_name: String,
+        patterns: Vec<String>,
+        working_dir: PathBuf,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Store a FileWatcherHandle (replaces any existing watcher for the service)
+    StoreFileWatcher {
+        service_name: String,
+        handle: FileWatcherHandle,
     },
 
     // === Lifecycle ===

@@ -24,6 +24,7 @@ fn make_actor(working_dir: &str) -> FileWatcherActor {
         vec![],
         PathBuf::from(working_dir),
         tx,
+        Arc::new(AtomicBool::new(false)),
     )
 }
 
@@ -219,4 +220,376 @@ fn collect_watch_dirs_skips_negation_patterns() {
     // Only the include pattern contributes the default dir
     assert_eq!(dirs.len(), 1);
     assert!(dirs.contains(&PathBuf::from("/project")));
+}
+
+// --- suppression tests ---
+
+/// Helper: spawn a watcher actor with a suppression flag and an async event channel,
+/// returning (restart_rx, async_event_tx, suppressed_flag).
+/// The actor reads from the internal async_event channel produced by the spawned blocking reader.
+/// For unit-testing the suppression logic we bypass the inotify layer and instead
+/// feed events directly through an mpsc channel to a simplified actor loop.
+
+#[tokio::test]
+async fn suppressed_watcher_discards_events() {
+    let suppressed = Arc::new(AtomicBool::new(false));
+    let (restart_tx, mut restart_rx) = mpsc::channel::<FileChangeEvent>(16);
+    let (event_tx, mut event_rx) = mpsc::channel::<Vec<notify_debouncer_mini::DebouncedEvent>>(32);
+
+    let flag = suppressed.clone();
+    let send_tx = restart_tx.clone();
+
+    // Simulate the actor's event loop inline
+    let actor_task = tokio::spawn(async move {
+        let include_patterns = vec!["src/**/*.ts".to_string()];
+        let (include_set, exclude_set) =
+            FileWatcherActor::build_glob_sets(&include_patterns).unwrap();
+
+        let actor = FileWatcherActor::new(
+            PathBuf::from("/tmp/test.yaml"),
+            "test".to_string(),
+            include_patterns,
+            PathBuf::from("/project"),
+            restart_tx,
+            flag.clone(),
+        );
+
+        let mut was_suppressed = false;
+        while let Some(events) = event_rx.recv().await {
+            let currently_suppressed = flag.load(Ordering::Acquire);
+            if was_suppressed && !currently_suppressed {
+                while event_rx.try_recv().is_ok() {}
+                was_suppressed = false;
+                continue;
+            }
+            was_suppressed = currently_suppressed;
+            if currently_suppressed {
+                continue;
+            }
+            let matched = actor.process_file_events(&events, &include_set, &exclude_set);
+            if !matched.is_empty() {
+                let evt = FileChangeEvent {
+                    config_path: PathBuf::from("/tmp/test.yaml"),
+                    service_name: "test".to_string(),
+                    matched_files: matched,
+                };
+                if send_tx.send(evt).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Send an event while NOT suppressed — should be forwarded
+    event_tx
+        .send(vec![file_event("/project/src/app.ts")])
+        .await
+        .unwrap();
+    let evt = tokio::time::timeout(std::time::Duration::from_secs(1), restart_rx.recv()).await;
+    assert!(evt.is_ok(), "Expected event to be forwarded when not suppressed");
+
+    // Suppress the watcher
+    suppressed.store(true, Ordering::Release);
+
+    // Send events while suppressed — should NOT be forwarded
+    event_tx
+        .send(vec![file_event("/project/src/suppressed.ts")])
+        .await
+        .unwrap();
+    let evt = tokio::time::timeout(std::time::Duration::from_millis(100), restart_rx.recv()).await;
+    assert!(evt.is_err(), "Expected no event while suppressed");
+
+    // Clean up
+    actor_task.abort();
+}
+
+#[tokio::test]
+async fn resume_drains_stale_events() {
+    let suppressed = Arc::new(AtomicBool::new(true)); // start suppressed
+    let (restart_tx, mut restart_rx) = mpsc::channel::<FileChangeEvent>(16);
+    let (event_tx, mut event_rx) = mpsc::channel::<Vec<notify_debouncer_mini::DebouncedEvent>>(32);
+
+    let flag = suppressed.clone();
+    let send_tx = restart_tx.clone();
+
+    let actor_task = tokio::spawn(async move {
+        let include_patterns = vec!["src/**/*.ts".to_string()];
+        let (include_set, exclude_set) =
+            FileWatcherActor::build_glob_sets(&include_patterns).unwrap();
+
+        let actor = FileWatcherActor::new(
+            PathBuf::from("/tmp/test.yaml"),
+            "test".to_string(),
+            include_patterns,
+            PathBuf::from("/project"),
+            restart_tx,
+            flag.clone(),
+        );
+
+        let mut was_suppressed = false;
+        while let Some(events) = event_rx.recv().await {
+            let currently_suppressed = flag.load(Ordering::Acquire);
+            if was_suppressed && !currently_suppressed {
+                while event_rx.try_recv().is_ok() {}
+                was_suppressed = false;
+                continue;
+            }
+            was_suppressed = currently_suppressed;
+            if currently_suppressed {
+                continue;
+            }
+            let matched = actor.process_file_events(&events, &include_set, &exclude_set);
+            if !matched.is_empty() {
+                let evt = FileChangeEvent {
+                    config_path: PathBuf::from("/tmp/test.yaml"),
+                    service_name: "test".to_string(),
+                    matched_files: matched,
+                };
+                if send_tx.send(evt).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Queue stale events while suppressed
+    event_tx
+        .send(vec![file_event("/project/src/stale1.ts")])
+        .await
+        .unwrap();
+    event_tx
+        .send(vec![file_event("/project/src/stale2.ts")])
+        .await
+        .unwrap();
+
+    // Give the actor time to process (discard) the first event
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Resume the watcher — next event should trigger drain of stale2,
+    // and subsequent events should be processed normally.
+    suppressed.store(false, Ordering::Release);
+
+    // Send a fresh event after resume — this triggers the drain transition
+    // (stale2 is still in the channel and will be drained).
+    // We need a "trigger" event to wake the loop after the suppressed ones.
+    event_tx
+        .send(vec![file_event("/project/src/trigger.ts")])
+        .await
+        .unwrap();
+
+    // Give the actor time to process the trigger (which does the drain + continue)
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Now send a real event that should be processed normally
+    event_tx
+        .send(vec![file_event("/project/src/fresh.ts")])
+        .await
+        .unwrap();
+
+    let evt = tokio::time::timeout(std::time::Duration::from_secs(1), restart_rx.recv()).await;
+    assert!(evt.is_ok(), "Expected fresh event to be forwarded after resume");
+
+    // Should be no more stale events
+    let extra = tokio::time::timeout(std::time::Duration::from_millis(100), restart_rx.recv()).await;
+    assert!(extra.is_err(), "Expected no stale events after drain");
+
+    actor_task.abort();
+}
+
+// --- FileWatcherHandle tests ---
+
+#[tokio::test]
+async fn file_watcher_handle_matches_same_patterns() {
+    let handle = FileWatcherHandle {
+        task_handle: tokio::spawn(async {}),
+        suppressed: Arc::new(AtomicBool::new(false)),
+        patterns: vec!["src/**/*.ts".to_string()],
+        working_dir: PathBuf::from("/project"),
+    };
+
+    assert!(handle.matches(
+        &["src/**/*.ts".to_string()],
+        Path::new("/project"),
+    ));
+}
+
+#[tokio::test]
+async fn file_watcher_handle_no_match_different_patterns() {
+    let handle = FileWatcherHandle {
+        task_handle: tokio::spawn(async {}),
+        suppressed: Arc::new(AtomicBool::new(false)),
+        patterns: vec!["src/**/*.ts".to_string()],
+        working_dir: PathBuf::from("/project"),
+    };
+
+    assert!(!handle.matches(
+        &["src/**/*.rs".to_string()],
+        Path::new("/project"),
+    ));
+}
+
+#[tokio::test]
+async fn file_watcher_handle_no_match_different_dir() {
+    let handle = FileWatcherHandle {
+        task_handle: tokio::spawn(async {}),
+        suppressed: Arc::new(AtomicBool::new(false)),
+        patterns: vec!["src/**/*.ts".to_string()],
+        working_dir: PathBuf::from("/project"),
+    };
+
+    assert!(!handle.matches(
+        &["src/**/*.ts".to_string()],
+        Path::new("/other"),
+    ));
+}
+
+#[tokio::test]
+async fn file_watcher_handle_suppress_and_resume() {
+    let flag = Arc::new(AtomicBool::new(false));
+    let handle = FileWatcherHandle {
+        task_handle: tokio::spawn(async {}),
+        suppressed: flag.clone(),
+        patterns: vec![],
+        working_dir: PathBuf::from("/project"),
+    };
+
+    assert!(!flag.load(Ordering::Acquire));
+    handle.suppress();
+    assert!(flag.load(Ordering::Acquire));
+    handle.resume();
+    assert!(!flag.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn double_suppress_is_idempotent() {
+    let flag = Arc::new(AtomicBool::new(false));
+    let handle = FileWatcherHandle {
+        task_handle: tokio::spawn(async {}),
+        suppressed: flag.clone(),
+        patterns: vec![],
+        working_dir: PathBuf::from("/project"),
+    };
+
+    handle.suppress();
+    assert!(flag.load(Ordering::Acquire));
+    handle.suppress();
+    assert!(flag.load(Ordering::Acquire));
+    handle.resume();
+    assert!(!flag.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn resume_without_suppress_is_noop() {
+    let flag = Arc::new(AtomicBool::new(false));
+    let handle = FileWatcherHandle {
+        task_handle: tokio::spawn(async {}),
+        suppressed: flag.clone(),
+        patterns: vec![],
+        working_dir: PathBuf::from("/project"),
+    };
+
+    // Resume when not suppressed — flag stays false
+    handle.resume();
+    assert!(!flag.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn finished_watcher_is_not_reusable() {
+    // Spawn a task that completes immediately
+    let task = tokio::spawn(async {});
+    // Wait for it to finish
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let handle = FileWatcherHandle {
+        task_handle: task,
+        suppressed: Arc::new(AtomicBool::new(false)),
+        patterns: vec!["src/**/*.ts".to_string()],
+        working_dir: PathBuf::from("/project"),
+    };
+
+    // Patterns match, but watcher is finished — should not be reusable
+    assert!(handle.is_finished());
+    assert!(handle.matches(
+        &["src/**/*.ts".to_string()],
+        Path::new("/project"),
+    ));
+    // In the actor, ResumeFileWatcher checks both is_finished() AND matches()
+    // A finished watcher should not be resumed even if patterns match
+}
+
+#[tokio::test]
+async fn normal_processing_resumes_after_suppress_resume_cycle() {
+    let suppressed = Arc::new(AtomicBool::new(false));
+    let (restart_tx, mut restart_rx) = mpsc::channel::<FileChangeEvent>(16);
+    let (event_tx, mut event_rx) = mpsc::channel::<Vec<notify_debouncer_mini::DebouncedEvent>>(32);
+
+    let flag = suppressed.clone();
+    let send_tx = restart_tx.clone();
+
+    let actor_task = tokio::spawn(async move {
+        let include_patterns = vec!["src/**/*.ts".to_string()];
+        let (include_set, exclude_set) =
+            FileWatcherActor::build_glob_sets(&include_patterns).unwrap();
+
+        let actor = FileWatcherActor::new(
+            PathBuf::from("/tmp/test.yaml"),
+            "test".to_string(),
+            include_patterns,
+            PathBuf::from("/project"),
+            restart_tx,
+            flag.clone(),
+        );
+
+        let mut was_suppressed = false;
+        while let Some(events) = event_rx.recv().await {
+            let currently_suppressed = flag.load(Ordering::Acquire);
+            if was_suppressed && !currently_suppressed {
+                while event_rx.try_recv().is_ok() {}
+                was_suppressed = false;
+                continue;
+            }
+            was_suppressed = currently_suppressed;
+            if currently_suppressed {
+                continue;
+            }
+            let matched = actor.process_file_events(&events, &include_set, &exclude_set);
+            if !matched.is_empty() {
+                let evt = FileChangeEvent {
+                    config_path: PathBuf::from("/tmp/test.yaml"),
+                    service_name: "test".to_string(),
+                    matched_files: matched,
+                };
+                if send_tx.send(evt).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Phase 1: Normal event → forwarded
+    event_tx.send(vec![file_event("/project/src/a.ts")]).await.unwrap();
+    let evt = tokio::time::timeout(std::time::Duration::from_secs(1), restart_rx.recv()).await;
+    assert!(evt.is_ok(), "Phase 1: event should be forwarded");
+
+    // Phase 2: Suppress → events discarded
+    suppressed.store(true, Ordering::Release);
+    event_tx.send(vec![file_event("/project/src/stale.ts")]).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Phase 3: Resume → drain trigger event consumed, then normal processing resumes
+    suppressed.store(false, Ordering::Release);
+    // This event triggers the drain transition (gets consumed by the drain logic)
+    event_tx.send(vec![file_event("/project/src/drain_trigger.ts")]).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Phase 4: Post-resume event → forwarded normally
+    event_tx.send(vec![file_event("/project/src/b.ts")]).await.unwrap();
+    let evt = tokio::time::timeout(std::time::Duration::from_secs(1), restart_rx.recv()).await;
+    assert!(evt.is_ok(), "Phase 4: event should be forwarded after resume");
+
+    // No stale events leaked through
+    let extra = tokio::time::timeout(std::time::Duration::from_millis(100), restart_rx.recv()).await;
+    assert!(extra.is_err(), "No stale events should leak");
+
+    actor_task.abort();
 }
