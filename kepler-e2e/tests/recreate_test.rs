@@ -42,7 +42,7 @@ async fn test_restart_preserves_config() -> E2eResult<()> {
     // Restart with different env value (should still use original baked value)
     let output = harness
         .run_cli_with_env(
-            &["-f", config_path.to_str().unwrap(), "restart", "-d"],
+            &["-f", config_path.to_str().unwrap(), "restart"],
             &[("TEST_RESTART_VAR", "changed_value")],
         )
         .await?;

@@ -4,14 +4,26 @@ How services transition between states, how start modes work, and how quiescence
 
 ## Table of Contents
 
-- [Service Status States](#service-status-states)
-- [Status Display](#status-display)
-- [Start Modes](#start-modes)
-- [Startup Cluster vs Deferred Cluster](#startup-cluster-vs-deferred-cluster)
-- [Foreground Quiescence](#foreground-quiescence)
-- [Restart Behavior](#restart-behavior)
-- [Stop Behavior](#stop-behavior)
-- [Recreate](#recreate)
+- [Service Lifecycle](#service-lifecycle)
+  - [Table of Contents](#table-of-contents)
+  - [Service Status States](#service-status-states)
+    - [State Transitions](#state-transitions)
+  - [Status Display](#status-display)
+  - [Start Modes](#start-modes)
+    - [Restart Modes](#restart-modes)
+  - [Startup Cluster vs Deferred Cluster](#startup-cluster-vs-deferred-cluster)
+    - [How Clusters Affect Start Modes](#how-clusters-affect-start-modes)
+  - [Foreground Quiescence](#foreground-quiescence)
+  - [Unhandled Failure Detection](#unhandled-failure-detection)
+    - [What Is an Unhandled Failure?](#what-is-an-unhandled-failure)
+    - [Examples](#examples)
+    - [Behavior by Mode](#behavior-by-mode)
+  - [Restart Behavior](#restart-behavior)
+    - [Restart Policies](#restart-policies)
+    - [Restart Triggers](#restart-triggers)
+  - [Stop Behavior](#stop-behavior)
+  - [Recreate](#recreate)
+  - [See Also](#see-also)
 
 ---
 
@@ -19,17 +31,17 @@ How services transition between states, how start modes work, and how quiescence
 
 Kepler services have 9 possible status states:
 
-| Status | Description |
-|--------|-------------|
-| **Stopped** | Manually stopped via `kepler stop` |
-| **Starting** | Service is in the process of starting |
-| **Running** | Process is running (no healthcheck, or healthcheck not yet passed) |
-| **Stopping** | Service is in the process of stopping |
-| **Failed** | Spawn failure or dependency permanently unsatisfied |
-| **Healthy** | Running and healthcheck is passing |
-| **Unhealthy** | Running but healthcheck is failing |
-| **Exited** | Process exited naturally with any exit code (no restart policy) |
-| **Killed** | Process killed by signal |
+| Status        | Description                                                        |
+| ------------- | ------------------------------------------------------------------ |
+| **Stopped**   | Manually stopped via `kepler stop`                                 |
+| **Starting**  | Service is in the process of starting                              |
+| **Running**   | Process is running (no healthcheck, or healthcheck not yet passed) |
+| **Stopping**  | Service is in the process of stopping                              |
+| **Failed**    | Spawn failure or dependency permanently unsatisfied                |
+| **Healthy**   | Running and healthcheck is passing                                 |
+| **Unhealthy** | Running but healthcheck is failing                                 |
+| **Exited**    | Process exited naturally with any exit code (no restart policy)    |
+| **Killed**    | Process killed by signal                                           |
 
 ### State Transitions
 
@@ -62,17 +74,17 @@ Key distinctions:
 
 The `kepler ps` command shows status in a Docker-style format:
 
-| State | Display Format | Example |
-|-------|---------------|---------|
-| Running | `Up <duration>` | `Up 5m` |
-| Healthy | `Up <duration> (healthy)` | `Up 5m (healthy)` |
-| Unhealthy | `Up <duration> (unhealthy)` | `Up 2m (unhealthy)` |
-| Starting | `Starting` | `Starting` |
-| Stopping | `Stopping` | `Stopping` |
-| Stopped | `Stopped` or `Stopped <duration> ago` | `Stopped`, `Stopped 5m ago` |
-| Exited | `Exited (<code>) <duration> ago` | `Exited (0) 14s ago`, `Exited (1) 5s ago` |
-| Killed | `Killed (<signal>) <duration> ago` | `Killed (SIGKILL) 3s ago` |
-| Failed | `Failed <duration> ago` | `Failed 2s ago` |
+| State     | Display Format                        | Example                                   |
+| --------- | ------------------------------------- | ----------------------------------------- |
+| Running   | `Up <duration>`                       | `Up 5m`                                   |
+| Healthy   | `Up <duration> (healthy)`             | `Up 5m (healthy)`                         |
+| Unhealthy | `Up <duration> (unhealthy)`           | `Up 2m (unhealthy)`                       |
+| Starting  | `Starting`                            | `Starting`                                |
+| Stopping  | `Stopping`                            | `Stopping`                                |
+| Stopped   | `Stopped` or `Stopped <duration> ago` | `Stopped`, `Stopped 5m ago`               |
+| Exited    | `Exited (<code>) <duration> ago`      | `Exited (0) 14s ago`, `Exited (1) 5s ago` |
+| Killed    | `Killed (<signal>) <duration> ago`    | `Killed (SIGKILL) 3s ago`                 |
+| Failed    | `Failed <duration> ago`               | `Failed 2s ago`                           |
 
 The `kepler ps` output has three columns: **NAME**, **STATUS**, **PID**.
 
@@ -82,14 +94,23 @@ The `kepler ps` output has three columns: **NAME**, **STATUS**, **PID**.
 
 Kepler supports three start modes that control how the CLI interacts with service startup:
 
-| Flags | Blocks until | Then |
-|-------|-------------|------|
-| `kepler start` (no flags) | All services quiescent | Follows logs, Ctrl+C stops all |
-| `kepler start -d` | Immediately | Returns |
-| `kepler start -d --wait` | Startup cluster ready | Returns (deferred continue in background) |
-| `kepler start -d --wait --timeout 30s` | Startup cluster ready OR timeout | Returns |
+| Flags                                  | Blocks until                     | Then                                      |
+| -------------------------------------- | -------------------------------- | ----------------------------------------- |
+| `kepler start` (no flags)              | All services quiescent           | Follows logs, Ctrl+C stops all            |
+| `kepler start -d`                      | Immediately                      | Returns                                   |
+| `kepler start -d --wait`               | Startup cluster ready            | Returns (deferred continue in background) |
+| `kepler start -d --wait --timeout 30s` | Startup cluster ready OR timeout | Returns                                   |
 
-The same flags apply to `kepler restart`.
+### Restart Modes
+
+`kepler restart` is always detached — it never follows logs or owns the service lifecycle by default.
+
+| Flags                                 | Blocks until                    | Then                                                    |
+| ------------------------------------- | ------------------------------- | ------------------------------------------------------- |
+| `kepler restart` (no flags)           | Progress bars finish            | Returns                                                 |
+| `kepler restart --wait`               | Progress bars finish            | Returns                                                 |
+| `kepler restart --wait --timeout 30s` | Progress bars finish OR timeout | Returns                                                 |
+| `kepler restart --follow`             | Progress bars finish            | Follows logs, Ctrl+C just exits (services keep running) |
 
 ---
 
@@ -106,11 +127,11 @@ See [Dependencies](dependencies.md#startup-vs-deferred-conditions) for the full 
 
 ### How Clusters Affect Start Modes
 
-| Mode | Startup cluster | Deferred cluster |
-|------|----------------|-----------------|
+| Mode                 | Startup cluster                  | Deferred cluster                            |
+| -------------------- | -------------------------------- | ------------------------------------------- |
 | `start` (foreground) | Started level-by-level, blocking | Spawned in background after startup cluster |
-| `start -d` | All started in background | All started in background |
-| `start -d --wait` | Started level-by-level, blocking | Spawned in background, CLI returns |
+| `start -d`           | All started in background        | All started in background                   |
+| `start -d --wait`    | Started level-by-level, blocking | Spawned in background, CLI returns          |
 
 ---
 
@@ -169,11 +190,11 @@ services:
 
 ### Behavior by Mode
 
-| Mode | Default on unhandled failure | Override flag |
-|------|------------------------------|--------------|
-| Foreground (`kepler start`) | Stop all services + exit 1 | `--no-abort-on-failure`: just exit 1 at quiescence |
-| `kepler start -d --wait` | Exit 1 (services left running) | `--abort-on-failure`: stop all services + exit 1 |
-| `kepler start -d` | No detection (fire-and-forget) | — |
+| Mode                        | Default on unhandled failure   | Override flag                                      |
+| --------------------------- | ------------------------------ | -------------------------------------------------- |
+| Foreground (`kepler start`) | Stop all services + exit 1     | `--no-abort-on-failure`: just exit 1 at quiescence |
+| `kepler start -d --wait`    | Exit 1 (services left running) | `--abort-on-failure`: stop all services + exit 1   |
+| `kepler start -d`           | No detection (fire-and-forget) | —                                                  |
 
 See [CLI Reference](cli-reference.md#kepler-start) for flag details.
 
@@ -183,10 +204,10 @@ See [CLI Reference](cli-reference.md#kepler-start) for flag details.
 
 ### Restart Policies
 
-| Policy | Behavior |
-|--------|----------|
-| `no` | Never restart (default) |
-| `always` | Always restart on exit |
+| Policy       | Behavior                      |
+| ------------ | ----------------------------- |
+| `no`         | Never restart (default)       |
+| `always`     | Always restart on exit        |
 | `on-failure` | Restart only on non-zero exit |
 
 ### Restart Triggers

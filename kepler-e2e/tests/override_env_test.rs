@@ -90,7 +90,6 @@ async fn test_restart_with_override_envs() -> E2eResult<()> {
             "-f",
             config_path.to_str().unwrap(),
             "restart",
-            "-d",
             "--wait",
             "-e",
             "OVERRIDE_A=restarted",
@@ -156,7 +155,6 @@ async fn test_override_persists_across_restart() -> E2eResult<()> {
             "-f",
             config_path.to_str().unwrap(),
             "restart",
-            "-d",
             "--wait",
         ])
         .await?;
@@ -299,7 +297,6 @@ async fn test_restart_with_refresh_env() -> E2eResult<()> {
                 "-f",
                 config_path.to_str().unwrap(),
                 "restart",
-                "-d",
                 "--wait",
                 "--refresh-env",
             ],

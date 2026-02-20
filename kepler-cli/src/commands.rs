@@ -54,15 +54,15 @@ pub enum Commands {
         /// Services to restart (restarts all running services if none specified)
         #[arg(value_name = "SERVICE")]
         services: Vec<String>,
-        /// Detach and return immediately (don't follow logs)
-        #[arg(short, long)]
-        detach: bool,
-        /// Block until restart is complete, then return (requires -d)
-        #[arg(long, requires = "detach")]
+        /// Wait until all restarted services are ready, then return
+        #[arg(long, conflicts_with = "follow")]
         wait: bool,
         /// Timeout for --wait mode (e.g. "30s", "5m")
         #[arg(long, requires = "wait")]
         timeout: Option<String>,
+        /// Follow logs after restart (Ctrl+C exits log following, services keep running)
+        #[arg(long, conflicts_with = "wait")]
+        follow: bool,
         /// Skip dependency ordering (use specified order instead; requires service names)
         #[arg(long)]
         no_deps: bool,

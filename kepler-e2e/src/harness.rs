@@ -543,7 +543,7 @@ impl E2eHarness {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        self.run_cli(&["-f", config_str, "restart", "-d", "--wait"]).await
+        self.run_cli(&["-f", config_str, "restart", "--wait"]).await
     }
 
     /// Restart a specific service
@@ -551,7 +551,7 @@ impl E2eHarness {
         let config_str = config_path.to_str().ok_or_else(|| {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
-        self.run_cli(&["-f", config_str, "restart", "-d", "--wait", service]).await
+        self.run_cli(&["-f", config_str, "restart", "--wait", service]).await
     }
 
     /// Recreate all services (stop --clean, re-bake config, start)

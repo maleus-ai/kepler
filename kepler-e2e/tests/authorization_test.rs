@@ -147,7 +147,7 @@ async fn test_owner_can_restart_own_config() -> E2eResult<()> {
     harness.wait_for_service_status(&config_path, "auth-svc-a", "running", Duration::from_secs(10)).await?;
 
     // testuser1 can restart their own config
-    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "restart", "-d", "--wait"]).await?;
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "restart", "--wait"]).await?;
     output.assert_success();
 
     harness.stop_daemon().await?;
@@ -169,7 +169,7 @@ async fn test_non_owner_cannot_restart_config() -> E2eResult<()> {
     harness.wait_for_service_status(&config_path, "auth-svc-a", "running", Duration::from_secs(10)).await?;
 
     // testuser2 cannot restart testuser1's config
-    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "restart", "-d"]).await?;
+    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "restart"]).await?;
     assert!(!output.success(), "Non-owner restart should fail");
     assert!(
         output.stderr.contains("Permission denied") || output.stdout.contains("Permission denied"),

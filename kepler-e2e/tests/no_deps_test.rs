@@ -142,7 +142,7 @@ async fn test_restart_no_deps_user_order() -> E2eResult<()> {
     let config_str = config_path.to_str().unwrap();
     let output = harness
         .run_cli_with_timeout(
-            &["-f", config_str, "restart", "-d", "--wait", "--no-deps", "top", "mid"],
+            &["-f", config_str, "restart", "--wait", "--no-deps", "top", "mid"],
             Duration::from_secs(15),
         )
         .await?;
@@ -262,7 +262,7 @@ async fn test_restart_service_ignores_if_condition() -> E2eResult<()> {
     // Now restart "never-run" — should succeed despite if: false
     let output = harness
         .run_cli_with_timeout(
-            &["-f", config_str, "restart", "-d", "--wait", "never-run"],
+            &["-f", config_str, "restart", "--wait", "never-run"],
             Duration::from_secs(15),
         )
         .await?;
@@ -321,7 +321,7 @@ async fn test_restart_no_deps_without_services_fails() -> E2eResult<()> {
 
     let config_str = config_path.to_str().unwrap();
     let output = harness
-        .run_cli(&["-f", config_str, "restart", "-d", "--no-deps"])
+        .run_cli(&["-f", config_str, "restart", "--no-deps"])
         .await?;
 
     // Should fail (non-zero exit code)

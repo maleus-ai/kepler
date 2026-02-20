@@ -145,6 +145,8 @@ kepler restart -e API_KEY=updated_key
 
 Overrides are merged into the existing `sys_env` — keys not specified are preserved. The updated `sys_env` is persisted to the on-disk snapshot, so subsequent `restart` (without `-e`) will still use the overridden values.
 
+> **Note:** `-e` and `--refresh-env` operate on the **entire config snapshot**, not on individual services. Even when targeting specific services (e.g., `kepler restart -e FOO=bar svc1`), the overrides are applied to the shared `sys_env` and will affect **all** services on their next start or restart.
+
 ### Refresh All Variables (`--refresh-env`)
 
 Use `--refresh-env` to replace the entire baked `sys_env` with the current shell environment:
