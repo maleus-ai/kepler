@@ -1,5 +1,187 @@
 use super::*;
-use notify_debouncer_mini::DebouncedEvent;
+use notify::event::{
+    AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+    RenameMode,
+};
+
+// --- is_content_modifying tests ---
+
+#[test]
+fn access_open_read_is_not_content_modifying() {
+    assert!(!is_content_modifying(&EventKind::Access(AccessKind::Open(
+        AccessMode::Read
+    ))));
+}
+
+#[test]
+fn access_open_write_is_not_content_modifying() {
+    assert!(!is_content_modifying(&EventKind::Access(AccessKind::Open(
+        AccessMode::Write
+    ))));
+}
+
+#[test]
+fn access_open_any_is_not_content_modifying() {
+    assert!(!is_content_modifying(&EventKind::Access(AccessKind::Open(
+        AccessMode::Any
+    ))));
+}
+
+#[test]
+fn access_close_read_is_not_content_modifying() {
+    assert!(!is_content_modifying(&EventKind::Access(
+        AccessKind::Close(AccessMode::Read)
+    )));
+}
+
+#[test]
+fn access_close_write_is_not_content_modifying() {
+    assert!(!is_content_modifying(&EventKind::Access(
+        AccessKind::Close(AccessMode::Write)
+    )));
+}
+
+#[test]
+fn access_read_is_not_content_modifying() {
+    assert!(!is_content_modifying(&EventKind::Access(
+        AccessKind::Read
+    )));
+}
+
+#[test]
+fn access_any_is_not_content_modifying() {
+    assert!(!is_content_modifying(&EventKind::Access(
+        AccessKind::Any
+    )));
+}
+
+#[test]
+fn create_file_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Create(CreateKind::File)));
+}
+
+#[test]
+fn create_folder_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Create(
+        CreateKind::Folder
+    )));
+}
+
+#[test]
+fn create_any_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Create(CreateKind::Any)));
+}
+
+#[test]
+fn modify_data_content_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Modify(
+        ModifyKind::Data(DataChange::Content)
+    )));
+}
+
+#[test]
+fn modify_data_size_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Modify(
+        ModifyKind::Data(DataChange::Size)
+    )));
+}
+
+#[test]
+fn modify_data_any_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Modify(
+        ModifyKind::Data(DataChange::Any)
+    )));
+}
+
+#[test]
+fn modify_metadata_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Modify(
+        ModifyKind::Metadata(MetadataKind::Any)
+    )));
+}
+
+#[test]
+fn modify_name_rename_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Modify(
+        ModifyKind::Name(RenameMode::Both)
+    )));
+}
+
+#[test]
+fn modify_any_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Modify(
+        ModifyKind::Any
+    )));
+}
+
+#[test]
+fn remove_file_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Remove(
+        RemoveKind::File
+    )));
+}
+
+#[test]
+fn remove_folder_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Remove(
+        RemoveKind::Folder
+    )));
+}
+
+#[test]
+fn remove_any_is_content_modifying() {
+    assert!(is_content_modifying(&EventKind::Remove(RemoveKind::Any)));
+}
+
+#[test]
+fn event_kind_any_is_not_content_modifying() {
+    assert!(!is_content_modifying(&EventKind::Any));
+}
+
+#[test]
+fn event_kind_other_is_not_content_modifying() {
+    assert!(!is_content_modifying(&EventKind::Other));
+}
+
+// --- extract_base_dir tests ---
+
+#[test]
+fn extract_base_dir_simple_glob() {
+    assert_eq!(
+        extract_base_dir("/home/user/src/**/*.ts"),
+        Some(PathBuf::from("/home/user/src"))
+    );
+}
+
+#[test]
+fn extract_base_dir_glob_at_start() {
+    assert_eq!(extract_base_dir("*.ts"), None);
+}
+
+#[test]
+fn extract_base_dir_no_glob() {
+    assert_eq!(
+        extract_base_dir("/home/user/src/app.ts"),
+        Some(PathBuf::from("/home/user/src"))
+    );
+}
+
+#[test]
+fn extract_base_dir_multibyte_utf8() {
+    // Must not panic — previously used char index instead of byte index
+    assert_eq!(
+        extract_base_dir("日本語/*.ts"),
+        Some(PathBuf::from("日本語"))
+    );
+}
+
+#[test]
+fn extract_base_dir_multibyte_utf8_absolute() {
+    assert_eq!(
+        extract_base_dir("/données/café/*.rs"),
+        Some(PathBuf::from("/données/café"))
+    );
+}
 
 /// Helper to build glob sets from pattern strings
 fn make_glob_sets(patterns: &[&str]) -> (GlobSet, GlobSet) {
@@ -7,15 +189,7 @@ fn make_glob_sets(patterns: &[&str]) -> (GlobSet, GlobSet) {
     FileWatcherActor::build_glob_sets(&patterns).unwrap()
 }
 
-/// Helper to create a DebouncedEvent with DebouncedEventKind::Any
-fn file_event(path: &str) -> DebouncedEvent {
-    DebouncedEvent {
-        path: PathBuf::from(path),
-        kind: DebouncedEventKind::Any,
-    }
-}
-
-/// Helper to create a FileWatcherActor for testing process_file_events
+/// Helper to create a FileWatcherActor for testing process_file_paths
 fn make_actor(working_dir: &str) -> FileWatcherActor {
     let (tx, _rx) = mpsc::channel(1);
     FileWatcherActor::new(
@@ -66,125 +240,125 @@ fn build_glob_sets_multiple_excludes() {
     assert!(!exclude.is_match("src/app.ts"));
 }
 
-// --- process_file_events tests ---
+// --- process_file_paths tests ---
 
 #[test]
-fn process_events_include_only() {
+fn process_paths_include_only() {
     let actor = make_actor("/project");
     let (include, exclude) = make_glob_sets(&["src/**/*.ts"]);
-    let events = vec![file_event("/project/src/app.ts")];
+    let paths = vec![PathBuf::from("/project/src/app.ts")];
 
-    assert!(!actor.process_file_events(&events, &include, &exclude).is_empty());
+    assert!(!actor.process_file_paths(&paths, &include, &exclude).is_empty());
 }
 
 #[test]
-fn process_events_no_match() {
+fn process_paths_no_match() {
     let actor = make_actor("/project");
     let (include, exclude) = make_glob_sets(&["src/**/*.ts"]);
-    let events = vec![file_event("/project/src/style.css")];
+    let paths = vec![PathBuf::from("/project/src/style.css")];
 
-    assert!(actor.process_file_events(&events, &include, &exclude).is_empty());
+    assert!(actor.process_file_paths(&paths, &include, &exclude).is_empty());
 }
 
 #[test]
-fn process_events_negation_excludes_file() {
+fn process_paths_negation_excludes_file() {
     let actor = make_actor("/project");
     let (include, exclude) = make_glob_sets(&["src/**/*.ts", "!**/*.test.ts"]);
 
     // Regular .ts file should trigger restart
-    let events = vec![file_event("/project/src/app.ts")];
-    assert!(!actor.process_file_events(&events, &include, &exclude).is_empty());
+    let paths = vec![PathBuf::from("/project/src/app.ts")];
+    assert!(!actor.process_file_paths(&paths, &include, &exclude).is_empty());
 
     // .test.ts file should NOT trigger restart
-    let events = vec![file_event("/project/src/app.test.ts")];
-    assert!(actor.process_file_events(&events, &include, &exclude).is_empty());
+    let paths = vec![PathBuf::from("/project/src/app.test.ts")];
+    assert!(actor.process_file_paths(&paths, &include, &exclude).is_empty());
 }
 
 #[test]
-fn process_events_negation_multiple_excludes() {
+fn process_paths_negation_multiple_excludes() {
     let actor = make_actor("/project");
     let (include, exclude) =
         make_glob_sets(&["src/**/*.ts", "!**/*.test.ts", "!**/*.spec.ts"]);
 
-    assert!(!actor.process_file_events(
-        &[file_event("/project/src/app.ts")],
+    assert!(!actor.process_file_paths(
+        &[PathBuf::from("/project/src/app.ts")],
         &include,
         &exclude
     ).is_empty());
-    assert!(actor.process_file_events(
-        &[file_event("/project/src/app.test.ts")],
+    assert!(actor.process_file_paths(
+        &[PathBuf::from("/project/src/app.test.ts")],
         &include,
         &exclude
     ).is_empty());
-    assert!(actor.process_file_events(
-        &[file_event("/project/src/app.spec.ts")],
+    assert!(actor.process_file_paths(
+        &[PathBuf::from("/project/src/app.spec.ts")],
         &include,
         &exclude
     ).is_empty());
 }
 
 #[test]
-fn process_events_mixed_batch_excluded_file_does_not_trigger() {
+fn process_paths_mixed_batch_excluded_file_does_not_trigger() {
     let actor = make_actor("/project");
     let (include, exclude) = make_glob_sets(&["src/**/*.ts", "!**/*.test.ts"]);
 
     // Batch with only excluded files should not trigger
-    let events = vec![
-        file_event("/project/src/foo.test.ts"),
-        file_event("/project/src/bar.test.ts"),
+    let paths = vec![
+        PathBuf::from("/project/src/foo.test.ts"),
+        PathBuf::from("/project/src/bar.test.ts"),
     ];
-    assert!(actor.process_file_events(&events, &include, &exclude).is_empty());
+    assert!(actor.process_file_paths(&paths, &include, &exclude).is_empty());
 
     // Batch with one included file should trigger
-    let events = vec![
-        file_event("/project/src/foo.test.ts"),
-        file_event("/project/src/app.ts"),
+    let paths = vec![
+        PathBuf::from("/project/src/foo.test.ts"),
+        PathBuf::from("/project/src/app.ts"),
     ];
-    assert!(!actor.process_file_events(&events, &include, &exclude).is_empty());
+    assert!(!actor.process_file_paths(&paths, &include, &exclude).is_empty());
 }
 
 #[test]
-fn process_events_negation_with_subdirectory_pattern() {
+fn process_paths_negation_with_subdirectory_pattern() {
     let actor = make_actor("/project");
     let (include, exclude) =
         make_glob_sets(&["src/**/*.ts", "!src/generated/**"]);
 
-    assert!(!actor.process_file_events(
-        &[file_event("/project/src/app.ts")],
+    assert!(!actor.process_file_paths(
+        &[PathBuf::from("/project/src/app.ts")],
         &include,
         &exclude
     ).is_empty());
-    assert!(actor.process_file_events(
-        &[file_event("/project/src/generated/types.ts")],
+    assert!(actor.process_file_paths(
+        &[PathBuf::from("/project/src/generated/types.ts")],
         &include,
         &exclude
     ).is_empty());
 }
 
-// --- process_file_events: matched_files content tests ---
+// --- process_file_paths: matched_files content tests ---
 
 #[test]
-fn process_events_returns_correct_matched_path() {
+fn process_paths_returns_correct_matched_path() {
     let actor = make_actor("/project");
     let (include, exclude) = make_glob_sets(&["src/**/*.ts"]);
-    let events = vec![file_event("/project/src/app.ts")];
+    let paths = vec![PathBuf::from("/project/src/app.ts")];
 
-    let matched = actor.process_file_events(&events, &include, &exclude);
+    let matched = actor.process_file_paths(&paths, &include, &exclude);
     assert_eq!(matched.len(), 1);
     assert_eq!(matched[0], PathBuf::from("/project/src/app.ts"));
 }
 
 #[test]
-fn process_events_batch_returns_all_matched_files() {
+fn process_paths_batch_returns_all_matched_files() {
     let actor = make_actor("/project");
     let (include, exclude) = make_glob_sets(&["src/**/*.ts"]);
-    let events = vec![
-        file_event("/project/src/app.ts"),
-        file_event("/project/src/utils.ts"),
-        file_event("/project/src/index.ts"),
+    let paths = vec![
+        PathBuf::from("/project/src/app.ts"),
+        PathBuf::from("/project/src/utils.ts"),
+        PathBuf::from("/project/src/index.ts"),
     ];
 
-    let matched = actor.process_file_events(&events, &include, &exclude);
+    let matched = actor.process_file_paths(&paths, &include, &exclude);
     assert_eq!(matched.len(), 3);
     assert!(matched.contains(&PathBuf::from("/project/src/app.ts")));
     assert!(matched.contains(&PathBuf::from("/project/src/utils.ts")));
@@ -192,17 +366,17 @@ fn process_events_batch_returns_all_matched_files() {
 }
 
 #[test]
-fn process_events_batch_only_returns_matching_files() {
+fn process_paths_batch_only_returns_matching_files() {
     let actor = make_actor("/project");
     let (include, exclude) = make_glob_sets(&["src/**/*.ts", "!**/*.test.ts"]);
-    let events = vec![
-        file_event("/project/src/app.ts"),
-        file_event("/project/src/app.test.ts"),
-        file_event("/project/src/style.css"),
-        file_event("/project/src/utils.ts"),
+    let paths = vec![
+        PathBuf::from("/project/src/app.ts"),
+        PathBuf::from("/project/src/app.test.ts"),
+        PathBuf::from("/project/src/style.css"),
+        PathBuf::from("/project/src/utils.ts"),
     ];
 
-    let matched = actor.process_file_events(&events, &include, &exclude);
+    let matched = actor.process_file_paths(&paths, &include, &exclude);
     assert_eq!(matched.len(), 2);
     assert!(matched.contains(&PathBuf::from("/project/src/app.ts")));
     assert!(matched.contains(&PathBuf::from("/project/src/utils.ts")));
@@ -224,17 +398,11 @@ fn collect_watch_dirs_skips_negation_patterns() {
 
 // --- suppression tests ---
 
-/// Helper: spawn a watcher actor with a suppression flag and an async event channel,
-/// returning (restart_rx, async_event_tx, suppressed_flag).
-/// The actor reads from the internal async_event channel produced by the spawned blocking reader.
-/// For unit-testing the suppression logic we bypass the inotify layer and instead
-/// feed events directly through an mpsc channel to a simplified actor loop.
-
 #[tokio::test]
 async fn suppressed_watcher_discards_events() {
     let suppressed = Arc::new(AtomicBool::new(false));
     let (restart_tx, mut restart_rx) = mpsc::channel::<FileChangeEvent>(16);
-    let (event_tx, mut event_rx) = mpsc::channel::<Vec<notify_debouncer_mini::DebouncedEvent>>(32);
+    let (event_tx, mut event_rx) = mpsc::channel::<Vec<PathBuf>>(32);
 
     let flag = suppressed.clone();
     let send_tx = restart_tx.clone();
@@ -255,7 +423,7 @@ async fn suppressed_watcher_discards_events() {
         );
 
         let mut was_suppressed = false;
-        while let Some(events) = event_rx.recv().await {
+        while let Some(paths) = event_rx.recv().await {
             let currently_suppressed = flag.load(Ordering::Acquire);
             if was_suppressed && !currently_suppressed {
                 while event_rx.try_recv().is_ok() {}
@@ -266,7 +434,7 @@ async fn suppressed_watcher_discards_events() {
             if currently_suppressed {
                 continue;
             }
-            let matched = actor.process_file_events(&events, &include_set, &exclude_set);
+            let matched = actor.process_file_paths(&paths, &include_set, &exclude_set);
             if !matched.is_empty() {
                 let evt = FileChangeEvent {
                     config_path: PathBuf::from("/tmp/test.yaml"),
@@ -282,7 +450,7 @@ async fn suppressed_watcher_discards_events() {
 
     // Send an event while NOT suppressed — should be forwarded
     event_tx
-        .send(vec![file_event("/project/src/app.ts")])
+        .send(vec![PathBuf::from("/project/src/app.ts")])
         .await
         .unwrap();
     let evt = tokio::time::timeout(std::time::Duration::from_secs(1), restart_rx.recv()).await;
@@ -293,7 +461,7 @@ async fn suppressed_watcher_discards_events() {
 
     // Send events while suppressed — should NOT be forwarded
     event_tx
-        .send(vec![file_event("/project/src/suppressed.ts")])
+        .send(vec![PathBuf::from("/project/src/suppressed.ts")])
         .await
         .unwrap();
     let evt = tokio::time::timeout(std::time::Duration::from_millis(100), restart_rx.recv()).await;
@@ -307,7 +475,7 @@ async fn suppressed_watcher_discards_events() {
 async fn resume_drains_stale_events() {
     let suppressed = Arc::new(AtomicBool::new(true)); // start suppressed
     let (restart_tx, mut restart_rx) = mpsc::channel::<FileChangeEvent>(16);
-    let (event_tx, mut event_rx) = mpsc::channel::<Vec<notify_debouncer_mini::DebouncedEvent>>(32);
+    let (event_tx, mut event_rx) = mpsc::channel::<Vec<PathBuf>>(32);
 
     let flag = suppressed.clone();
     let send_tx = restart_tx.clone();
@@ -327,7 +495,7 @@ async fn resume_drains_stale_events() {
         );
 
         let mut was_suppressed = false;
-        while let Some(events) = event_rx.recv().await {
+        while let Some(paths) = event_rx.recv().await {
             let currently_suppressed = flag.load(Ordering::Acquire);
             if was_suppressed && !currently_suppressed {
                 while event_rx.try_recv().is_ok() {}
@@ -338,7 +506,7 @@ async fn resume_drains_stale_events() {
             if currently_suppressed {
                 continue;
             }
-            let matched = actor.process_file_events(&events, &include_set, &exclude_set);
+            let matched = actor.process_file_paths(&paths, &include_set, &exclude_set);
             if !matched.is_empty() {
                 let evt = FileChangeEvent {
                     config_path: PathBuf::from("/tmp/test.yaml"),
@@ -354,11 +522,11 @@ async fn resume_drains_stale_events() {
 
     // Queue stale events while suppressed
     event_tx
-        .send(vec![file_event("/project/src/stale1.ts")])
+        .send(vec![PathBuf::from("/project/src/stale1.ts")])
         .await
         .unwrap();
     event_tx
-        .send(vec![file_event("/project/src/stale2.ts")])
+        .send(vec![PathBuf::from("/project/src/stale2.ts")])
         .await
         .unwrap();
 
@@ -373,7 +541,7 @@ async fn resume_drains_stale_events() {
     // (stale2 is still in the channel and will be drained).
     // We need a "trigger" event to wake the loop after the suppressed ones.
     event_tx
-        .send(vec![file_event("/project/src/trigger.ts")])
+        .send(vec![PathBuf::from("/project/src/trigger.ts")])
         .await
         .unwrap();
 
@@ -382,7 +550,7 @@ async fn resume_drains_stale_events() {
 
     // Now send a real event that should be processed normally
     event_tx
-        .send(vec![file_event("/project/src/fresh.ts")])
+        .send(vec![PathBuf::from("/project/src/fresh.ts")])
         .await
         .unwrap();
 
@@ -521,7 +689,7 @@ async fn finished_watcher_is_not_reusable() {
 async fn normal_processing_resumes_after_suppress_resume_cycle() {
     let suppressed = Arc::new(AtomicBool::new(false));
     let (restart_tx, mut restart_rx) = mpsc::channel::<FileChangeEvent>(16);
-    let (event_tx, mut event_rx) = mpsc::channel::<Vec<notify_debouncer_mini::DebouncedEvent>>(32);
+    let (event_tx, mut event_rx) = mpsc::channel::<Vec<PathBuf>>(32);
 
     let flag = suppressed.clone();
     let send_tx = restart_tx.clone();
@@ -541,7 +709,7 @@ async fn normal_processing_resumes_after_suppress_resume_cycle() {
         );
 
         let mut was_suppressed = false;
-        while let Some(events) = event_rx.recv().await {
+        while let Some(paths) = event_rx.recv().await {
             let currently_suppressed = flag.load(Ordering::Acquire);
             if was_suppressed && !currently_suppressed {
                 while event_rx.try_recv().is_ok() {}
@@ -552,7 +720,7 @@ async fn normal_processing_resumes_after_suppress_resume_cycle() {
             if currently_suppressed {
                 continue;
             }
-            let matched = actor.process_file_events(&events, &include_set, &exclude_set);
+            let matched = actor.process_file_paths(&paths, &include_set, &exclude_set);
             if !matched.is_empty() {
                 let evt = FileChangeEvent {
                     config_path: PathBuf::from("/tmp/test.yaml"),
@@ -567,23 +735,23 @@ async fn normal_processing_resumes_after_suppress_resume_cycle() {
     });
 
     // Phase 1: Normal event → forwarded
-    event_tx.send(vec![file_event("/project/src/a.ts")]).await.unwrap();
+    event_tx.send(vec![PathBuf::from("/project/src/a.ts")]).await.unwrap();
     let evt = tokio::time::timeout(std::time::Duration::from_secs(1), restart_rx.recv()).await;
     assert!(evt.is_ok(), "Phase 1: event should be forwarded");
 
     // Phase 2: Suppress → events discarded
     suppressed.store(true, Ordering::Release);
-    event_tx.send(vec![file_event("/project/src/stale.ts")]).await.unwrap();
+    event_tx.send(vec![PathBuf::from("/project/src/stale.ts")]).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Phase 3: Resume → drain trigger event consumed, then normal processing resumes
     suppressed.store(false, Ordering::Release);
     // This event triggers the drain transition (gets consumed by the drain logic)
-    event_tx.send(vec![file_event("/project/src/drain_trigger.ts")]).await.unwrap();
+    event_tx.send(vec![PathBuf::from("/project/src/drain_trigger.ts")]).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Phase 4: Post-resume event → forwarded normally
-    event_tx.send(vec![file_event("/project/src/b.ts")]).await.unwrap();
+    event_tx.send(vec![PathBuf::from("/project/src/b.ts")]).await.unwrap();
     let evt = tokio::time::timeout(std::time::Duration::from_secs(1), restart_rx.recv()).await;
     assert!(evt.is_ok(), "Phase 4: event should be forwarded after resume");
 

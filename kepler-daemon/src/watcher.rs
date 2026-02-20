@@ -1,11 +1,11 @@
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
-use std::collections::HashSet;
+use notify::event::EventKind;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -13,9 +13,8 @@ use tracing::{debug, error, info, warn};
 /// Extract the base directory from a glob pattern.
 /// Returns the portion of the path before any glob characters (* ? [ {).
 fn extract_base_dir(pattern: &str) -> Option<PathBuf> {
-    // Find the first glob character
-    let glob_chars = ['*', '?', '[', '{'];
-    let first_glob_pos = pattern.chars().position(|c| glob_chars.contains(&c));
+    // Find the first glob character (byte offset, safe for UTF-8)
+    let first_glob_pos = pattern.find(['*', '?', '[', '{']);
 
     match first_glob_pos {
         Some(pos) => {
@@ -49,6 +48,15 @@ fn is_absolute_pattern(pattern: &str) -> bool {
     pattern.starts_with('/')
 }
 
+/// Returns true if the event kind represents a content-modifying operation
+/// (create, modify, remove) that should trigger a file watcher restart.
+/// Only explicit mutation events pass through. Imprecise events (`Any`)
+/// and non-mutating access events (open, read, close) are filtered out
+/// to prevent spurious restarts — notably in Docker environments where
+/// notify's inotify backend registers `WatchMask::OPEN` by default.
+fn is_content_modifying(kind: &EventKind) -> bool {
+    kind.is_create() || kind.is_modify() || kind.is_remove()
+}
 
 /// Message sent when a file change is detected
 #[derive(Debug, Clone)]
@@ -175,39 +183,64 @@ impl FileWatcherActor {
             self.service_name, self.patterns, watch_dirs
         );
 
-        // Create debounced watcher using std channel
+        // Create raw watcher using std channel (no debouncer — we filter + debounce ourselves)
         let (watcher_tx, watcher_rx) = std_mpsc::channel();
-        let mut debouncer = new_debouncer(Duration::from_millis(500), watcher_tx)?;
+        let mut watcher = RecommendedWatcher::new(
+            move |event: Result<notify::Event, notify::Error>| {
+                let _ = watcher_tx.send(event);
+            },
+            notify::Config::default(),
+        )?;
 
         // Watch all collected directories
         for dir in &watch_dirs {
-            if let Err(e) = debouncer.watcher().watch(dir, RecursiveMode::Recursive) {
+            if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
                 warn!("Failed to watch directory {:?}: {}", dir, e);
             }
         }
 
-        // Create a channel for receiving file events in async context
-        let (async_event_tx, mut async_event_rx) = mpsc::channel::<Vec<notify_debouncer_mini::DebouncedEvent>>(32);
+        // Create a channel for receiving debounced file paths in async context
+        let (async_event_tx, mut async_event_rx) = mpsc::channel::<Vec<PathBuf>>(32);
 
-        // Spawn blocking task to receive from std channel and forward to tokio channel.
-        // Uses recv_timeout so the thread can detect when the async side is cancelled
-        // (abort() on the JoinHandle drops the async_event_rx, but spawn_blocking
-        // threads cannot be cancelled — they must exit on their own).
+        // Spawn blocking task to receive raw events, filter out non-mutating Access events
+        // (open, read, close — the root cause of spurious restarts in Docker environments),
+        // debounce by path, and forward batches of changed paths to the async side.
+        //
+        // Debounce uses a fixed window: 500ms after the *first* event for a given path,
+        // regardless of subsequent events. This ensures events are never delayed
+        // indefinitely by continuous modifications — the service handles suppression
+        // during transient states.
         let working_dir = self.working_dir.clone();
         tokio::task::spawn_blocking(move || {
+            let debounce_timeout = Duration::from_millis(500);
+            // Maps each path to the time it was *first* seen in the current debounce cycle.
+            // Subsequent events for the same path do NOT reset the timer.
+            let mut event_map: HashMap<PathBuf, Instant> = HashMap::new();
+            let mut debounce_deadline: Option<Instant> = None;
+
             loop {
-                match watcher_rx.recv_timeout(Duration::from_secs(1)) {
-                    Ok(Ok(events)) => {
-                        if async_event_tx.blocking_send(events).is_err() {
-                            debug!("Async event channel closed, stopping file watcher");
-                            break;
+                let wait = match debounce_deadline {
+                    Some(deadline) => deadline.saturating_duration_since(Instant::now()),
+                    None => Duration::from_secs(1),
+                };
+
+                match watcher_rx.recv_timeout(wait) {
+                    Ok(Ok(event)) => {
+                        if !is_content_modifying(&event.kind) {
+                            continue;
+                        }
+                        let now = Instant::now();
+                        for path in event.paths {
+                            event_map.entry(path).or_insert(now);
+                        }
+                        if debounce_deadline.is_none() {
+                            debounce_deadline = Some(now + debounce_timeout);
                         }
                     }
                     Ok(Err(error)) => {
                         warn!("File watcher error: {:?}", error);
                     }
                     Err(std_mpsc::RecvTimeoutError::Timeout) => {
-                        // Check if the async side is still alive
                         if async_event_tx.is_closed() {
                             debug!("Async receiver dropped, stopping file watcher");
                             break;
@@ -218,9 +251,37 @@ impl FileWatcherActor {
                         break;
                     }
                 }
+
+                // Emit paths whose debounce window (from first event) has expired
+                if let Some(deadline) = debounce_deadline {
+                    if Instant::now() >= deadline {
+                        let now = Instant::now();
+                        let mut ready = Vec::new();
+                        let mut remaining = HashMap::new();
+                        for (path, first_seen) in event_map.drain() {
+                            if now.duration_since(first_seen) >= debounce_timeout {
+                                ready.push(path);
+                            } else {
+                                remaining.insert(path, first_seen);
+                            }
+                        }
+                        event_map = remaining;
+                        debounce_deadline = if event_map.is_empty() {
+                            None
+                        } else {
+                            event_map.values().map(|t| *t + debounce_timeout).min()
+                        };
+                        if !ready.is_empty() {
+                            if async_event_tx.blocking_send(ready).is_err() {
+                                debug!("Async event channel closed, stopping file watcher");
+                                break;
+                            }
+                        }
+                    }
+                }
             }
-            // Keep debouncer alive until the loop exits
-            drop(debouncer);
+            // Keep watcher alive until the loop exits
+            drop(watcher);
             drop(working_dir);
         });
 
@@ -253,7 +314,7 @@ impl FileWatcherActor {
                         continue;
                     }
 
-                    let matched_files = self.process_file_events(&events, &include_set, &exclude_set);
+                    let matched_files = self.process_file_paths(&events, &include_set, &exclude_set);
                     if !matched_files.is_empty() {
                         let event = FileChangeEvent {
                             config_path: self.config_path.clone(),
@@ -300,41 +361,66 @@ impl FileWatcherActor {
         Ok(())
     }
 
-    /// Process file events and return the list of matched files that should trigger a restart.
+    /// Process debounced file paths and return those that should trigger a restart.
     /// A file triggers a restart if it matches an include pattern and does NOT match any exclude pattern.
-    fn process_file_events(
+    fn process_file_paths(
         &self,
-        events: &[notify_debouncer_mini::DebouncedEvent],
+        paths: &[PathBuf],
         include_set: &GlobSet,
         exclude_set: &GlobSet,
     ) -> Vec<PathBuf> {
         let mut matched_files = Vec::new();
 
-        for event in events {
-            if event.kind == DebouncedEventKind::Any {
-                let path = &event.path;
-                let path_str = path.to_string_lossy();
+        for path in paths {
+            let path_str = path.to_string_lossy();
 
-                // Check absolute path
-                let abs_included = include_set.is_match(path.as_os_str())
-                    || include_set.is_match(&*path_str);
+            // Check absolute path
+            let abs_included = include_set.is_match(path.as_os_str())
+                || include_set.is_match(&*path_str);
 
-                if abs_included {
-                    // Check if excluded (test both absolute and relative for exclusion)
-                    let abs_excluded = exclude_set.is_match(path.as_os_str())
+            if abs_included {
+                // Check if excluded (test both absolute and relative for exclusion)
+                let abs_excluded = exclude_set.is_match(path.as_os_str())
+                    || exclude_set.is_match(&*path_str);
+                let rel_excluded = path
+                    .strip_prefix(&self.working_dir)
+                    .ok()
+                    .map(|rel| {
+                        exclude_set.is_match(rel.as_os_str())
+                            || exclude_set.is_match(&*rel.to_string_lossy())
+                    })
+                    .unwrap_or(false);
+
+                if !abs_excluded && !rel_excluded {
+                    debug!(
+                        "File change detected for {} (absolute match): {:?}",
+                        self.service_name, path
+                    );
+                    matched_files.push(path.clone());
+                } else {
+                    debug!(
+                        "File change excluded for {} by negation pattern: {:?}",
+                        self.service_name, path
+                    );
+                }
+                continue;
+            }
+
+            // Check relative path
+            if let Ok(relative) = path.strip_prefix(&self.working_dir) {
+                let relative_str = relative.to_string_lossy();
+                let rel_included = include_set.is_match(relative.as_os_str())
+                    || include_set.is_match(&*relative_str);
+
+                if rel_included {
+                    let excluded = exclude_set.is_match(relative.as_os_str())
+                        || exclude_set.is_match(&*relative_str)
+                        || exclude_set.is_match(path.as_os_str())
                         || exclude_set.is_match(&*path_str);
-                    let rel_excluded = path
-                        .strip_prefix(&self.working_dir)
-                        .ok()
-                        .map(|rel| {
-                            exclude_set.is_match(rel.as_os_str())
-                                || exclude_set.is_match(&*rel.to_string_lossy())
-                        })
-                        .unwrap_or(false);
 
-                    if !abs_excluded && !rel_excluded {
+                    if !excluded {
                         debug!(
-                            "File change detected for {} (absolute match): {:?}",
+                            "File change detected for {} (relative match): {:?}",
                             self.service_name, path
                         );
                         matched_files.push(path.clone());
@@ -343,34 +429,6 @@ impl FileWatcherActor {
                             "File change excluded for {} by negation pattern: {:?}",
                             self.service_name, path
                         );
-                    }
-                    continue;
-                }
-
-                // Check relative path
-                if let Ok(relative) = path.strip_prefix(&self.working_dir) {
-                    let relative_str = relative.to_string_lossy();
-                    let rel_included = include_set.is_match(relative.as_os_str())
-                        || include_set.is_match(&*relative_str);
-
-                    if rel_included {
-                        let excluded = exclude_set.is_match(relative.as_os_str())
-                            || exclude_set.is_match(&*relative_str)
-                            || exclude_set.is_match(path.as_os_str())
-                            || exclude_set.is_match(&*path_str);
-
-                        if !excluded {
-                            debug!(
-                                "File change detected for {} (relative match): {:?}",
-                                self.service_name, path
-                            );
-                            matched_files.push(path.clone());
-                        } else {
-                            debug!(
-                                "File change excluded for {} by negation pattern: {:?}",
-                                self.service_name, path
-                            );
-                        }
                     }
                 }
             }
