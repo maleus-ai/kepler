@@ -144,7 +144,7 @@ pub struct ProcessHandle {
     /// Stdout capture task. Returns `Some(Vec<String>)` of raw `KEY=VALUE` lines
     /// when output capture is enabled, `None` otherwise.
     pub stdout_task: Option<JoinHandle<Option<Vec<String>>>>,
-    pub stderr_task: Option<JoinHandle<()>>,
+    pub stderr_task: Option<JoinHandle<Option<Vec<String>>>>,
 }
 
 impl std::fmt::Debug for ProcessHandle {

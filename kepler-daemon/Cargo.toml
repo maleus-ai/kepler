@@ -57,5 +57,6 @@ dhat = { version = "0.3", optional = true }
 default = ["jemalloc"]
 jemalloc = ["tikv-jemallocator", "tikv-jemalloc-ctl", "tikv-jemalloc-sys"]
 dhat-heap = ["dhat"]
+fd-tracking = []
 
 [dev-dependencies]

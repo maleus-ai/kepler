@@ -139,7 +139,7 @@ pub struct BlockingResult {
 pub struct DetachedResult {
     pub child: Child,
     pub stdout_task: Option<JoinHandle<Option<Vec<String>>>>,
-    pub stderr_task: Option<JoinHandle<()>>,
+    pub stderr_task: Option<JoinHandle<Option<Vec<String>>>>,
 }
 
 /// Build a `Command` from a `CommandSpec`, applying all common configuration:
@@ -464,7 +464,7 @@ pub async fn spawn_detached(
     });
 
     let stderr_task = child.stderr.take().map(|stderr| {
-        let task = spawn_capture_task(
+        spawn_capture_task(
             Some(stderr),
             Some(log_config),
             log_service_name,
@@ -472,9 +472,7 @@ pub async fn spawn_detached(
             store_stderr,
             false,
             None, // No output capture on stderr
-        );
-        // Wrap to discard the unused Option<Vec<String>> return value
-        tokio::spawn(async move { let _ = task.await; })
+        )
     });
 
     Ok(DetachedResult {

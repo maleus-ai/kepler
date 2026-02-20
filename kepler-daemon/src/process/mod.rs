@@ -126,6 +126,10 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         stderr_task: result.stderr_task,
     };
 
+    if let Some(fd_count) = crate::fd_count::count_open_fds() {
+        debug!("FD count after spawning service {}: {}", service_name, fd_count);
+    }
+
     Ok(process_handle)
 }
 
@@ -328,6 +332,10 @@ pub async fn stop_service(
         .await;
 
     let _ = handle.set_service_pid(service_name, None, None).await;
+
+    if let Some(fd_count) = crate::fd_count::count_open_fds() {
+        debug!("FD count after stopping service {}: {}", service_name, fd_count);
+    }
 
     Ok(())
 }

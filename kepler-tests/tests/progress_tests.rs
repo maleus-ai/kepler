@@ -46,10 +46,12 @@ async fn setup_orchestrator(
     let (exit_tx, _exit_rx) = mpsc::channel::<ProcessExitEvent>(32);
     let (restart_tx, _restart_rx) = mpsc::channel::<FileChangeEvent>(32);
 
+    let cursor_manager = Arc::new(kepler_daemon::cursor::CursorManager::new(300));
     let orchestrator = Arc::new(ServiceOrchestrator::new(
         registry,
         exit_tx.clone(),
         restart_tx.clone(),
+        cursor_manager,
     ));
 
     (orchestrator, config_path, exit_tx, restart_tx)
@@ -82,10 +84,12 @@ async fn setup_orchestrator_with_exit_handler(
     let (exit_tx, mut exit_rx) = mpsc::channel::<ProcessExitEvent>(32);
     let (restart_tx, _restart_rx) = mpsc::channel::<FileChangeEvent>(32);
 
+    let cursor_manager = Arc::new(kepler_daemon::cursor::CursorManager::new(300));
     let orchestrator = Arc::new(ServiceOrchestrator::new(
         registry,
         exit_tx.clone(),
         restart_tx.clone(),
+        cursor_manager,
     ));
 
     // Spawn exit event handler (mirrors the one in main.rs)

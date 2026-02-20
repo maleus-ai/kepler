@@ -40,6 +40,7 @@ fn test_byte_budget_limits_large_lines() {
         None,
         true,
         false,
+        0,
     );
 
     let (entries, has_more) = manager.read_entries(&cursor_id, &config_path).unwrap();
@@ -92,6 +93,7 @@ fn test_small_lines_hit_count_limit() {
         None,
         true,
         false,
+        0,
     );
 
     let (entries, has_more) = manager.read_entries(&cursor_id, &config_path).unwrap();
@@ -126,6 +128,7 @@ fn test_mixed_line_sizes_respect_budget() {
         None,
         true,
         false,
+        0,
     );
 
     let mut all_count = 0;
@@ -191,6 +194,7 @@ fn test_cursor_reads_all_entries_no_data_loss() {
         None,
         true,
         false,
+        0,
     );
 
     let mut all_entries = Vec::new();
@@ -248,6 +252,7 @@ fn test_cursor_position_tracking_no_duplicates() {
         None,
         true,
         false,
+        0,
     );
 
     let mut seen_indices = Vec::new();
@@ -297,6 +302,7 @@ fn test_multi_service_cursor_reads_all() {
         None,
         true,
         false,
+        0,
     );
 
     let (entries, has_more) = manager.read_entries(&cursor_id, &config_path).unwrap();
@@ -324,6 +330,7 @@ fn test_service_filter_cursor() {
         Some("alpha".to_string()),
         true,
         false,
+        0,
     );
 
     let (entries, has_more) = manager.read_entries(&cursor_id, &config_path).unwrap();
@@ -356,6 +363,7 @@ fn test_cursor_from_start_reads_everything() {
         None,
         true,
         false,
+        0,
     );
 
     let (entries, has_more) = manager.read_entries(&cursor_id, &config_path).unwrap();
@@ -386,6 +394,7 @@ fn test_cursor_from_end_reads_nothing_existing() {
         None,
         false,
         false,
+        0,
     );
 
     let (entries, has_more) = manager.read_entries(&cursor_id, &config_path).unwrap();
@@ -409,6 +418,7 @@ fn test_cursor_follow_picks_up_new_data() {
         None,
         false,
         false,
+        0,
     );
 
     // First read: nothing (cursor starts at EOF)
@@ -450,6 +460,7 @@ fn test_cursor_discovers_new_files() {
         None,
         true,
         false,
+        0,
     );
 
     // First read: only migration logs
@@ -491,6 +502,7 @@ fn test_cursor_detects_replaced_file() {
         None,
         true,
         false,
+        0,
     );
 
     // First read: get the initial lines
@@ -546,7 +558,7 @@ fn test_concurrent_cursors_no_deadlock() {
             let cfg = config_path.clone();
             std::thread::spawn(move || {
                 let cursor_id =
-                    mgr.create_cursor(cfg.clone(), logs, None, true, false);
+                    mgr.create_cursor(cfg.clone(), logs, None, true, false, 0);
 
                 let mut total = 0;
                 let mut iters = 0;
@@ -603,7 +615,7 @@ fn test_concurrent_create_read_cleanup() {
                     // Reader thread
                     for _ in 0..20 {
                         let cid =
-                            mgr.create_cursor(cfg.clone(), logs.clone(), None, true, false);
+                            mgr.create_cursor(cfg.clone(), logs.clone(), None, true, false, 0);
                         // Cursor may be cleaned up between create and read, that's OK
                         let _ = mgr.read_entries(&cid, &cfg);
                     }
@@ -633,7 +645,7 @@ fn test_cursor_config_mismatch() {
 
     let manager = CursorManager::new(300);
     let cursor_id =
-        manager.create_cursor(config_a, logs_dir, None, true, false);
+        manager.create_cursor(config_a, logs_dir, None, true, false, 0);
 
     let result = manager.read_entries(&cursor_id, &config_b);
     assert!(matches!(result, Err(CursorError::CursorConfigMismatch { .. })));
@@ -656,6 +668,7 @@ fn test_cursor_expired_after_cleanup() {
         None,
         true,
         false,
+        0,
     );
 
     std::thread::sleep(Duration::from_millis(10));
@@ -673,4 +686,286 @@ fn test_cursor_nonexistent_id() {
 
     let result = manager.read_entries("cursor_does_not_exist", &config_path);
     assert!(matches!(result, Err(CursorError::CursorExpired(_))));
+}
+
+// ========================================================================
+// Cursor invalidation
+// ========================================================================
+
+/// invalidate_config_cursors removes only cursors belonging to the target config.
+#[test]
+fn test_invalidate_config_cursors_removes_matching() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs_dir = dir.path().to_path_buf();
+    let config_a = PathBuf::from("/fake/config-a.yaml");
+    let config_b = PathBuf::from("/fake/config-b.yaml");
+
+    write_log_file(dir.path(), "svc", "stdout", &[(1000, "hello")]);
+
+    let manager = CursorManager::new(300);
+    let cursor_a = manager.create_cursor(
+        config_a.clone(),
+        logs_dir.clone(),
+        None,
+        true,
+        false,
+        1,
+    );
+    let cursor_b = manager.create_cursor(
+        config_b.clone(),
+        logs_dir,
+        None,
+        true,
+        false,
+        2,
+    );
+
+    // Both cursors are alive
+    assert!(manager.read_entries(&cursor_a, &config_a).is_ok());
+    assert!(manager.read_entries(&cursor_b, &config_b).is_ok());
+
+    // Invalidate config_a cursors
+    manager.invalidate_config_cursors(&config_a);
+
+    // cursor_a should be gone, cursor_b should survive
+    assert!(matches!(
+        manager.read_entries(&cursor_a, &config_a),
+        Err(CursorError::CursorExpired(_))
+    ));
+    assert!(manager.read_entries(&cursor_b, &config_b).is_ok());
+}
+
+/// invalidate_config_cursors removes multiple cursors for the same config.
+#[test]
+fn test_invalidate_config_cursors_removes_all_for_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs_dir = dir.path().to_path_buf();
+    let config_path = PathBuf::from("/fake/config.yaml");
+
+    write_log_file(dir.path(), "svc", "stdout", &[(1000, "hello")]);
+
+    let manager = CursorManager::new(300);
+    let cursor_1 = manager.create_cursor(
+        config_path.clone(),
+        logs_dir.clone(),
+        None,
+        true,
+        false,
+        1,
+    );
+    let cursor_2 = manager.create_cursor(
+        config_path.clone(),
+        logs_dir,
+        None,
+        true,
+        false,
+        2,
+    );
+
+    manager.invalidate_config_cursors(&config_path);
+
+    assert!(matches!(
+        manager.read_entries(&cursor_1, &config_path),
+        Err(CursorError::CursorExpired(_))
+    ));
+    assert!(matches!(
+        manager.read_entries(&cursor_2, &config_path),
+        Err(CursorError::CursorExpired(_))
+    ));
+}
+
+/// invalidate_connection_cursors removes only cursors belonging to the target connection.
+#[test]
+fn test_invalidate_connection_cursors_removes_matching() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs_dir = dir.path().to_path_buf();
+    let config_path = PathBuf::from("/fake/config.yaml");
+
+    write_log_file(dir.path(), "svc", "stdout", &[(1000, "hello")]);
+
+    let manager = CursorManager::new(300);
+    let cursor_conn1 = manager.create_cursor(
+        config_path.clone(),
+        logs_dir.clone(),
+        None,
+        true,
+        false,
+        100,
+    );
+    let cursor_conn2 = manager.create_cursor(
+        config_path.clone(),
+        logs_dir,
+        None,
+        true,
+        false,
+        200,
+    );
+
+    // Both cursors are alive
+    assert!(manager.read_entries(&cursor_conn1, &config_path).is_ok());
+    assert!(manager.read_entries(&cursor_conn2, &config_path).is_ok());
+
+    // Invalidate connection 100
+    manager.invalidate_connection_cursors(100);
+
+    // cursor_conn1 should be gone, cursor_conn2 should survive
+    assert!(matches!(
+        manager.read_entries(&cursor_conn1, &config_path),
+        Err(CursorError::CursorExpired(_))
+    ));
+    assert!(manager.read_entries(&cursor_conn2, &config_path).is_ok());
+}
+
+/// invalidate_connection_cursors removes multiple cursors for the same connection.
+#[test]
+fn test_invalidate_connection_cursors_removes_all_for_connection() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let config_a = PathBuf::from("/fake/config-a.yaml");
+    let config_b = PathBuf::from("/fake/config-b.yaml");
+
+    write_log_file(dir_a.path(), "svc", "stdout", &[(1000, "a")]);
+    write_log_file(dir_b.path(), "svc", "stdout", &[(1000, "b")]);
+
+    let manager = CursorManager::new(300);
+    // Same connection_id (42) opens cursors on two different configs
+    let cursor_1 = manager.create_cursor(
+        config_a.clone(),
+        dir_a.path().to_path_buf(),
+        None,
+        true,
+        false,
+        42,
+    );
+    let cursor_2 = manager.create_cursor(
+        config_b.clone(),
+        dir_b.path().to_path_buf(),
+        None,
+        true,
+        false,
+        42,
+    );
+
+    manager.invalidate_connection_cursors(42);
+
+    assert!(matches!(
+        manager.read_entries(&cursor_1, &config_a),
+        Err(CursorError::CursorExpired(_))
+    ));
+    assert!(matches!(
+        manager.read_entries(&cursor_2, &config_b),
+        Err(CursorError::CursorExpired(_))
+    ));
+}
+
+/// Invalidating a config with no matching cursors is a no-op.
+#[test]
+fn test_invalidate_config_cursors_noop_when_no_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs_dir = dir.path().to_path_buf();
+    let config_path = PathBuf::from("/fake/config.yaml");
+    let other_config = PathBuf::from("/fake/other.yaml");
+
+    write_log_file(dir.path(), "svc", "stdout", &[(1000, "hello")]);
+
+    let manager = CursorManager::new(300);
+    let cursor_id = manager.create_cursor(
+        config_path.clone(),
+        logs_dir,
+        None,
+        true,
+        false,
+        0,
+    );
+
+    // Invalidate a different config — cursor should survive
+    manager.invalidate_config_cursors(&other_config);
+
+    assert!(manager.read_entries(&cursor_id, &config_path).is_ok());
+}
+
+/// Invalidating a connection with no matching cursors is a no-op.
+#[test]
+fn test_invalidate_connection_cursors_noop_when_no_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs_dir = dir.path().to_path_buf();
+    let config_path = PathBuf::from("/fake/config.yaml");
+
+    write_log_file(dir.path(), "svc", "stdout", &[(1000, "hello")]);
+
+    let manager = CursorManager::new(300);
+    let cursor_id = manager.create_cursor(
+        config_path.clone(),
+        logs_dir,
+        None,
+        true,
+        false,
+        10,
+    );
+
+    // Invalidate a different connection — cursor should survive
+    manager.invalidate_connection_cursors(999);
+
+    assert!(manager.read_entries(&cursor_id, &config_path).is_ok());
+}
+
+/// Concurrent invalidation + read doesn't deadlock.
+#[test]
+fn test_concurrent_invalidation_no_deadlock() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs_dir = dir.path().to_path_buf();
+    let config_path = PathBuf::from("/fake/config.yaml");
+
+    write_log_file(dir.path(), "svc", "stdout", &[
+        (1000, "line-1"),
+        (2000, "line-2"),
+        (3000, "line-3"),
+    ]);
+
+    let manager = Arc::new(CursorManager::new(300));
+
+    let handles: Vec<_> = (0..20)
+        .map(|i| {
+            let mgr = manager.clone();
+            let logs = logs_dir.clone();
+            let cfg = config_path.clone();
+            std::thread::spawn(move || {
+                match i % 4 {
+                    0 => {
+                        // Config invalidation thread
+                        for _ in 0..50 {
+                            mgr.invalidate_config_cursors(&cfg);
+                            std::thread::yield_now();
+                        }
+                    }
+                    1 => {
+                        // Connection invalidation thread
+                        for conn in 0..50u64 {
+                            mgr.invalidate_connection_cursors(conn);
+                            std::thread::yield_now();
+                        }
+                    }
+                    _ => {
+                        // Reader thread
+                        for j in 0..20 {
+                            let cid = mgr.create_cursor(
+                                cfg.clone(),
+                                logs.clone(),
+                                None,
+                                true,
+                                false,
+                                i as u64 * 1000 + j,
+                            );
+                            // Cursor may be invalidated between create and read
+                            let _ = mgr.read_entries(&cid, &cfg);
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("Thread panicked — possible deadlock");
+    }
 }

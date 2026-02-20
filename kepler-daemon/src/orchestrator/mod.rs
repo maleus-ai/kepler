@@ -35,6 +35,7 @@ use crate::events::{RestartReason, ServiceEvent};
 /// Created once per `start_services` call and reused across all service starts,
 /// ensuring the `global` table persists between services.
 type SharedLuaEvaluator = Arc<tokio::sync::Mutex<LuaEvaluator>>;
+use crate::cursor::CursorManager;
 use crate::health::spawn_health_checker;
 use crate::hooks::{
     run_global_hook, run_service_hook, GlobalHookParams, GlobalHookType, ServiceHookParams, ServiceHookType,
@@ -78,6 +79,7 @@ pub struct ServiceOrchestrator {
     registry: SharedConfigRegistry,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
     restart_tx: mpsc::Sender<FileChangeEvent>,
+    cursor_manager: Arc<CursorManager>,
 }
 
 impl ServiceOrchestrator {
@@ -86,11 +88,13 @@ impl ServiceOrchestrator {
         registry: SharedConfigRegistry,
         exit_tx: mpsc::Sender<ProcessExitEvent>,
         restart_tx: mpsc::Sender<FileChangeEvent>,
+        cursor_manager: Arc<CursorManager>,
     ) -> Self {
         Self {
             registry,
             exit_tx,
             restart_tx,
+            cursor_manager,
         }
     }
 
@@ -120,6 +124,10 @@ impl ServiceOrchestrator {
         no_deps: bool,
         override_envs: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
+        if let Some(fd_count) = crate::fd_count::count_open_fds() {
+            debug!("FD count at start_services entry: {}", fd_count);
+        }
+
         // Get or create the config actor
         let handle = self
             .registry
@@ -1012,6 +1020,10 @@ impl ServiceOrchestrator {
         clean: bool,
         signal: Option<i32>,
     ) -> Result<String, OrchestratorError> {
+        if let Some(fd_count) = crate::fd_count::count_open_fds() {
+            debug!("FD count at stop_services entry: {}", fd_count);
+        }
+
         let config_dir = config_path
             .parent()
             .map(|p| p.to_path_buf())
@@ -1293,6 +1305,9 @@ impl ServiceOrchestrator {
                 }
             };
 
+            // Drop all cursors holding file handles into this config's log directory
+            self.cursor_manager.invalidate_config_cursors(config_path);
+
             // Unload config from registry (triggers actor cleanup + save_state)
             self.registry.unload(&config_path.to_path_buf()).await;
 
@@ -1308,6 +1323,10 @@ impl ServiceOrchestrator {
 
             // Purge allocator caches to return freed pages to the OS
             crate::allocator::purge_caches();
+        }
+
+        if let Some(fd_count) = crate::fd_count::count_open_fds() {
+            debug!("FD count after stop_services: {}", fd_count);
         }
 
         if stopped.is_empty() && !clean {
@@ -1762,6 +1781,10 @@ impl ServiceOrchestrator {
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> Result<(), OrchestratorError> {
+        if let Some(fd_count) = crate::fd_count::count_open_fds() {
+            debug!("FD count at handle_exit entry for {}: {}", service_name, fd_count);
+        }
+
         let handle = match self.registry.get(&config_path.to_path_buf()) {
             Some(h) => h,
             None => return Ok(()), // Config no longer loaded
@@ -1832,6 +1855,16 @@ impl ServiceOrchestrator {
         };
 
         if should_restart {
+            // Await output tasks before restarting to release pipe FDs and log file FDs.
+            // Dropping JoinHandles without awaiting/aborting leaks the underlying tasks.
+            let (stdout_task, stderr_task) = output_tasks;
+            if let Some(task) = stdout_task {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+            }
+            if let Some(task) = stderr_task {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+            }
+
             // Emit Restart event with Failure reason
             handle
                 .emit_event(
@@ -2026,6 +2059,10 @@ impl ServiceOrchestrator {
                     warn!("Failed to set {} to {:?}: {}", service_name, status, e);
                 }
             }
+        }
+
+        if let Some(fd_count) = crate::fd_count::count_open_fds() {
+            debug!("FD count at handle_exit exit for {}: {}", service_name, fd_count);
         }
 
         Ok(())

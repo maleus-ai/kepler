@@ -11,7 +11,7 @@ use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, Serv
 
 /// Stdout and stderr capture task handles taken from a process handle.
 /// The stdout task returns `Option<Vec<String>>` (captured `KEY=VALUE` lines if output capture is enabled).
-pub type OutputTasks = (Option<JoinHandle<Option<Vec<String>>>>, Option<JoinHandle<()>>);
+pub type OutputTasks = (Option<JoinHandle<Option<Vec<String>>>>, Option<JoinHandle<Option<Vec<String>>>>);
 use crate::errors::Result;
 use crate::events::{ServiceEvent, ServiceEventReceiver};
 use crate::lua_eval::{ConditionResult, EvalContext};
