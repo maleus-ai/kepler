@@ -21,6 +21,7 @@ use crate::persistence::{ConfigPersistence, ExpandedConfigSnapshot};
 use crate::state::{
     PersistedConfigState, PersistedServiceState, ProcessHandle, ServiceState, ServiceStatus,
 };
+use crate::watcher::FileWatcherHandle;
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
 
 use super::command::ConfigCommand;
@@ -52,7 +53,7 @@ pub struct ConfigActor {
 
     // Process and task handles (moved from DaemonState)
     processes: HashMap<String, ProcessHandle>,
-    watchers: HashMap<String, JoinHandle<()>>,
+    watchers: HashMap<String, FileWatcherHandle>,
     health_checks: HashMap<String, JoinHandle<()>>,
 
     // Event channels per service (service_name -> sender)
@@ -816,9 +817,9 @@ impl ConfigActor {
                     }
                 }
                 TaskHandleType::FileWatcher => {
-                    if let Some(old) = self.watchers.insert(service_name, handle) {
-                        old.abort();
-                    }
+                    // FileWatcher storage now uses StoreFileWatcher command
+                    warn!("StoreTaskHandle(FileWatcher) is deprecated, use StoreFileWatcher");
+                    handle.abort();
                 }
             },
             ConfigCommand::CancelTaskHandle {
@@ -836,6 +837,39 @@ impl ConfigActor {
                     }
                 }
             },
+
+            // === File Watcher Suppress/Resume Commands ===
+            ConfigCommand::SuppressFileWatcher { service_name } => {
+                if let Some(handle) = self.watchers.get(&service_name) {
+                    handle.suppress();
+                }
+            }
+            ConfigCommand::ResumeFileWatcher {
+                service_name,
+                patterns,
+                working_dir,
+                reply,
+            } => {
+                let resumed = if let Some(handle) = self.watchers.get(&service_name) {
+                    if !handle.is_finished() && handle.matches(&patterns, &working_dir) {
+                        handle.resume();
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                let _ = reply.send(resumed);
+            }
+            ConfigCommand::StoreFileWatcher {
+                service_name,
+                handle,
+            } => {
+                if let Some(old) = self.watchers.insert(service_name, handle) {
+                    old.abort();
+                }
+            }
 
             // === Lifecycle ===
             ConfigCommand::Shutdown { reply } => {

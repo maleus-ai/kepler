@@ -3,9 +3,11 @@ use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc as std_mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc as std_mpsc, Arc};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 /// Extract the base directory from a glob pattern.
@@ -63,6 +65,7 @@ pub struct FileWatcherActor {
     patterns: Vec<String>,
     working_dir: PathBuf,
     restart_tx: mpsc::Sender<FileChangeEvent>,
+    suppressed: Arc<AtomicBool>,
 }
 
 impl FileWatcherActor {
@@ -73,6 +76,7 @@ impl FileWatcherActor {
         patterns: Vec<String>,
         working_dir: PathBuf,
         restart_tx: mpsc::Sender<FileChangeEvent>,
+        suppressed: Arc<AtomicBool>,
     ) -> Self {
         Self {
             config_path,
@@ -80,6 +84,7 @@ impl FileWatcherActor {
             patterns,
             working_dir,
             restart_tx,
+            suppressed,
         }
     }
 
@@ -220,10 +225,34 @@ impl FileWatcherActor {
         });
 
         // Main event loop - process both file events and commands
+        let mut was_suppressed = false;
         loop {
             tokio::select! {
                 // Handle file change events
                 Some(events) = async_event_rx.recv() => {
+                    let currently_suppressed = self.suppressed.load(Ordering::Acquire);
+
+                    // Transition from suppressed → active: drain stale events
+                    if was_suppressed && !currently_suppressed {
+                        debug!(
+                            "File watcher for {} resuming, draining stale events",
+                            self.service_name
+                        );
+                        while async_event_rx.try_recv().is_ok() {}
+                        was_suppressed = false;
+                        continue;
+                    }
+                    was_suppressed = currently_suppressed;
+
+                    // Discard events while suppressed
+                    if currently_suppressed {
+                        debug!(
+                            "File watcher for {} suppressed, discarding events",
+                            self.service_name
+                        );
+                        continue;
+                    }
+
                     let matched_files = self.process_file_events(&events, &include_set, &exclude_set);
                     if !matched_files.is_empty() {
                         let event = FileChangeEvent {
@@ -350,29 +379,75 @@ impl FileWatcherActor {
     }
 }
 
+/// Handle for a spawned file watcher, supporting suppress/resume without teardown.
+pub struct FileWatcherHandle {
+    task_handle: JoinHandle<()>,
+    suppressed: Arc<AtomicBool>,
+    patterns: Vec<String>,
+    working_dir: PathBuf,
+}
+
+impl FileWatcherHandle {
+    /// Suppress the watcher — events will be discarded until resumed.
+    pub fn suppress(&self) {
+        self.suppressed.store(true, Ordering::Release);
+    }
+
+    /// Resume the watcher — stale events accumulated during suppression
+    /// are drained automatically on the next event loop iteration.
+    pub fn resume(&self) {
+        self.suppressed.store(false, Ordering::Release);
+    }
+
+    /// Check if this watcher can be reused for the given patterns and working directory.
+    pub fn matches(&self, patterns: &[String], working_dir: &Path) -> bool {
+        self.patterns == patterns && self.working_dir == working_dir
+    }
+
+    /// Abort the underlying task (full teardown).
+    pub fn abort(&self) {
+        self.task_handle.abort();
+    }
+
+    /// Check if the underlying task has finished.
+    pub fn is_finished(&self) -> bool {
+        self.task_handle.is_finished()
+    }
+}
+
 /// Spawn a file watcher actor for a service
 ///
-/// Returns a JoinHandle for the task. The watcher can be cancelled by aborting the handle.
+/// Returns a `FileWatcherHandle` for the task. The watcher can be
+/// suppressed/resumed or fully cancelled by aborting the handle.
 pub fn spawn_file_watcher(
     config_path: PathBuf,
     service_name: String,
     patterns: Vec<String>,
     working_dir: PathBuf,
     restart_tx: mpsc::Sender<FileChangeEvent>,
-) -> tokio::task::JoinHandle<()> {
+) -> FileWatcherHandle {
+    let suppressed = Arc::new(AtomicBool::new(false));
     let actor = FileWatcherActor::new(
         config_path,
         service_name,
-        patterns,
-        working_dir,
+        patterns.clone(),
+        working_dir.clone(),
         restart_tx,
+        suppressed.clone(),
     );
 
-    tokio::spawn(async move {
+    let task_handle = tokio::spawn(async move {
         if let Err(e) = actor.run().await {
             error!("File watcher error: {}", e);
         }
-    })
+    });
+
+    FileWatcherHandle {
+        task_handle,
+        suppressed,
+        patterns,
+        working_dir,
+    }
 }
 
 #[cfg(test)]

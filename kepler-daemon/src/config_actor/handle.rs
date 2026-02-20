@@ -17,6 +17,7 @@ use crate::events::{ServiceEvent, ServiceEventReceiver};
 use crate::lua_eval::{ConditionResult, EvalContext};
 use crate::logs::LogWriterConfig;
 use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
+use crate::watcher::FileWatcherHandle;
 use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
 
 use super::command::{ConfigCommand, OutputTasks};
@@ -832,6 +833,61 @@ impl ConfigActorHandle {
             .is_err()
         {
             warn!("Config actor closed, cannot send CancelTaskHandle");
+        }
+    }
+
+    /// Suppress the file watcher for a service (events discarded without teardown)
+    pub async fn suppress_file_watcher(&self, service_name: &str) {
+        if self
+            .tx
+            .send(ConfigCommand::SuppressFileWatcher {
+                service_name: service_name.to_string(),
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send SuppressFileWatcher");
+        }
+    }
+
+    /// Try to resume an existing file watcher. Returns true if resumed
+    /// (patterns and working_dir match and watcher is still alive), false otherwise.
+    pub async fn resume_file_watcher(
+        &self,
+        service_name: &str,
+        patterns: Vec<String>,
+        working_dir: PathBuf,
+    ) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ConfigCommand::ResumeFileWatcher {
+                service_name: service_name.to_string(),
+                patterns,
+                working_dir,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send ResumeFileWatcher");
+            return false;
+        }
+        reply_rx.await.unwrap_or(false)
+    }
+
+    /// Store a FileWatcherHandle (replaces any existing watcher for the service)
+    pub async fn store_file_watcher(&self, service_name: &str, handle: FileWatcherHandle) {
+        if self
+            .tx
+            .send(ConfigCommand::StoreFileWatcher {
+                service_name: service_name.to_string(),
+                handle,
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send StoreFileWatcher");
         }
     }
 
