@@ -4,7 +4,7 @@ mod errors;
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::{BufWriter, IsTerminal, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -53,6 +53,13 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    // KEPLER_COLOR: "true"/"1" forces colors on, "false"/"0" forces off, unset = auto-detect TTY
+    match std::env::var("KEPLER_COLOR").as_deref() {
+        Ok("true" | "1") => colored::control::set_override(true),
+        Ok("false" | "0") => colored::control::set_override(false),
+        _ => {}
+    }
 
     let filter = if cli.verbose {
         EnvFilter::new("debug")
@@ -1509,7 +1516,7 @@ async fn follow_logs_until_quiescent(
     service: Option<&str>,
     abort_on_failure: bool,
 ) -> Result<()> {
-    let use_color = std::io::stdout().is_terminal();
+    let use_color = colored::control::SHOULD_COLORIZE.should_colorize();
     let mut color_map: HashMap<String, Color> = HashMap::new();
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
@@ -1691,7 +1698,7 @@ async fn handle_logs(
 
     // For 'all' mode (default) and 'follow' mode, use cursor-based streaming
     let stream_mode = if follow { StreamMode::UntilQuiescent } else { StreamMode::All };
-    let use_color = std::io::stdout().is_terminal();
+    let use_color = colored::control::SHOULD_COLORIZE.should_colorize();
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
 
