@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use std::os::unix::fs::MetadataExt;
 
 use dashmap::DashMap;
+use tokio::sync::Notify;
 
 use crate::logs::{LogReader, MergedLogIterator};
 use kepler_protocol::protocol::{MAX_CURSOR_BATCH_SIZE, MAX_MESSAGE_SIZE};
@@ -97,6 +98,8 @@ fn generate_cursor_id() -> String {
 pub struct CursorManager {
     /// Map of cursor ID -> cursor state (Arc<Mutex<>> for per-cursor locking)
     cursors: DashMap<String, Arc<Mutex<CursorState>>>,
+    /// Per-config Notify: wakes waiting cursor handlers when log data is flushed
+    log_notifiers: DashMap<PathBuf, Arc<Notify>>,
     /// Time-to-live for cursors (based on last poll time)
     ttl: Duration,
 }
@@ -106,8 +109,18 @@ impl CursorManager {
     pub fn new(ttl_seconds: u64) -> Self {
         Self {
             cursors: DashMap::new(),
+            log_notifiers: DashMap::new(),
             ttl: Duration::from_secs(ttl_seconds),
         }
+    }
+
+    /// Get or create the Notify for a given config path.
+    /// Used by writers (via LogWriterConfig) and cursor handlers (for long polling).
+    pub fn get_log_notify(&self, config_path: &Path) -> Arc<Notify> {
+        self.log_notifiers
+            .entry(config_path.to_path_buf())
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone()
     }
 
     /// Create a new cursor at start or end of files.
@@ -269,6 +282,7 @@ impl CursorManager {
             let cursor = arc.lock().unwrap_or_else(|e| e.into_inner());
             cursor.config_path != config_path
         });
+        self.log_notifiers.remove(config_path);
     }
 
     /// Remove all cursors belonging to the given connection.

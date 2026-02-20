@@ -332,6 +332,7 @@ impl Client {
         cursor_id: Option<&str>,
         from_start: bool,
         no_hooks: bool,
+        poll_timeout_ms: Option<u32>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::LogsCursor {
             config_path: config_path.to_path_buf(),
@@ -339,6 +340,7 @@ impl Client {
             cursor_id: cursor_id.map(String::from),
             from_start,
             no_hooks,
+            poll_timeout_ms,
         })
     }
 

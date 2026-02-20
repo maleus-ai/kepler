@@ -98,6 +98,11 @@ impl ProgressSender {
         }
     }
 
+    /// Check if the client has disconnected (the write channel is closed).
+    pub fn is_closed(&self) -> bool {
+        self.write_tx.is_closed()
+    }
+
     /// Wait until the client disconnects (the write channel is closed).
     pub async fn closed(&self) {
         self.write_tx.closed().await

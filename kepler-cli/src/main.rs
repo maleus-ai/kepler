@@ -1209,6 +1209,7 @@ trait FollowClient {
         cursor_id: Option<&str>,
         from_start: bool,
         no_hooks: bool,
+        poll_timeout_ms: Option<u32>,
     ) -> std::result::Result<Response, ClientError>;
 }
 
@@ -1220,8 +1221,9 @@ impl FollowClient for Client {
         cursor_id: Option<&str>,
         from_start: bool,
         no_hooks: bool,
+        poll_timeout_ms: Option<u32>,
     ) -> std::result::Result<Response, ClientError> {
-        let (_rx, fut) = Client::logs_cursor(self, config_path, service, cursor_id, from_start, no_hooks)?;
+        let (_rx, fut) = Client::logs_cursor(self, config_path, service, cursor_id, from_start, no_hooks, poll_timeout_ms)?;
         fut.await
     }
 }
@@ -1253,6 +1255,8 @@ struct StreamCursorParams<'a> {
     service: Option<&'a str>,
     no_hooks: bool,
     mode: StreamMode,
+    /// If set, the server waits up to this many ms for new data (long polling).
+    poll_timeout_ms: Option<u32>,
 }
 
 /// Unified cursor-based log streaming loop.
@@ -1277,9 +1281,41 @@ async fn stream_cursor_logs(
     let mut quiescent_received = false;
 
     loop {
-        let log_response = client
-            .logs_cursor(params.config_path, params.service, cursor_id.as_deref(), from_start, params.no_hooks)
-            .await;
+        // Skip long polling for the drain pass after quiescence — we just want
+        // to check for remaining data, not wait for new writes.
+        let effective_timeout = if quiescent_received { None } else { params.poll_timeout_ms };
+
+        // When long polling is active in UntilQuiescent mode, race the cursor request
+        // against shutdown/quiescence so we react immediately instead of blocking for
+        // up to poll_timeout_ms. Without long polling, signals are checked in the
+        // post-processing section (original behavior).
+        let log_response = if params.mode == StreamMode::UntilQuiescent && effective_timeout.is_some() {
+            let cursor_fut = client.logs_cursor(
+                params.config_path, params.service, cursor_id.as_deref(),
+                from_start, params.no_hooks, effective_timeout,
+            );
+            tokio::pin!(cursor_fut);
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => {
+                    return Ok(StreamExitReason::ShutdownRequested);
+                }
+                _ = &mut quiescence, if !quiescent_received => {
+                    quiescent_received = true;
+                    // The in-flight request may hold data the server already
+                    // read (advancing the cursor). Await it to avoid data loss.
+                    // The server returns quickly if data was ready; worst case
+                    // waits for the remaining poll timeout (~2s) if it had none.
+                    cursor_fut.await
+                }
+                resp = &mut cursor_fut => resp,
+            }
+        } else {
+            client.logs_cursor(
+                params.config_path, params.service, cursor_id.as_deref(),
+                from_start, params.no_hooks, effective_timeout,
+            ).await
+        };
 
         let has_more_data;
         match log_response {
@@ -1339,33 +1375,36 @@ async fn stream_cursor_logs(
                 }
             }
             StreamMode::Follow => {
-                if !has_more_data {
+                // When long polling is active, the server already waited — no client-side sleep needed
+                if !has_more_data && params.poll_timeout_ms.is_none() {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
             StreamMode::UntilQuiescent => {
-                let delay = if has_more_data {
-                    Duration::ZERO
-                } else {
-                    Duration::from_millis(100)
-                };
-                tokio::select! {
-                    biased;
-                    _ = &mut shutdown => {
-                        return Ok(StreamExitReason::ShutdownRequested);
-                    }
-                    _ = &mut quiescence, if !quiescent_received => {
-                        quiescent_received = true;
-                        // Don't break yet — do one more cursor poll to discover
-                        // any newly created log files (e.g. hook logs written
-                        // just before quiescence fired), then drain them.
-                        continue;
-                    }
-                    _ = tokio::time::sleep(delay) => {}
-                }
                 // After quiescence signaled and all logs drained, exit
                 if quiescent_received && !has_more_data {
                     break;
+                }
+                // When long polling is active, signals are already checked during
+                // the cursor call (select! racing). Without long polling, check
+                // signals between iterations with a rate-limiting sleep.
+                if effective_timeout.is_none() {
+                    let delay = if has_more_data {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_millis(100)
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = &mut shutdown => {
+                            return Ok(StreamExitReason::ShutdownRequested);
+                        }
+                        _ = &mut quiescence, if !quiescent_received => {
+                            quiescent_received = true;
+                            continue;
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
                 }
             }
         }
@@ -1495,6 +1534,7 @@ async fn follow_logs_until_quiescent(
         async move {
             loop {
                 tokio::select! {
+                    biased;
                     signal = signal_rx.recv() => {
                         match signal {
                             Some(QuiescenceSignal::UnhandledFailure { service, exit_code }) => {
@@ -1544,6 +1584,7 @@ async fn follow_logs_until_quiescent(
             service,
             no_hooks: false,
             mode: StreamMode::UntilQuiescent,
+            poll_timeout_ms: Some(2000),
         },
         async { let _ = tokio::signal::ctrl_c().await; },
         quiescence_wrapper,
@@ -1646,6 +1687,9 @@ async fn handle_logs(
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
 
+    // Use long polling for follow modes (Follow/UntilQuiescent), not for All mode
+    let poll_timeout_ms = if stream_mode != StreamMode::All { Some(2000) } else { None };
+
     stream_cursor_logs(
         client,
         StreamCursorParams {
@@ -1653,6 +1697,7 @@ async fn handle_logs(
             service: service.as_deref(),
             no_hooks,
             mode: stream_mode,
+            poll_timeout_ms,
         },
         std::future::pending(),
         std::future::pending(),

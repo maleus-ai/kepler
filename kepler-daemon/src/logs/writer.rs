@@ -5,6 +5,9 @@ use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use tokio::sync::Notify;
 
 use super::{LogStream, LogWriterConfig};
 
@@ -30,6 +33,8 @@ pub struct BufferedLogWriter {
     format_buffer: String,
     service_name: String,
     stream: LogStream,
+    /// Optional notifier to wake cursor handlers when log data is flushed.
+    log_notify: Option<Arc<Notify>>,
 }
 
 impl std::fmt::Debug for BufferedLogWriter {
@@ -92,18 +97,21 @@ impl BufferedLogWriter {
             format_buffer: String::with_capacity(256),
             service_name: service_name.to_string(),
             stream,
+            log_notify: None,
         }
     }
 
     /// Create from a LogWriterConfig
     pub fn from_config(config: &LogWriterConfig, service_name: &str, stream: LogStream) -> Self {
-        Self::new(
+        let mut writer = Self::new(
             &config.logs_dir,
             service_name,
             stream,
             config.max_log_size,
             config.buffer_size,
-        )
+        );
+        writer.log_notify = config.log_notify.clone();
+        writer
     }
 
     /// Write a log line (adds timestamp automatically)
@@ -118,6 +126,9 @@ impl BufferedLogWriter {
         if self.buffer_size == 0 {
             // No buffering - write directly to disk
             self.write_format_buffer_to_disk();
+            if let Some(ref notify) = self.log_notify {
+                notify.notify_waiters();
+            }
         } else {
             // Buffer the entry
             self.buffer.extend_from_slice(self.format_buffer.as_bytes());
@@ -139,6 +150,9 @@ impl BufferedLogWriter {
         self.write_to_disk(&buffer);
         self.buffer = buffer;
         self.buffer.clear();
+        if let Some(ref notify) = self.log_notify {
+            notify.notify_waiters();
+        }
     }
 
     /// Write the format buffer directly to disk without allocation.
