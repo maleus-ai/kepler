@@ -63,7 +63,7 @@ kepler:
 
   hooks:
     pre_start:
-      - if: not service.initialized
+      - if: ${{ not hook.initialized }}$
         run: echo "Global on_init — initializing platform"
         environment:
           - KEPLER_PHASE=init
@@ -118,7 +118,7 @@ services:
         on_exit: retain
     hooks:
       pre_start:
-        - if: not service.initialized
+        - if: ${{ not service.initialized }}$
           run: echo "postgres on_init — creating data directory"
         - command: ["sh", "-c", "echo 'postgres pre_start — checking config'"]
       post_start:
@@ -244,12 +244,12 @@ services:
         - run: echo "::output::started_at=$(date +%s)"
           output: timing
         - run: echo "db-migration pre_start — schema version from hook=${{ hooks.pre_start.outputs.timing.started_at }}$"
-        - if: always()
+        - if: ${{ always() }}$
           run: echo "db-migration pre_start — always runs regardless of prior step outcome"
       post_exit:
-        - if: service.exit_code == 0
+        - if: ${{ service.exit_code == 0 }}$
           run: echo "db-migration post_exit — migration succeeded"
-        - if: failure()
+        - if: ${{ failure() }}$
           run: echo "db-migration post_exit — a prior hook step failed, running cleanup"
 
   # 7. db-seed — Cross-service output access, sequential env evaluation, outputs declaration
@@ -348,7 +348,7 @@ services:
       start_period: 2s
     hooks:
       pre_start:
-        - if: not service.initialized
+        - if: ${{ not service.initialized }}$
           run: echo "::output::jwt_key=rsa-256-init"
           output: init_keys
           environment: !lua |
@@ -359,7 +359,7 @@ services:
         command: ["sh", "-c", "echo 'auth-service post_start — listening'"]
       pre_stop:
         - run: echo "auth-service pre_stop — draining connections"
-        - if: deps.postgres.status == 'healthy'
+        - if: ${{ deps.postgres.status == 'healthy' }}$
           run: echo "auth-service pre_stop — postgres still healthy, flushing sessions"
       post_stop:
         command: ["sh", "-c", "echo 'auth-service post_stop — cleanup done'"]
@@ -1006,7 +1006,7 @@ services:
 
   # 41. uptime-checker — Lua global table usage, conditional startup
   uptime-checker:
-    if: true
+    if: ${{ true }}$
     command:
       [
         "sh",
@@ -1137,9 +1137,9 @@ services:
           allow_skipped: true
     hooks:
       pre_start:
-        - if: skipped('postgres-failover')
+        - if: ${{ skipped('postgres-failover') }}$
           run: echo "cascade-handler — postgres-failover was skipped, running in no-op mode"
-        - if: success('postgres-failover')
+        - if: ${{ success('postgres-failover') }}$
           run: echo "cascade-handler — postgres-failover succeeded, proceeding with full recovery"
 
   # 49. emergency-shutdown — 3x service_failed fan-in
@@ -1160,18 +1160,18 @@ services:
           condition: service_failed
     hooks:
       pre_start:
-        - if: not service.initialized
+        - if: ${{ not service.initialized }}$
           run: echo "::output::runbook_loaded=true"
           output: init_step
         - run: echo "emergency-shutdown pre_start — notifying oncall, runbook=${{ hooks.pre_start.outputs.init_step.runbook_loaded or 'skipped' }}$"
-        - if: failure()
+        - if: ${{ failure() }}$
           run: echo "emergency-shutdown pre_start — a prior step failed, proceeding with caution"
-        - if: always()
+        - if: ${{ always() }}$
           run: echo "emergency-shutdown pre_start — final step always executes"
       post_exit:
-        - if: service.exit_code == 0
+        - if: ${{ service.exit_code == 0 }}$
           run: echo "emergency-shutdown post_exit — incident report filed successfully"
-        - if: service.exit_code ~= 0
+        - if: ${{ service.exit_code ~= 0 }}$
           run: echo "emergency-shutdown post_exit — shutdown failed with code ${{ service.exit_code }}$"
 
   # 50. post-mortem — run: form, embedded expressions, dep exit_code access
@@ -1196,7 +1196,7 @@ services:
       post_exit:
         - command:
             ["sh", "-c", "echo 'post-mortem post_exit — archiving report'"]
-        - if: always()
+        - if: ${{ always() }}$
           run: echo "post-mortem — final cleanup, status=${{ service.status }}$"
 
   # ═══════════════════════════════════════════════════════════════════════════
