@@ -166,7 +166,7 @@ async fn run() -> Result<()> {
                         .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
                     let result = tokio::time::timeout(
                         timeout_duration,
-                        wait_until_ready_with_start(progress_rx, sub_future, start_future, abort_on_failure, &client, &canonical_path),
+                        wait_until_ready_with_start(progress_rx, sub_future, start_future, !no_abort_on_failure, &client, &canonical_path),
                     ).await;
                     match result {
                         Ok(Ok(())) => {}
@@ -177,7 +177,7 @@ async fn run() -> Result<()> {
                         }
                     }
                 } else {
-                    wait_until_ready_with_start(progress_rx, sub_future, start_future, abort_on_failure, &client, &canonical_path).await?;
+                    wait_until_ready_with_start(progress_rx, sub_future, start_future, !no_abort_on_failure, &client, &canonical_path).await?;
                 }
             } else if detach {
                 // -d: Fire start, exit immediately
@@ -199,7 +199,7 @@ async fn run() -> Result<()> {
                 )?;
                 foreground_with_logs(
                     start_future,
-                    follow_logs_until_quiescent(&client, &canonical_path, log_service, !no_abort_on_failure),
+                    follow_logs_until_quiescent(&client, &canonical_path, log_service, abort_on_failure),
                 ).await?;
             }
         }

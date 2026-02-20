@@ -190,11 +190,11 @@ services:
 
 ### Behavior by Mode
 
-| Mode                        | Default on unhandled failure   | Override flag                                      |
-| --------------------------- | ------------------------------ | -------------------------------------------------- |
-| Foreground (`kepler start`) | Stop all services + exit 1     | `--no-abort-on-failure`: just exit 1 at quiescence |
-| `kepler start -d --wait`    | Exit 1 (services left running) | `--abort-on-failure`: stop all services + exit 1   |
-| `kepler start -d`           | No detection (fire-and-forget) | —                                                  |
+| Mode                        | Default on unhandled failure                         | Override flag                                                    |
+| --------------------------- | ---------------------------------------------------- | ---------------------------------------------------------------- |
+| Foreground (`kepler start`) | Exit 1 at quiescence (services keep running until quiescent) | `--abort-on-failure`: stop all services immediately, exit 1 |
+| `kepler start -d --wait`    | Stop all services + exit 1                           | `--no-abort-on-failure`: exit 1 without stopping services        |
+| `kepler start -d`           | No detection (fire-and-forget)                       | —                                                                |
 
 See [CLI Reference](cli-reference.md#kepler-start) for flag details.
 
