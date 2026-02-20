@@ -179,6 +179,10 @@ pub enum Request {
         /// Whether to exclude hook log entries
         #[serde(default)]
         no_hooks: bool,
+        /// If set, the server will wait up to this many ms for new data before
+        /// returning an empty response. Enables server-side long polling.
+        #[serde(default)]
+        poll_timeout_ms: Option<u32>,
     },
     /// Subscribe to service state change events
     Subscribe {

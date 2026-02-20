@@ -29,6 +29,7 @@ impl FollowClient for MockClient {
         _cursor_id: Option<&str>,
         _from_start: bool,
         _no_hooks: bool,
+        _poll_timeout_ms: Option<u32>,
     ) -> std::result::Result<Response, ClientError> {
         self.cursor_responses
             .lock()
@@ -124,7 +125,7 @@ async fn test_follow_reads_cursor_and_exits_on_quiescence() {
 
     // Fire quiescence after we've collected 3 lines
     let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
         async { let _ = rx.await; },
         |st, entries| {
             collect_batch(&mut collected, st, entries);
@@ -153,7 +154,7 @@ async fn test_follow_drains_logs_after_quiescence() {
 
     // Quiescence fires immediately — but logs should still be drained
     let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
         async {},  // quiescence fires immediately
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
@@ -177,7 +178,7 @@ async fn test_follow_continues_without_quiescence() {
     let mut tx = Some(tx);
 
     let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
         async { let _ = rx.await; },
         |st, entries| {
             collect_batch(&mut collected, st, entries);
@@ -213,7 +214,7 @@ async fn test_follow_shutdown_stops_cursor_reads() {
 
     // Shutdown resolves immediately — the biased select picks it up after first cursor read
     let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, async {},
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, async {},
         never_quiescent(),
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
@@ -244,7 +245,7 @@ async fn test_follow_shutdown_after_n_reads() {
 
     // Trigger shutdown after 3 batches are collected
     let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent },
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None },
         async move { notify_clone.notified().await },
         never_quiescent(),
         |st, entries| {
@@ -274,7 +275,7 @@ async fn test_follow_daemon_disconnect_exits() {
     let mut collected = Vec::new();
 
     stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
         never_quiescent(),
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
@@ -299,7 +300,7 @@ async fn test_follow_cursor_expired_resets_and_retries() {
     let (tx, rx) = oneshot::channel::<()>();
     let mut tx = Some(tx);
     let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
         async { let _ = rx.await; },
         |st, entries| {
             collect_batch(&mut collected, st, entries);
@@ -325,7 +326,7 @@ async fn test_follow_server_error_breaks_loop() {
     let mut collected = Vec::new();
 
     stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
         never_quiescent(),
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
@@ -348,7 +349,7 @@ async fn test_follow_empty_cursor_exits_on_quiescence() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
         async {},  // quiescence fires immediately
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
@@ -368,7 +369,7 @@ async fn test_follow_shutdown_returns_immediately() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, async {},
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, async {},
         never_quiescent(),
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
@@ -599,7 +600,7 @@ async fn test_follow_config_not_loaded_retries_then_starts() {
     let (tx, rx) = oneshot::channel::<()>();
     let mut tx = Some(tx);
     stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
         async { let _ = rx.await; },
         |st, entries| {
             collect_batch(&mut collected, st, entries);
@@ -624,7 +625,7 @@ async fn test_follow_config_not_loaded_exits_on_quiescence() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
         async {},  // quiescence fires immediately (config was unloaded)
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
@@ -643,7 +644,7 @@ async fn test_follow_config_not_loaded_shutdown() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, async {},  // shutdown fires immediately
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, async {},  // shutdown fires immediately
         never_quiescent(),
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
@@ -662,7 +663,7 @@ async fn test_follow_shutdown_handles_starting_services() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, async {},
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, async {},
         never_quiescent(),
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
@@ -684,7 +685,7 @@ async fn test_follow_exits_on_quiescence() {
     let (tx, rx) = oneshot::channel::<()>();
     let mut tx = Some(tx);
     stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent }, never_shutdown(),
+        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
         async { let _ = rx.await; },
         |st, entries| {
             collect_batch(&mut collected, st, entries);

@@ -766,8 +766,10 @@ async fn handle_request(
             cursor_id,
             from_start,
             no_hooks,
+            poll_timeout_ms,
         } => {
-            use kepler_protocol::protocol::LogCursorData;
+            use kepler_protocol::protocol::{CursorLogEntry, LogCursorData};
+            use tokio::time::Instant;
 
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -797,44 +799,77 @@ async fn handle_request(
             };
 
             // Read entries from cursor
-            match cursor_manager.read_entries(&cursor_id, &config_path) {
-                Ok((entries, has_more)) => {
-                    // Build service table and compact entries with u16 service_id
-                    use kepler_protocol::protocol::CursorLogEntry;
-                    let mut service_table: Vec<Arc<str>> = Vec::new();
-                    let mut service_map: HashMap<Arc<str>, u16> = HashMap::new();
-                    let mut compact_entries = Vec::with_capacity(entries.len());
+            let (entries, has_more) = match cursor_manager.read_entries(&cursor_id, &config_path) {
+                Ok(result) => result,
+                Err(e) => return Response::error(e.to_string()),
+            };
 
-                    for log_line in entries {
-                        let service_id = match service_map.get(&log_line.service) {
-                            Some(&id) => id,
-                            None => {
-                                let id = service_table.len() as u16;
-                                service_table.push(Arc::clone(&log_line.service));
-                                service_map.insert(Arc::clone(&log_line.service), id);
-                                id
+            // If no data and poll_timeout_ms is set, wait for notification
+            let (entries, has_more) = if entries.is_empty() && !has_more {
+                if let Some(timeout_ms) = poll_timeout_ms {
+                    let notify = cursor_manager.get_log_notify(&config_path);
+                    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+                    let mut final_entries = entries;
+                    let mut final_has_more = has_more;
+                    loop {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() || progress.is_closed() {
+                            break;
+                        }
+                        tokio::select! {
+                            _ = notify.notified() => {}
+                            _ = tokio::time::sleep(remaining) => { break; }
+                        }
+                        match cursor_manager.read_entries(&cursor_id, &config_path) {
+                            Ok((entries, has_more)) if !entries.is_empty() || has_more => {
+                                final_entries = entries;
+                                final_has_more = has_more;
+                                break;
                             }
-                        };
-                        compact_entries.push(CursorLogEntry {
-                            service_id,
-                            line: log_line.line,
-                            timestamp: log_line.timestamp,
-                            stream: match log_line.stream {
-                                kepler_daemon::logs::LogStream::Stdout => kepler_protocol::protocol::StreamType::Stdout,
-                                kepler_daemon::logs::LogStream::Stderr => kepler_protocol::protocol::StreamType::Stderr,
-                            },
-                        });
+                            Err(e) => return Response::error(e.to_string()),
+                            _ => {} // spurious wake — continue waiting
+                        }
                     }
-
-                    Response::ok_with_data(ResponseData::LogCursor(LogCursorData {
-                        service_table,
-                        entries: compact_entries,
-                        cursor_id,
-                        has_more,
-                    }))
+                    (final_entries, final_has_more)
+                } else {
+                    (entries, has_more)
                 }
-                Err(e) => Response::error(e.to_string()),
+            } else {
+                (entries, has_more)
+            };
+
+            // Build service table and compact entries with u16 service_id
+            let mut service_table: Vec<Arc<str>> = Vec::new();
+            let mut service_map: HashMap<Arc<str>, u16> = HashMap::new();
+            let mut compact_entries = Vec::with_capacity(entries.len());
+
+            for log_line in entries {
+                let service_id = match service_map.get(&log_line.service) {
+                    Some(&id) => id,
+                    None => {
+                        let id = service_table.len() as u16;
+                        service_table.push(Arc::clone(&log_line.service));
+                        service_map.insert(Arc::clone(&log_line.service), id);
+                        id
+                    }
+                };
+                compact_entries.push(CursorLogEntry {
+                    service_id,
+                    line: log_line.line,
+                    timestamp: log_line.timestamp,
+                    stream: match log_line.stream {
+                        kepler_daemon::logs::LogStream::Stdout => kepler_protocol::protocol::StreamType::Stdout,
+                        kepler_daemon::logs::LogStream::Stderr => kepler_protocol::protocol::StreamType::Stderr,
+                    },
+                });
             }
+
+            Response::ok_with_data(ResponseData::LogCursor(LogCursorData {
+                service_table,
+                entries: compact_entries,
+                cursor_id,
+                has_more,
+            }))
         }
 
         Request::Subscribe {

@@ -1,6 +1,9 @@
 //! Configuration for log writers
 
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use tokio::sync::Notify;
 
 use super::DEFAULT_BUFFER_SIZE;
 
@@ -16,6 +19,8 @@ pub struct LogWriterConfig {
     pub max_log_size: Option<u64>,
     /// Buffer size in bytes. 0 = synchronous writes (no buffering).
     pub buffer_size: usize,
+    /// Optional notifier to wake cursor handlers when log data is flushed.
+    pub log_notify: Option<Arc<Notify>>,
 }
 
 impl LogWriterConfig {
@@ -25,6 +30,7 @@ impl LogWriterConfig {
             logs_dir,
             max_log_size: None, // Unbounded by default
             buffer_size: DEFAULT_BUFFER_SIZE,
+            log_notify: None,
         }
     }
 
@@ -34,6 +40,7 @@ impl LogWriterConfig {
             logs_dir,
             max_log_size: Some(max_log_size),
             buffer_size: DEFAULT_BUFFER_SIZE,
+            log_notify: None,
         }
     }
 
@@ -47,6 +54,7 @@ impl LogWriterConfig {
             logs_dir,
             max_log_size,
             buffer_size,
+            log_notify: None,
         }
     }
 }

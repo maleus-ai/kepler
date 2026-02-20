@@ -178,15 +178,17 @@ fn roundtrip_envelope_logs_cursor() {
             cursor_id: Some("cursor-abc123".into()),
             from_start: true,
             no_hooks: false,
+            poll_timeout_ms: Some(2000),
         },
     };
     let bytes = encode_envelope(&envelope).unwrap();
     let decoded = decode_envelope(&bytes[4..]).unwrap();
     match decoded.request {
-        Request::LogsCursor { cursor_id, from_start, no_hooks, .. } => {
+        Request::LogsCursor { cursor_id, from_start, no_hooks, poll_timeout_ms, .. } => {
             assert_eq!(cursor_id, Some("cursor-abc123".into()));
             assert!(from_start);
             assert!(!no_hooks);
+            assert_eq!(poll_timeout_ms, Some(2000));
         }
         _ => panic!("Expected LogsCursor request"),
     }

@@ -185,10 +185,11 @@ impl ServiceOrchestrator {
                 .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?,
         ));
 
-        let log_config = handle
+        let mut log_config = handle
             .get_log_config()
             .await
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
+        log_config.log_notify = Some(self.cursor_manager.get_log_notify(config_path));
 
         let global_hooks = config.global_hooks().cloned();
         let global_log_config = config.global_logs().cloned();
@@ -425,7 +426,8 @@ impl ServiceOrchestrator {
                 // Write error to service stderr log so it's visible via `kepler logs`.
                 // Skip for hook errors — they already wrote to stderr in run_service_hook.
                 if !matches!(e, OrchestratorError::HookFailed(_)) {
-                    if let Some(log_config) = handle.get_log_config().await {
+                    if let Some(mut log_config) = handle.get_log_config().await {
+                        log_config.log_notify = Some(self.cursor_manager.get_log_notify(handle.config_path()));
                         let mut writer = BufferedLogWriter::from_config(&log_config, service_name, LogStream::Stderr);
                         writer.write(&e.to_string());
                     }
@@ -1050,7 +1052,10 @@ impl ServiceOrchestrator {
             None => get_stop_order(&config.services)?,
         };
 
-        let log_config = handle.get_log_config().await;
+        let log_config = handle.get_log_config().await.map(|mut cfg| {
+            cfg.log_notify = Some(self.cursor_manager.get_log_notify(config_path));
+            cfg
+        });
         let global_log_config = config.global_logs().cloned();
         let global_hooks = config.global_hooks().cloned();
 
@@ -1388,7 +1393,10 @@ impl ServiceOrchestrator {
             .await
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
-        let log_config = handle.get_log_config().await;
+        let log_config = handle.get_log_config().await.map(|mut cfg| {
+            cfg.log_notify = Some(self.cursor_manager.get_log_notify(config_path));
+            cfg
+        });
         let global_hooks = config.global_hooks().cloned();
         let global_log_config = config.global_logs().cloned();
 
