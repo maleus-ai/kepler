@@ -1170,8 +1170,8 @@ impl ServiceOrchestrator {
             }
         }
 
-        // Run global post_stop hook if stopping all and services were stopped
-        if service_filter.is_none() && !stopped.is_empty()
+        // Run global post_stop hook if stopping all services
+        if service_filter.is_none()
             && let Some(ref log_cfg) = log_config
             && let Err(e) = run_global_hook(
                 &global_hooks,
@@ -1279,7 +1279,7 @@ impl ServiceOrchestrator {
             }
 
             // Clear global hook logs if stopping all
-            if service_filter.is_none() && (!stopped.is_empty() || clean) {
+            if service_filter.is_none() {
                 // When clean is true, always clear; otherwise check on_stop retention
                 let should_clear_global = clean
                     || global_log_config
@@ -2588,6 +2588,95 @@ impl ServiceOrchestrator {
         .await
         {
             warn!("pre_cleanup hook failed: {}", e);
+        }
+    }
+
+    /// Run global `pre_stop` + `post_stop` hooks on quiescence.
+    /// Called by the subscribe handler so hooks complete before the CLI receives
+    /// the quiescent signal (ensuring hook output appears in foreground logs).
+    pub async fn run_quiescence_hooks(
+        &self,
+        config_path: &Path,
+    ) {
+        let handle = match self.registry.get(&config_path.to_path_buf()) {
+            Some(h) => h,
+            None => return,
+        };
+
+        let config = match handle.get_config().await {
+            Some(c) => c,
+            None => return,
+        };
+
+        let config_dir = config_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let global_hooks = config.global_hooks().cloned();
+        let global_log_config = config.global_logs().cloned();
+        let stored_env = handle.get_sys_env().await;
+        let log_config = handle.get_log_config().await.map(|mut cfg| {
+            cfg.log_notify = Some(self.cursor_manager.get_log_notify(config_path));
+            cfg
+        });
+
+        if let Some(ref log_cfg) = log_config {
+            let params = GlobalHookParams {
+                working_dir: &config_dir,
+                env: &stored_env,
+                log_config: Some(log_cfg),
+                global_log_config: global_log_config.as_ref(),
+                progress: &None,
+                handle: Some(&handle),
+                lua_code: config.lua.as_deref(),
+            };
+
+            if let Err(e) = run_global_hook(&global_hooks, GlobalHookType::PreStop, &params).await {
+                warn!("Global pre_stop hook (quiescence) failed: {}", e);
+            }
+            if let Err(e) = run_global_hook(&global_hooks, GlobalHookType::PostStop, &params).await {
+                warn!("Global post_stop hook (quiescence) failed: {}", e);
+            }
+        }
+    }
+
+    /// Clear only the `pre_stop` and `post_stop` global hook log files
+    /// after the quiescent signal has been sent to the CLI. This avoids
+    /// accumulation across runs while leaving other global hook logs
+    /// (e.g. `pre_start`) untouched.
+    pub async fn clear_quiescence_hook_logs(
+        &self,
+        config_path: &Path,
+    ) {
+        let handle = match self.registry.get(&config_path.to_path_buf()) {
+            Some(h) => h,
+            None => return,
+        };
+
+        let config = match handle.get_config().await {
+            Some(c) => c,
+            None => return,
+        };
+
+        let global_log_config = config.global_logs().cloned();
+        let log_config = match handle.get_log_config().await {
+            Some(cfg) => cfg,
+            None => return,
+        };
+
+        let should_clear = global_log_config
+            .as_ref()
+            .and_then(|c| c.get_on_stop())
+            .unwrap_or(LogRetention::Clear)
+            == LogRetention::Clear;
+
+        if should_clear {
+            use crate::logs::LogReader;
+            let reader = LogReader::new(log_config.logs_dir);
+            // Only delete pre_stop/post_stop files — not all global.* hooks.
+            reader.clear_service_prefix("global.pre_stop");
+            reader.clear_service_prefix("global.post_stop");
         }
     }
 
