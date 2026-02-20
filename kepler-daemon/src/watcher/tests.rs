@@ -73,7 +73,7 @@ fn process_events_include_only() {
     let (include, exclude) = make_glob_sets(&["src/**/*.ts"]);
     let events = vec![file_event("/project/src/app.ts")];
 
-    assert!(actor.process_file_events(&events, &include, &exclude));
+    assert!(!actor.process_file_events(&events, &include, &exclude).is_empty());
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn process_events_no_match() {
     let (include, exclude) = make_glob_sets(&["src/**/*.ts"]);
     let events = vec![file_event("/project/src/style.css")];
 
-    assert!(!actor.process_file_events(&events, &include, &exclude));
+    assert!(actor.process_file_events(&events, &include, &exclude).is_empty());
 }
 
 #[test]
@@ -92,11 +92,11 @@ fn process_events_negation_excludes_file() {
 
     // Regular .ts file should trigger restart
     let events = vec![file_event("/project/src/app.ts")];
-    assert!(actor.process_file_events(&events, &include, &exclude));
+    assert!(!actor.process_file_events(&events, &include, &exclude).is_empty());
 
     // .test.ts file should NOT trigger restart
     let events = vec![file_event("/project/src/app.test.ts")];
-    assert!(!actor.process_file_events(&events, &include, &exclude));
+    assert!(actor.process_file_events(&events, &include, &exclude).is_empty());
 }
 
 #[test]
@@ -105,21 +105,21 @@ fn process_events_negation_multiple_excludes() {
     let (include, exclude) =
         make_glob_sets(&["src/**/*.ts", "!**/*.test.ts", "!**/*.spec.ts"]);
 
-    assert!(actor.process_file_events(
+    assert!(!actor.process_file_events(
         &[file_event("/project/src/app.ts")],
         &include,
         &exclude
-    ));
-    assert!(!actor.process_file_events(
+    ).is_empty());
+    assert!(actor.process_file_events(
         &[file_event("/project/src/app.test.ts")],
         &include,
         &exclude
-    ));
-    assert!(!actor.process_file_events(
+    ).is_empty());
+    assert!(actor.process_file_events(
         &[file_event("/project/src/app.spec.ts")],
         &include,
         &exclude
-    ));
+    ).is_empty());
 }
 
 #[test]
@@ -132,14 +132,14 @@ fn process_events_mixed_batch_excluded_file_does_not_trigger() {
         file_event("/project/src/foo.test.ts"),
         file_event("/project/src/bar.test.ts"),
     ];
-    assert!(!actor.process_file_events(&events, &include, &exclude));
+    assert!(actor.process_file_events(&events, &include, &exclude).is_empty());
 
     // Batch with one included file should trigger
     let events = vec![
         file_event("/project/src/foo.test.ts"),
         file_event("/project/src/app.ts"),
     ];
-    assert!(actor.process_file_events(&events, &include, &exclude));
+    assert!(!actor.process_file_events(&events, &include, &exclude).is_empty());
 }
 
 #[test]
@@ -148,16 +148,63 @@ fn process_events_negation_with_subdirectory_pattern() {
     let (include, exclude) =
         make_glob_sets(&["src/**/*.ts", "!src/generated/**"]);
 
-    assert!(actor.process_file_events(
+    assert!(!actor.process_file_events(
         &[file_event("/project/src/app.ts")],
         &include,
         &exclude
-    ));
-    assert!(!actor.process_file_events(
+    ).is_empty());
+    assert!(actor.process_file_events(
         &[file_event("/project/src/generated/types.ts")],
         &include,
         &exclude
-    ));
+    ).is_empty());
+}
+
+// --- process_file_events: matched_files content tests ---
+
+#[test]
+fn process_events_returns_correct_matched_path() {
+    let actor = make_actor("/project");
+    let (include, exclude) = make_glob_sets(&["src/**/*.ts"]);
+    let events = vec![file_event("/project/src/app.ts")];
+
+    let matched = actor.process_file_events(&events, &include, &exclude);
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0], PathBuf::from("/project/src/app.ts"));
+}
+
+#[test]
+fn process_events_batch_returns_all_matched_files() {
+    let actor = make_actor("/project");
+    let (include, exclude) = make_glob_sets(&["src/**/*.ts"]);
+    let events = vec![
+        file_event("/project/src/app.ts"),
+        file_event("/project/src/utils.ts"),
+        file_event("/project/src/index.ts"),
+    ];
+
+    let matched = actor.process_file_events(&events, &include, &exclude);
+    assert_eq!(matched.len(), 3);
+    assert!(matched.contains(&PathBuf::from("/project/src/app.ts")));
+    assert!(matched.contains(&PathBuf::from("/project/src/utils.ts")));
+    assert!(matched.contains(&PathBuf::from("/project/src/index.ts")));
+}
+
+#[test]
+fn process_events_batch_only_returns_matching_files() {
+    let actor = make_actor("/project");
+    let (include, exclude) = make_glob_sets(&["src/**/*.ts", "!**/*.test.ts"]);
+    let events = vec![
+        file_event("/project/src/app.ts"),
+        file_event("/project/src/app.test.ts"),
+        file_event("/project/src/style.css"),
+        file_event("/project/src/utils.ts"),
+    ];
+
+    let matched = actor.process_file_events(&events, &include, &exclude);
+    assert_eq!(matched.len(), 2);
+    assert!(matched.contains(&PathBuf::from("/project/src/app.ts")));
+    assert!(matched.contains(&PathBuf::from("/project/src/utils.ts")));
 }
 
 // --- collect_watch_dirs tests ---

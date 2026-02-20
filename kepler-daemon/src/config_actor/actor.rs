@@ -811,10 +811,14 @@ impl ConfigActor {
                 handle,
             } => match handle_type {
                 TaskHandleType::HealthCheck => {
-                    self.health_checks.insert(service_name, handle);
+                    if let Some(old) = self.health_checks.insert(service_name, handle) {
+                        old.abort();
+                    }
                 }
                 TaskHandleType::FileWatcher => {
-                    self.watchers.insert(service_name, handle);
+                    if let Some(old) = self.watchers.insert(service_name, handle) {
+                        old.abort();
+                    }
                 }
             },
             ConfigCommand::CancelTaskHandle {
