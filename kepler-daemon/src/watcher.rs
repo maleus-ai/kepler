@@ -53,6 +53,7 @@ fn is_absolute_pattern(pattern: &str) -> bool {
 pub struct FileChangeEvent {
     pub config_path: PathBuf,
     pub service_name: String,
+    pub matched_files: Vec<PathBuf>,
 }
 
 /// File watcher actor that watches for file changes and sends restart events
@@ -223,11 +224,12 @@ impl FileWatcherActor {
             tokio::select! {
                 // Handle file change events
                 Some(events) = async_event_rx.recv() => {
-                    let should_restart = self.process_file_events(&events, &include_set, &exclude_set);
-                    if should_restart {
+                    let matched_files = self.process_file_events(&events, &include_set, &exclude_set);
+                    if !matched_files.is_empty() {
                         let event = FileChangeEvent {
                             config_path: self.config_path.clone(),
                             service_name: self.service_name.clone(),
+                            matched_files,
                         };
                         // Use try_send with overflow handling
                         match self.restart_tx.try_send(event) {
@@ -269,14 +271,16 @@ impl FileWatcherActor {
         Ok(())
     }
 
-    /// Process file events and return true if a restart should be triggered.
+    /// Process file events and return the list of matched files that should trigger a restart.
     /// A file triggers a restart if it matches an include pattern and does NOT match any exclude pattern.
     fn process_file_events(
         &self,
         events: &[notify_debouncer_mini::DebouncedEvent],
         include_set: &GlobSet,
         exclude_set: &GlobSet,
-    ) -> bool {
+    ) -> Vec<PathBuf> {
+        let mut matched_files = Vec::new();
+
         for event in events {
             if event.kind == DebouncedEventKind::Any {
                 let path = &event.path;
@@ -304,7 +308,7 @@ impl FileWatcherActor {
                             "File change detected for {} (absolute match): {:?}",
                             self.service_name, path
                         );
-                        return true;
+                        matched_files.push(path.clone());
                     } else {
                         debug!(
                             "File change excluded for {} by negation pattern: {:?}",
@@ -331,7 +335,7 @@ impl FileWatcherActor {
                                 "File change detected for {} (relative match): {:?}",
                                 self.service_name, path
                             );
-                            return true;
+                            matched_files.push(path.clone());
                         } else {
                             debug!(
                                 "File change excluded for {} by negation pattern: {:?}",
@@ -342,7 +346,7 @@ impl FileWatcherActor {
                 }
             }
         }
-        false
+        matched_files
     }
 }
 

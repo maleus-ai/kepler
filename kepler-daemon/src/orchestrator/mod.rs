@@ -12,7 +12,7 @@ pub use error::OrchestratorError;
 pub use events::{spawn_event_forwarders, ServiceEventHandler, TaggedEventMessage};
 pub use lifecycle::LifecycleEvent;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1264,6 +1264,12 @@ impl ServiceOrchestrator {
 
         // Phase 1: Run pre_restart hooks and stop (reverse dependency order)
         for service_name in &stop_order {
+            // Cancel file watcher early so hooks that modify watched files
+            // don't queue spurious restart events.
+            handle
+                .cancel_task_handle(service_name, TaskHandleType::FileWatcher)
+                .await;
+
             // Get service context
             let ctx = match handle.get_service_context(service_name).await {
                 Some(ctx) => ctx,
@@ -1470,6 +1476,12 @@ impl ServiceOrchestrator {
                     reason: reason.clone(),
                 },
             )
+            .await;
+
+        // Cancel file watcher early so hooks that modify watched files
+        // don't queue spurious restart events.
+        handle
+            .cancel_task_handle(service_name, TaskHandleType::FileWatcher)
             .await;
 
         // Get service context
@@ -1683,6 +1695,12 @@ impl ServiceOrchestrator {
                 restart_policy
             );
 
+            // Cancel file watcher before hooks run so that hook file modifications
+            // don't queue spurious restart events.
+            handle
+                .cancel_task_handle(service_name, TaskHandleType::FileWatcher)
+                .await;
+
             // Run pre_restart hook
             if let Err(e) = self
                 .run_service_hook(&ctx, service_name, ServiceHookType::PreRestart, &None, Some(&handle))
@@ -1855,9 +1873,23 @@ impl ServiceOrchestrator {
 
     /// Handle a file change event by restarting the affected service
     pub async fn handle_file_change(&self, event: FileChangeEvent) {
+        // Check if the service is still active before restarting.
+        // A file change event may have been enqueued before the service was stopped.
+        if let Some(handle) = self.registry.get(&event.config_path) {
+            if let Some(state) = handle.get_service_state(&event.service_name).await {
+                if !state.status.is_active() {
+                    debug!(
+                        "Ignoring file change for {} (status: {})",
+                        event.service_name, state.status
+                    );
+                    return;
+                }
+            }
+        }
+
         info!(
-            "File change detected for {} in {:?}, restarting",
-            event.service_name, event.config_path
+            "File change detected for {}, restarting. Matched files: {:?}",
+            event.service_name, event.matched_files
         );
 
         if let Err(e) = self
@@ -1877,10 +1909,28 @@ impl ServiceOrchestrator {
         mut restart_rx: mpsc::Receiver<FileChangeEvent>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
+            let in_flight: Arc<std::sync::Mutex<HashSet<String>>> =
+                Arc::new(std::sync::Mutex::new(HashSet::new()));
+
             while let Some(event) = restart_rx.recv().await {
+                {
+                    let set = in_flight.lock().unwrap();
+                    if set.contains(&event.service_name) {
+                        debug!(
+                            "Skipping file change event for {} (restart already in progress)",
+                            event.service_name
+                        );
+                        continue;
+                    }
+                }
+                in_flight.lock().unwrap().insert(event.service_name.clone());
+
                 let orch = Arc::clone(&self);
+                let in_flight = Arc::clone(&in_flight);
+                let service_name = event.service_name.clone();
                 tokio::spawn(async move {
                     orch.handle_file_change(event).await;
+                    in_flight.lock().unwrap().remove(&service_name);
                 });
             }
         })
