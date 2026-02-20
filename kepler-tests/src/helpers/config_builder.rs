@@ -1,7 +1,7 @@
 //! Programmatic config creation with builder pattern
 
 use kepler_daemon::config::{
-    ConfigValue, DependsOn, HealthCheck, HookCommand, HookCommon, KeplerConfig,
+    ConfigValue, DependsOn, EnvironmentEntries, HealthCheck, HookCommand, HookCommon, KeplerConfig,
     KeplerGlobalConfig, LogConfig, RawServiceConfig, ResourceLimits, RestartConfig, RestartPolicy,
     ServiceConfig, ServiceHooks, SysEnvPolicy,
 };
@@ -427,7 +427,7 @@ impl TestHookBuilder {
         HookCommand::Script {
             run: script.to_string().into(),
             common: HookCommon {
-                environment: ConfigValue::wrap_vec(environment).into(),
+                environment: EnvironmentEntries(ConfigValue::wrap_vec(environment)).into(),
                 ..Default::default()
             },
         }

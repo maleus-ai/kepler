@@ -11,7 +11,7 @@ use crate::process::CommandSpec;
 
 use super::hooks::HookCommand;
 use super::resources::ResourceLimits;
-use super::{ConfigValue, RawServiceConfig};
+use super::{ConfigValue, EnvironmentEntries, RawServiceConfig};
 
 /// Unresolved process specification referencing ConfigValue<T> fields.
 ///
@@ -27,7 +27,7 @@ pub struct ResolvableCommand<'a> {
     user: &'a ConfigValue<Option<String>>,
     groups: &'a ConfigValue<Vec<ConfigValue<String>>>,
     working_dir: &'a ConfigValue<Option<PathBuf>>,
-    environment: &'a ConfigValue<Vec<ConfigValue<String>>>,
+    environment: &'a ConfigValue<EnvironmentEntries>,
     env_file: &'a ConfigValue<Option<PathBuf>>,
     limits: &'a ConfigValue<Option<ResourceLimits>>,
 }
@@ -149,15 +149,16 @@ impl<'a> ResolvableCommand<'a> {
         // Get the inner Vec<ConfigValue<String>> — either directly or by evaluating
         // a top-level !lua/${{ }}$ and deserializing the result.
         let env_entries: Vec<ConfigValue<String>> = match self.environment {
-            ConfigValue::Static(entries) => entries.clone(),
+            ConfigValue::Static(entries) => entries.0.clone(),
             ConfigValue::Dynamic(expr) => {
                 let yaml = expr.evaluate(
                     evaluator, &prepared.table, config_path,
                     &format!("{}.environment", field_prefix),
                 )?;
-                serde_yaml::from_value(yaml).map_err(|e| {
+                let env: EnvironmentEntries = serde_yaml::from_value(yaml).map_err(|e| {
                     DaemonError::Config(format!("{}.environment: {}", field_prefix, e))
-                })?
+                })?;
+                env.0
             }
         };
 

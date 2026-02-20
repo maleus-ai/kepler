@@ -130,6 +130,134 @@ impl<T> ConfigValue<T> {
     }
 }
 
+// ============================================================================
+// EnvironmentEntries — newtype for environment field supporting both seq and map
+// ============================================================================
+
+/// Wrapper around `Vec<ConfigValue<String>>` that deserializes from both
+/// YAML sequence (`["KEY=VALUE", ...]`) and mapping (`{KEY: value, ...}`) formats.
+///
+/// When serialized, always produces a sequence (for round-trip through `ServiceConfig`).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(transparent)]
+pub struct EnvironmentEntries(pub Vec<ConfigValue<String>>);
+
+impl From<Vec<ConfigValue<String>>> for EnvironmentEntries {
+    fn from(v: Vec<ConfigValue<String>>) -> Self {
+        EnvironmentEntries(v)
+    }
+}
+
+impl EnvironmentEntries {
+    /// Create from a vec of static strings (convenience for tests).
+    pub fn from_static(v: Vec<String>) -> Self {
+        EnvironmentEntries(v.into_iter().map(ConfigValue::Static).collect())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EnvironmentEntries {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_yaml::Value::deserialize(deserializer)?;
+        match &value {
+            serde_yaml::Value::Null => Ok(EnvironmentEntries(Vec::new())),
+            serde_yaml::Value::Sequence(_) => {
+                // Delegate to Vec<ConfigValue<String>> deserialization (existing behavior)
+                let entries: Vec<ConfigValue<String>> = serde_yaml::from_value(value)
+                    .map_err(serde::de::Error::custom)?;
+                Ok(EnvironmentEntries(entries))
+            }
+            serde_yaml::Value::Mapping(map) => {
+                let mut entries = Vec::with_capacity(map.len());
+                for (k, v) in map {
+                    let key = match k {
+                        serde_yaml::Value::String(s) => s.clone(),
+                        serde_yaml::Value::Number(n) => n.to_string(),
+                        serde_yaml::Value::Bool(b) => b.to_string(),
+                        _ => return Err(serde::de::Error::custom(
+                            format!("environment map key must be a string, got: {:?}", k),
+                        )),
+                    };
+                    let prefix = format!("{}=", key);
+                    let entry = environment_map_entry(&prefix, v)
+                        .map_err(serde::de::Error::custom)?;
+                    entries.push(entry);
+                }
+                Ok(EnvironmentEntries(entries))
+            }
+            _ => Err(serde::de::Error::custom(
+                "environment must be a sequence, mapping, or null",
+            )),
+        }
+    }
+}
+
+/// Convert a single mapping entry `(KEY, value)` into a `ConfigValue<String>`.
+///
+/// - Static string → `ConfigValue::Static("KEY=VALUE")`
+/// - Number/Bool → coerce to string: `"KEY=42"`, `"KEY=true"`
+/// - Null → `"KEY="`
+/// - `${{ expr }}$` standalone → `ConfigValue::Dynamic(Interpolated([Literal("KEY="), Expression(expr)]))`
+/// - `${{ expr }}$` embedded → prepend `Literal("KEY=")` to existing tokens
+/// - `!lua` → wrap code in IIFE, create `Interpolated([Literal("KEY="), Expression(wrapped)])`
+fn environment_map_entry(prefix: &str, value: &serde_yaml::Value) -> std::result::Result<ConfigValue<String>, String> {
+    use expr::{DynamicExpr, OwnedExprToken};
+
+    match value {
+        serde_yaml::Value::Null => {
+            Ok(ConfigValue::Static(prefix.to_string()))
+        }
+        serde_yaml::Value::Bool(b) => {
+            Ok(ConfigValue::Static(format!("{}{}", prefix, b)))
+        }
+        serde_yaml::Value::Number(n) => {
+            Ok(ConfigValue::Static(format!("{}{}", prefix, n)))
+        }
+        serde_yaml::Value::String(s) => {
+            match DynamicExpr::classify(value) {
+                None => {
+                    // Plain static string
+                    Ok(ConfigValue::Static(format!("{}{}", prefix, s)))
+                }
+                Some(DynamicExpr::Expression(expr)) => {
+                    // Standalone ${{ expr }}$ → prepend KEY= as literal
+                    Ok(ConfigValue::Dynamic(Box::new(DynamicExpr::Interpolated(vec![
+                        OwnedExprToken::Literal(prefix.to_string()),
+                        OwnedExprToken::Expression(expr),
+                    ]))))
+                }
+                Some(DynamicExpr::Interpolated(mut tokens)) => {
+                    // Embedded ${{ expr }}$ → prepend KEY= literal
+                    tokens.insert(0, OwnedExprToken::Literal(prefix.to_string()));
+                    Ok(ConfigValue::Dynamic(Box::new(DynamicExpr::Interpolated(tokens))))
+                }
+                Some(DynamicExpr::Lua(_)) => {
+                    // !lua on a string value (shouldn't happen for String variant, but handle it)
+                    unreachable!("DynamicExpr::classify returns Lua only for Tagged values")
+                }
+            }
+        }
+        serde_yaml::Value::Tagged(t) if t.tag == "!lua" => {
+            if let Some(code) = t.value.as_str() {
+                // Wrap in IIFE so it can be used as an expression
+                let wrapped = format!("(function() {} end)()", code);
+                Ok(ConfigValue::Dynamic(Box::new(DynamicExpr::Interpolated(vec![
+                    OwnedExprToken::Literal(prefix.to_string()),
+                    OwnedExprToken::Expression(wrapped),
+                ]))))
+            } else {
+                Err(format!("!lua tag value must be a string for environment map entry '{}'", prefix))
+            }
+        }
+        _ => Err(format!(
+            "unsupported value type for environment map entry '{}': {:?}",
+            prefix, value
+        )),
+    }
+}
+
 impl<T> ConfigValue<Option<T>> {
     /// Returns true if this value is statically known to be None.
     /// Used for skip_serializing_if on optional fields that only exist on RawServiceConfig.
@@ -297,7 +425,7 @@ pub struct RawServiceConfig {
     #[serde(default)]
     pub working_dir: ConfigValue<Option<PathBuf>>,
     #[serde(default)]
-    pub environment: ConfigValue<Vec<ConfigValue<String>>>,
+    pub environment: ConfigValue<EnvironmentEntries>,
     #[serde(default)]
     pub env_file: ConfigValue<Option<PathBuf>>,
     /// System environment inheritance policy (always static)
@@ -337,7 +465,7 @@ impl Default for RawServiceConfig {
             command: ConfigValue::Static(Vec::new()),
             run: ConfigValue::default(),
             working_dir: ConfigValue::default(),
-            environment: ConfigValue::Static(Vec::new()),
+            environment: ConfigValue::Static(EnvironmentEntries::default()),
             env_file: ConfigValue::default(),
             sys_env: None,
             restart: ConfigValue::default(),
@@ -371,15 +499,16 @@ impl RawServiceConfig {
         // Get the inner Vec<ConfigValue<String>> — either directly or by evaluating
         // a top-level !lua/${{ }}$ and deserializing the result.
         let entries: Vec<ConfigValue<String>> = match &self.environment {
-            ConfigValue::Static(entries) => entries.clone(),
+            ConfigValue::Static(entries) => entries.0.clone(),
             ConfigValue::Dynamic(expr) => {
                 let yaml = expr.evaluate(
                     evaluator, &prepared.table, config_path,
                     &format!("{}.environment", name),
                 )?;
-                serde_yaml::from_value(yaml).map_err(|e| {
+                let env_entries: EnvironmentEntries = serde_yaml::from_value(yaml).map_err(|e| {
                     DaemonError::Config(format!("service '{}': {}", name, e))
-                })?
+                })?;
+                env_entries.0
             }
         };
 

@@ -61,12 +61,14 @@ services:
         return {"./app"}
       end
     environment: !lua |
-      local env = {"NODE_ENV=production"}
+      local vars = {NODE_ENV="production"}
       if env.DEBUG then
-        table.insert(env, "LOG_LEVEL=debug")
+        vars.LOG_LEVEL = "debug"
       end
-      return env
+      return vars
 ```
+
+Lua can return environment as either a **table** (`{KEY="value"}`) or an **array** (`{"KEY=value"}`). Both formats are supported.
 
 Both `${{ }}$` and `!lua` can be used in the same config file, even in the same service.
 
@@ -93,19 +95,19 @@ services:
     command: !lua |
       return {"node", "server.js", "--port", tostring(env.PORT or 8080)}
     environment: !lua |
-      local result = {"NODE_ENV=production"}
+      local vars = {NODE_ENV="production"}
       if env.DEBUG then
-        table.insert(result, "DEBUG=true")
+        vars.DEBUG = "true"
       end
-      return result
+      return vars
 ```
 
 Lua scripts can return:
 - **Strings** — for scalar values
 - **Numbers** — converted to YAML numbers
 - **Booleans** — converted to YAML booleans
-- **Tables (arrays)** — for lists like `command` or `environment`
-- **Tables (maps)** — for object values like dependency config fields
+- **Tables (arrays)** — for lists like `command` or `environment` (array of `"KEY=value"` strings)
+- **Tables (maps)** — for object values like dependency config fields or `environment` (`{KEY="value"}` pairs)
 
 ---
 
@@ -230,15 +232,15 @@ Within a service, evaluation happens in this order:
 |-------|------|---------------|
 | 1 | `lua:` directive | System env only |
 | 2 | `env_file` path `${{ }}$` | System env only |
-| 3 | `environment` array `${{ }}$` | System env + env_file (sequential) |
+| 3 | `environment` `${{ }}$` / `!lua` | System env + env_file (sequential) |
 | 4 | All other fields `${{ }}$` and `!lua` | System env + env_file + environment |
 
 **Sequential environment evaluation:** Each `environment` entry is evaluated in order, and its result is added to the context for subsequent entries:
 
 ```yaml
 environment:
-  - BASE=/opt/app
-  - CONFIG=${{ env.BASE }}$/config    # Can see BASE from previous entry
+  BASE: /opt/app
+  CONFIG: ${{ env.BASE }}$/config    # Can see BASE from previous entry
 ```
 
 ---
@@ -374,19 +376,35 @@ services:
 
 ### Conditional Configuration
 
+Using table (map) format:
+
 ```yaml
 services:
   app:
     environment: !lua |
-      local env = {"NODE_ENV=production"}
+      local vars = {NODE_ENV="production"}
       if env.ENABLE_METRICS then
-        table.insert(env, "METRICS=true")
-        table.insert(env, "METRICS_PORT=9090")
+        vars.METRICS = "true"
+        vars.METRICS_PORT = "9090"
       end
       if env.DEBUG then
-        table.insert(env, "LOG_LEVEL=debug")
+        vars.LOG_LEVEL = "debug"
       end
-      return env
+      return vars
+```
+
+Using array format (equivalent):
+
+```yaml
+services:
+  app:
+    environment: !lua |
+      local vars = {"NODE_ENV=production"}
+      if env.ENABLE_METRICS then
+        table.insert(vars, "METRICS=true")
+        table.insert(vars, "METRICS_PORT=9090")
+      end
+      return vars
 ```
 
 ### Dynamic Dependency Config Fields

@@ -4,6 +4,7 @@ use serde::{Deserialize, Deserializer};
 use std::path::{Path, PathBuf};
 
 use super::ConfigValue;
+use super::EnvironmentEntries;
 use super::resources::ResourceLimits;
 
 /// Service-specific hooks
@@ -37,7 +38,7 @@ pub struct HookCommon {
     #[serde(default)]
     pub working_dir: ConfigValue<Option<PathBuf>>,
     #[serde(default)]
-    pub environment: ConfigValue<Vec<ConfigValue<String>>>,
+    pub environment: ConfigValue<EnvironmentEntries>,
     #[serde(default)]
     pub env_file: ConfigValue<Option<PathBuf>>,
     /// Runtime Lua condition. When present, the hook is only executed if this
@@ -222,7 +223,7 @@ impl HookCommand {
     /// Get environment entries (static value only).
     pub fn environment(&self) -> Vec<String> {
         match self.common().environment.as_static() {
-            Some(items) => items.iter().filter_map(|v| v.as_static().cloned()).collect(),
+            Some(entries) => entries.0.iter().filter_map(|v| v.as_static().cloned()).collect(),
             None => Vec::new(),
         }
     }
