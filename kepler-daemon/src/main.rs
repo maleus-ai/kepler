@@ -52,7 +52,14 @@ async fn main() -> anyhow::Result<()> {
     let _profiler = dhat::Profiler::new_heap();
 
     // Initialize tracing
+    // KEPLER_COLOR: "true"/"1" forces colors on, "false"/"0" forces off, unset = auto-detect TTY
+    let use_ansi = match std::env::var("KEPLER_COLOR").as_deref() {
+        Ok("true" | "1") => true,
+        Ok("false" | "0") => false,
+        _ => std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    };
     tracing_subscriber::fmt()
+        .with_ansi(use_ansi)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
