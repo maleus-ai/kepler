@@ -1302,11 +1302,14 @@ async fn stream_cursor_logs(
                 }
                 _ = &mut quiescence, if !quiescent_received => {
                     quiescent_received = true;
-                    // The in-flight request may hold data the server already
-                    // read (advancing the cursor). Await it to avoid data loss.
-                    // The server returns quickly if data was ready; worst case
-                    // waits for the remaining poll timeout (~2s) if it had none.
-                    cursor_fut.await
+                    // All services are terminal — data is on disk. Drop the
+                    // in-flight long-poll (which may block for up to 2s) and
+                    // continue to the drain pass which reads without timeout.
+                    // Safe because: (1) the protocol is multiplexed so the
+                    // discarded response won't corrupt the stream, and (2) the
+                    // daemon's long-poll cursor hasn't advanced (no new writes
+                    // after quiescence means no Notify, so it's still waiting).
+                    continue;
                 }
                 resp = &mut cursor_fut => resp,
             }
@@ -1350,7 +1353,10 @@ async fn stream_cursor_logs(
                                 return Ok(StreamExitReason::ShutdownRequested);
                             }
                             _ = &mut quiescence, if !quiescent_received => {
-                                break;
+                                // Config was loaded, services ran and finished.
+                                // Continue to drain any logs written during execution.
+                                quiescent_received = true;
+                                continue;
                             }
                             _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
                         }
@@ -1381,8 +1387,11 @@ async fn stream_cursor_logs(
                 }
             }
             StreamMode::UntilQuiescent => {
-                // After quiescence signaled and all logs drained, exit
-                if quiescent_received && !has_more_data {
+                // After quiescence signaled and all logs drained, exit.
+                // Only break when this iteration was a proper drain pass
+                // (effective_timeout=None), not when quiescence just arrived
+                // during an in-flight long-poll whose response may be stale.
+                if quiescent_received && !has_more_data && effective_timeout.is_none() {
                     break;
                 }
                 // When long polling is active, signals are already checked during
