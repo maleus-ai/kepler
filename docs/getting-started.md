@@ -166,7 +166,7 @@ kepler stop -s SIGKILL   # Stop services with a specific signal
 kepler daemon stop       # Stop daemon
 ```
 
-For a ready-to-run example, see [`example.kepler.yaml`](../example.kepler.yaml) in the project root.
+For a ready-to-run example, see [`example.kepler.yaml`](../examples/example.kepler.yaml) in the examples directory.
 
 ---
 

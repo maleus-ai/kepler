@@ -1,0 +1,762 @@
+# fast-chain.kepler.yaml — Fast-chaining stress test
+#
+# 52 services across 8 tiers, all short-lived (echo + exit).
+# No healthchecks, no long-lived loops. Services chain via
+# service_completed_successfully / service_started / service_failed.
+# Some exit 0, some exit >0 to trigger failure paths.
+
+lua: |
+  _counter = 0
+  function tick()
+    _counter = _counter + 1
+    return tostring(_counter)
+  end
+
+  global.platform_version = "2.5.0"
+  global.wave = 0
+
+  function wave()
+    global.wave = global.wave + 1
+    return "wave-" .. tostring(global.wave)
+  end
+
+kepler:
+  sys_env: inherit
+  timeout: 30s
+
+  hooks:
+    pre_start:
+      - if: ${{ not hook.initialized }}$
+        run: echo "[GLOBAL] init — bootstrapping platform"
+      - run: echo "[GLOBAL] pre_start — launching all services"
+    post_start:
+      run: echo "[GLOBAL] post_start — all services triggered"
+    pre_stop:
+      run: echo "[GLOBAL] pre_stop — shutting down"
+    post_stop:
+      run: echo "[GLOBAL] post_stop — shutdown complete"
+    pre_restart:
+      run: echo "[GLOBAL] pre_restart — restarting"
+    post_restart:
+      run: echo "[GLOBAL] post_restart — restart done"
+    pre_cleanup:
+      run: echo "[GLOBAL] pre_cleanup — cleaning up"
+
+services:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 1: Foundation (5 services, no deps, all exit 0)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 1
+  alpha:
+    run: echo "[alpha] Foundation service initialized"
+    restart: no
+    hooks:
+      pre_start:
+        - if: ${{ not service.initialized }}$
+          run: echo "[alpha] on_init — first time setup"
+        - run: echo "[alpha] pre_start — preparing"
+      post_start:
+        run: echo "[alpha] post_start — launched"
+      post_exit:
+        - if: ${{ service.exit_code == 0 }}$
+          run: echo "[alpha] post_exit — clean exit"
+
+  # 2
+  beta:
+    run: echo "[beta] Foundation service initialized"
+    restart: no
+    hooks:
+      pre_start:
+        run: echo "[beta] pre_start"
+      post_exit:
+        run: echo "[beta] post_exit — done"
+
+  # 3
+  gamma:
+    run: echo "[gamma] Foundation service initialized"
+    restart: no
+    environment: !lua |
+      return {"SVC_NAME=" .. service.name, "TICK=" .. tick()}
+
+  # 4
+  delta:
+    run: echo "[delta] Foundation service initialized"
+    restart: no
+    hooks:
+      pre_start:
+        - run: echo "::output::delta_token=abc123"
+          output: init
+        - run: echo "[delta] pre_start — token=${{ hooks.pre_start.outputs.init.delta_token }}$"
+      post_exit:
+        - if: ${{ always() }}$
+          run: echo "[delta] post_exit — always runs"
+
+  # 5
+  epsilon:
+    run: echo "[epsilon] Foundation service initialized"
+    restart: no
+    environment:
+      - PLATFORM=${{ global.platform_version }}$
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 2: Setup (5 services, depend on TIER 1 completions)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 6
+  setup-a:
+    run: |
+      echo "[setup-a] Configuring from alpha"
+      echo "::output::config_key=setup-a-val"
+    restart: no
+    output: true
+    depends_on:
+      alpha:
+        condition: service_completed_successfully
+    hooks:
+      pre_start:
+        - run: echo "::output::ts=$(date +%s)"
+          output: timing
+        - run: echo "[setup-a] pre_start — ts=${{ hooks.pre_start.outputs.timing.ts }}$"
+      post_exit:
+        - if: ${{ service.exit_code == 0 }}$
+          run: echo "[setup-a] post_exit — success"
+        - if: ${{ failure() }}$
+          run: echo "[setup-a] post_exit — a prior hook step failed"
+
+  # 7
+  setup-b:
+    run: |
+      echo "[setup-b] Configuring from beta"
+      echo "::output::db_ready=true"
+    restart: no
+    output: true
+    depends_on:
+      beta:
+        condition: service_completed_successfully
+
+  # 8
+  setup-c:
+    run: |
+      echo "[setup-c] Configuring from gamma + delta"
+      echo "::output::cache_ready=true"
+    restart: no
+    output: true
+    depends_on:
+      gamma:
+        condition: service_completed_successfully
+      delta:
+        condition: service_completed_successfully
+
+  # 9
+  setup-d:
+    run: |
+      echo "[setup-d] Initializing from epsilon"
+      echo "::output::queue_ready=true"
+    restart: no
+    output: true
+    depends_on:
+      epsilon:
+        condition: service_completed_successfully
+    environment: !lua |
+      return {"WAVE=" .. wave()}
+
+  # 10 — THIS ONE FAILS (exit 1)
+  setup-e:
+    command: ["sh", "-c", "echo '[setup-e] FAIL — simulated setup failure'; exit 1"]
+    restart: no
+    depends_on:
+      epsilon:
+        condition: service_completed_successfully
+    hooks:
+      post_exit:
+        - if: ${{ service.exit_code ~= 0 }}$
+          run: echo "[setup-e] post_exit — failed with code ${{ service.exit_code }}$"
+        - if: ${{ always() }}$
+          run: echo "[setup-e] post_exit — always cleanup"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 3: Core (5 services, fan-in from setup)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 11
+  core-auth:
+    run: |
+      echo "[core-auth] Auth service — config=${{ deps['setup-a'].outputs.config_key or 'none' }}$"
+      echo "::output::auth_token=jwt-xyz"
+    restart: no
+    output: true
+    depends_on:
+      setup-a:
+        condition: service_completed_successfully
+      setup-b:
+        condition: service_completed_successfully
+    environment:
+      - DB_READY=${{ deps["setup-b"].outputs.db_ready or "false" }}$
+    hooks:
+      pre_start:
+        - if: ${{ not service.initialized }}$
+          run: echo "[core-auth] on_init — generating keys"
+        - run: echo "[core-auth] pre_start — deps ready"
+      post_exit:
+        run: echo "[core-auth] post_exit — auth done"
+
+  # 12
+  core-config:
+    run: |
+      echo "[core-config] Config service"
+      echo "::output::feature_flags=dark_mode,beta_ui"
+    restart: no
+    output: true
+    depends_on:
+      setup-c:
+        condition: service_completed_successfully
+
+  # 13
+  core-events:
+    run: |
+      echo "[core-events] Event bus — queue=${{ deps['setup-d'].outputs.queue_ready or 'unknown' }}$"
+      echo "::output::event_channel=main"
+    restart: no
+    output: true
+    depends_on:
+      setup-d:
+        condition: service_completed_successfully
+    hooks:
+      pre_start:
+        run: echo "[core-events] pre_start — connecting to queue"
+      post_exit:
+        run: echo "[core-events] post_exit — event bus stopped"
+
+  # 14
+  core-storage:
+    run: |
+      echo "[core-storage] Storage service — cache=${{ deps['setup-c'].outputs.cache_ready or 'unknown' }}$"
+      echo "::output::storage_path=/data"
+    restart: no
+    output: true
+    depends_on:
+      setup-c:
+        condition: service_completed_successfully
+      setup-b:
+        condition: service_completed_successfully
+
+  # 15 — depends on failed setup-e with allow_skipped
+  core-recovery:
+    run: echo "[core-recovery] Recovery service — running despite setup-e skip"
+    restart: no
+    depends_on:
+      setup-e:
+        condition: service_completed_successfully
+        allow_skipped: true
+    hooks:
+      pre_start:
+        - if: ${{ skipped('setup-e') }}$
+          run: echo "[core-recovery] setup-e was skipped/failed — running in fallback mode"
+        - if: ${{ success('setup-e') }}$
+          run: echo "[core-recovery] setup-e succeeded — full recovery mode"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 4: Business Logic (10 services, deep chaining)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 16
+  biz-users:
+    run: echo "[biz-users] User service — auth=${{ deps['core-auth'].outputs.auth_token or 'none' }}$"
+    restart: no
+    depends_on:
+      core-auth:
+        condition: service_completed_successfully
+    hooks:
+      pre_start:
+        run: echo "[biz-users] pre_start"
+      post_exit:
+        run: echo "[biz-users] post_exit"
+
+  # 17
+  biz-products:
+    run: echo "[biz-products] Product service — flags=${{ deps['core-config'].outputs.feature_flags or 'none' }}$"
+    restart: no
+    depends_on:
+      core-config:
+        condition: service_completed_successfully
+      core-auth:
+        condition: service_completed_successfully
+
+  # 18
+  biz-inventory:
+    run: echo "[biz-inventory] Inventory service"
+    restart: no
+    depends_on:
+      biz-products:
+        condition: service_completed_successfully
+    hooks:
+      pre_start:
+        run: echo "[biz-inventory] pre_start — syncing stock"
+
+  # 19 — 4-dep fan-in
+  biz-orders:
+    run: echo "[biz-orders] Order service — 4-way fan-in complete"
+    restart: no
+    depends_on:
+      biz-users:
+        condition: service_completed_successfully
+      biz-products:
+        condition: service_completed_successfully
+      biz-inventory:
+        condition: service_completed_successfully
+      core-events:
+        condition: service_completed_successfully
+    hooks:
+      pre_start:
+        run: echo "[biz-orders] pre_start — all deps ready"
+      post_exit:
+        run: echo "[biz-orders] post_exit — order pipeline done"
+
+  # 20 — FAILS (exit 2)
+  biz-payments:
+    command: ["sh", "-c", "echo '[biz-payments] FAIL — payment gateway unavailable'; exit 2"]
+    restart: no
+    depends_on:
+      biz-orders:
+        condition: service_completed_successfully
+      core-auth:
+        condition: service_completed_successfully
+    hooks:
+      post_exit:
+        - if: ${{ service.exit_code ~= 0 }}$
+          run: echo "[biz-payments] post_exit — PAYMENT FAILURE code=${{ service.exit_code }}$"
+        - if: ${{ always() }}$
+          run: echo "[biz-payments] post_exit — alerting ops team"
+
+  # 21
+  biz-notifications:
+    run: echo "[biz-notifications] Notification service — channel=${{ deps['core-events'].outputs.event_channel or 'none' }}$"
+    restart: no
+    depends_on:
+      core-events:
+        condition: service_completed_successfully
+    hooks:
+      post_exit:
+        run: echo "[biz-notifications] post_exit — queue flushed"
+
+  # 22
+  biz-emails:
+    run: echo "[biz-emails] Email service"
+    restart: no
+    depends_on:
+      biz-notifications:
+        condition: service_completed_successfully
+    hooks:
+      post_exit:
+        run: echo "[biz-emails] post_exit — emails sent"
+
+  # 23
+  biz-search:
+    run: echo "[biz-search] Search service — storage=${{ deps['core-storage'].outputs.storage_path or 'none' }}$"
+    restart: no
+    depends_on:
+      core-storage:
+        condition: service_completed_successfully
+      core-auth:
+        condition: service_completed_successfully
+    environment: !lua |
+      return {"SEARCH_PORT=" .. tick()}
+
+  # 24 — 3-way fan-in
+  biz-analytics:
+    run: |
+      echo "[biz-analytics] Analytics service — 3-way fan-in"
+      echo "::output::report_id=rpt-001"
+    restart: no
+    output: true
+    depends_on:
+      core-events:
+        condition: service_completed_successfully
+      core-storage:
+        condition: service_completed_successfully
+      core-auth:
+        condition: service_completed_successfully
+    hooks:
+      pre_start:
+        run: echo "[biz-analytics] pre_start — aggregating data"
+      post_exit:
+        run: echo "[biz-analytics] post_exit — analytics done"
+
+  # 25
+  biz-reports:
+    run: |
+      echo "[biz-reports] Report service — report=${{ deps['biz-analytics'].outputs.report_id or 'none' }}$"
+      echo "::output::report_status=generated"
+    restart: no
+    output: true
+    depends_on:
+      biz-analytics:
+        condition: service_completed_successfully
+      core-storage:
+        condition: service_completed_successfully
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 5: Workers (10 services, chaining off business logic)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 26
+  worker-orders:
+    run: echo "[worker-orders] Processing order batch"
+    restart: no
+    depends_on:
+      biz-orders:
+        condition: service_completed_successfully
+      core-events:
+        condition: service_completed_successfully
+
+  # 27 — FAILS (exit 3)
+  worker-payments:
+    command: ["sh", "-c", "echo '[worker-payments] FAIL — transaction rollback'; exit 3"]
+    restart: no
+    depends_on:
+      biz-payments:
+        condition: service_completed_successfully
+        allow_skipped: true
+    hooks:
+      pre_start:
+        - if: ${{ skipped('biz-payments') }}$
+          run: echo "[worker-payments] biz-payments was skipped — running refund mode"
+      post_exit:
+        - if: ${{ service.exit_code ~= 0 }}$
+          run: echo "[worker-payments] post_exit — worker failed code=${{ service.exit_code }}$"
+
+  # 28
+  worker-emails:
+    run: echo "[worker-emails] Sending email batch"
+    restart: no
+    depends_on:
+      biz-emails:
+        condition: service_completed_successfully
+    hooks:
+      pre_start:
+        run: echo "[worker-emails] pre_start — loading templates"
+      post_exit:
+        run: echo "[worker-emails] post_exit — batch sent"
+
+  # 29
+  worker-search:
+    run: echo "[worker-search] Indexing documents"
+    restart: no
+    depends_on:
+      biz-search:
+        condition: service_completed_successfully
+    environment: !lua |
+      return {"INDEX_TICK=" .. tick()}
+
+  # 30
+  worker-analytics:
+    run: echo "[worker-analytics] Crunching numbers"
+    restart: no
+    depends_on:
+      biz-analytics:
+        condition: service_completed_successfully
+
+  # 31
+  worker-notifications:
+    run: echo "[worker-notifications] Dispatching notifications"
+    restart: no
+    depends_on:
+      biz-notifications:
+        condition: service_completed_successfully
+
+  # 32 — 3-dep fan-in
+  worker-cache:
+    run: echo "[worker-cache] Warming cache from 3 sources"
+    restart: no
+    depends_on:
+      biz-users:
+        condition: service_completed_successfully
+      biz-products:
+        condition: service_completed_successfully
+      core-auth:
+        condition: service_completed_successfully
+    hooks:
+      pre_start:
+        run: echo "[worker-cache] pre_start — preparing cache keys"
+      post_exit:
+        run: echo "[worker-cache] post_exit — cache warm"
+
+  # 33
+  worker-sync:
+    run: echo "[worker-sync] Syncing data across stores"
+    restart: no
+    depends_on:
+      core-storage:
+        condition: service_completed_successfully
+      core-events:
+        condition: service_completed_successfully
+
+  # 34 — FAILS (exit 1)
+  worker-files:
+    command: ["sh", "-c", "echo '[worker-files] FAIL — disk full'; exit 1"]
+    restart: no
+    depends_on:
+      core-storage:
+        condition: service_completed_successfully
+    hooks:
+      post_exit:
+        - if: ${{ service.exit_code ~= 0 }}$
+          run: echo "[worker-files] post_exit — file processing failed"
+        - if: ${{ always() }}$
+          run: echo "[worker-files] post_exit — cleanup tmp files"
+
+  # 35
+  worker-cleanup:
+    run: echo "[worker-cleanup] Running scheduled cleanup"
+    restart: no
+    depends_on:
+      core-storage:
+        condition: service_completed_successfully
+      biz-reports:
+        condition: service_completed_successfully
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 6: Monitoring (8 services, wide fan-in)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 36 — no deps, runs in parallel with everything
+  mon-metrics:
+    run: echo "[mon-metrics] Metrics collector snapshot"
+    restart: no
+    hooks:
+      pre_start:
+        run: echo "[mon-metrics] pre_start — initializing collectors"
+
+  # 37 — no deps
+  mon-logs:
+    run: echo "[mon-logs] Log aggregator snapshot"
+    restart: no
+
+  # 38 — 5-dep fan-in (all foundation services)
+  mon-health:
+    run: echo "[mon-health] Health check — all 5 foundations OK"
+    restart: no
+    depends_on:
+      alpha:
+        condition: service_completed_successfully
+      beta:
+        condition: service_completed_successfully
+      gamma:
+        condition: service_completed_successfully
+      delta:
+        condition: service_completed_successfully
+      epsilon:
+        condition: service_completed_successfully
+    hooks:
+      pre_start:
+        run: echo "[mon-health] pre_start — checking all foundations"
+      post_exit:
+        run: echo "[mon-health] post_exit — health report generated"
+
+  # 39
+  mon-alerts:
+    run: echo "[mon-alerts] Alert manager — checking thresholds"
+    restart: no
+    depends_on:
+      mon-health:
+        condition: service_completed_successfully
+      mon-metrics:
+        condition: service_completed_successfully
+    hooks:
+      pre_start:
+        run: echo "[mon-alerts] pre_start"
+        environment: !lua |
+          return {"ALERT_SVC=" .. service.name, "ALERT_HOOK=" .. hook.name}
+
+  # 40 — 4-dep fan-in
+  mon-dashboard:
+    run: echo "[mon-dashboard] Dashboard rendering"
+    restart: no
+    depends_on:
+      mon-metrics:
+        condition: service_completed_successfully
+      mon-logs:
+        condition: service_completed_successfully
+      mon-health:
+        condition: service_completed_successfully
+      mon-alerts:
+        condition: service_completed_successfully
+    environment: !lua |
+      return {"DASH_PORT=" .. tick()}
+
+  # 41 — conditional (always true here)
+  mon-uptime:
+    if: ${{ true }}$
+    run: echo "[mon-uptime] Uptime check — all systems nominal"
+    restart: no
+    depends_on:
+      alpha:
+        condition: service_completed_successfully
+    environment: !lua |
+      return {"UPTIME_TICK=" .. tick()}
+
+  # 42 — deep chain
+  mon-traces:
+    run: echo "[mon-traces] Trace collector — capturing spans"
+    restart: no
+    depends_on:
+      core-auth:
+        condition: service_completed_successfully
+      core-events:
+        condition: service_completed_successfully
+
+  # 43 — 3-dep fan-in
+  mon-audit:
+    run: echo "[mon-audit] Audit log — recording events"
+    restart: no
+    depends_on:
+      core-auth:
+        condition: service_completed_successfully
+      core-events:
+        condition: service_completed_successfully
+      biz-orders:
+        condition: service_completed_successfully
+    hooks:
+      post_exit:
+        run: echo "[mon-audit] post_exit — audit log written"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 7: Failure Handlers (7 services, react to failures)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 44 — reacts to setup-e failure
+  failover-setup:
+    run: echo "[failover-setup] Handling setup-e failure — applying fallback config"
+    restart: no
+    depends_on:
+      setup-e:
+        condition: service_failed
+
+  # 45 — reacts to biz-payments failure
+  failover-payments:
+    run: echo "[failover-payments] Payment failover — switching to backup gateway"
+    restart: no
+    depends_on:
+      biz-payments:
+        condition: service_failed
+    hooks:
+      pre_start:
+        run: echo "[failover-payments] pre_start — activating backup"
+      post_exit:
+        run: echo "[failover-payments] post_exit — failover complete"
+
+  # 46 — reacts to worker-files failure
+  failover-files:
+    run: echo "[failover-files] File worker failover — retrying on different volume"
+    restart: no
+    depends_on:
+      worker-files:
+        condition: service_failed
+        exit_code: [1]
+
+  # 47 — reacts to worker-payments failure
+  failover-worker-pay:
+    run: echo "[failover-worker-pay] Worker payment failover — queuing for retry"
+    restart: no
+    depends_on:
+      worker-payments:
+        condition: service_failed
+        exit_code: ["1:5"]
+
+  # 48 — cascade from failover with allow_skipped
+  cascade-recovery:
+    run: echo "[cascade-recovery] Running post-failover recovery tasks"
+    restart: no
+    depends_on:
+      failover-setup:
+        condition: service_completed_successfully
+        allow_skipped: true
+      failover-payments:
+        condition: service_completed_successfully
+        allow_skipped: true
+    hooks:
+      pre_start:
+        - if: ${{ skipped('failover-setup') }}$
+          run: echo "[cascade-recovery] failover-setup was skipped"
+        - if: ${{ skipped('failover-payments') }}$
+          run: echo "[cascade-recovery] failover-payments was skipped"
+        - if: ${{ always() }}$
+          run: echo "[cascade-recovery] proceeding with whatever completed"
+
+  # 49 — 3x failure fan-in (FAILS itself too — exit 4)
+  emergency-stop:
+    command: ["sh", "-c", "echo '[emergency-stop] FAIL — could not gracefully stop all services'; exit 4"]
+    restart: no
+    depends_on:
+      setup-e:
+        condition: service_failed
+      biz-payments:
+        condition: service_failed
+      worker-payments:
+        condition: service_failed
+    hooks:
+      pre_start:
+        - if: ${{ not service.initialized }}$
+          run: echo "::output::runbook=true"
+          output: init_step
+        - run: echo "[emergency-stop] pre_start — runbook=${{ hooks.pre_start.outputs.init_step.runbook or 'none' }}$"
+        - if: ${{ always() }}$
+          run: echo "[emergency-stop] pre_start — final step always runs"
+      post_exit:
+        - if: ${{ service.exit_code ~= 0 }}$
+          run: echo "[emergency-stop] post_exit — emergency stop ALSO FAILED code=${{ service.exit_code }}$"
+
+  # 50
+  post-mortem:
+    run: |
+      echo "[post-mortem] Analyzing failures"
+      echo "  emergency exit code: ${{ deps['emergency-stop'].exit_code }}$"
+      echo "  platform: ${{ global.platform_version }}$"
+      echo "[post-mortem] Report complete"
+    restart: no
+    depends_on:
+      emergency-stop:
+        condition: service_completed_successfully
+        allow_skipped: true
+    hooks:
+      pre_start:
+        - if: ${{ skipped('emergency-stop') }}$
+          run: echo "[post-mortem] emergency-stop skipped — partial report"
+        - if: ${{ success('emergency-stop') }}$
+          run: echo "[post-mortem] emergency-stop succeeded — full report"
+      post_exit:
+        - if: ${{ always() }}$
+          run: echo "[post-mortem] post_exit — archiving, status=${{ service.status }}$"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 8: Conditional / Final (2 services)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # 51 — conditional, skipped by default
+  optional-profiler:
+    if: ${{ env.ENABLE_PROFILING ~= nil }}$
+    run: echo "[optional-profiler] Profiling run complete"
+    restart: no
+    depends_on:
+      core-auth:
+        condition: service_completed_successfully
+
+  # 52 — depends on skippable profiler + dashboard
+  final-summary:
+    run: echo "[final-summary] All chains complete — platform fully exercised"
+    restart: no
+    depends_on:
+      optional-profiler:
+        condition: service_completed_successfully
+        allow_skipped: true
+      mon-dashboard:
+        condition: service_completed_successfully
+    hooks:
+      pre_start:
+        - if: ${{ skipped('optional-profiler') }}$
+          run: echo "[final-summary] profiler was skipped"
+        - run: echo "[final-summary] pre_start — assembling final report"
+      post_exit:
+        - if: ${{ always() }}$
+          run: echo "[final-summary] THE END"
