@@ -2,6 +2,7 @@
 compile_error!("kepler-protocol server requires a unix target for socket security (peer credentials, file permissions)");
 
 use std::{future::Future, path::PathBuf, sync::Arc};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -103,6 +104,9 @@ impl ProgressSender {
     }
 }
 
+/// Monotonic counter for assigning unique connection IDs.
+static CONNECTION_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 pub struct Server<F, Fut>
 where
     F: Fn(Request, ShutdownTx, ProgressSender, PeerCredentials) -> Fut + Send + Sync + 'static,
@@ -112,6 +116,7 @@ where
     handler: Arc<F>,
     shutdown_tx: mpsc::Sender<()>,
     shutdown_rx: mpsc::Receiver<()>,
+    on_disconnect: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 }
 
 // Re-export Request so the handler signature compiles
@@ -129,7 +134,14 @@ where
             handler: Arc::new(handler),
             shutdown_tx,
             shutdown_rx,
+            on_disconnect: None,
         })
+    }
+
+    /// Set a callback that fires when a client disconnects, receiving the connection_id.
+    pub fn with_on_disconnect(mut self, cb: impl Fn(u64) + Send + Sync + 'static) -> Self {
+        self.on_disconnect = Some(Arc::new(cb));
+        self
     }
 
     pub async fn run(mut self) -> Result<()> {
@@ -198,9 +210,11 @@ where
                         Ok((stream,_)) => {
                             let shutdown_tx = self.shutdown_tx.clone();
                             let handler = Arc::clone(&self.handler);
+                            let on_disconnect = self.on_disconnect.clone();
+                            let connection_id = CONNECTION_COUNTER.fetch_add(1, Ordering::Relaxed);
 
                             tokio::spawn(async move {
-                                if let Err(e) = handle_client(handler, stream, shutdown_tx).await {
+                                if let Err(e) = handle_client(handler, stream, shutdown_tx, connection_id, on_disconnect).await {
                                     debug!("Client handler error: {}", e);
                                 }
                             });
@@ -225,12 +239,14 @@ async fn handle_client<F, Fut>(
     handler: Arc<F>,
     stream: UnixStream,
     shutdown_tx: mpsc::Sender<()>,
+    connection_id: u64,
+    on_disconnect: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 ) -> Result<()>
 where
     F: Fn(Request, ShutdownTx, ProgressSender, PeerCredentials) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response> + Send,
 {
-    debug!("Client connected");
+    debug!("Client connected (connection_id={})", connection_id);
 
     // Verify peer credentials and capture uid/gid for the handler
     let peer_credentials;
@@ -263,6 +279,7 @@ where
         peer_credentials = PeerCredentials {
             uid: cred.uid(),
             gid: cred.gid(),
+            connection_id,
         };
     }
 
@@ -292,11 +309,15 @@ where
         let mut len_buf = [0u8; 4];
         if let Err(e) = reader.read_exact(&mut len_buf).await {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                debug!("Client disconnected (EOF)");
+                debug!("Client disconnected (EOF, connection_id={})", connection_id);
                 drop(write_tx);
                 // Abort the writer task so write_rx is dropped immediately.
                 // This unblocks any handler task waiting on progress.closed().
                 writer_task.abort();
+                // Notify the daemon so it can clean up cursors for this connection
+                if let Some(ref cb) = on_disconnect {
+                    cb(connection_id);
+                }
                 return Ok(());
             }
             return Err(ServerError::Receive(e));

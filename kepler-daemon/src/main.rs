@@ -62,6 +62,9 @@ async fn main() -> anyhow::Result<()> {
     // Configure allocator for aggressive memory return (jemalloc decay rates)
     kepler_daemon::allocator::configure();
 
+    if let Some(fd_count) = kepler_daemon::fd_count::count_open_fds() {
+        info!("FD count at daemon start: {}", fd_count);
+    }
     info!("Starting Kepler daemon");
 
     // Require root (the kepler group controls CLI access)
@@ -166,25 +169,26 @@ async fn main() -> anyhow::Result<()> {
     // Using 500 capacity to handle rapid file changes
     let (restart_tx, restart_rx) = mpsc::channel::<FileChangeEvent>(500);
 
-    // Create ServiceOrchestrator
+    // Create CursorManager for log streaming
+    // TTL configurable via KEPLER_CURSOR_TTL env var (default 10 seconds)
+    let cursor_ttl_seconds = std::env::var("KEPLER_CURSOR_TTL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let cursor_manager = Arc::new(CursorManager::new(cursor_ttl_seconds));
+
+    // Create ServiceOrchestrator (needs cursor_manager to invalidate cursors on stop --clean)
     let orchestrator = Arc::new(ServiceOrchestrator::new(
         registry.clone(),
         exit_tx.clone(),
         restart_tx.clone(),
+        cursor_manager.clone(),
     ));
 
-    // Create CursorManager for log streaming
-    // TTL configurable via KEPLER_CURSOR_TTL env var (default 300 seconds = 5 minutes)
-    let cursor_ttl_seconds = std::env::var("KEPLER_CURSOR_TTL")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300);
-    let cursor_manager = Arc::new(CursorManager::new(cursor_ttl_seconds));
-
-    // Spawn cursor cleanup task (runs every 60 seconds)
+    // Spawn cursor cleanup task (runs every 5 seconds)
     let cleanup_manager = cursor_manager.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             interval.tick().await;
             cleanup_manager.cleanup_stale();
@@ -204,16 +208,28 @@ async fn main() -> anyhow::Result<()> {
         async move { handle_request(request, orchestrator, registry, cursor_manager, shutdown_tx, progress, peer).await }
     };
 
-    // Create server
+    // Create server with on_disconnect callback to clean up cursors
     let socket_path = Daemon::get_socket_path().unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
-    let server = Server::new(socket_path.clone(), handler)?;
+    let disconnect_cursor_manager = cursor_manager.clone();
+    let server = Server::new(socket_path.clone(), handler)?
+        .with_on_disconnect(move |connection_id| {
+            disconnect_cursor_manager.invalidate_connection_cursors(connection_id);
+        });
+
+    if let Some(fd_count) = kepler_daemon::fd_count::count_open_fds() {
+        info!("FD count before config discovery: {}", fd_count);
+    }
 
     // Discover and restore existing configs from persisted snapshots
     // Kill orphaned processes and respawn services that were previously running
     discover_existing_configs(&registry, &orchestrator).await;
+
+    if let Some(fd_count) = kepler_daemon::fd_count::count_open_fds() {
+        info!("FD count after config discovery: {}", fd_count);
+    }
 
     info!("Daemon listening on {:?}", socket_path);
 
@@ -776,6 +792,7 @@ async fn handle_request(
                     service,
                     from_start,
                     no_hooks,
+                    peer.connection_id,
                 ),
             };
 

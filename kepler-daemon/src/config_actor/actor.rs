@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::{resolve_log_buffer_size, resolve_log_max_size, DependencyConfig, KeplerConfig, ServiceConfig};
 use crate::deps::{get_start_order, is_condition_met, is_failure_handled};
@@ -1497,6 +1497,10 @@ impl ConfigActor {
 
     /// Cleanup all resources when shutting down
     fn cleanup(&mut self) {
+        if let Some(fd_count) = crate::fd_count::count_open_fds() {
+            debug!("FD count before cleanup: {}", fd_count);
+        }
+
         // Save state as safety net (in case shutdown wasn't triggered via command)
         if let Err(e) = self.save_state() {
             warn!("Failed to save state during cleanup: {}", e);
@@ -1512,8 +1516,17 @@ impl ConfigActor {
             handle.abort();
         }
 
-        // Clear processes (they should have been stopped already)
-        self.processes.clear();
+        // Abort output tasks before clearing process handles.
+        // Dropping a JoinHandle does NOT cancel the underlying task, so we must
+        // explicitly abort to release pipe FDs and log file FDs.
+        for (_, process_handle) in self.processes.drain() {
+            if let Some(task) = process_handle.stdout_task {
+                task.abort();
+            }
+            if let Some(task) = process_handle.stderr_task {
+                task.abort();
+            }
+        }
 
         // Clear all channel-based resources to avoid dead sender accumulation
         self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -1530,6 +1543,10 @@ impl ConfigActor {
         }
         for task in self.event_forwarder_tasks.drain(..) {
             task.abort();
+        }
+
+        if let Some(fd_count) = crate::fd_count::count_open_fds() {
+            debug!("FD count after cleanup: {}", fd_count);
         }
     }
 }

@@ -30,7 +30,8 @@ fn create_test_orchestrator(
     let registry = Arc::new(ConfigRegistry::new());
     let (exit_tx, exit_rx) = mpsc::channel(32);
     let (restart_tx, restart_rx) = mpsc::channel(32);
-    let orchestrator = ServiceOrchestrator::new(registry.clone(), exit_tx, restart_tx);
+    let cursor_manager = Arc::new(kepler_daemon::cursor::CursorManager::new(300));
+    let orchestrator = ServiceOrchestrator::new(registry.clone(), exit_tx, restart_tx, cursor_manager);
     (orchestrator, registry, exit_rx, restart_rx)
 }
 

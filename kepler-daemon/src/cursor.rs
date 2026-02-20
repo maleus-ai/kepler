@@ -37,6 +37,8 @@ pub struct CursorState {
     no_hooks: bool,
     /// Map of file paths → inode numbers known to the iterator (to detect new/replaced files)
     known_files: HashMap<PathBuf, u64>,
+    /// Connection that owns this cursor (for cleanup on disconnect)
+    connection_id: u64,
 }
 
 /// Error types for cursor operations
@@ -121,6 +123,7 @@ impl CursorManager {
         service: Option<String>,
         from_start: bool,
         no_hooks: bool,
+        connection_id: u64,
     ) -> String {
         let cursor_id = generate_cursor_id();
 
@@ -161,6 +164,7 @@ impl CursorManager {
             service_filter: service,
             no_hooks,
             known_files,
+            connection_id,
         }));
 
         self.cursors.insert(cursor_id.clone(), state);
@@ -256,6 +260,24 @@ impl CursorManager {
 
         let has_more = cursor.iterator.has_more();
         Ok((entries, has_more))
+    }
+
+    /// Remove all cursors belonging to the given config path.
+    /// Called when `stop --clean` deletes a config's log directory.
+    pub fn invalidate_config_cursors(&self, config_path: &Path) {
+        self.cursors.retain(|_id, arc| {
+            let cursor = arc.lock().unwrap_or_else(|e| e.into_inner());
+            cursor.config_path != config_path
+        });
+    }
+
+    /// Remove all cursors belonging to the given connection.
+    /// Called when a client disconnects.
+    pub fn invalidate_connection_cursors(&self, connection_id: u64) {
+        self.cursors.retain(|_id, arc| {
+            let cursor = arc.lock().unwrap_or_else(|e| e.into_inner());
+            cursor.connection_id != connection_id
+        });
     }
 
     /// Remove stale cursors (those not polled within TTL).
