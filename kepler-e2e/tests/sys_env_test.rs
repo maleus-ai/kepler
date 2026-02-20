@@ -167,7 +167,7 @@ services:
     // Restart with updated value - should still use INITIAL value (baked config preserved)
     let restart_output = harness
         .run_cli_with_env(
-            &["-f", config_path.to_str().unwrap(), "restart", "-d"],
+            &["-f", config_path.to_str().unwrap(), "restart"],
             &[(TEST_VAR, UPDATED_VALUE)],
         )
         .await?;

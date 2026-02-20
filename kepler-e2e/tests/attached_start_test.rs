@@ -76,9 +76,9 @@ async fn test_start_attached_blocks() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that `kepler restart -d` returns immediately (fire-and-forget)
+/// Test that `kepler restart` (no flags) returns immediately after progress bars
 #[tokio::test]
-async fn test_restart_detached_returns_immediately() -> E2eResult<()> {
+async fn test_restart_returns_immediately() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_start_attached")?;
 
@@ -90,14 +90,13 @@ async fn test_restart_detached_returns_immediately() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
         .await?;
 
-    // Restart in detached mode with a tight timeout — should return quickly
+    // Restart with no flags — should return after progress bars complete
     let output = harness
         .run_cli_with_timeout(
             &[
                 "-f",
                 config_path.to_str().unwrap(),
                 "restart",
-                "-d",
             ],
             Duration::from_secs(5),
         )
@@ -148,11 +147,11 @@ async fn test_recreate_returns_immediately() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that `kepler restart` (no -d) blocks following logs after restart.
+/// Test that `kepler restart --follow` blocks following logs after restart.
 /// Progress bars show the stop+start lifecycle, then log following begins
-/// and blocks until quiescence or Ctrl+C — same behavior as `kepler start`.
+/// and blocks until Ctrl+C — services keep running.
 #[tokio::test]
-async fn test_restart_attached_blocks() -> E2eResult<()> {
+async fn test_restart_follow_blocks() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_start_attached")?;
 
@@ -164,14 +163,15 @@ async fn test_restart_attached_blocks() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
         .await?;
 
-    // Restart in attached mode with a short timeout — should time out because it
-    // follows logs after the restart completes (same as attached start)
+    // Restart with --follow and a short timeout — should time out because it
+    // follows logs after the restart completes
     let result = harness
         .run_cli_with_timeout(
             &[
                 "-f",
                 config_path.to_str().unwrap(),
                 "restart",
+                "--follow",
             ],
             Duration::from_secs(5),
         )
@@ -180,7 +180,7 @@ async fn test_restart_attached_blocks() -> E2eResult<()> {
     // The command should have timed out (proving it blocks/follows logs)
     assert!(
         result.is_err(),
-        "Attached restart should block and time out, but it returned: {:?}",
+        "Restart --follow should block and time out, but it returned: {:?}",
         result
     );
 

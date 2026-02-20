@@ -1,4 +1,4 @@
-# Simple service for testing restart -d --wait progress
+# Simple service for testing restart --wait progress
 kepler:
   logs:
     buffer_size: 0

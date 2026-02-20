@@ -91,8 +91,8 @@ kepler start -d --wait --abort-on-failure  # Stop all services on failure in --w
 | `-d, --detach` | Return immediately, startup runs in background |
 | `--wait` | Block until startup cluster is ready (requires `-d`) |
 | `--timeout <DURATION>` | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait` |
-| `-e, --override-envs <KEY=VALUE>` | Override specific system environment variables (repeatable). Can be combined with `--refresh-env` |
-| `-r, --refresh-env` | Replace all baked system environment variables with the current shell environment. Can be combined with `-e` |
+| `-e, --override-envs <KEY=VALUE>` | Override specific system environment variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services |
+| `-r, --refresh-env` | Replace all baked system environment variables with the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
 | `--abort-on-failure` | Stop all services on unhandled failure (requires `--wait`) |
 | `--no-abort-on-failure` | Don't stop services on unhandled failure (foreground mode only, incompatible with `-d`) |
 
@@ -137,17 +137,35 @@ See [Hooks](hooks.md) for details on cleanup hooks.
 
 ### `kepler restart`
 
-Restart services. Supports the same `-d`, `--wait`, `--timeout`, `-e`, and `--refresh-env` flags as `start`.
+Restart services. Always detached — shows progress bars for the stop+start lifecycle, then exits. Unlike `start`, Ctrl+C during restart does **not** stop services.
 
 ```bash
-kepler restart                           # Restart, follow logs (Ctrl+C stops)
-kepler restart -d                        # Restart detached
-kepler restart -d --wait                 # Block until restart complete
-kepler restart -d --wait --timeout 30s   # Block with timeout
+kepler restart                           # Restart with progress bars, exit when done
+kepler restart --wait                    # Block until restart complete (with progress bars)
+kepler restart --wait --timeout 30s      # Block with timeout
+kepler restart --follow                  # Restart, then follow logs (Ctrl+C just exits)
 kepler restart backend worker            # Restart specific services
 kepler restart -e MY_VAR=new_value       # Restart with overridden env var
 kepler restart --refresh-env             # Restart with refreshed shell env
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--wait` | Block until restart completes with progress bars (mutually exclusive with `--follow`) |
+| `--timeout <DURATION>` | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait` |
+| `--follow` | Follow logs after restart completes. Ctrl+C exits log following, services keep running (mutually exclusive with `--wait`) |
+| `-e, --override-envs <KEY=VALUE>` | Override specific system environment variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services |
+| `-r, --refresh-env` | Replace all baked system environment variables with the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
+| `--no-deps` | Skip dependency ordering (requires specifying service names) |
+
+**Behavior by mode:**
+
+| Mode | Blocks until | Then |
+|------|-------------|------|
+| `restart` (no flags) | Progress bars finish | Returns |
+| `restart --wait` | Progress bars finish | Returns |
+| `restart --wait --timeout T` | Progress bars finish OR timeout | Returns |
+| `restart --follow` | Progress bars finish | Follows logs, Ctrl+C just exits (services keep running) |
 
 ### `kepler recreate`
 

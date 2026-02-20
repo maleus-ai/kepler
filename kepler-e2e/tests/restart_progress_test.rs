@@ -1,18 +1,18 @@
 //! E2E tests for restart progress events and related improvements.
 //!
 //! Tests cover:
-//! - Restart -d --wait completes with progress (Improvement 2)
+//! - Restart --wait completes with progress
 //! - Restart with healthcheck reaches healthy after restart
 //! - Restart multi-service with dependencies preserves ordering
 //! - Auto-restart (handle_exit) re-spawns health checker (bug fix)
-//! - Foreground restart blocks following logs (behavioral change)
+//! - Default restart returns immediately (always detached)
 
 use kepler_e2e::{E2eHarness, E2eResult};
 use std::time::Duration;
 
 const TEST_MODULE: &str = "restart_progress_test";
 
-/// Test that `kepler restart -d --wait` completes successfully
+/// Test that `kepler restart --wait` completes successfully
 /// and the service is running after restart.
 #[tokio::test]
 async fn test_restart_wait_completes() -> E2eResult<()> {
@@ -29,7 +29,7 @@ async fn test_restart_wait_completes() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "web", "running", Duration::from_secs(10))
         .await?;
 
-    // Restart with -d --wait — should complete and return
+    // Restart with --wait — should complete and return
     let output = harness.restart_services(&config_path).await?;
     output.assert_success();
 
@@ -73,7 +73,7 @@ async fn test_restart_healthcheck_reaches_healthy() -> E2eResult<()> {
     let output = harness.restart_services(&config_path).await?;
     output.assert_success();
 
-    // After restart -d --wait completes, service should be healthy again
+    // After restart --wait completes, service should be healthy again
     harness
         .wait_for_service_status(&config_path, "web", "healthy", Duration::from_secs(15))
         .await?;
@@ -180,10 +180,10 @@ async fn test_auto_restart_respawns_health_checker() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that `kepler restart -d` (detached, no wait) returns immediately
-/// without blocking for progress.
+/// Test that `kepler restart` (default, no flags) returns after progress bars
+/// without blocking for log following.
 #[tokio::test]
-async fn test_restart_detached_no_wait_returns_fast() -> E2eResult<()> {
+async fn test_restart_default_returns_after_progress() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_restart_wait_completes")?;
 
@@ -197,10 +197,10 @@ async fn test_restart_detached_no_wait_returns_fast() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "web", "running", Duration::from_secs(10))
         .await?;
 
-    // Restart with -d (no --wait) — should return quickly
+    // Restart with no flags — should return after progress bars complete
     let output = harness
         .run_cli_with_timeout(
-            &["-f", config_path.to_str().unwrap(), "restart", "-d"],
+            &["-f", config_path.to_str().unwrap(), "restart"],
             Duration::from_secs(5),
         )
         .await?;

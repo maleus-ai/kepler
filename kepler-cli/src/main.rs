@@ -217,20 +217,20 @@ async fn run() -> Result<()> {
             }
         }
 
-        Commands::Restart { services, detach, wait, timeout, no_deps, override_envs, refresh_env } => {
+        Commands::Restart { services, wait, timeout, follow, no_deps, override_envs, refresh_env } => {
             let override_envs = build_override_envs(override_envs, refresh_env, &sys_env);
             if no_deps && services.is_empty() {
                 eprintln!("Error: --no-deps requires specifying at least one service");
                 std::process::exit(1);
             }
-            if detach && wait {
-                // -d --wait: Fire restart with progress bars for full lifecycle
+            if wait {
+                // --wait: Progress bars for full stop+start lifecycle, exit when restart completes
                 let (progress_rx, response_future) = client.restart(
-                    canonical_path,
+                    canonical_path.clone(),
                     services,
                     Some(sys_env),
                     no_deps,
-                    override_envs.clone(),
+                    override_envs,
                 )?;
                 if let Some(timeout_str) = &timeout {
                     let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
@@ -251,13 +251,9 @@ async fn run() -> Result<()> {
                     let response = run_with_progress(progress_rx, response_future).await?;
                     handle_response(response);
                 }
-            } else if detach {
-                // -d: Fire restart, exit when done
-                let (_progress_rx, response_future) = client.restart(canonical_path, services, Some(sys_env), no_deps, override_envs.clone())?;
-                let response = response_future.await?;
-                handle_response(response);
-            } else {
-                // Foreground: progress bars for stop+start, then follow logs until quiescent
+            } else if follow {
+                // --follow: Progress bars then log following (Ctrl+C just exits, services keep running)
+                let log_service = if services.len() == 1 { Some(services[0].clone()) } else { None };
                 let (progress_rx, restart_future) = client.restart(
                     canonical_path.clone(),
                     services,
@@ -265,11 +261,20 @@ async fn run() -> Result<()> {
                     no_deps,
                     override_envs,
                 )?;
-                // Phase 1: Progress bars for Stopping → Stopped → Starting → Started/Healthy
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);
-                // Phase 2: Follow logs until quiescence or Ctrl+C
-                follow_logs_until_quiescent(&client, &canonical_path, None, true).await?;
+                handle_logs(&client, canonical_path, log_service, true, 100, LogMode::All, false).await?;
+            } else {
+                // Default: Progress bars, exit when done
+                let (progress_rx, restart_future) = client.restart(
+                    canonical_path.clone(),
+                    services,
+                    Some(sys_env),
+                    no_deps,
+                    override_envs,
+                )?;
+                let response = run_with_progress(progress_rx, restart_future).await?;
+                handle_response(response);
             }
         }
 
