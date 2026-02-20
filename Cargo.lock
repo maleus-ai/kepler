@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-cli"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "chrono",
  "clap",
@@ -732,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-daemon"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -750,7 +750,6 @@ dependencies = [
  "mlua",
  "nix",
  "notify",
- "notify-debouncer-mini",
  "parking_lot",
  "serde",
  "serde_json",
@@ -771,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-e2e"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "pretty_assertions",
@@ -783,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-exec"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "kepler-unix",
  "libc",
@@ -792,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-protocol"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "bincode",
  "dashmap 6.1.0",
@@ -808,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-tests"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "chrono",
  "kepler-daemon",
@@ -828,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-unix"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "libc",
  "nix",
@@ -1013,18 +1012,6 @@ dependencies = [
  "notify-types",
  "walkdir",
  "windows-sys 0.60.2",
-]
-
-[[package]]
-name = "notify-debouncer-mini"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17849edfaabd9a5fef1c606d99cfc615a8e99f7ac4366406d86c7942a3184cf2"
-dependencies = [
- "log",
- "notify",
- "notify-types",
- "tempfile",
 ]
 
 [[package]]

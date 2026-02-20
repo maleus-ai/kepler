@@ -23,7 +23,6 @@ hex = "0.4"
 parking_lot = "0.12"
 chrono = "0.4"
 notify = { version = "8.2", features = ["macos_kqueue"] }
-notify-debouncer-mini = "0.7"
 globset = "0.4"
 dotenvy = "0.15"
 mlua = { version = "0.10", features = ["luau", "serialize", "send"] }
