@@ -951,6 +951,7 @@ async fn handle_request(
             }
 
             // Stream config events until client disconnects or channel closes
+            let mut quiescence_handled = false;
             loop {
                 tokio::select! {
                     event = rx.recv() => {
@@ -973,7 +974,20 @@ async fn handle_request(
                                 progress.send_ready().await;
                             }
                             Some(ConfigEvent::Quiescent) => {
+                                // Guard: Quiescent can arrive more than once
+                                // (e.g. recheck races with the original event).
+                                // Only run hooks on the first occurrence.
+                                if !quiescence_handled {
+                                    quiescence_handled = true;
+                                    // Run global pre_stop + post_stop hooks before
+                                    // notifying the CLI, so hook output appears in
+                                    // the foreground log stream.
+                                    orchestrator.run_quiescence_hooks(&config_path).await;
+                                }
                                 progress.send_quiescent().await;
+                                // Clear pre_stop/post_stop log files now that the
+                                // CLI has been notified (retention on quiescence).
+                                orchestrator.clear_quiescence_hook_logs(&config_path).await;
                             }
                             Some(ConfigEvent::UnhandledFailure { service, exit_code }) => {
                                 progress.send_unhandled_failure(service, exit_code).await;

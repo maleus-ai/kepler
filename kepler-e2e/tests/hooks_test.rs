@@ -304,3 +304,264 @@ async fn test_service_on_exit_runs() -> E2eResult<()> {
 
     Ok(())
 }
+
+/// Test that global post_stop runs even when services are already terminal (e.g. failed)
+/// before `stop` is called. Previously, `stopped.is_empty()` caused the hook to be skipped.
+#[tokio::test]
+async fn test_global_post_stop_runs_when_services_already_stopped() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    let marker_file = harness.create_temp_file("post_stop_already_stopped_marker.txt", "")?;
+
+    let config_path = harness.load_config_with_replacements(
+        TEST_MODULE,
+        "test_global_post_stop_runs_when_services_already_stopped",
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
+    )?;
+
+    harness.start_daemon().await?;
+
+    // Start in detached mode — service exits immediately with exit 1
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    // Wait for service to reach a terminal status
+    harness
+        .wait_for_service_status_any(&config_path, "failing-service", &["failed", "exited"], Duration::from_secs(10))
+        .await?;
+
+    // Now call stop — service is already terminal
+    harness.stop_services(&config_path).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let marker_content = std::fs::read_to_string(&marker_file)?;
+    assert!(
+        marker_content.contains("PRE_STOP_RAN"),
+        "Global pre_stop hook should have run. Content: {}",
+        marker_content
+    );
+    assert!(
+        marker_content.contains("POST_STOP_RAN"),
+        "Global post_stop hook should have run even when services were already stopped. Content: {}",
+        marker_content
+    );
+
+    harness.stop_daemon().await?;
+
+    Ok(())
+}
+
+/// Test that global pre_stop and post_stop hooks fire on quiescence
+/// (when all services naturally exit without an explicit `stop` call).
+#[tokio::test]
+async fn test_global_hooks_on_quiescence() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    let marker_file = harness.create_temp_file("quiescence_hooks_marker.txt", "")?;
+
+    let config_path = harness.load_config_with_replacements(
+        TEST_MODULE,
+        "test_global_hooks_on_quiescence",
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
+    )?;
+
+    harness.start_daemon().await?;
+
+    // Start in foreground mode (no -d) — CLI blocks until quiescence then exits
+    let config_str = config_path.to_str().unwrap();
+    let output = harness
+        .run_cli_with_timeout(
+            &["-f", config_str, "start"],
+            Duration::from_secs(15),
+        )
+        .await?;
+
+    output.assert_success();
+
+    // Give hooks a moment to complete
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let marker_content = std::fs::read_to_string(&marker_file)?;
+    assert!(
+        marker_content.contains("PRE_STOP_RAN"),
+        "Global pre_stop hook should have run on quiescence. Content: {}",
+        marker_content
+    );
+    assert!(
+        marker_content.contains("POST_STOP_RAN"),
+        "Global post_stop hook should have run on quiescence. Content: {}",
+        marker_content
+    );
+
+    harness.stop_daemon().await?;
+
+    Ok(())
+}
+
+/// Test that global hooks fire on quiescence even when the service runs for a
+/// while before exiting (race condition: the quiescent signal must not reach
+/// the CLI before hooks have completed).
+#[tokio::test]
+async fn test_global_hooks_on_delayed_quiescence() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    let marker_file = harness.create_temp_file("delayed_quiescence_hooks_marker.txt", "")?;
+
+    let config_path = harness.load_config_with_replacements(
+        TEST_MODULE,
+        "test_global_hooks_on_delayed_quiescence",
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
+    )?;
+
+    harness.start_daemon().await?;
+
+    // Start in foreground mode (no -d) — service runs for 1s then exits
+    let config_str = config_path.to_str().unwrap();
+    let output = harness
+        .run_cli_with_timeout(
+            &["-f", config_str, "start"],
+            Duration::from_secs(15),
+        )
+        .await?;
+
+    output.assert_success();
+
+    // Hooks must have completed before the CLI exited
+    let marker_content = std::fs::read_to_string(&marker_file)?;
+    assert!(
+        marker_content.contains("PRE_STOP_RAN"),
+        "Global pre_stop hook should have run on delayed quiescence. Content: {}",
+        marker_content
+    );
+    assert!(
+        marker_content.contains("POST_STOP_RAN"),
+        "Global post_stop hook should have run on delayed quiescence. Content: {}",
+        marker_content
+    );
+
+    harness.stop_daemon().await?;
+
+    Ok(())
+}
+
+/// Test that quiescence hook logs are cleared after quiescence (retention policy).
+/// Without retention, pre_stop/post_stop logs would accumulate across runs.
+#[tokio::test]
+async fn test_quiescence_hook_logs_cleared_on_restart() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    let marker_file = harness.create_temp_file("retention_quiescence_marker.txt", "")?;
+
+    let config_path = harness.load_config_with_replacements(
+        TEST_MODULE,
+        "test_quiescence_hook_logs_cleared_on_restart",
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
+    )?;
+
+    harness.start_daemon().await?;
+
+    // First foreground start — service exits after 1s, quiescence hooks fire
+    let config_str = config_path.to_str().unwrap();
+    let output = harness
+        .run_cli_with_timeout(&["-f", config_str, "start"], Duration::from_secs(15))
+        .await?;
+    output.assert_success();
+
+    // Verify hooks ran
+    let marker_content = std::fs::read_to_string(&marker_file)?;
+    assert!(marker_content.contains("PRE_STOP_RAN"), "First run hooks should fire");
+
+    // After quiescence, pre_stop/post_stop logs should be cleared by retention
+    let logs = harness.get_logs(&config_path, None, 100).await?;
+    let pre_stop_count = logs.stdout.matches("global.pre_stop").count();
+    assert_eq!(
+        pre_stop_count, 0,
+        "After quiescence, pre_stop logs should be cleared by retention. Logs:\n{}",
+        logs.stdout
+    );
+
+    // Second foreground start — no stale hook logs to accumulate
+    let output = harness
+        .run_cli_with_timeout(&["-f", config_str, "start"], Duration::from_secs(15))
+        .await?;
+    output.assert_success();
+
+    // Still 0 — no accumulation
+    let logs = harness.get_logs(&config_path, None, 100).await?;
+    let pre_stop_count = logs.stdout.matches("global.pre_stop").count();
+    assert_eq!(
+        pre_stop_count, 0,
+        "After second run, pre_stop logs should still be cleared. Logs:\n{}",
+        logs.stdout
+    );
+
+    harness.stop_daemon().await?;
+
+    Ok(())
+}
+
+/// Test that on_stop log retention applies to global hook logs even when services
+/// are already terminal before `stop` is called. Previously, the `!stopped.is_empty()`
+/// condition caused retention to be skipped, so hook logs accumulated.
+#[tokio::test]
+async fn test_stop_hook_logs_retention_when_already_stopped() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    let marker_file = harness.create_temp_file("retention_stop_marker.txt", "")?;
+
+    let config_path = harness.load_config_with_replacements(
+        TEST_MODULE,
+        "test_stop_hook_logs_cleared_on_next_stop",
+        &[("__MARKER_FILE__", marker_file.to_str().unwrap())],
+    )?;
+
+    harness.start_daemon().await?;
+
+    // Start detached — service exits immediately with exit 1
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    // Wait for terminal status
+    harness
+        .wait_for_service_status_any(&config_path, "failing-service", &["failed", "exited"], Duration::from_secs(10))
+        .await?;
+
+    // First stop — service already terminal, hooks fire then retention clears
+    harness.stop_services(&config_path).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify hooks ran (marker file)
+    let marker_content = std::fs::read_to_string(&marker_file)?;
+    assert!(marker_content.contains("PRE_STOP_RAN"), "Hooks should have fired");
+
+    // on_stop retention (default: clear) clears global hook logs after hooks run
+    let logs = harness.get_logs(&config_path, None, 100).await?;
+    let pre_stop_count = logs.stdout.matches("global.pre_stop").count();
+    assert_eq!(
+        pre_stop_count, 0,
+        "After stop, global hook logs should be cleared by on_stop retention. Logs:\n{}",
+        logs.stdout
+    );
+
+    // Start again, wait for terminal, stop again
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+    harness
+        .wait_for_service_status_any(&config_path, "failing-service", &["failed", "exited"], Duration::from_secs(10))
+        .await?;
+    harness.stop_services(&config_path).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Still 0 — no accumulation
+    let logs = harness.get_logs(&config_path, None, 100).await?;
+    let pre_stop_count = logs.stdout.matches("global.pre_stop").count();
+    assert_eq!(
+        pre_stop_count, 0,
+        "After second stop, global hook logs should still be cleared. Logs:\n{}",
+        logs.stdout
+    );
+
+    harness.stop_daemon().await?;
+
+    Ok(())
+}
