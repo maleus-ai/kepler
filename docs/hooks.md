@@ -128,7 +128,7 @@ hooks:
 |--------|------|-------------|
 | `run` | `string` | Shell command to execute |
 | `command` | `string[]` | Command array to execute (mutually exclusive with `run`) |
-| `if` | `string` | Lua condition expression. Hook only runs if truthy. See [Status Functions](#status-functions) |
+| `if` | `bool` or `${{ expr }}$` / `!lua` | Condition expression. Hook only runs if truthy. Supports static bools and dynamic Lua expressions. See [Status Functions](#status-functions) |
 | `user` | `string` | User to run hook as (overrides service default) |
 | `working_dir` | `string` | Working directory (overrides service default) |
 | `environment` | `string[]` | Additional environment variables |
@@ -207,7 +207,8 @@ On process exit (not manual stop):
 When a hook step fails, subsequent steps follow **implicit `success()`** semantics:
 
 - Steps **without** an `if` condition are skipped after a failure
-- Steps **with** an `if` condition that evaluates to `true` still run after a failure (e.g., `if: "always()"` or `if: "failure()"`)
+- Steps **with** an `if` condition that evaluates to `true` still run after a failure (e.g., `if: ${{ always() }}$` or `if: ${{ failure() }}$`)
+- `if: true` / `if: false` are static bools evaluated at parse time
 
 A failure is only considered **handled** when `failure()` (no args) is called in the `if:` condition AND the step succeeds. This is an explicit acknowledgment of the failure. Using `always()` means "run this step no matter what" (cleanup), but it does **not** clear the failure.
 
@@ -216,7 +217,7 @@ hooks:
   pre_start:
     - run: echo "step 1" && false          # This fails
     - run: echo "step 2"                   # Skipped (implicit success())
-    - if: "failure()"
+    - if: ${{ failure() }}$
       run: echo "handle the failure"       # Runs — failure() called + succeeds → failure is handled
     - run: echo "step 3"                   # Runs (failure was handled above)
 ```
@@ -227,7 +228,7 @@ hooks:
 hooks:
   pre_start:
     - run: echo "step 1" && false          # This fails
-    - if: "always()"
+    - if: ${{ always() }}$
       run: echo "cleanup always runs"      # Runs (cleanup), but failure NOT handled
     # → Hook returns error (always() is not an explicit failure handler)
 ```
@@ -238,7 +239,7 @@ If no step calls `failure()` and succeeds, the original error propagates to the 
 hooks:
   pre_start:
     - run: echo "step 1" && false          # This fails
-    - if: "success()"
+    - if: ${{ success() }}$
       run: echo "only on success"          # Skipped — failure NOT handled
     # → Hook returns error (no failure handler succeeded)
 ```
@@ -249,7 +250,7 @@ If a `failure()` step itself fails, the failure state continues and the original
 hooks:
   pre_start:
     - run: echo "step 1" && false          # This fails (original error)
-    - if: "failure()"
+    - if: ${{ failure() }}$
       run: echo "handler" && false         # Runs but also fails → failure NOT handled
     # → Hook returns the original error
 ```
@@ -290,12 +291,12 @@ services:
     hooks:
       pre_start:
         - run: ./setup.sh
-        - if: "always()"
+        - if: ${{ always() }}$
           run: echo "runs even if setup failed"
-        - if: "failure()"
+        - if: ${{ failure() }}$
           run: ./notify-failure.sh
       post_exit:
-        - if: "failure('db')"
+        - if: ${{ failure('db') }}$
           run: echo "db was in a failed state when app exited"
 ```
 
@@ -330,9 +331,9 @@ services:
         condition: service_healthy
     hooks:
       post_exit:
-        - if: "deps.db.status == 'healthy'"
+        - if: ${{ deps.db.status == 'healthy' }}$
           run: echo "db was healthy when app exited"
-        - if: "deps.db.restart_count > 0"
+        - if: ${{ deps.db.restart_count > 0 }}$
           run: echo "db had restarted at least once"
 ```
 

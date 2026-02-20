@@ -4,5 +4,5 @@ services:
     command: ["sh", "-c", "echo STARTED >> MARKER_FILE && sleep 3600"]
     hooks:
       pre_start:
-        if: "not service.initialized"
+        if: ${{ not service.initialized }}$
         run: "echo ON_INIT >> MARKER_FILE"

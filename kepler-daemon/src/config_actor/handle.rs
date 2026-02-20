@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::config::{KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
+use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
 use crate::errors::{DaemonError, Result};
 use crate::events::{ServiceEvent, ServiceEventReceiver};
 use crate::lua_eval::{ConditionResult, EvalContext};
@@ -1011,11 +1011,11 @@ impl ConfigActorHandle {
     // === Lua Evaluation ===
 
     /// Evaluate a runtime `if` condition using the Lua evaluator.
-    pub async fn eval_if_condition(&self, condition: &str, ctx: EvalContext) -> Result<ConditionResult> {
+    pub async fn eval_if_condition(&self, expr: &DynamicExpr, ctx: EvalContext) -> Result<ConditionResult> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ConfigCommand::EvalIfCondition {
-                condition: condition.to_string(),
+                expr: Box::new(expr.clone()),
                 context: Box::new(ctx),
                 reply: reply_tx,
             })

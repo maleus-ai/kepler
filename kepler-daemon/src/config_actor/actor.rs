@@ -27,9 +27,11 @@ use super::command::ConfigCommand;
 use super::context::{ConfigEvent, DiagnosticCounts, HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
 use super::handle::ConfigActorHandle;
 
+use crate::config::DynamicExpr;
+
 /// Request sent to the dedicated Lua worker thread.
 struct LuaEvalRequest {
-    condition: String,
+    expr: DynamicExpr,
     context: EvalContext,
     reply: tokio::sync::oneshot::Sender<Result<ConditionResult>>,
 }
@@ -378,8 +380,8 @@ impl ConfigActor {
         info!("ConfigActor started for {:?}", self.config_path);
         while let Some(cmd) = self.rx.recv().await {
             // Handle EvalIfCondition directly — forwards to the worker, never blocks
-            if let ConfigCommand::EvalIfCondition { condition, context, reply } = cmd {
-                self.handle_lua_eval(condition, *context, reply);
+            if let ConfigCommand::EvalIfCondition { expr, context, reply } = cmd {
+                self.handle_lua_eval(*expr, *context, reply);
                 continue;
             }
             if self.process_command(cmd) {
@@ -394,7 +396,7 @@ impl ConfigActor {
     /// Lazily spawns the worker on first call.
     fn handle_lua_eval(
         &mut self,
-        condition: String,
+        expr: DynamicExpr,
         context: EvalContext,
         reply: tokio::sync::oneshot::Sender<Result<ConditionResult>>,
     ) {
@@ -441,7 +443,7 @@ impl ConfigActor {
                             Ok(mlua::VmState::Continue)
                         }
                     });
-                    let result = evaluator.eval_condition(&req.condition, &req.context)
+                    let result = evaluator.eval_condition_expr(&req.expr, &req.context)
                         .map_err(|e| DaemonError::Internal(format!("Lua eval failed: {}", e)));
                     evaluator.remove_interrupt();
                     let _ = req.reply.send(result);
@@ -452,7 +454,7 @@ impl ConfigActor {
         }
 
         if let Some(ref tx) = self.lua_eval_tx {
-            let _ = tx.send(LuaEvalRequest { condition, context, reply });
+            let _ = tx.send(LuaEvalRequest { expr, context, reply });
         }
     }
 

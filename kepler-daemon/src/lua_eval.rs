@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::config::{DynamicExpr, expr::OwnedExprToken};
+
 /// Result of evaluating a hook `if:` condition.
 #[derive(Debug, Clone)]
 pub struct ConditionResult {
@@ -250,6 +252,35 @@ impl LuaEvaluator {
             .into_function()?;
 
         let result: Value = func.call(())?;
+        Ok(ConditionResult {
+            value: !matches!(result, Value::Nil | Value::Boolean(false)),
+            failure_checked: failure_flag.load(Ordering::Relaxed),
+        })
+    }
+
+    /// Evaluate a condition from a `DynamicExpr` and return a `ConditionResult`.
+    ///
+    /// Like `eval_condition` but accepts a pre-parsed `DynamicExpr` instead of a raw string.
+    /// Handles all three expression variants (Expression, Interpolated, Lua).
+    pub fn eval_condition_expr(&self, expr: &DynamicExpr, ctx: &EvalContext) -> LuaResult<ConditionResult> {
+        let (env_table, failure_flag) = self.build_condition_env_table(ctx)?;
+
+        let code = match expr {
+            DynamicExpr::Expression(s) => format!("return {}", s),
+            DynamicExpr::Lua(s) => s.clone(),
+            DynamicExpr::Interpolated(tokens) => {
+                let parts: Vec<String> = tokens.iter().map(|t| match t {
+                    OwnedExprToken::Literal(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+                    OwnedExprToken::Expression(s) => format!("tostring({})", s),
+                }).collect();
+                format!("return {}", parts.join(" .. "))
+            }
+        };
+
+        let chunk = self.lua.load(&code);
+        let func = chunk.set_name("if-condition").set_environment(env_table).into_function()?;
+        let result: Value = func.call(())?;
+
         Ok(ConditionResult {
             value: !matches!(result, Value::Nil | Value::Boolean(false)),
             failure_checked: failure_flag.load(Ordering::Relaxed),
