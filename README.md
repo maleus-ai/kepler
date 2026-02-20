@@ -92,7 +92,7 @@ For a ready-to-run example, see [`example.kepler.yaml`](examples/example.kepler.
 - [Service Lifecycle](docs/service-lifecycle.md) -- Status states, start modes, quiescence
 - [Dependencies](docs/dependencies.md) -- Conditions, ordering, propagation, timeouts
 - [Health Checks](docs/health-checks.md) -- Docker-compatible health checks
-- [Hooks](docs/hooks.md) -- Global and service lifecycle hooks
+- [Hooks](docs/hooks.md) -- Service lifecycle hooks
 
 ### Configuration Features
 

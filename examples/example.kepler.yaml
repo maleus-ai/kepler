@@ -13,16 +13,6 @@ kepler:
   logs:
     buffer_size: 0 # Flush logs immediately (good for demos)
 
-  hooks:
-    pre_start:
-      - if: "not ctx.initialized"
-        run: echo "Initializing services for the first time..."
-      - run: echo "Starting all services"
-    pre_stop:
-      run: echo "Stopping all services"
-    pre_cleanup:
-      run: echo "Cleaning up resources"
-
 services:
   # A one-shot migration task that runs first then exits
   # `run:` executes via sh -c — ideal for shell scripts, pipes, and chaining
@@ -48,7 +38,7 @@ services:
       - PYTHONUNBUFFERED=1
     hooks:
       pre_start:
-        - if: "not ctx.initialized"
+        - if: ${{ not hook.initialized }}$
           run: echo "First-time setup for web server"
         - run: echo "Web server starting on port 8089"
       post_healthcheck_success:

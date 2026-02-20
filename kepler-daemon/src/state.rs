@@ -76,7 +76,7 @@ pub struct ServiceState {
     pub signal: Option<i32>,
     pub health_check_failures: u32,
     pub restart_count: u32,
-    /// Whether on_init hook has been run for this service
+    /// Whether this service has completed its first start
     pub initialized: bool,
     /// Pre-computed environment variables for this service
     pub computed_env: HashMap<String, String>,
@@ -293,7 +293,7 @@ impl PersistedServiceState {
 pub struct PersistedConfigState {
     /// Service states keyed by service name
     pub services: HashMap<String, PersistedServiceState>,
-    /// Whether the config has been initialized (on_init hook run)
+    /// Whether the config has been initialized (first start completed)
     pub config_initialized: bool,
     /// Unix timestamp of when the snapshot was taken
     pub snapshot_time: i64,

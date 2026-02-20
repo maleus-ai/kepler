@@ -9,7 +9,7 @@
 //!
 //! Tests run inside Docker as root with kepler group and test users available.
 
-use kepler_daemon::config::{GlobalHooks, HookCommand, HookCommon, HookList, ServiceHooks};
+use kepler_daemon::config::{HookCommand, HookCommon, HookList, ServiceHooks};
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::{TestDaemonHarness, UMASK_LOCK};
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -1490,52 +1490,6 @@ async fn test_default_user_service_hook_inherits() {
     );
 
     harness.stop_service("hooked").await.unwrap();
-}
-
-/// Verify that global hooks get the default user baked into their config
-#[tokio::test]
-#[cfg(unix)]
-async fn test_default_user_global_hook() {
-    let _guard = UMASK_LOCK.lock().unwrap();
-
-    let temp_dir = TempDir::new().unwrap();
-
-    // Global hook with no user: field
-    let global_hooks = GlobalHooks {
-        pre_start: Some(HookList(vec![HookCommand::script("echo global")])),
-        ..Default::default()
-    };
-
-    let config = TestConfigBuilder::new()
-        .with_global_hooks(global_hooks)
-        .add_service("svc", TestServiceBuilder::long_running().build())
-        .build();
-
-    // Config owner is uid 65534
-    let harness = TestDaemonHarness::new_with_config_owner(
-        config,
-        temp_dir.path(),
-        Some((65534, 65534)),
-    )
-    .await
-    .unwrap();
-
-    // Verify the baked config has user set on the global hook
-    let baked_config = harness.handle().get_config().await.unwrap();
-    let global_hook = baked_config
-        .kepler
-        .as_ref()
-        .and_then(|k| k.hooks.as_ref())
-        .and_then(|h| h.pre_start.as_ref());
-
-    assert!(global_hook.is_some(), "Global pre_start hook should exist");
-    let hook_user = global_hook.unwrap().0.first().unwrap().user();
-    assert_eq!(
-        hook_user,
-        Some("65534:65534"),
-        "Global hook should have user baked from config owner, got {:?}",
-        hook_user
-    );
 }
 
 /// Verify that a hook with explicit `user:` overrides the config owner default

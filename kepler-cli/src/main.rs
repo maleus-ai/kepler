@@ -1734,7 +1734,7 @@ const SERVICE_COLORS: &[Color] = &[
 
 fn get_base_service_name(service: &str) -> &str {
     // Extract base service name from hook patterns like "backend.pre_start"
-    // Also handles "global.on_init" -> "global"
+    // Also handles "global.pre_start" -> "global"
     if let Some(dot_pos) = service.find('.') {
         return &service[..dot_pos];
     }

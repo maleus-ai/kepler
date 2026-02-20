@@ -368,7 +368,7 @@ async fn test_recreate_rebakes_config() {
 async fn test_recreate_runs_pre_start_hooks() {
     let temp_dir = TempDir::new().unwrap();
     let marker = MarkerFileHelper::new(temp_dir.path());
-    let on_init_path = marker.marker_path("on_init");
+    let on_init_path = marker.marker_path("pre_start");
     let started_path = marker.marker_path("started");
 
     let hooks = ServiceHooks {
@@ -410,7 +410,7 @@ async fn test_recreate_runs_pre_start_hooks() {
         .await;
 
     // Count initial pre_start calls
-    let init_count_1 = marker.count_marker_lines("on_init");
+    let init_count_1 = marker.count_marker_lines("pre_start");
     assert_eq!(init_count_1, 1, "pre_start should fire once on first start");
 
     // Stop services before recreate
@@ -429,7 +429,7 @@ async fn test_recreate_runs_pre_start_hooks() {
         .await;
 
     // Count pre_start calls after recreate + start
-    let init_count_2 = marker.count_marker_lines("on_init");
+    let init_count_2 = marker.count_marker_lines("pre_start");
     assert_eq!(
         init_count_2, 2,
         "pre_start should fire again after recreate (state cleared)"

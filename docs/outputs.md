@@ -230,8 +230,6 @@ When the limit is exceeded, further capture is silently discarded with a log war
 
 - **`output: true` and `outputs:` require `restart: no`** — Output capture is designed for one-shot services that run to completion. Services with restart policies would have ambiguous output semantics across restart cycles.
 
-- **Global hooks do NOT support output capture** — The `output:` field is only available on service hook steps, not global hooks.
-
 - **Markers are only captured from stdout** — Stderr is not scanned for `::output::` markers.
 
 ---

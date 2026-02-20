@@ -35,16 +35,6 @@ kepler:
     buffer_size: 16384   # 16KB buffer for better write throughput
     max_size: "50MB"     # Truncate logs when they exceed this size
 
-  hooks:
-    on_init:
-      run: echo "First run initialization"
-    pre_start:
-      run: echo "Kepler starting"
-    pre_stop:
-      command: ["echo", "Kepler stopping"]
-    pre_cleanup:
-      run: docker-compose down -v
-
 services:
   database:
     command: ["docker", "compose", "up", "postgres"]
@@ -89,10 +79,10 @@ services:
       timeout: 5s
       retries: 3
     hooks:
-      on_init:
-        run: npm install
       pre_start:
-        command: ["echo", "Backend starting"]
+        - if: ${{ not hook.initialized }}$
+          run: npm install
+        - command: ["echo", "Backend starting"]
       pre_restart:
         run: echo "Backend restarting..."
       pre_stop:
@@ -123,7 +113,7 @@ A Kepler config has three top-level keys:
 
 | Key | Required | Description |
 |-----|----------|-------------|
-| `kepler` | No | Global settings (env policy, timeout, logs, hooks) |
+| `kepler` | No | Global settings (env policy, timeout, logs) |
 | `services` | Yes | Service definitions |
 | `lua` | No | Global Lua code executed before all other blocks |
 
@@ -149,7 +139,6 @@ Settings under the `kepler:` namespace apply to all services unless overridden.
 | `sys_env` | `string` | `inherit` | System env policy: `clear` or `inherit`. Applied to all services and hooks unless overridden. See [Environment Variables](environment-variables.md) |
 | `timeout` | `duration` | none | Global default timeout for dependency waits. See [Dependencies](dependencies.md) |
 | `logs` | `object` | - | Global log settings. See [Log Management](log-management.md) |
-| `hooks` | `object` | - | Global lifecycle hooks. See [Hooks](hooks.md) |
 | `output_max_size` | `string` | `1mb` | Max output capture size per step/process (e.g., `"2mb"`, `"512kb"`). See [Outputs](outputs.md) |
 
 ### Global Log Settings
@@ -160,23 +149,6 @@ Settings under the `kepler:` namespace apply to all services unless overridden.
 | `logs.buffer_size` | `int` | `0` | Bytes to buffer before flushing (0 = synchronous) |
 
 See [Log Management](log-management.md) for full details.
-
-### Global Hooks
-
-| Hook | Description |
-|------|-------------|
-| `on_init` | Runs once when config is first used (before first start) |
-| `pre_start` | Runs before services start |
-| `post_start` | Runs after all services have started |
-| `pre_stop` | Runs before services stop |
-| `post_stop` | Runs after all services have stopped |
-| `pre_restart` | Runs before full restart (all services) |
-| `post_restart` | Runs after full restart (all services) |
-| `pre_cleanup` | Runs when `--clean` flag is used |
-
-See [Hooks](hooks.md) for format, execution order, and examples.
-
----
 
 ## Service Options
 
@@ -279,7 +251,7 @@ The `recreate` command:
 - [Getting Started](getting-started.md) -- Quick start tutorial
 - [CLI Reference](cli-reference.md) -- Command reference
 - [Dependencies](dependencies.md) -- Dependency conditions and ordering
-- [Hooks](hooks.md) -- Global and service hooks
+- [Hooks](hooks.md) -- Service lifecycle hooks
 - [Health Checks](health-checks.md) -- Health check configuration
 - [Environment Variables](environment-variables.md) -- Env var handling
 - [Inline Expressions](variable-expansion.md) -- `${{ expr }}$` syntax reference

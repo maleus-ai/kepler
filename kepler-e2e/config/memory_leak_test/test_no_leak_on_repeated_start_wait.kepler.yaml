@@ -37,26 +37,6 @@ kepler:
     retention:
       on_stop: clear
       on_start: clear
-  hooks:
-    pre_start:
-      - if: "not service.initialized"
-        run: echo "global on_init"
-        environment:
-          - KEPLER_PHASE=init
-        working_dir: /tmp
-      - command: ["sh", "-c", "echo global pre_start"]
-    post_start:
-      run: echo "global post_start"
-    pre_stop:
-      command: ["sh", "-c", "echo global pre_stop"]
-    post_stop:
-      run: echo "global post_stop"
-    pre_restart:
-      command: ["sh", "-c", "echo global pre_restart"]
-    post_restart:
-      run: echo "global post_restart"
-    pre_cleanup:
-      command: ["sh", "-c", "echo global pre_cleanup"]
 
 services:
   # ═══════════════════════════════════════════════════════════════════
@@ -86,8 +66,8 @@ services:
         on_exit: retain
     hooks:
       pre_start:
-        - if: "not service.initialized"
-          run: echo "postgres on_init"
+        - if: ${{ not hook.initialized }}$
+          run: echo "postgres first_start"
         - command: ["sh", "-c", "echo postgres pre_start"]
       post_start:
         command: ["sh", "-c", "echo postgres post_start"]
@@ -183,8 +163,8 @@ services:
       start_period: 1s
     hooks:
       pre_start:
-        - if: "not service.initialized"
-          run: echo "auth on_init"
+        - if: ${{ not hook.initialized }}$
+          run: echo "auth first_start"
         - run: echo "auth pre_start"
       post_start:
         command: ["sh", "-c", "echo auth post_start"]

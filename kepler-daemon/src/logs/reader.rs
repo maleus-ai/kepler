@@ -353,7 +353,7 @@ impl LogReader {
 
     /// Clear logs for services matching a prefix.
     /// Skips files that are direct service logs (e.g., prefix "web." won't match
-    /// "web.stdout.log" but will match "web.on_init.stdout.log").
+    /// "web.stdout.log" but will match "web.pre_start.stdout.log").
     pub fn clear_service_prefix(&self, prefix: &str) {
         let safe_prefix = prefix.replace(['/', '\\', ':', '[', ']'], "_");
 

@@ -569,7 +569,7 @@ fn roundtrip_all_service_phases() {
         ServicePhase::Failed { message: "boom".into() },
         ServicePhase::HookStarted { hook: "pre_start".into() },
         ServicePhase::HookCompleted { hook: "pre_start".into() },
-        ServicePhase::HookFailed { hook: "on_init".into(), message: "Exit code: Some(127)".into() },
+        ServicePhase::HookFailed { hook: "pre_start".into(), message: "Exit code: Some(127)".into() },
     ];
 
     for (i, phase) in phases.into_iter().enumerate() {
