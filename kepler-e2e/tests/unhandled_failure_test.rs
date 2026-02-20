@@ -1,10 +1,10 @@
 //! E2E tests for unhandled service failure detection.
 //!
 //! Verifies CLI behavior when services fail without a handler:
-//! - `-d --wait` mode exits with code 1
-//! - `-d --wait --abort-on-failure` stops services + exits 1
-//! - Foreground mode stops services + exits 1 (default abort)
-//! - Foreground `--no-abort-on-failure` waits for quiescence then exits 1
+//! - `-d --wait` mode stops services + exits 1 (default abort)
+//! - `-d --wait --no-abort-on-failure` exits 1, leaves services running
+//! - Foreground mode exits 1 at quiescence (default no-abort)
+//! - Foreground `--abort-on-failure` stops services + exits 1
 //! - Handled failures (service_failed dep) result in exit 0
 
 use kepler_e2e::{E2eHarness, E2eResult};
@@ -97,7 +97,7 @@ services:
     Ok(())
 }
 
-/// `-d --wait --abort-on-failure` with failing + long-running → exit 1, services stopped
+/// `-d --wait` (default abort) with failing + long-running → exit 1, services stopped
 #[tokio::test]
 async fn test_wait_mode_abort_on_failure_stops_services() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -115,6 +115,7 @@ services:
 
     harness.start_daemon().await?;
 
+    // --wait mode aborts on failure by default (no flag needed)
     let output = harness
         .run_cli_with_timeout(
             &[
@@ -123,7 +124,6 @@ services:
                 "start",
                 "-d",
                 "--wait",
-                "--abort-on-failure",
             ],
             Duration::from_secs(15),
         )
@@ -131,7 +131,7 @@ services:
 
     assert_eq!(
         output.exit_code, 1,
-        "Should exit 1 with --abort-on-failure. stdout: {}\nstderr: {}",
+        "Should exit 1 on unhandled failure (default abort). stdout: {}\nstderr: {}",
         output.stdout, output.stderr
     );
 
@@ -149,7 +149,7 @@ services:
     Ok(())
 }
 
-/// `-d --wait` (no --abort) with failing + long-running → exit 1, long-running still running
+/// `-d --wait --no-abort-on-failure` with failing + long-running → exit 1, long-running still running
 #[tokio::test]
 async fn test_wait_mode_no_abort_leaves_services_running() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -167,6 +167,7 @@ services:
 
     harness.start_daemon().await?;
 
+    // --no-abort-on-failure overrides the default abort behavior of --wait
     let output = harness
         .run_cli_with_timeout(
             &[
@@ -175,6 +176,7 @@ services:
                 "start",
                 "-d",
                 "--wait",
+                "--no-abort-on-failure",
             ],
             Duration::from_secs(15),
         )
@@ -186,7 +188,7 @@ services:
         output.stdout, output.stderr
     );
 
-    // Without --abort-on-failure, long-running service should still be running
+    // With --no-abort-on-failure, long-running service should still be running
     harness
         .wait_for_service_status(
             &config_path,
@@ -204,7 +206,7 @@ services:
 // Foreground mode tests
 // ============================================================================
 
-/// Foreground mode (no -d) with failing service → exits 1 (default abort behavior)
+/// Foreground mode (no -d) with failing service → exits 1 at quiescence (default no-abort)
 #[tokio::test]
 async fn test_foreground_exits_1_on_unhandled_failure() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -220,7 +222,7 @@ services:
 
     harness.start_daemon().await?;
 
-    // Foreground mode — should abort on unhandled failure and exit 1
+    // Foreground mode — exits 1 at quiescence (no abort by default)
     let output = harness
         .run_cli_with_timeout(
             &[
@@ -242,14 +244,16 @@ services:
     Ok(())
 }
 
-/// Foreground `--no-abort-on-failure` still exits 1 at quiescence
+/// Foreground `--abort-on-failure` stops services immediately and exits 1
 #[tokio::test]
-async fn test_foreground_no_abort_exits_1_at_quiescence() -> E2eResult<()> {
+async fn test_foreground_abort_on_failure_stops_services() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
 
     let config_path = harness.create_test_config(
         r#"
 services:
+  long-running:
+    command: ["sh", "-c", "sleep 300"]
   failing:
     command: ["sh", "-c", "exit 42"]
     restart: "no"
@@ -258,13 +262,14 @@ services:
 
     harness.start_daemon().await?;
 
+    // --abort-on-failure overrides the default no-abort behavior of foreground mode
     let output = harness
         .run_cli_with_timeout(
             &[
                 "-f",
                 config_path.to_str().unwrap(),
                 "start",
-                "--no-abort-on-failure",
+                "--abort-on-failure",
             ],
             Duration::from_secs(15),
         )
@@ -272,9 +277,19 @@ services:
 
     assert_eq!(
         output.exit_code, 1,
-        "Should exit 1 at quiescence with --no-abort-on-failure. stdout: {}\nstderr: {}",
+        "Should exit 1 with --abort-on-failure. stdout: {}\nstderr: {}",
         output.stdout, output.stderr
     );
+
+    // Verify long-running service was stopped
+    harness
+        .wait_for_service_status(
+            &config_path,
+            "long-running",
+            "stopped",
+            Duration::from_secs(10),
+        )
+        .await?;
 
     harness.stop_daemon().await?;
     Ok(())

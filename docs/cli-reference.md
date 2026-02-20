@@ -93,8 +93,8 @@ kepler start -d --wait --abort-on-failure  # Stop all services on failure in --w
 | `--timeout <DURATION>` | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait` |
 | `-e, --override-envs <KEY=VALUE>` | Override specific system environment variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services |
 | `-r, --refresh-env` | Replace all baked system environment variables with the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
-| `--abort-on-failure` | Stop all services on unhandled failure (requires `--wait`) |
-| `--no-abort-on-failure` | Don't stop services on unhandled failure (foreground mode only, incompatible with `-d`) |
+| `--abort-on-failure` | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`) |
+| `--no-abort-on-failure` | Don't stop services on unhandled failure (requires `--wait`) |
 
 **Behavior by mode:**
 
@@ -111,8 +111,8 @@ An "unhandled failure" occurs when a service fails (exits with non-zero code, is
 
 | Mode | Default behavior | Override |
 |------|-----------------|----------|
-| Foreground (`start`) | Stop all services, exit 1 | `--no-abort-on-failure`: exit 1 at quiescence without stopping |
-| `start -d --wait` | Exit 1 (services left running) | `--abort-on-failure`: stop all services, then exit 1 |
+| Foreground (`start`) | Exit 1 at quiescence (services keep running until quiescent) | `--abort-on-failure`: stop all services immediately, exit 1 |
+| `start -d --wait` | Stop all services, exit 1 | `--no-abort-on-failure`: exit 1 without stopping services |
 | `start -d` | No failure detection (fire-and-forget) | — |
 
 See [Service Lifecycle](service-lifecycle.md) for details on startup/deferred clusters and quiescence.

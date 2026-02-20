@@ -31,11 +31,11 @@ pub enum Commands {
         /// Refresh all system environment variables from the current shell
         #[arg(short = 'r', long)]
         refresh_env: bool,
-        /// Stop all services on unhandled failure (--wait mode only)
-        #[arg(long, requires = "wait")]
-        abort_on_failure: bool,
-        /// Don't stop services on unhandled failure (foreground mode)
+        /// Stop all services on unhandled failure (foreground mode)
         #[arg(long, conflicts_with = "detach")]
+        abort_on_failure: bool,
+        /// Don't stop services on unhandled failure (--wait mode only)
+        #[arg(long, requires = "wait")]
         no_abort_on_failure: bool,
     },
     /// Stop services (requires daemon to be running)
