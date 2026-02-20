@@ -3,7 +3,7 @@
 /// Lifecycle events that trigger different hook/retention combinations
 #[derive(Debug, Clone, Copy)]
 pub enum LifecycleEvent {
-    /// First start - on_init hook
+    /// First start
     Init,
     /// Normal start - pre_start/post_start hooks, on_start retention
     Start,

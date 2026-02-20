@@ -1,23 +1,10 @@
-//! Hook configuration types for global and service-specific hooks
+//! Hook configuration types for service-specific hooks
 
 use serde::{Deserialize, Deserializer};
 use std::path::{Path, PathBuf};
 
 use super::ConfigValue;
 use super::resources::ResourceLimits;
-
-/// Global hooks that run at daemon lifecycle events
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GlobalHooks {
-    pub pre_start: Option<HookList>,
-    pub post_start: Option<HookList>,
-    pub pre_stop: Option<HookList>,
-    pub post_stop: Option<HookList>,
-    pub pre_restart: Option<HookList>,
-    pub post_restart: Option<HookList>,
-    pub pre_cleanup: Option<HookList>,
-}
 
 /// Service-specific hooks
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
@@ -252,22 +239,6 @@ impl HookCommand {
 
     pub fn output(&self) -> Option<&str> {
         self.common().output.as_deref()
-    }
-}
-
-impl GlobalHooks {
-    /// Iterate over all hook slots mutably.
-    pub fn all_hooks_mut(&mut self) -> impl Iterator<Item = &mut Option<HookList>> {
-        [
-            &mut self.pre_start,
-            &mut self.post_start,
-            &mut self.pre_stop,
-            &mut self.post_stop,
-            &mut self.pre_restart,
-            &mut self.post_restart,
-            &mut self.pre_cleanup,
-        ]
-        .into_iter()
     }
 }
 

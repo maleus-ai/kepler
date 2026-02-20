@@ -32,8 +32,6 @@ pub enum HealthStatus {
 /// Service lifecycle events
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceEvent {
-    /// Service initialization (on_init hook about to run)
-    Init,
     /// Service starting (pre_start hook about to run)
     Start,
     /// Service restarting
@@ -56,7 +54,6 @@ impl ServiceEvent {
     /// Get a string representation of the event type
     pub fn as_str(&self) -> &'static str {
         match self {
-            ServiceEvent::Init => "init",
             ServiceEvent::Start => "start",
             ServiceEvent::Restart { .. } => "restart",
             ServiceEvent::Exit { .. } => "exit",

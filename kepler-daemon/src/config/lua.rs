@@ -23,7 +23,7 @@ pub fn process_lua_scripts(
 ) -> Result<()> {
     use serde_yaml::Value;
 
-    // Process kepler namespace only (global hooks and logs).
+    // Process kepler namespace only (logs).
     // Service-level !lua processing is deferred to resolve_service() at service start time.
     if let Value::Mapping(map) = value
         && let Some(Value::Mapping(kepler_map)) = map.get_mut(Value::String("kepler".to_string())) {
@@ -39,53 +39,7 @@ pub fn process_lua_scripts(
                 };
                 super::expand::evaluate_value_tree(logs_value, evaluator, &ctx, config_path, "kepler.logs")?;
             }
-
-            // Process kepler.hooks
-            if let Some(hooks_value) = kepler_map.get_mut(Value::String("hooks".to_string())) {
-                process_global_hooks_lua(hooks_value, evaluator, sys_env, config_path)?;
-            }
         }
-
-    Ok(())
-}
-
-/// Process Lua tags and `${{ }}$` expressions in global hooks with proper hook_name context.
-fn process_global_hooks_lua(
-    hooks_value: &mut serde_yaml::Value,
-    evaluator: &LuaEvaluator,
-    sys_env: &HashMap<String, String>,
-    config_path: &Path,
-) -> Result<()> {
-    use serde_yaml::Value;
-
-    let hooks_map = match hooks_value {
-        Value::Mapping(map) => map,
-        _ => return Ok(()),
-    };
-
-    // Process each hook type with its name in the context.
-    // Build the base context once; only hook_name changes per iteration.
-    let hook_names: Vec<String> = hooks_map
-        .keys()
-        .filter_map(|k| k.as_str().map(String::from))
-        .collect();
-
-    let mut ctx = EvalContext {
-        hook: Some(crate::lua_eval::HookEvalContext {
-            raw_env: sys_env.clone(),
-            env: sys_env.clone(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    for hook_name in hook_names {
-        if let Some(hook_value) = hooks_map.get_mut(Value::String(hook_name.clone())) {
-            let field_path = format!("kepler.hooks.{}", hook_name);
-            ctx.hook.as_mut().unwrap().name = hook_name;
-            super::expand::evaluate_value_tree(hook_value, evaluator, &ctx, config_path, &field_path)?;
-        }
-    }
 
     Ok(())
 }

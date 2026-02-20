@@ -24,7 +24,7 @@ const RESTART_DELAY: Duration = Duration::from_millis(500);
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{resolve_log_retention, resolve_sys_env, DependsOn, GlobalHooks, KeplerConfig, LogConfig, LogRetention, RawServiceConfig, ServiceHooks, SysEnvPolicy};
+use crate::config::{resolve_log_retention, resolve_sys_env, DependsOn, KeplerConfig, LogRetention, RawServiceConfig, ServiceHooks, SysEnvPolicy};
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
 use crate::deps::{check_dependency_satisfied, get_start_order, get_stop_order, is_condition_unreachable_by_policy, is_dependency_permanently_unsatisfied, is_transient_satisfaction};
@@ -38,11 +38,10 @@ type SharedLuaEvaluator = Arc<tokio::sync::Mutex<LuaEvaluator>>;
 use crate::cursor::CursorManager;
 use crate::health::spawn_health_checker;
 use crate::hooks::{
-    run_global_hook, run_service_hook, GlobalHookParams, GlobalHookType, ServiceHookParams, ServiceHookType,
-    GLOBAL_HOOK_PREFIX,
+    run_service_hook, ServiceHookParams, ServiceHookType,
 };
 use crate::lua_eval::DepInfo;
-use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
+use crate::logs::{BufferedLogWriter, LogStream};
 use crate::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
 use crate::state::ServiceStatus;
 use crate::watcher::{spawn_file_watcher, FileChangeEvent};
@@ -56,13 +55,6 @@ struct StartupContext<'a> {
     handle: &'a ConfigActorHandle,
     started: &'a [String],
     initialized: bool,
-    global_hooks: &'a Option<GlobalHooks>,
-    global_log_config: Option<&'a LogConfig>,
-    config_dir: &'a Path,
-    stored_env: &'a HashMap<String, String>,
-    log_config: &'a LogWriterConfig,
-    run_global_hooks: bool,
-    progress: &'a Option<ProgressSender>,
 }
 
 
@@ -139,8 +131,6 @@ impl ServiceOrchestrator {
             handle.merge_sys_env(overrides).await;
         }
 
-        let config_dir = handle.get_config_dir().await;
-
         // Get config and determine services to start
         let config = handle
             .get_config()
@@ -185,37 +175,7 @@ impl ServiceOrchestrator {
                 .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?,
         ));
 
-        let mut log_config = handle
-            .get_log_config()
-            .await
-            .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
-        log_config.log_notify = Some(self.cursor_manager.get_log_notify(config_path));
-
-        let global_hooks = config.global_hooks().cloned();
-        let global_log_config = config.global_logs().cloned();
         let initialized = handle.is_config_initialized().await;
-
-        // Fetch stored sys_env once for all global hooks in this method
-        let stored_env = handle.get_sys_env().await;
-
-        // Only run global hooks for full start (not specific service)
-        if !is_specific_service {
-            // Run global pre_start hook
-            run_global_hook(
-                &global_hooks,
-                GlobalHookType::PreStart,
-                &GlobalHookParams {
-                    working_dir: &config_dir,
-                    env: &stored_env,
-                    log_config: Some(&log_config),
-                    global_log_config: global_log_config.as_ref(),
-                    progress: &progress,
-                    handle: Some(&handle),
-                    lua_code: config.lua.as_deref(),
-                },
-            )
-            .await?;
-        }
 
         // Start services
         if is_specific_service {
@@ -248,13 +208,6 @@ impl ServiceOrchestrator {
                 handle: &handle,
                 started: &started,
                 initialized,
-                global_hooks: &global_hooks,
-                global_log_config: global_log_config.as_ref(),
-                config_dir: &config_dir,
-                stored_env: &stored_env,
-                log_config: &log_config,
-                run_global_hooks: false, // no global hooks for specific service
-                progress: &progress,
             }).await?;
 
             if started.is_empty() {
@@ -300,31 +253,20 @@ impl ServiceOrchestrator {
                 });
             }
 
-            // Post-startup work (snapshot, event handler, global post_start hook)
+            // Post-startup work (snapshot, event handler, mark initialized)
             self.post_startup_work(StartupContext {
                 config_path,
                 config: &config,
                 handle: &handle,
                 started: &services_to_start,
                 initialized,
-                global_hooks: &global_hooks,
-                global_log_config: global_log_config.as_ref(),
-                config_dir: &config_dir,
-                stored_env: &stored_env,
-                log_config: &log_config,
-                run_global_hooks: true,
-                progress: &progress,
             }).await?;
 
             Ok(format!("Services starting: {}", services_to_start.join(", ")))
         }
     }
 
-    /// Run post-startup work: snapshot, event handler, global post_start hook, mark initialized
-    ///
-    /// When `run_global_hooks` is false (specific service start), the global post_start
-    /// hook is skipped — consistent with stop/restart which also skip global hooks
-    /// for single-service operations.
+    /// Run post-startup work: snapshot, event handler, mark initialized
     async fn post_startup_work(
         &self,
         ctx: StartupContext<'_>,
@@ -346,27 +288,6 @@ impl ServiceOrchestrator {
                 let handle_clone = ctx.handle.clone();
                 self_arc.spawn_event_handler(config_path_owned, handle_clone).await;
                 ctx.handle.set_event_handler_spawned().await;
-            }
-
-            // Run global post_start hook (after all services started)
-            // Skipped for specific service start (consistent with stop/restart)
-            if ctx.run_global_hooks
-                && let Err(e) = run_global_hook(
-                    ctx.global_hooks,
-                    GlobalHookType::PostStart,
-                    &GlobalHookParams {
-                        working_dir: ctx.config_dir,
-                        env: ctx.stored_env,
-                        log_config: Some(ctx.log_config),
-                        global_log_config: ctx.global_log_config,
-                        progress: ctx.progress,
-                        handle: Some(ctx.handle),
-                        lua_code: ctx.config.lua.as_deref(),
-                    },
-                )
-                .await
-            {
-                warn!("Global post_start hook failed: {}", e);
             }
 
             // Mark config initialized after first start
@@ -626,7 +547,6 @@ impl ServiceOrchestrator {
             return Ok(());
         }
 
-        // Run on_init hook if first time for this service
         let service_initialized = handle.is_service_initialized(service_name).await;
 
         // Clear previous outputs for a fresh start
@@ -1026,11 +946,6 @@ impl ServiceOrchestrator {
             debug!("FD count at stop_services entry: {}", fd_count);
         }
 
-        let config_dir = config_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-
         let handle = match self.registry.get(&config_path.to_path_buf()) {
             Some(h) => h,
             None => return Ok("Config not loaded".to_string()),
@@ -1057,31 +972,6 @@ impl ServiceOrchestrator {
             cfg
         });
         let global_log_config = config.global_logs().cloned();
-        let global_hooks = config.global_hooks().cloned();
-
-        // Fetch stored sys_env once for all global hooks in this method
-        let stored_env = handle.get_sys_env().await;
-
-        // Run global pre_stop hook if stopping all services
-        if service_filter.is_none()
-            && let Some(ref log_cfg) = log_config
-            && let Err(e) = run_global_hook(
-                &global_hooks,
-                GlobalHookType::PreStop,
-                &GlobalHookParams {
-                    working_dir: &config_dir,
-                    env: &stored_env,
-                    log_config: Some(log_cfg),
-                    global_log_config: global_log_config.as_ref(),
-                    progress: &None,
-                    handle: Some(&handle),
-                    lua_code: config.lua.as_deref(),
-                },
-            )
-            .await
-        {
-            warn!("Global pre_stop hook failed: {}", e);
-        }
 
         let mut stopped = Vec::new();
 
@@ -1170,27 +1060,6 @@ impl ServiceOrchestrator {
             }
         }
 
-        // Run global post_stop hook if stopping all services
-        if service_filter.is_none()
-            && let Some(ref log_cfg) = log_config
-            && let Err(e) = run_global_hook(
-                &global_hooks,
-                GlobalHookType::PostStop,
-                &GlobalHookParams {
-                    working_dir: &config_dir,
-                    env: &stored_env,
-                    log_config: Some(log_cfg),
-                    global_log_config: global_log_config.as_ref(),
-                    progress: &None,
-                    handle: Some(&handle),
-                    lua_code: config.lua.as_deref(),
-                },
-            )
-            .await
-        {
-            warn!("Global post_stop hook failed: {}", e);
-        }
-
         // Run pre_cleanup if requested
         if service_filter.is_none() && clean {
             info!("Running cleanup hooks");
@@ -1219,26 +1088,6 @@ impl ServiceOrchestrator {
                     && let Err(e) = self.run_service_hook(ctx, service_name, ServiceHookType::PreCleanup, &None, Some(&handle)).await {
                         warn!("Hook pre_cleanup failed for {}: {}", service_name, e);
                     }
-            }
-
-            // Run global pre_cleanup hook
-            if let Some(ref log_cfg) = log_config
-                && let Err(e) = run_global_hook(
-                    &global_hooks,
-                    GlobalHookType::PreCleanup,
-                    &GlobalHookParams {
-                        working_dir: &config_dir,
-                        env: &stored_env,
-                        log_config: Some(log_cfg),
-                        global_log_config: global_log_config.as_ref(),
-                        progress: &None,
-                        handle: Some(&handle),
-                        lua_code: config.lua.as_deref(),
-                    },
-                )
-                .await
-            {
-                error!("pre_cleanup hook failed: {}", e);
             }
         }
 
@@ -1278,19 +1127,6 @@ impl ServiceOrchestrator {
                 }
             }
 
-            // Clear global hook logs if stopping all
-            if service_filter.is_none() {
-                // When clean is true, always clear; otherwise check on_stop retention
-                let should_clear_global = clean
-                    || global_log_config
-                        .as_ref()
-                        .and_then(|c| c.get_on_stop())
-                        .unwrap_or(LogRetention::Clear)
-                        == LogRetention::Clear;
-                if should_clear_global {
-                    reader.clear_service_prefix(GLOBAL_HOOK_PREFIX);
-                }
-            }
         }
 
         // When clean=true and stopping all services, remove entire state directory
@@ -1358,12 +1194,10 @@ impl ServiceOrchestrator {
     /// For a fresh restart with re-baked config, use `recreate_services()` instead.
     ///
     /// Execution order:
-    /// 1. Global pre_restart (full restart only)
-    /// 2. STOP PHASE - reverse dependency order (dependents first):
+    /// 1. STOP PHASE - reverse dependency order (dependents first):
     ///    For each running service: pre_restart, pre_stop, apply retention, stop, post_stop
-    /// 3. START PHASE - forward dependency order (dependencies first):
+    /// 2. START PHASE - forward dependency order (dependencies first):
     ///    For each service: pre_start, apply retention, spawn, post_start, post_restart
-    /// 4. Global post_restart (full restart only)
     pub async fn restart_services(
         &self,
         config_path: &Path,
@@ -1374,11 +1208,6 @@ impl ServiceOrchestrator {
         info!("Restarting services for {:?} (preserving state)", config_path);
 
         let is_full_restart = services.is_empty();
-        let config_dir = config_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-
         // Get handle - must already be loaded
         let handle = self.registry.get(&config_path.to_path_buf())
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
@@ -1392,16 +1221,6 @@ impl ServiceOrchestrator {
             .get_config()
             .await
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
-
-        let log_config = handle.get_log_config().await.map(|mut cfg| {
-            cfg.log_notify = Some(self.cursor_manager.get_log_notify(config_path));
-            cfg
-        });
-        let global_hooks = config.global_hooks().cloned();
-        let global_log_config = config.global_logs().cloned();
-
-        // Fetch stored sys_env once for all global hooks in this method
-        let stored_env = handle.get_sys_env().await;
 
         // Get list of running services to restart
         let services_to_restart: Vec<String> = if is_full_restart {
@@ -1439,27 +1258,6 @@ impl ServiceOrchestrator {
             stop.reverse();
             (start, stop)
         };
-
-        // Run global pre_restart hook for full restart
-        if is_full_restart
-            && let Some(ref log_cfg) = log_config
-            && let Err(e) = run_global_hook(
-                &global_hooks,
-                GlobalHookType::PreRestart,
-                &GlobalHookParams {
-                    working_dir: &config_dir,
-                    env: &stored_env,
-                    log_config: Some(log_cfg),
-                    global_log_config: global_log_config.as_ref(),
-                    progress: &None,
-                    handle: Some(&handle),
-                    lua_code: config.lua.as_deref(),
-                },
-            )
-            .await
-        {
-            warn!("Global pre_restart hook failed: {}", e);
-        }
 
         // Suppress Quiescent/Ready signals during the stop+start cycle
         handle.set_startup_in_progress(true).await;
@@ -1572,27 +1370,6 @@ impl ServiceOrchestrator {
 
         // Re-enable Quiescent/Ready signals now that restart is complete
         handle.set_startup_in_progress(false).await;
-
-        // Run global post_restart hook for full restart
-        if is_full_restart
-            && let Some(ref log_cfg) = log_config
-            && let Err(e) = run_global_hook(
-                &global_hooks,
-                GlobalHookType::PostRestart,
-                &GlobalHookParams {
-                    working_dir: &config_dir,
-                    env: &stored_env,
-                    log_config: Some(log_cfg),
-                    global_log_config: global_log_config.as_ref(),
-                    progress: &None,
-                    handle: Some(&handle),
-                    lua_code: config.lua.as_deref(),
-                },
-            )
-            .await
-        {
-            warn!("Global post_restart hook failed: {}", e);
-        }
 
         if restarted.is_empty() {
             Ok("No services were restarted".to_string())
@@ -2437,7 +2214,7 @@ impl ServiceOrchestrator {
     ///
     /// Scans `~/.kepler/configs/` for all config state directories and:
     /// - For each config: verifies all services are stopped (or orphaned)
-    /// - Runs the global `on_cleanup` hook (if config readable)
+    /// - Runs service-level `pre_cleanup` hooks (if config readable)
     /// - Deletes the config's state directory entirely
     /// - Reports what was pruned
     pub async fn prune_all(
@@ -2518,11 +2295,6 @@ impl ServiceOrchestrator {
                 continue;
             }
 
-            // Run cleanup hook if snapshot exists (not orphaned)
-            if !is_orphaned {
-                self.run_cleanup_hook_for_prune(&state_dir).await;
-            }
-
             // Unload from registry BEFORE deleting state directory
             // Use the ORIGINAL source path which matches the registry key
             if !is_orphaned
@@ -2557,127 +2329,6 @@ impl ServiceOrchestrator {
         }
 
         Ok(results)
-    }
-
-    /// Run pre_cleanup hook before pruning
-    ///
-    /// Loads the baked config and sys_env directly from the persisted snapshot,
-    /// avoiding the need to re-parse the raw config.
-    async fn run_cleanup_hook_for_prune(&self, state_dir: &Path) {
-        use crate::persistence::ConfigPersistence;
-        let persistence = ConfigPersistence::new(state_dir.to_path_buf());
-
-        let snapshot = match persistence.load_expanded_config() {
-            Ok(Some(s)) => s,
-            _ => return,
-        };
-
-        if let Err(e) = run_global_hook(
-            &snapshot.config.global_hooks().cloned(),
-            GlobalHookType::PreCleanup,
-            &GlobalHookParams {
-                working_dir: &snapshot.config_dir,
-                env: &snapshot.sys_env,
-                log_config: None,
-                global_log_config: snapshot.config.global_logs(),
-                progress: &None,
-                handle: None,
-                lua_code: snapshot.config.lua.as_deref(),
-            },
-        )
-        .await
-        {
-            warn!("pre_cleanup hook failed: {}", e);
-        }
-    }
-
-    /// Run global `pre_stop` + `post_stop` hooks on quiescence.
-    /// Called by the subscribe handler so hooks complete before the CLI receives
-    /// the quiescent signal (ensuring hook output appears in foreground logs).
-    pub async fn run_quiescence_hooks(
-        &self,
-        config_path: &Path,
-    ) {
-        let handle = match self.registry.get(&config_path.to_path_buf()) {
-            Some(h) => h,
-            None => return,
-        };
-
-        let config = match handle.get_config().await {
-            Some(c) => c,
-            None => return,
-        };
-
-        let config_dir = config_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let global_hooks = config.global_hooks().cloned();
-        let global_log_config = config.global_logs().cloned();
-        let stored_env = handle.get_sys_env().await;
-        let log_config = handle.get_log_config().await.map(|mut cfg| {
-            cfg.log_notify = Some(self.cursor_manager.get_log_notify(config_path));
-            cfg
-        });
-
-        if let Some(ref log_cfg) = log_config {
-            let params = GlobalHookParams {
-                working_dir: &config_dir,
-                env: &stored_env,
-                log_config: Some(log_cfg),
-                global_log_config: global_log_config.as_ref(),
-                progress: &None,
-                handle: Some(&handle),
-                lua_code: config.lua.as_deref(),
-            };
-
-            if let Err(e) = run_global_hook(&global_hooks, GlobalHookType::PreStop, &params).await {
-                warn!("Global pre_stop hook (quiescence) failed: {}", e);
-            }
-            if let Err(e) = run_global_hook(&global_hooks, GlobalHookType::PostStop, &params).await {
-                warn!("Global post_stop hook (quiescence) failed: {}", e);
-            }
-        }
-    }
-
-    /// Clear only the `pre_stop` and `post_stop` global hook log files
-    /// after the quiescent signal has been sent to the CLI. This avoids
-    /// accumulation across runs while leaving other global hook logs
-    /// (e.g. `pre_start`) untouched.
-    pub async fn clear_quiescence_hook_logs(
-        &self,
-        config_path: &Path,
-    ) {
-        let handle = match self.registry.get(&config_path.to_path_buf()) {
-            Some(h) => h,
-            None => return,
-        };
-
-        let config = match handle.get_config().await {
-            Some(c) => c,
-            None => return,
-        };
-
-        let global_log_config = config.global_logs().cloned();
-        let log_config = match handle.get_log_config().await {
-            Some(cfg) => cfg,
-            None => return,
-        };
-
-        let should_clear = global_log_config
-            .as_ref()
-            .and_then(|c| c.get_on_stop())
-            .unwrap_or(LogRetention::Clear)
-            == LogRetention::Clear;
-
-        if should_clear {
-            use crate::logs::LogReader;
-            let reader = LogReader::new(log_config.logs_dir);
-            // Only delete pre_stop/post_stop files — not all global.* hooks.
-            reader.clear_service_prefix("global.pre_stop");
-            reader.clear_service_prefix("global.post_stop");
-        }
     }
 
     /// Spawn an event handler for a config

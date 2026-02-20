@@ -21,7 +21,7 @@ async fn test_full_lifecycle_with_healthcheck_hooks() {
     let health_marker_path = marker.marker_path("health_status");
 
     let hooks = ServiceHooks {
-        pre_start: Some(HookList(vec![marker.create_timestamped_marker_hook("on_init"), marker.create_timestamped_marker_hook("on_start")])),
+        pre_start: Some(HookList(vec![marker.create_timestamped_marker_hook("first_start"), marker.create_timestamped_marker_hook("on_start")])),
         pre_stop: Some(HookList(vec![marker.create_timestamped_marker_hook("on_stop")])),
         post_healthcheck_success: Some(HookList(vec![marker.create_timestamped_marker_hook("on_healthy")])),
         post_healthcheck_fail: Some(HookList(vec![marker.create_timestamped_marker_hook("on_unhealthy")])),
@@ -50,8 +50,8 @@ async fn test_full_lifecycle_with_healthcheck_hooks() {
     // 1. Start the service
     harness.start_service("test").await.unwrap();
     assert!(
-        marker.wait_for_marker("on_init", Duration::from_secs(2)).await,
-        "on_init should fire"
+        marker.wait_for_marker("first_start", Duration::from_secs(2)).await,
+        "first_start should fire"
     );
     assert!(
         marker.wait_for_marker("on_start", Duration::from_secs(2)).await,
@@ -102,7 +102,7 @@ async fn test_full_lifecycle_with_healthcheck_hooks() {
     assert_eq!(harness.get_status("test").await, Some(ServiceStatus::Stopped));
 
     // Check hook counts - each should fire exactly once
-    assert_eq!(marker.count_marker_lines("on_init"), 1);
+    assert_eq!(marker.count_marker_lines("first_start"), 1);
     assert_eq!(marker.count_marker_lines("on_start"), 1);
     assert_eq!(marker.count_marker_lines("on_unhealthy"), 1);
     assert_eq!(marker.count_marker_lines("on_healthy"), 1);

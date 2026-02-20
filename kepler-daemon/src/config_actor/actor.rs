@@ -112,8 +112,8 @@ impl ConfigActor {
     /// If None and no snapshot exists, defaults to an empty env with a warning.
     ///
     /// The `config_owner` parameter provides the UID/GID of the CLI user that loaded
-    /// this config. If provided and uid != 0, services and global hooks without an
-    /// explicit `user:` field will default to running as this user instead of root.
+    /// this config. If provided and uid != 0, services without an explicit `user:`
+    /// field will default to running as this user instead of root.
     /// This is only applied on fresh loads — snapshot restoration already has user baked.
     pub fn create(
         config_path: PathBuf,
@@ -271,7 +271,7 @@ impl ConfigActor {
                         other => other,
                     })?;
 
-                // Bake default user into services and global hooks based on CLI user
+                // Bake default user into services based on CLI user
                 if let Some((uid, gid)) = config_owner {
                     config.resolve_default_user(uid, gid);
                 }

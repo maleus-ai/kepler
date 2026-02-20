@@ -17,7 +17,7 @@ For a quick overview of the project, see the [main README](../README.md).
 - **[Service Lifecycle](service-lifecycle.md)** -- Status states, start modes, and quiescence
 - **[Dependencies](dependencies.md)** -- Conditions, ordering, propagation, and timeouts
 - **[Health Checks](health-checks.md)** -- Docker-compatible health check configuration
-- **[Hooks](hooks.md)** -- Global and service lifecycle hooks
+- **[Hooks](hooks.md)** -- Service lifecycle hooks
 
 ## Configuration Features
 

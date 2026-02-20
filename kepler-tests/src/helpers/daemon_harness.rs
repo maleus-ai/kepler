@@ -252,8 +252,8 @@ impl TestDaemonHarness {
             .set_service_status(service_name, ServiceStatus::Starting)
             .await;
 
-        // Run on_init hook if not initialized
-        let should_run_init = !self.handle
+        // Track whether this is the first start for this service
+        let should_mark_initialized = !self.handle
             .is_service_initialized(service_name)
             .await;
 
@@ -278,8 +278,8 @@ impl TestDaemonHarness {
             config_dir: Some(&self.config_dir),
         };
 
-        if should_run_init {
-            // Mark as initialized
+        if should_mark_initialized {
+            // Mark as initialized after first start
             let _ = self.handle
                 .mark_service_initialized(service_name)
                 .await;

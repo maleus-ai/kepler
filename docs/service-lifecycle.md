@@ -234,7 +234,7 @@ kepler stop --clean      # Stop and run cleanup hooks
 
 Services transition: Running/Healthy/Unhealthy → Stopping → Stopped
 
-The `--clean` flag runs the `pre_cleanup` hook after services are stopped. See [Hooks](hooks.md) for details.
+The `--clean` flag performs cleanup after services are stopped.
 
 ---
 

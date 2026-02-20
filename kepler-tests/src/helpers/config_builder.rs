@@ -1,7 +1,7 @@
 //! Programmatic config creation with builder pattern
 
 use kepler_daemon::config::{
-    ConfigValue, DependsOn, GlobalHooks, HealthCheck, HookCommand, HookCommon, KeplerConfig,
+    ConfigValue, DependsOn, HealthCheck, HookCommand, HookCommon, KeplerConfig,
     KeplerGlobalConfig, LogConfig, RawServiceConfig, ResourceLimits, RestartConfig, RestartPolicy,
     ServiceConfig, ServiceHooks, SysEnvPolicy,
 };
@@ -12,7 +12,6 @@ use std::time::Duration;
 /// Builder for creating test configurations
 pub struct TestConfigBuilder {
     lua: Option<String>,
-    hooks: Option<GlobalHooks>,
     logs: Option<LogConfig>,
     sys_env: Option<SysEnvPolicy>,
     services: HashMap<String, ServiceConfig>,
@@ -22,7 +21,6 @@ impl TestConfigBuilder {
     pub fn new() -> Self {
         Self {
             lua: None,
-            hooks: None,
             logs: None,
             sys_env: None,
             services: HashMap::new(),
@@ -31,11 +29,6 @@ impl TestConfigBuilder {
 
     pub fn with_lua(mut self, lua: &str) -> Self {
         self.lua = Some(lua.to_string());
-        self
-    }
-
-    pub fn with_global_hooks(mut self, hooks: GlobalHooks) -> Self {
-        self.hooks = Some(hooks);
         self
     }
 
@@ -56,13 +49,12 @@ impl TestConfigBuilder {
 
     /// Build the KeplerGlobalConfig from the builder fields
     fn build_kepler_global(&self) -> Option<KeplerGlobalConfig> {
-        if self.hooks.is_none() && self.logs.is_none() && self.sys_env.is_none() {
+        if self.logs.is_none() && self.sys_env.is_none() {
             return None;
         }
         Some(KeplerGlobalConfig {
             sys_env: self.sys_env.clone(),
             logs: self.logs.clone(),
-            hooks: self.hooks.clone(),
             timeout: None,
             output_max_size: None,
         })

@@ -24,24 +24,6 @@ kepler:
   sys_env: inherit
   timeout: 30s
 
-  hooks:
-    pre_start:
-      - if: ${{ not hook.initialized }}$
-        run: echo "[GLOBAL] init — bootstrapping platform"
-      - run: echo "[GLOBAL] pre_start — launching all services"
-    post_start:
-      run: echo "[GLOBAL] post_start — all services triggered"
-    pre_stop:
-      run: echo "[GLOBAL] pre_stop — shutting down"
-    post_stop:
-      run: echo "[GLOBAL] post_stop — shutdown complete"
-    pre_restart:
-      run: echo "[GLOBAL] pre_restart — restarting"
-    post_restart:
-      run: echo "[GLOBAL] post_restart — restart done"
-    pre_cleanup:
-      run: echo "[GLOBAL] pre_cleanup — cleaning up"
-
 services:
   # ═══════════════════════════════════════════════════════════════════════════
   # TIER 1: Foundation (5 services, no deps, all exit 0)
@@ -53,8 +35,8 @@ services:
     restart: no
     hooks:
       pre_start:
-        - if: ${{ not service.initialized }}$
-          run: echo "[alpha] on_init — first time setup"
+        - if: ${{ not hook.initialized }}$
+          run: echo "[alpha] first start — first time setup"
         - run: echo "[alpha] pre_start — preparing"
       post_start:
         run: echo "[alpha] post_start — launched"
@@ -195,8 +177,8 @@ services:
       - DB_READY=${{ deps["setup-b"].outputs.db_ready or "false" }}$
     hooks:
       pre_start:
-        - if: ${{ not service.initialized }}$
-          run: echo "[core-auth] on_init — generating keys"
+        - if: ${{ not hook.initialized }}$
+          run: echo "[core-auth] first start — generating keys"
         - run: echo "[core-auth] pre_start — deps ready"
       post_exit:
         run: echo "[core-auth] post_exit — auth done"
@@ -697,7 +679,7 @@ services:
         condition: service_failed
     hooks:
       pre_start:
-        - if: ${{ not service.initialized }}$
+        - if: ${{ not hook.initialized }}$
           run: echo "::output::runbook=true"
           output: init_step
         - run: echo "[emergency-stop] pre_start — runbook=${{ hooks.pre_start.outputs.init_step.runbook or 'none' }}$"

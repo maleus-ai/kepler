@@ -146,11 +146,6 @@ kepler:
       on_stop: retain
       on_start: retain
     max_size: 10M
-  hooks:
-    pre_start:
-      run: echo "Kepler starting"
-    pre_stop:
-      run: echo "Kepler stopping"
 
 services:
   app:
@@ -177,14 +172,7 @@ services:
     assert!(logs.max_size.as_static().unwrap().is_some(), "max_size config should exist");
     assert_eq!(*logs.max_size.as_static().unwrap(), Some("10M".to_string()));
 
-    // Verify hooks
-    assert!(kepler.hooks.is_some(), "kepler.hooks should exist");
-    let hooks = kepler.hooks.as_ref().unwrap();
-    assert!(hooks.pre_start.is_some(), "pre_start hook should exist");
-    assert!(hooks.pre_stop.is_some(), "pre_stop hook should exist");
-
     // Verify accessor methods work
-    assert!(config.global_hooks().is_some());
     assert!(config.global_logs().is_some());
     assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));
 }
@@ -206,7 +194,6 @@ services:
 
     // No kepler namespace - should fall back to defaults
     assert!(config.kepler.is_none() || config.global_sys_env().is_none());
-    assert!(config.global_hooks().is_none());
     assert!(config.global_logs().is_none());
 
     // Services should use defaults
@@ -245,9 +232,8 @@ services:
     // sys_env should be set
     assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));
 
-    // logs and hooks should be None
+    // logs should be None
     assert!(config.global_logs().is_none());
-    assert!(config.global_hooks().is_none());
 }
 
 /// Test resolve_sys_env function directly

@@ -44,9 +44,6 @@ fn test_kepler_namespace_parsing() {
     let yaml = r#"
 kepler:
   sys_env: inherit
-  hooks:
-    pre_start:
-      run: echo "init"
 
 services:
   app:
@@ -57,10 +54,7 @@ services:
     assert!(config.kepler.is_some());
     let kepler = config.kepler.as_ref().unwrap();
     assert_eq!(kepler.sys_env, Some(SysEnvPolicy::Inherit));
-    assert!(kepler.hooks.is_some());
-    assert!(kepler.hooks.as_ref().unwrap().pre_start.is_some());
     assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));
-    assert!(config.global_hooks().is_some());
 }
 
 #[test]
@@ -74,7 +68,6 @@ services:
     assert!(config.kepler.is_none());
     assert!(config.global_sys_env().is_none());
     assert!(config.global_logs().is_none());
-    assert!(config.global_hooks().is_none());
 }
 
 #[test]
@@ -145,35 +138,6 @@ command: !lua |
 "#;
     let raw_lua: RawServiceConfig = serde_yaml::from_str(yaml_lua).unwrap();
     assert!(raw_lua.command.is_dynamic());
-}
-
-#[test]
-fn test_resolve_default_user_bakes_global_hooks() {
-    let yaml = r#"
-kepler:
-  hooks:
-    pre_start:
-      run: echo "hello"
-    post_start:
-      run: echo "world"
-      user: "root"
-
-services:
-  svc:
-    command: ["./svc"]
-"#;
-    let mut config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
-    config.resolve_default_user(1000, 1000);
-
-    let hooks = config.kepler.as_ref().unwrap().hooks.as_ref().unwrap();
-    assert_eq!(
-        hooks.pre_start.as_ref().unwrap().0[0].user(),
-        Some("1000:1000")
-    );
-    assert_eq!(
-        hooks.post_start.as_ref().unwrap().0[0].user(),
-        Some("root")
-    );
 }
 
 #[test]

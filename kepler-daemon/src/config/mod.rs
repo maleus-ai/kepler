@@ -27,7 +27,7 @@ pub use expand::{
     evaluate_value_tree, evaluate_value_tree_with_env, resolve_sys_env,
 };
 pub use health::HealthCheck;
-pub use hooks::{GlobalHooks, HookCommand, HookCommon, HookList, ServiceHooks};
+pub use hooks::{HookCommand, HookCommon, HookList, ServiceHooks};
 pub use logs::{LogConfig, LogRetention, LogRetentionConfig, LogStoreConfig};
 pub use resolvable::ResolvableCommand;
 pub use resources::{ResourceLimits, SysEnvPolicy, parse_memory_limit};
@@ -587,10 +587,6 @@ pub struct KeplerGlobalConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logs: Option<LogConfig>,
 
-    /// Global hooks that run at daemon lifecycle events
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hooks: Option<GlobalHooks>,
-
     /// Global default timeout for dependency waits.
     /// Used as fallback when a dependency doesn't specify its own timeout.
     #[serde(
@@ -617,7 +613,7 @@ pub struct KeplerConfig {
     /// Inline Lua code that runs in global scope to define functions
     pub lua: Option<String>,
 
-    /// Global Kepler configuration (sys_env, logs, hooks)
+    /// Global Kepler configuration (sys_env, logs)
     pub kepler: Option<KeplerGlobalConfig>,
 
     /// Typed service configurations (dynamic fields resolved at service start time)
@@ -1148,9 +1144,9 @@ impl KeplerConfig {
         Ok(())
     }
 
-    /// Bake the default user into services and global hooks where `user` is `None`.
+    /// Bake the default user into services where `user` is `None`.
     ///
-    /// When the CLI invoking user is not root (uid != 0), services and global hooks
+    /// When the CLI invoking user is not root (uid != 0), services
     /// that don't specify an explicit `user:` field will default to running as the
     /// CLI user instead of root.
     pub fn resolve_default_user(&mut self, uid: u32, gid: u32) {
@@ -1166,26 +1162,9 @@ impl KeplerConfig {
                 raw.user = ConfigValue::Static(Some(user_str.clone()));
             }
         }
-
-        // Bake into global hooks (they don't inherit from any service)
-        if let Some(ref mut kepler) = self.kepler
-            && let Some(ref mut hooks) = kepler.hooks {
-                for hook_list in hooks.all_hooks_mut().flatten() {
-                    for hook in &mut hook_list.0 {
-                        if matches!(&hook.common().user, ConfigValue::Static(None)) {
-                            hook.common_mut().user = ConfigValue::Static(Some(user_str.clone()));
-                        }
-                    }
-                }
-            }
     }
 
     // === Accessor methods for kepler namespace ===
-
-    /// Get global hooks configuration
-    pub fn global_hooks(&self) -> Option<&GlobalHooks> {
-        self.kepler.as_ref().and_then(|k| k.hooks.as_ref())
-    }
 
     /// Get global log configuration
     pub fn global_logs(&self) -> Option<&LogConfig> {

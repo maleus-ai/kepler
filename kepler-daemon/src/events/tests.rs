@@ -15,7 +15,6 @@ async fn test_event_channel() {
 
 #[test]
 fn test_event_as_str() {
-    assert_eq!(ServiceEvent::Init.as_str(), "init");
     assert_eq!(ServiceEvent::Start.as_str(), "start");
     assert_eq!(
         ServiceEvent::Restart {

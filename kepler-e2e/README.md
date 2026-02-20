@@ -29,7 +29,7 @@ Unlike `kepler-tests` (which runs in-process), E2E tests spawn **real binaries**
 | `environment_test` | Env vars, sys_env, env_file |
 | `file_watcher_test` | Auto-restart on file changes |
 | `healthcheck_test` | Health checks, healthy/unhealthy transitions |
-| `hooks_test` | Global and service hooks |
+| `hooks_test` | Service lifecycle hooks |
 | `integration_test` | General integration scenarios |
 | `logs_test` | Log viewing, follow, head/tail |
 | `lua_advanced_test` | Advanced Lua scripting |

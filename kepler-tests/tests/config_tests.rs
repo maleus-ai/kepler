@@ -233,35 +233,6 @@ services:
     }
 }
 
-/// Global hooks parse correctly (under kepler namespace)
-#[test]
-fn test_global_hooks_parsing() {
-    let temp_dir = TempDir::new().unwrap();
-    let config_path = temp_dir.path().join("kepler.yaml");
-
-    let yaml = r#"
-kepler:
-  hooks:
-    pre_start:
-      run: echo global start
-    pre_stop:
-      run: echo global stop
-    pre_cleanup:
-      run: echo global cleanup
-services:
-  test:
-    command: ["sleep", "3600"]
-"#;
-
-    std::fs::write(&config_path, yaml).unwrap();
-    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
-
-    let hooks = config.global_hooks().unwrap();
-    assert!(hooks.pre_start.is_some());
-    assert!(hooks.pre_stop.is_some());
-    assert!(hooks.pre_cleanup.is_some());
-}
-
 /// Restart policy parsing (simple form)
 #[test]
 fn test_restart_policy_parsing() {

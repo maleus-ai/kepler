@@ -61,27 +61,6 @@ kepler:
       on_restart: clear
       on_exit: clear
 
-  hooks:
-    pre_start:
-      - if: ${{ not hook.initialized }}$
-        run: echo "Global on_init — initializing platform"
-        environment:
-          - KEPLER_PHASE=init
-        working_dir: /tmp
-      - command: ["sh", "-c", "echo 'Global pre_start — preparing services'"]
-    post_start:
-      run: echo "Global post_start — all services triggered"
-    pre_stop:
-      command: ["sh", "-c", "echo 'Global pre_stop — beginning shutdown'"]
-    post_stop:
-      run: echo "Global post_stop — shutdown complete"
-    pre_restart:
-      command: ["sh", "-c", "echo 'Global pre_restart — restarting services'"]
-    post_restart:
-      run: echo "Global post_restart — restart complete"
-    pre_cleanup:
-      command: ["sh", "-c", "echo 'Global pre_cleanup — cleaning resources'"]
-
 services:
   # ═══════════════════════════════════════════════════════════════════════════
   # TIER 1: Infrastructure (5 services, no deps, all with healthchecks)
@@ -118,8 +97,8 @@ services:
         on_exit: retain
     hooks:
       pre_start:
-        - if: ${{ not service.initialized }}$
-          run: echo "postgres on_init — creating data directory"
+        - if: ${{ not hook.initialized }}$
+          run: echo "postgres first start — creating data directory"
         - command: ["sh", "-c", "echo 'postgres pre_start — checking config'"]
       post_start:
         command:
@@ -348,7 +327,7 @@ services:
       start_period: 2s
     hooks:
       pre_start:
-        - if: ${{ not service.initialized }}$
+        - if: ${{ not hook.initialized }}$
           run: echo "::output::jwt_key=rsa-256-init"
           output: init_keys
           environment: !lua |
@@ -1160,7 +1139,7 @@ services:
           condition: service_failed
     hooks:
       pre_start:
-        - if: ${{ not service.initialized }}$
+        - if: ${{ not hook.initialized }}$
           run: echo "::output::runbook_loaded=true"
           output: init_step
         - run: echo "emergency-shutdown pre_start — notifying oncall, runbook=${{ hooks.pre_start.outputs.init_step.runbook_loaded or 'skipped' }}$"

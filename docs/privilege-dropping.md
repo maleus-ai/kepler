@@ -134,8 +134,6 @@ services:
         user: root               # Override: runs as root
 ```
 
-Global hooks do not inherit from any service. Instead, when a non-root CLI user loads the config, global hooks without a `user:` field are baked with the CLI user's UID:GID. To run a global hook as root, set `user: root` explicitly.
-
 Each hook can override `user` to run as a different user.
 
 ---
@@ -207,11 +205,11 @@ services:
     command: ["./server"]
     user: appuser
     hooks:
-      on_init:
-        run: ./create-dirs.sh
-        user: root           # Setup requires root
       pre_start:
-        run: ./warmup.sh     # Runs as appuser (inherited)
+        - if: ${{ not hook.initialized }}$
+          run: ./create-dirs.sh
+          user: root           # Setup requires root
+        - run: ./warmup.sh    # Runs as appuser (inherited)
 ```
 
 ---

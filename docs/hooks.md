@@ -1,10 +1,9 @@
 # Hooks
 
-Lifecycle hooks allow you to run commands at various stages of service and config lifecycle.
+Lifecycle hooks allow you to run commands at various stages of service lifecycle.
 
 ## Table of Contents
 
-- [Global Hooks](#global-hooks)
 - [Service Hooks](#service-hooks)
 - [Hook Format](#hook-format)
 - [Hook Inheritance](#hook-inheritance)
@@ -13,39 +12,7 @@ Lifecycle hooks allow you to run commands at various stages of service and confi
 - [Status Functions](#status-functions)
 - [Dependency State Access](#dependency-state-access)
 - [Hook Logging](#hook-logging)
-- [Cleanup Hooks](#cleanup-hooks)
-- [Detached Mode Behavior](#detached-mode-behavior)
 - [Examples](#examples)
-
----
-
-## Global Hooks
-
-Global hooks run at config-level lifecycle events. They are defined under `kepler.hooks`:
-
-| Hook | Description |
-|------|-------------|
-| `on_init` | Runs once when config is first used (before first start) |
-| `pre_start` | Runs before services start |
-| `post_start` | Runs after all services have started |
-| `pre_stop` | Runs before services stop |
-| `post_stop` | Runs after all services have stopped |
-| `pre_restart` | Runs before full restart (all services) |
-| `post_restart` | Runs after full restart (all services) |
-| `pre_cleanup` | Runs when `--clean` flag is used |
-
-```yaml
-kepler:
-  hooks:
-    on_init:
-      run: echo "First run initialization"
-    pre_start:
-      run: echo "Starting services"
-    pre_stop:
-      command: ["echo", "Stopping services"]
-    pre_cleanup:
-      run: docker-compose down -v
-```
 
 ---
 
@@ -55,7 +22,6 @@ Service hooks run at per-service lifecycle events. They are defined under `servi
 
 | Hook | Description |
 |------|-------------|
-| `on_init` | Runs once when service first starts (before spawn) |
 | `pre_start` | Runs before service spawns |
 | `post_start` | Runs after service spawns |
 | `pre_stop` | Runs before service stops |
@@ -71,10 +37,10 @@ services:
   backend:
     command: ["./server"]
     hooks:
-      on_init:
-        run: npm install
       pre_start:
-        run: echo "Backend starting"
+        - if: ${{ not hook.initialized }}$
+          run: npm install
+        - run: echo "Backend starting"
       post_exit:
         command: ["echo", "Backend process exited"]
       post_healthcheck_success:
@@ -82,6 +48,8 @@ services:
       post_healthcheck_fail:
         run: ./alert-team.sh "Backend health check failed"
 ```
+
+> **Tip:** Use `if: ${{ not hook.initialized }}$` on a `pre_start` step to run a command only on the first start (equivalent to an init hook).
 
 ---
 
@@ -145,42 +113,14 @@ Service hooks inherit from their parent service by default:
 - **Environment**: Hook receives the service's environment, plus any additional vars from `environment`/`env_file`
 - **Working directory**: Hook uses the service's `working_dir` unless overridden
 
-Global hooks do not inherit from any service. However, when a non-root CLI user loads the config, global hooks without an explicit `user:` field default to the CLI user's UID:GID (same as services). To run a global hook as root, set `user: root`.
-
 ---
 
 ## Execution Order
 
-### Global Hook Execution
-
-For a `kepler start` command:
-1. `on_init` (first start only)
-2. `pre_start`
-3. *services start*
-4. `post_start`
-
-For a `kepler stop` command:
-1. `pre_stop`
-2. *services stop*
-3. `post_stop`
-
-For a `kepler restart` command:
-1. `pre_restart`
-2. `pre_stop`
-3. *services stop*
-4. `post_stop`
-5. `pre_start`
-6. *services start*
-7. `post_start`
-8. `post_restart`
-
-### Service Hook Execution
-
 For a service starting:
-1. `on_init` (first start only)
-2. `pre_start`
-3. *process spawns*
-4. `post_start`
+1. `pre_start`
+2. *process spawns*
+3. `post_start`
 
 For a service stopping (via CLI):
 1. `pre_stop`
@@ -287,7 +227,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    if: "success('db')"
+    if: ${{ success('db') }}$
     hooks:
       pre_start:
         - run: ./setup.sh
@@ -312,7 +252,7 @@ Service hook conditions can access dependency state via the `deps` table. Each d
 |-------|------|-------------|
 | `deps.<name>.status` | `string` | Current status (`"running"`, `"healthy"`, `"failed"`, `"stopped"`, etc.) |
 | `deps.<name>.exit_code` | `int\|nil` | Last exit code (`nil` if process hasn't exited) |
-| `deps.<name>.initialized` | `bool` | Whether the service has been initialized (`on_init` run) |
+| `deps.<name>.initialized` | `bool` | Whether the service has completed its first start |
 | `deps.<name>.restart_count` | `int` | Number of times the service has restarted |
 
 ### Example
@@ -343,7 +283,7 @@ The `deps` table is read-only. Attempting to modify it raises a runtime error.
 
 ## Hook Logging
 
-Hook output is captured in the service's log stream (or the global log stream for global hooks). Use the `--no-hook` flag with `kepler logs` to exclude hook output:
+Hook output is captured in the service's log stream. Use the `--no-hook` flag with `kepler logs` to exclude hook output:
 
 ```bash
 kepler logs --no-hook           # Exclude hook output
@@ -375,29 +315,7 @@ hooks:
 
 Marker lines are filtered from logs — they are captured but not written to the log stream. Regular output lines continue to appear in logs normally.
 
-Global hooks do **not** support output capture. See [Outputs](outputs.md) for the full reference including marker format, size limits, and cross-service access.
-
----
-
-## Cleanup Hooks
-
-The `pre_cleanup` hook (global) runs when the `--clean` flag is used with `kepler stop`:
-
-```bash
-kepler stop --clean    # Stop services, then run pre_cleanup hook
-```
-
-This is useful for cleanup tasks like removing containers, temporary files, or other resources.
-
----
-
-## Detached Mode Behavior
-
-In detached mode (`kepler start -d`), global hooks run **inside** the background task, not before it. This means:
-
-- The CLI returns immediately
-- Global hooks execute asynchronously in the daemon
-- Hook failures are logged but don't block the CLI
+See [Outputs](outputs.md) for the full reference including marker format, size limits, and cross-service access.
 
 ---
 
@@ -406,21 +324,21 @@ In detached mode (`kepler start -d`), global hooks run **inside** the background
 ### Setup and Teardown
 
 ```yaml
-kepler:
-  hooks:
-    on_init:
-      run: docker-compose up -d postgres redis
-    pre_cleanup:
-      run: docker-compose down -v
-
 services:
+  setup:
+    command: ["sh", "-c", "docker-compose up -d postgres redis"]
+    restart: no
+
   backend:
     command: ["npm", "run", "dev"]
+    depends_on:
+      setup:
+        condition: service_completed_successfully
     hooks:
-      on_init:
-        run: npm install
       pre_start:
-        run: npm run migrate
+        - if: ${{ not hook.initialized }}$
+          run: npm install
+        - run: npm run migrate
 ```
 
 ### Notifications

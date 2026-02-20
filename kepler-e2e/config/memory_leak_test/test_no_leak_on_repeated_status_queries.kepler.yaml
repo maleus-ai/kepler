@@ -30,13 +30,6 @@ kepler:
     retention:
       on_stop: clear
       on_start: clear
-  hooks:
-    pre_start:
-      - if: "not service.initialized"
-        run: echo "global on_init"
-      - command: ["sh", "-c", "echo global pre_start"]
-    post_start:
-      run: echo "global post_start"
 
 services:
   # TIER 1: Infrastructure
@@ -59,8 +52,8 @@ services:
         on_start: clear
     hooks:
       pre_start:
-        - if: "not service.initialized"
-          run: echo "postgres on_init"
+        - if: ${{ not hook.initialized }}$
+          run: echo "postgres first_start"
       post_healthcheck_success:
         run: echo "postgres healthcheck passed"
 
@@ -121,8 +114,8 @@ services:
       start_period: 1s
     hooks:
       pre_start:
-        - if: "not service.initialized"
-          run: echo "auth on_init"
+        - if: ${{ not hook.initialized }}$
+          run: echo "auth first_start"
         - run: echo "auth pre_start"
       post_start:
         run: echo "auth post_start"

@@ -214,12 +214,12 @@ Services emit events at the following lifecycle points:
 
 | Event | Description |
 |-------|-------------|
-| `Init` | Before `on_init` hook runs (first start only) |
+| `Init` | First start of a service |
 | `Start` | Before `pre_start` hook runs |
 | `Restart` | Before service restarts (with reason) |
 | `Exit` | When process exits (with exit code) |
 | `Stop` | Before `pre_stop` hook runs |
-| `Cleanup` | Before `pre_cleanup` hook runs |
+| `Cleanup` | Before cleanup runs |
 | `Healthcheck` | After each health check (with status) |
 | `Healthy` | When service transitions to healthy |
 | `Unhealthy` | When service transitions to unhealthy |
