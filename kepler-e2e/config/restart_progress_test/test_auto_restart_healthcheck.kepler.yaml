@@ -9,7 +9,7 @@ services:
     command: ["sh", "-c", "echo WORKER_STARTED; sleep 1; exit 1"]
     restart: always
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 500ms
       timeout: 2s
       retries: 1

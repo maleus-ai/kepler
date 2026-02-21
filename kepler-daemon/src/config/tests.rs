@@ -89,7 +89,7 @@ fn test_raw_service_config_has_healthcheck() {
     let yaml = r#"
 command: ["./app"]
 healthcheck:
-  test: ["curl", "localhost"]
+  command: ["curl", "localhost"]
   interval: 1s
 "#;
     let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();

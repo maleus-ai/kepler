@@ -17,7 +17,7 @@ services:
       track("working_dir")
       return "/tmp"
     healthcheck:
-      test: !lua |
+      command: !lua |
         track("healthcheck")
         return {"sh", "-c", "true"}
       interval: 30s

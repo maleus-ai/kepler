@@ -11,7 +11,7 @@ services:
   database:
     command: ["sh", "-c", "echo DATABASE_STARTED; sleep 300"]
     healthcheck:
-      test: ["false"]  # Always fails
+      command: ["false"]  # Always fails
       interval: 500ms
       timeout: 1s
       retries: 1

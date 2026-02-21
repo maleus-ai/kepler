@@ -45,7 +45,7 @@ services:
   test:
     command: ["sleep", "3600"]
     healthcheck:
-      test: ["CMD", "true"]
+      command: ["CMD", "true"]
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
@@ -70,7 +70,7 @@ services:
   test:
     command: ["sleep", "3600"]
     healthcheck:
-      test: ["CMD", "true"]
+      command: ["CMD", "true"]
       interval: 5s
       timeout: 10s
       retries: 5

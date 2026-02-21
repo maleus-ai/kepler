@@ -60,8 +60,10 @@ async fn health_check_loop(
         };
 
         // Run health check with service environment
-        let test_cmd = config.test.as_static().cloned().unwrap_or_default();
-        let passed = run_health_check(&test_cmd, config.timeout, &ctx.env, &ctx.working_dir).await;
+        let cmd: Vec<String> = config.command.as_static()
+            .map(|v| v.iter().filter_map(|cv| cv.as_static().cloned()).collect())
+            .unwrap_or_default();
+        let passed = run_health_check(&cmd, config.timeout, &ctx.env, &ctx.working_dir).await;
 
         // Update state based on result
         let update_result = handle

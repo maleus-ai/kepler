@@ -40,7 +40,7 @@ services:
     command: ["docker", "compose", "up", "postgres"]
     user: postgres
     healthcheck:
-      test: ["pg_isready", "-U", "postgres"]
+      command: ["pg_isready", "-U", "postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -75,7 +75,7 @@ services:
         - "**/*.ts"
         - "**/*.json"
     healthcheck:
-      test: ["sh", "-c", "curl -f http://localhost:4000/health"]
+      run: "curl -f http://localhost:4000/health"
       interval: 10s
       timeout: 5s
       retries: 3

@@ -37,7 +37,7 @@ services:
     command: ["sh", "-c", "echo PostgreSQL starting; exec sleep 300"]
     restart: always
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 5s
       retries: 3
@@ -65,7 +65,7 @@ services:
     restart: always
     sys_env: clear
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       retries: 3
       start_period: 1s
@@ -78,7 +78,7 @@ services:
     environment: !lua |
       return svc_env(service.name, {"AMQP_PORT=" .. next_port()})
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       retries: 3
       start_period: 1s
@@ -114,7 +114,7 @@ services:
       - db-migration:
           condition: service_completed_successfully
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       retries: 3
       start_period: 1s
@@ -138,7 +138,7 @@ services:
           condition: service_healthy
           restart: true
     healthcheck:
-      test: !lua |
+      command: !lua |
         return {"true"}
       interval: 1s
       retries: 3
@@ -151,7 +151,7 @@ services:
       - auth-service:
           condition: service_healthy
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       retries: 3
       start_period: 1s
@@ -164,7 +164,7 @@ services:
       - auth-service:
           condition: service_healthy
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       retries: 3
       start_period: 1s
@@ -179,7 +179,7 @@ services:
       - event-bus:
           condition: service_healthy
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       retries: 3
       start_period: 1s
@@ -195,7 +195,7 @@ services:
         {["rabbitmq"] = {condition = "service_healthy"}}
       }
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       retries: 3
       start_period: 1s
@@ -225,7 +225,7 @@ services:
       - redis-init:
           condition: service_completed_successfully
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       retries: 3
       start_period: 1s
@@ -238,7 +238,7 @@ services:
     command: ["sh", "-c", "echo Metrics starting; exec sleep 300"]
     restart: always
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       retries: 3
       start_period: 1s
@@ -260,7 +260,7 @@ services:
       - analytics-service:
           condition: service_started
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       retries: 3
       start_period: 1s

@@ -7,7 +7,7 @@ services:
   db:
     command: ["sh", "-c", "echo DB_STARTED; sleep 300"]
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 500ms
       timeout: 2s
       retries: 1

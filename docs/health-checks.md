@@ -23,7 +23,7 @@ services:
   backend:
     command: ["./server"]
     healthcheck:
-      test: ["sh", "-c", "curl -f http://localhost:3000/health || exit 1"]
+      run: "curl -f http://localhost:3000/health || exit 1"
       interval: 10s
       timeout: 5s
       retries: 3
@@ -32,11 +32,14 @@ services:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `test` | `string[]` | required | Health check command |
+| `command` | `string[]` | - | Health check command (direct exec, no shell). Mutually exclusive with `run`. |
+| `run` | `string` | - | Health check shell script (via `sh -c`). Mutually exclusive with `command`. |
 | `interval` | `duration` | `30s` | Time between checks |
 | `timeout` | `duration` | `30s` | Timeout per check |
 | `retries` | `int` | `3` | Consecutive failures before marking unhealthy |
 | `start_period` | `duration` | `0s` | Grace period before health checks begin |
+
+Either `command` or `run` is required (but not both).
 
 **Duration format:** `100ms`, `10s`, `5m`, `1h`, `1d`
 
@@ -72,12 +75,29 @@ stateDiagram-v2
 
 ## Command Format
 
-The `test` field takes a command array, identical to Docker's health check format:
+Health checks support two formats, matching the service `command`/`run` pattern:
+
+### Shell Script (`run`)
+
+Use `run` when you need shell features (pipes, `||`, redirection, etc.):
 
 ```yaml
 healthcheck:
-  test: ["sh", "-c", "curl -f http://localhost:8080/health || exit 1"]
+  run: "curl -f http://localhost:8080/health || exit 1"
 ```
+
+The script is executed via the system shell (`$SHELL`, `/bin/bash`, or `sh`).
+
+### Direct Command (`command`)
+
+Use `command` for direct exec without a shell:
+
+```yaml
+healthcheck:
+  command: ["pg_isready", "-U", "postgres"]
+```
+
+### Exit Codes
 
 - **Exit code 0**: healthy
 - **Any other exit code**: unhealthy
@@ -146,7 +166,7 @@ services:
   backend:
     command: ["./server"]
     healthcheck:
-      test: ["sh", "-c", "curl -f http://localhost:3000/health"]
+      run: "curl -f http://localhost:3000/health"
       interval: 10s
       retries: 3
     hooks:
@@ -170,7 +190,7 @@ services:
     command: ["./server"]
     restart: "on-failure|on-unhealthy"
     healthcheck:
-      test: ["sh", "-c", "curl -f http://localhost:3000/health || exit 1"]
+      run: "curl -f http://localhost:3000/health || exit 1"
       interval: 10s
       timeout: 5s
       retries: 3
@@ -200,7 +220,7 @@ services:
     command: ["./server"]
     restart: "on-unhealthy"
     healthcheck:
-      test: ["sh", "-c", "curl -f http://localhost:3000/health"]
+      run: "curl -f http://localhost:3000/health"
       interval: 10s
       retries: 3
     hooks:
@@ -218,7 +238,7 @@ services:
 
 ```yaml
 healthcheck:
-  test: ["sh", "-c", "curl -f http://localhost:8080/health || exit 1"]
+  run: "curl -f http://localhost:8080/health || exit 1"
   interval: 10s
   timeout: 5s
   retries: 3
@@ -229,7 +249,7 @@ healthcheck:
 
 ```yaml
 healthcheck:
-  test: ["pg_isready", "-U", "postgres"]
+  command: ["pg_isready", "-U", "postgres"]
   interval: 5s
   timeout: 5s
   retries: 5
@@ -240,7 +260,7 @@ healthcheck:
 
 ```yaml
 healthcheck:
-  test: ["sh", "-c", "test -f /tmp/healthy"]
+  run: "test -f /tmp/healthy"
   interval: 15s
   retries: 2
 ```
@@ -249,7 +269,7 @@ healthcheck:
 
 ```yaml
 healthcheck:
-  test: ["sh", "-c", "nc -z localhost 6379"]
+  run: "nc -z localhost 6379"
   interval: 5s
   timeout: 3s
   retries: 3

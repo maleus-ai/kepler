@@ -7,7 +7,7 @@ services:
     command: ["sh", "-c", "echo HOOK_UNHEALTHY_START; sleep 300"]
     restart: "on-unhealthy"
     healthcheck:
-      test: ["sh", "-c", "exit 1"]
+      run: "exit 1"
       interval: 1s
       timeout: 5s
       retries: 2

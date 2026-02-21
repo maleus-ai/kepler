@@ -47,7 +47,7 @@ services:
     command: ["sh", "-c", "echo PostgreSQL starting; exec sleep 300"]
     restart: always
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 5s
       retries: 3
@@ -81,7 +81,7 @@ services:
     restart: always
     sys_env: clear
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 2s
       retries: 3
@@ -101,7 +101,7 @@ services:
     environment: !lua |
       return svc_env(service.name, {"AMQP_PORT=" .. next_port()})
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 5s
       retries: 3
@@ -156,7 +156,7 @@ services:
       - db-migration:
           condition: service_completed_successfully
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 3s
       retries: 3
@@ -187,7 +187,7 @@ services:
       - consul-register:
           condition: service_completed_successfully
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 3s
       retries: 3
@@ -201,7 +201,7 @@ services:
           condition: service_healthy
           restart: true
     healthcheck:
-      test: !lua |
+      command: !lua |
         return {"true"}
       interval: 1s
       timeout: 3s
@@ -218,7 +218,7 @@ services:
       - config-service:
           condition: service_healthy
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 3s
       retries: 3
@@ -237,7 +237,7 @@ services:
       - postgres:
           condition: service_healthy
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 3s
       retries: 3
@@ -255,7 +255,7 @@ services:
       - redis:
           condition: service_healthy
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 3s
       retries: 3
@@ -272,7 +272,7 @@ services:
         {["rabbitmq"] = {condition = "service_healthy"}}
       }
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 3s
       retries: 3
@@ -304,7 +304,7 @@ services:
       - redis-init:
           condition: service_completed_successfully
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 5s
       retries: 3
@@ -323,7 +323,7 @@ services:
       - redis:
           condition: service_healthy
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 3s
       retries: 3
@@ -351,7 +351,7 @@ services:
     command: ["sh", "-c", "echo Metrics collector starting; exec sleep 300"]
     restart: always
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 3s
       retries: 3
@@ -376,7 +376,7 @@ services:
       - analytics-service:
           condition: service_started
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 1s
       timeout: 3s
       retries: 3

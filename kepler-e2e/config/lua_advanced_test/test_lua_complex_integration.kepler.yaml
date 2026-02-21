@@ -26,7 +26,7 @@ services:
       }
     command: ["sh", "-c", "echo Starting $SERVICE on port $PORT with DB=$DB_URL && sleep 300"]
     healthcheck:
-      test: !lua |
+      command: !lua |
         return {"sh", "-c", "curl -f http://localhost:" .. env.PORT .. "/health || exit 1"}
       interval: 10s
     hooks:

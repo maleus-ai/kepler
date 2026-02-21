@@ -134,7 +134,7 @@ services:
     working_dir: ./backend
     restart: always
     healthcheck:
-      test: ["sh", "-c", "curl -f http://localhost:3000/health || exit 1"]
+      run: "curl -f http://localhost:3000/health || exit 1"
       interval: 10s
       timeout: 5s
       retries: 3

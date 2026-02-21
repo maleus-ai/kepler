@@ -11,7 +11,7 @@ services:
       watch:
         - "**/*"
     healthcheck:
-      test: ["sh", "-c", "exit 0"]
+      run: "exit 0"
       interval: 2s
       timeout: 5s
       retries: 2

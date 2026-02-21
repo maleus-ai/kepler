@@ -9,7 +9,7 @@ services:
   database:
     command: ["sh", "-c", "echo DATABASE_STARTED_$(date +%s%N); sleep 300"]
     healthcheck:
-      test: ["true"]
+      command: ["true"]
       interval: 500ms
       timeout: 1s
       retries: 1

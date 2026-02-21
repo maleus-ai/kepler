@@ -77,7 +77,7 @@ The following fields support `${{ }}$`:
 - `command` entries
 - `run`
 - `hooks.run` / `hooks.command`
-- `healthcheck.test`
+- `healthcheck.command` / `healthcheck.run`
 - `restart.watch` patterns
 - `limits.memory`
 - `logs` settings
