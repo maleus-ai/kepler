@@ -257,6 +257,7 @@ impl TestDaemonHarness {
             }),
             hook: None,
             deps: HashMap::new(),
+            ..Default::default()
         };
 
         // Create Lua evaluator with config's lua: block loaded
@@ -337,6 +338,8 @@ impl TestDaemonHarness {
             config_dir: Some(&self.config_dir),
             hardening: self.effective_hardening(),
             owner_uid: None,
+            owner_gid: None,
+            owner_user: None,
             kepler_gid: None,
         };
 
@@ -521,6 +524,8 @@ impl TestDaemonHarness {
             config_dir: Some(&self.config_dir),
             hardening: self.effective_hardening(),
             owner_uid: None,
+            owner_gid: None,
+            owner_user: None,
             kepler_gid: None,
         };
 
@@ -580,6 +585,8 @@ impl TestDaemonHarness {
             config_dir: Some(&self.config_dir),
             hardening: self.effective_hardening(),
             owner_uid: None,
+            owner_gid: None,
+            owner_user: None,
             kepler_gid: None,
         };
 
@@ -688,6 +695,8 @@ impl TestDaemonHarness {
                     config_dir: Some(&config_dir),
                     hardening: effective_hardening,
                     owner_uid: None,
+                    owner_gid: None,
+                    owner_user: None,
                     kepler_gid: None,
                 };
 
@@ -832,6 +841,8 @@ impl TestDaemonHarness {
                     config_dir: Some(&config_dir),
                     hardening: effective_hardening,
                     owner_uid: None,
+                    owner_gid: None,
+                    owner_user: None,
                     kepler_gid: None,
                 };
 

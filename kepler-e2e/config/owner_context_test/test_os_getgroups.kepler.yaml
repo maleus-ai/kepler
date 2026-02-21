@@ -1,0 +1,14 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  getgroups-svc:
+    command: !lua |
+      local user = owner and owner.user or nil
+      if user then
+        local groups = os.getgroups(user)
+        return {"sh", "-c", "echo GROUPS=" .. table.concat(groups, ",") .. "; sleep 300"}
+      else
+        return {"sh", "-c", "echo NO_OWNER; sleep 300"}
+      end

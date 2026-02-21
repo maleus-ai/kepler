@@ -1,0 +1,14 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  getgroups-strict-svc:
+    command: !lua |
+      -- With strict hardening, querying a different user should fail
+      local ok, err = pcall(function() return os.getgroups("testuser2") end)
+      if ok then
+        return {"sh", "-c", "echo SHOULD_HAVE_FAILED; sleep 300"}
+      else
+        return {"sh", "-c", "echo GETGROUPS_OTHER_USER_BLOCKED; sleep 300"}
+      end

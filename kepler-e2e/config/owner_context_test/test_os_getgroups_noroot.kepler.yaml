@@ -1,0 +1,14 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  getgroups-noroot-svc:
+    command: !lua |
+      -- Try to query uid 0's groups with no-root hardening — should fail
+      local ok, err = pcall(function() return os.getgroups(0) end)
+      if ok then
+        return {"sh", "-c", "echo SHOULD_HAVE_FAILED; sleep 300"}
+      else
+        return {"sh", "-c", "echo GETGROUPS_ROOT_BLOCKED; sleep 300"}
+      end

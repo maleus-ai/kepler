@@ -291,6 +291,8 @@ async fn run_status_change_hook(
             config_dir: Some(&ctx.config_dir),
             hardening,
             owner_uid: handle.owner_uid(),
+            owner_gid: handle.owner_gid(),
+            owner_user: handle.owner_user(),
             kepler_gid,
         };
 

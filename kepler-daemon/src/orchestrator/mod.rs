@@ -29,7 +29,7 @@ use crate::hardening::HardeningLevel;
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
 use crate::deps::{check_dependency_satisfied, get_start_order, get_stop_order, is_condition_unreachable_by_policy, is_dependency_permanently_unsatisfied, is_transient_satisfaction};
-use crate::lua_eval::{EvalContext, LuaEvaluator, ServiceEvalContext};
+use crate::lua_eval::{EvalContext, LuaEvaluator, OwnerEvalContext, ServiceEvalContext};
 use crate::events::{RestartReason, ServiceEvent};
 
 /// Shared Lua evaluator for cross-service global state within a single config.
@@ -106,6 +106,16 @@ impl ServiceOrchestrator {
     /// Result = max(daemon_hardening, config_hardening).
     fn effective_hardening(&self, handle: &ConfigActorHandle) -> HardeningLevel {
         std::cmp::max(self.hardening, handle.hardening().unwrap_or_default())
+    }
+
+    /// Build an OwnerEvalContext from a ConfigActorHandle.
+    fn build_owner_ctx(handle: &ConfigActorHandle) -> Option<OwnerEvalContext> {
+        let uid = handle.owner_uid()?;
+        Some(OwnerEvalContext {
+            uid,
+            gid: handle.owner_gid().unwrap_or(uid),
+            user: handle.owner_user().map(|s| s.to_string()),
+        })
     }
 
     /// Start services for a config
@@ -460,6 +470,7 @@ impl ServiceOrchestrator {
         full_env.extend(env_file_vars.clone());
 
         let state = handle.get_service_state(service_name).await;
+        let effective_hardening = self.effective_hardening(handle);
         let mut eval_ctx = EvalContext {
             service: Some(ServiceEvalContext {
                 name: service_name.to_string(),
@@ -474,6 +485,8 @@ impl ServiceOrchestrator {
             }),
             hook: None,
             deps: dep_infos,
+            owner: Self::build_owner_ctx(handle),
+            hardening: effective_hardening,
         };
         debug!("[timeit] {} eval context built in {:?}", service_name, ctx_start.elapsed());
 
@@ -731,6 +744,8 @@ impl ServiceOrchestrator {
             }),
             hook: None,
             deps: dep_infos,
+            owner: Self::build_owner_ctx(handle),
+            hardening: self.effective_hardening(handle),
         };
 
         // Create fresh evaluator and resolve
@@ -1835,6 +1850,7 @@ impl ServiceOrchestrator {
                             }),
                             hook: None,
                             deps: HashMap::new(),
+                            ..Default::default()
                         };
 
                         let evaluator = match config.create_lua_evaluator() {
@@ -2079,6 +2095,8 @@ impl ServiceOrchestrator {
             config_dir: Some(&ctx.config_dir),
             hardening: handle.map(|h| self.effective_hardening(h)).unwrap_or(self.hardening),
             owner_uid: handle.and_then(|h| h.owner_uid()),
+            owner_gid: handle.and_then(|h| h.owner_gid()),
+            owner_user: handle.and_then(|h| h.owner_user()),
             kepler_gid: self.kepler_gid,
         };
 

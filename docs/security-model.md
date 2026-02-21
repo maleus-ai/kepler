@@ -185,6 +185,31 @@ When hardening is `no-root` or `strict`, spawned processes have the `kepler` gro
 
 Instead of using `initgroups()` (which loads all supplementary groups including `kepler`), the daemon computes an explicit group list excluding the kepler GID and uses `setgroups()`.
 
+For finer control without full hardening, you can use `os.getgroups()` in Lua to explicitly set service groups with `kepler` filtered out:
+
+```yaml
+lua: |
+  -- Build supplementary groups for the config owner, excluding "kepler"
+  function groups_without_kepler()
+    if not owner then return {} end
+    local all = os.getgroups(owner.uid)
+    local filtered = {}
+    for _, g in ipairs(all) do
+      if g ~= "kepler" then
+        table.insert(filtered, g)
+      end
+    end
+    return filtered
+  end
+
+services:
+  app:
+    command: ["./app"]
+    groups: ${{ groups_without_kepler() }}$
+```
+
+This gives you explicit group control per-service without enabling `--hardening`, which also enforces privilege escalation checks.
+
 ### Examples
 
 #### The problem: nested privilege escalation

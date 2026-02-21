@@ -1,0 +1,14 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  owner-root-svc:
+    command: !lua |
+      if owner then
+        local uid = tostring(owner.uid)
+        local user = owner.user or "nil"
+        return {"sh", "-c", "echo ROOT_OWNER_UID=" .. uid .. " ROOT_OWNER_USER=" .. user .. "; sleep 300"}
+      else
+        return {"sh", "-c", "echo OWNER_IS_NIL; sleep 300"}
+      end
