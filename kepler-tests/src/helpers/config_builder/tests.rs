@@ -22,7 +22,10 @@ fn test_health_check_builder() {
         .with_retries(5)
         .build();
 
-    assert_eq!(*hc.test.as_static().unwrap(), vec!["true"]);
+    let cmd: Vec<&str> = hc.command.as_static().unwrap().iter()
+        .filter_map(|cv| cv.as_static().map(|s| s.as_str()))
+        .collect();
+    assert_eq!(cmd, vec!["true"]);
     assert_eq!(hc.interval, Duration::from_secs(5));
     assert_eq!(hc.retries, 5);
 }

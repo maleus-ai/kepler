@@ -182,7 +182,7 @@ services:
   database:
     command: ["postgres"]
     healthcheck:
-      test: ["pg_isready"]
+      command: ["pg_isready"]
 
   backend:
     command: ["./server"]
@@ -336,7 +336,7 @@ services:
   database:
     command: ["postgres"]
     healthcheck:
-      test: ["pg_isready"]
+      command: ["pg_isready"]
       interval: 5s
       retries: 5
 
@@ -406,7 +406,7 @@ services:
   database:
     command: ["postgres"]
     healthcheck:
-      test: ["pg_isready"]
+      command: ["pg_isready"]
 
   app:
     command: ["./server"]

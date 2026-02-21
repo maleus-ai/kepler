@@ -310,7 +310,8 @@ impl TestServiceBuilder {
 
 /// Builder for creating health check configurations
 pub struct TestHealthCheckBuilder {
-    test: Vec<String>,
+    command: Option<Vec<String>>,
+    run: Option<String>,
     interval: Duration,
     timeout: Duration,
     retries: u32,
@@ -318,9 +319,10 @@ pub struct TestHealthCheckBuilder {
 }
 
 impl TestHealthCheckBuilder {
-    pub fn new(test: Vec<String>) -> Self {
+    fn new_command(cmd: Vec<String>) -> Self {
         Self {
-            test,
+            command: Some(cmd),
+            run: None,
             interval: Duration::from_millis(100),
             timeout: Duration::from_secs(5),
             retries: 3,
@@ -330,28 +332,31 @@ impl TestHealthCheckBuilder {
 
     /// Create a health check that always passes (exit 0)
     pub fn always_healthy() -> Self {
-        Self::new(vec!["true".to_string()])
+        Self::new_command(vec!["true".to_string()])
     }
 
     /// Create a health check that always fails (exit 1)
     pub fn always_unhealthy() -> Self {
-        Self::new(vec!["false".to_string()])
+        Self::new_command(vec!["false".to_string()])
     }
 
     /// Create a health check that runs a shell script
     pub fn shell(script: &str) -> Self {
-        Self::new(vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            script.to_string(),
-        ])
+        Self {
+            command: None,
+            run: Some(script.to_string()),
+            interval: Duration::from_millis(100),
+            timeout: Duration::from_secs(5),
+            retries: 3,
+            start_period: Duration::from_secs(0),
+        }
     }
 
     /// Create a health check that runs a command directly
     pub fn command(executable: &str, args: &[&str]) -> Self {
-        let mut test = vec![executable.to_string()];
-        test.extend(args.iter().map(|s| s.to_string()));
-        Self::new(test)
+        let mut cmd = vec![executable.to_string()];
+        cmd.extend(args.iter().map(|s| s.to_string()));
+        Self::new_command(cmd)
     }
 
     /// Create a health check that checks for a file's existence
@@ -385,8 +390,17 @@ impl TestHealthCheckBuilder {
     }
 
     pub fn build(self) -> HealthCheck {
+        let command = match self.command {
+            Some(cmd) => ConfigValue::Static(ConfigValue::wrap_vec(cmd)),
+            None => ConfigValue::default(),
+        };
+        let run = match self.run {
+            Some(script) => ConfigValue::Static(Some(script)),
+            None => ConfigValue::default(),
+        };
         HealthCheck {
-            test: self.test.into(),
+            command,
+            run,
             interval: self.interval,
             timeout: self.timeout,
             retries: self.retries,

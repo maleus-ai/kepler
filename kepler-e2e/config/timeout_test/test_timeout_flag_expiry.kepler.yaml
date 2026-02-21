@@ -6,7 +6,7 @@ services:
   never-ready:
     command: ["sh", "-c", "echo Starting; sleep 300"]
     healthcheck:
-      test: ["sh", "-c", "exit 1"]
+      run: "exit 1"
       interval: 1s
       retries: 999
 

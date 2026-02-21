@@ -6,7 +6,7 @@ services:
   healthy-dependency:
     command: ["sh", "-c", "echo HEALTHY_DEP_STARTED; sleep 300"]
     healthcheck:
-      test: ["sh", "-c", "exit 0"]
+      run: "exit 0"
       interval: 1s
       timeout: 5s
       retries: 1

@@ -78,7 +78,7 @@ services:
     user: root
     groups: ["kepler"]
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/pg_ready"]
+      run: "test -f /tmp/pg_ready"
       interval: 2s
       timeout: 5s
       retries: 5
@@ -122,7 +122,7 @@ services:
     restart: always
     sys_env: clear
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/redis_ready"]
+      run: "test -f /tmp/redis_ready"
       interval: 1s
       timeout: 2s
       retries: 3
@@ -149,7 +149,7 @@ services:
     environment: !lua |
       return svc_env(service.name, {"AMQP_PORT=" .. next_port()})
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/rmq_ready"]
+      run: "test -f /tmp/rmq_ready"
       interval: 3s
       timeout: 5s
       retries: 4
@@ -170,7 +170,7 @@ services:
       - MINIO_ROOT_PASSWORD=${{ env.MINIO_PASS or "minioadmin" }}$
       - MINIO_PORT=${{ env.MINIO_PORT or "9000" }}$
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/minio_ready"]
+      run: "test -f /tmp/minio_ready"
       interval: 1500ms
       timeout: 3s
       retries: 3
@@ -189,7 +189,7 @@ services:
       - CONSUL_BIND=0.0.0.0
       - CONSUL_DC=${{ env.CONSUL_DC and "production" or "" }}$
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/consul_ready"]
+      run: "test -f /tmp/consul_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -320,7 +320,7 @@ services:
       - SCHEMA_VERSION=${{ deps["db-migration"].outputs.schema_version or "unknown" }}$
       - RESTART_COUNT=${{ service.restart_count }}$
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/auth_ready"]
+      run: "test -f /tmp/auth_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -366,7 +366,7 @@ services:
     environment:
       - REGISTRY_COUNT=${{ deps["consul-register"].outputs.registry_count or "0" }}$
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/config_ready"]
+      run: "test -f /tmp/config_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -393,7 +393,7 @@ services:
     environment:
       - GATEWAY_VERSION=${{ global.platform_version }}$
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/gateway_ready"]
+      run: "test -f /tmp/gateway_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -413,7 +413,7 @@ services:
           condition: service_healthy
           restart: true
     healthcheck:
-      test: !lua |
+      command: !lua |
         return {"sh", "-c", "test -f /tmp/eventbus_ready"}
       interval: 2s
       timeout: 3s
@@ -440,7 +440,7 @@ services:
         "AVAILABLE_BUCKETS=" .. (deps["minio-init"].outputs.buckets or "default")
       })
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/storage_ready"]
+      run: "test -f /tmp/storage_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -468,7 +468,7 @@ services:
       - postgres:
           condition: service_healthy
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/user_ready"]
+      run: "test -f /tmp/user_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -491,7 +491,7 @@ services:
       - config-service:
           condition: service_started
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/product_ready"]
+      run: "test -f /tmp/product_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -514,7 +514,7 @@ services:
       - redis:
           condition: service_healthy
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/inventory_ready"]
+      run: "test -f /tmp/inventory_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -539,7 +539,7 @@ services:
       - event-bus:
           condition: service_healthy
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/order_ready"]
+      run: "test -f /tmp/order_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -563,7 +563,7 @@ services:
           condition: service_healthy
           restart: true
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/payment_ready"]
+      run: "test -f /tmp/payment_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -594,7 +594,7 @@ services:
       - rabbitmq:
           condition: service_healthy
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/notif_ready"]
+      run: "test -f /tmp/notif_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -633,7 +633,7 @@ services:
       - redis:
           condition: service_healthy
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/search_ready"]
+      run: "test -f /tmp/search_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -658,7 +658,7 @@ services:
     environment:
       - REDIS_KEYSPACES=${{ deps["redis-init"].outputs.keyspaces or "default" }}$
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/analytics_ready"]
+      run: "test -f /tmp/analytics_ready"
       interval: 3s
       timeout: 5s
       retries: 4
@@ -893,7 +893,7 @@ services:
       ]
     restart: always
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/metrics_ready"]
+      run: "test -f /tmp/metrics_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -936,7 +936,7 @@ services:
       - consul:
           condition: service_healthy
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/healthmon_ready"]
+      run: "test -f /tmp/healthmon_ready"
       interval: 3s
       timeout: 5s
       retries: 4
@@ -977,7 +977,7 @@ services:
       - alert-manager:
           condition: service_started
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/dash_ready"]
+      run: "test -f /tmp/dash_ready"
       interval: 2s
       timeout: 3s
       retries: 3
@@ -997,7 +997,7 @@ services:
       - consul:
           condition: service_healthy
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/uptime_ready"]
+      run: "test -f /tmp/uptime_ready"
       interval: 5s
       timeout: 3s
       retries: 3
@@ -1197,7 +1197,7 @@ services:
       - gateway:
           condition: service_started
     healthcheck:
-      test: ["sh", "-c", "test -f /tmp/profiler_ready"]
+      run: "test -f /tmp/profiler_ready"
       interval: 3s
       timeout: 5s
       retries: 3

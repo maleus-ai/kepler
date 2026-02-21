@@ -306,7 +306,7 @@ services:
   test:
     command: ["echo", "hello"]
     healthcheck:
-      test: !lua |
+      command: !lua |
         local port = env.KEPLER_HEALTH_PORT or "80"
         return {"sh", "-c", "curl -f http://localhost:" .. port .. "/health"}
       interval: 10s
@@ -323,8 +323,10 @@ services:
     }
 
     let healthcheck = service.healthcheck.as_ref().unwrap();
+    let cmd: Vec<String> = healthcheck.command.as_static().unwrap()
+        .iter().filter_map(|cv| cv.as_static().cloned()).collect();
     assert_eq!(
-        *healthcheck.test.as_static().unwrap(),
+        cmd,
         vec!["sh", "-c", "curl -f http://localhost:8080/health"]
     );
 }

@@ -11,7 +11,7 @@ services:
     healthcheck:
       # Healthcheck passes for first ~2s (file doesn't exist yet), then fails
       # We create a marker file after the service becomes healthy
-      test: ["sh", "-c", "test ! -f {{MARKER_PATH}}"]
+      run: "test ! -f {{MARKER_PATH}}"
       interval: 500ms
       timeout: 1s
       retries: 1

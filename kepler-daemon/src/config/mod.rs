@@ -1137,9 +1137,33 @@ impl KeplerConfig {
         let user = user.or_else(|| default_user.map(String::from));
         let groups = resolve_nested_vec(&raw.groups, evaluator, ctx, config_path, &format!("{}.groups", name), &mut shared_env)?;
         let healthcheck: Option<HealthCheck> = raw.healthcheck.resolve_with_env(evaluator, ctx, config_path, &format!("{}.healthcheck", name), &mut shared_env)?;
-        // Resolve inner ConfigValue fields of HealthCheck
+        // Resolve inner ConfigValue fields of HealthCheck (command/run)
         let healthcheck = healthcheck.map(|mut hc| -> crate::errors::Result<HealthCheck> {
-            hc.test = ConfigValue::Static(hc.test.resolve_with_env(evaluator, ctx, config_path, &format!("{}.healthcheck.test", name), &mut shared_env)?);
+            let has_run = match &hc.run {
+                ConfigValue::Static(v) => v.is_some(),
+                ConfigValue::Dynamic(_) => true,
+            };
+            if has_run {
+                let script: Option<String> = hc.run.resolve_with_env(
+                    evaluator, ctx, config_path,
+                    &format!("{}.healthcheck.run", name), &mut shared_env,
+                )?;
+                if let Some(script) = script {
+                    let shell = resolve_shell(
+                        &ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default()
+                    );
+                    hc.command = ConfigValue::Static(ConfigValue::wrap_vec(
+                        vec![shell, "-c".to_string(), script]
+                    ));
+                }
+                hc.run = ConfigValue::Static(None);
+            } else {
+                let resolved = resolve_nested_vec(
+                    &hc.command, evaluator, ctx, config_path,
+                    &format!("{}.healthcheck.command", name), &mut shared_env,
+                )?;
+                hc.command = ConfigValue::Static(ConfigValue::wrap_vec(resolved));
+            }
             Ok(hc)
         }).transpose()?;
         let limits = raw.limits.resolve_with_env(evaluator, ctx, config_path, &format!("{}.limits", name), &mut shared_env)?;
@@ -1260,6 +1284,19 @@ impl KeplerConfig {
                         name
                     ));
                 }
+
+            // Validate healthcheck command/run
+            if let Some(hc) = raw.healthcheck.as_static().and_then(|h| h.as_ref()) {
+                if hc.has_command() && hc.has_run() {
+                    errors.push(format!(
+                        "Service '{}': healthcheck 'command' and 'run' are mutually exclusive", name
+                    ));
+                } else if !hc.has_command() && !hc.has_run() {
+                    errors.push(format!(
+                        "Service '{}': healthcheck requires either 'command' or 'run'", name
+                    ));
+                }
+            }
         }
 
         if !errors.is_empty() {

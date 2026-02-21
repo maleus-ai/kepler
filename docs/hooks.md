@@ -262,7 +262,7 @@ services:
   db:
     command: ["postgres"]
     healthcheck:
-      test: ["pg_isready"]
+      command: ["pg_isready"]
 
   app:
     command: ["./server"]
