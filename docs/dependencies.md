@@ -109,6 +109,8 @@ Some dependency conditions are **structurally unreachable** given the dependency
 
 **Why**: With `restart: always`, the dependency always restarts after any exit, so it can never permanently reach a failed or stopped state. With `restart: on-failure`, it restarts on non-zero exit, so `service_failed` (which requires non-zero exit) can never be permanent.
 
+**Note on combined policies**: Since restart policies are [combinable flags](configuration.md#restart-configuration), the structural reachability depends on which flags are set. The `on-failure` flag makes `service_failed` unreachable, the `on-success` flag makes `service_completed_successfully` unreachable, and both together make `service_stopped` unreachable. The `on-unhealthy` flag does not affect exit-based reachability.
+
 This check only fires once the dependency is actively running (not during startup, where a spawn failure could still occur).
 
 **Example**:

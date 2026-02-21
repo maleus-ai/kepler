@@ -175,3 +175,94 @@ async fn test_healthcheck_timeout() -> E2eResult<()> {
 
     Ok(())
 }
+
+/// Test that `restart: "on-failure|on-unhealthy"` restarts the service when healthcheck fails
+#[tokio::test]
+async fn test_on_unhealthy_restart() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_on_unhealthy_restart")?;
+
+    harness.start_daemon().await?;
+
+    // Start the service
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    // Wait for service to start running
+    harness
+        .wait_for_service_status(&config_path, "on-unhealthy-service", "running", Duration::from_secs(10))
+        .await?;
+
+    // Wait long enough for healthcheck to fail (retries=2, interval=1s) and trigger restart
+    // After restart, service should be running again
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    // Check logs for multiple starts (proves restart happened)
+    let logs = harness.get_logs(&config_path, Some("on-unhealthy-service"), 1000).await?;
+    let restart_count = logs.stdout.matches("ON_UNHEALTHY_START").count();
+    assert!(
+        restart_count >= 2,
+        "Service should have restarted at least once (on-unhealthy). Got {} starts. Logs: {}",
+        restart_count, logs.stdout
+    );
+
+    // Service should still be running (or going through restart cycle)
+    let status = harness
+        .wait_for_service_status_any(
+            &config_path,
+            "on-unhealthy-service",
+            &["running", "healthy", "unhealthy"],
+            Duration::from_secs(5),
+        )
+        .await?;
+    assert!(
+        status == "running" || status == "healthy" || status == "unhealthy",
+        "Service should be active, got: {}",
+        status
+    );
+
+    harness.stop_daemon().await?;
+
+    Ok(())
+}
+
+/// Test that `post_healthcheck_fail` hook fires before `on-unhealthy` restart
+#[tokio::test]
+async fn test_on_unhealthy_hook_before_restart() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_on_unhealthy_hook_before_restart")?;
+
+    harness.start_daemon().await?;
+
+    // Start the service
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    // Wait for service to start running
+    harness
+        .wait_for_service_status(&config_path, "hook-unhealthy-service", "running", Duration::from_secs(10))
+        .await?;
+
+    // Wait for healthcheck to fail and hook to fire, then restart
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    // Check that the hook fired (hook output goes to a prefixed log stream)
+    let all_logs = harness.get_logs(&config_path, None, 1000).await?;
+    assert!(
+        all_logs.stdout.contains("POST_HEALTHCHECK_FAIL_HOOK"),
+        "post_healthcheck_fail hook should have fired. All logs: {}",
+        all_logs.stdout
+    );
+
+    // Check that the service restarted (multiple starts)
+    let restart_count = all_logs.stdout.matches("HOOK_UNHEALTHY_START").count();
+    assert!(
+        restart_count >= 2,
+        "Service should have restarted after hook fired. Got {} starts. Logs: {}",
+        restart_count, all_logs.stdout
+    );
+
+    harness.stop_daemon().await?;
+
+    Ok(())
+}

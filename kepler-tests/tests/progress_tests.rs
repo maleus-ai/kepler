@@ -160,7 +160,7 @@ async fn test_start_transitions_starting_to_running() {
         .add_service(
             "web",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .build();
@@ -199,13 +199,13 @@ async fn test_start_multiple_services() {
         .add_service(
             "web",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .add_service(
             "worker",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .build();
@@ -250,7 +250,7 @@ async fn test_stop_transitions() {
         .add_service(
             "web",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .build();
@@ -295,7 +295,7 @@ async fn test_stop_already_stopped_is_noop() {
         .add_service(
             "web",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .build();
@@ -349,7 +349,7 @@ async fn test_restart_full_lifecycle() {
         .add_service(
             "web",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .build();
@@ -423,7 +423,7 @@ async fn test_start_healthcheck_transitions_to_healthy() {
         .add_service(
             "web",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .with_healthcheck(
                     TestHealthCheckBuilder::always_healthy()
                         .with_interval(Duration::from_millis(100))
@@ -474,13 +474,13 @@ async fn test_start_mixed_services_correct_final_states() {
         .add_service(
             "migration",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .add_service(
             "web",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .with_healthcheck(
                     TestHealthCheckBuilder::always_healthy()
                         .with_interval(Duration::from_millis(100))
@@ -541,7 +541,7 @@ async fn test_broadcast_emits_stop_transitions() {
         .add_service(
             "web",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .build();
@@ -596,13 +596,13 @@ async fn test_start_deps_no_false_quiescence() {
                 "-c".to_string(),
                 "sleep 1".to_string(),
             ])
-            .with_restart(RestartPolicy::No)
+            .with_restart(RestartPolicy::no())
             .build(),
         )
         .add_service(
             "web",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .with_depends_on_extended(DependsOn(vec![DependencyEntry::Extended(
                     HashMap::from([(
                         "migration".to_string(),
@@ -696,13 +696,13 @@ async fn test_dependency_waiting_reacts_via_broadcast() {
                 "-c".to_string(),
                 "echo DB_DONE; exit 0".to_string(),
             ])
-            .with_restart(RestartPolicy::No)
+            .with_restart(RestartPolicy::no())
             .build(),
         )
         .add_service(
             "web",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .with_depends_on_extended(DependsOn(vec![DependencyEntry::Extended(
                     HashMap::from([(
                         "db".to_string(),
@@ -794,7 +794,7 @@ async fn test_restart_broadcasts_full_lifecycle_with_healthcheck() {
         .add_service(
             "web",
             TestServiceBuilder::long_running()
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .with_healthcheck(
                     TestHealthCheckBuilder::always_healthy()
                         .with_interval(Duration::from_millis(100))
@@ -905,7 +905,7 @@ async fn test_handle_exit_respawns_health_checker() {
                 "-c".to_string(),
                 "sleep 2; exit 1".to_string(),
             ])
-            .with_restart(RestartPolicy::Always)
+            .with_restart(RestartPolicy::always())
             .with_healthcheck(
                 TestHealthCheckBuilder::always_healthy()
                     .with_interval(Duration::from_millis(200))

@@ -82,7 +82,7 @@ async fn test_restart_calls_restart_hooks() {
                 "-c".to_string(),
                 format!("echo 'started' >> {} && sleep 3600", started_path.display()),
             ])
-            .with_restart(RestartPolicy::No)
+            .with_restart(RestartPolicy::no())
             .with_hooks(hooks)
             .build(),
         )
@@ -182,7 +182,7 @@ async fn test_restart_preserves_baked_config() {
                 ),
             ])
             .with_environment(vec![format!("{}=${{{{ env.{} }}}}$", env_var_name, env_var_name)])
-            .with_restart(RestartPolicy::No)
+            .with_restart(RestartPolicy::no())
             .build(),
         )
         .build();
@@ -289,7 +289,7 @@ async fn test_recreate_rebakes_config() {
                 ),
             ])
             .with_environment(vec![format!("{}=${{{{ env.{} }}}}$", env_var_name, env_var_name)])
-            .with_restart(RestartPolicy::No)
+            .with_restart(RestartPolicy::no())
             .build(),
         )
         .build();
@@ -384,7 +384,7 @@ async fn test_recreate_runs_pre_start_hooks() {
                 "-c".to_string(),
                 format!("echo 'started' >> {} && sleep 3600", started_path.display()),
             ])
-            .with_restart(RestartPolicy::No)
+            .with_restart(RestartPolicy::no())
             .with_hooks(hooks)
             .build(),
         )

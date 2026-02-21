@@ -82,8 +82,8 @@ kepler start backend                     # Start a specific service
 kepler start -e MY_VAR=hello             # Override a system env var
 kepler start -e A=1 -e B=2              # Override multiple env vars
 kepler start --refresh-env               # Refresh all sys_env from current shell
-kepler start --no-abort-on-failure       # Don't stop on failure, just exit 1 at quiescence
-kepler start -d --wait --abort-on-failure  # Stop all services on failure in --wait mode
+kepler start --abort-on-failure            # Stop all services immediately on unhandled failure
+kepler start -d --wait --no-abort-on-failure  # Don't stop services on failure, just exit 1
 ```
 
 | Flag | Description |

@@ -88,26 +88,46 @@ async fn health_check_loop(
                     .await;
 
                 if passed {
-                    debug!("Health check passed for {}", service_name);
+                    if update.previous_status == ServiceStatus::Unhealthy {
+                        info!("Health check passed for {} — service recovering", service_name);
+                    } else {
+                        debug!("Health check passed for {}", service_name);
+                    }
+                } else if update.new_status == ServiceStatus::Unhealthy {
+                    if update.previous_status != ServiceStatus::Unhealthy {
+                        // Just transitioned to unhealthy
+                        warn!(
+                            "Service {} is unhealthy after {} consecutive failures",
+                            service_name, update.failures
+                        );
+                    } else {
+                        // Already unhealthy — don't spam the counter
+                        debug!(
+                            "Health check still failing for {} (unhealthy)",
+                            service_name
+                        );
+                    }
                 } else {
+                    // Still counting toward threshold
                     warn!(
                         "Health check failed for {} ({}/{})",
                         service_name, update.failures, config.retries
                     );
-
-                    if update.failures >= config.retries
-                        && update.previous_status != ServiceStatus::Unhealthy
-                    {
-                        info!(
-                            "Service {} marked as unhealthy after {} failures",
-                            service_name, update.failures
-                        );
-                    }
                 }
 
-                // Emit health state transition events and run hooks if status changed
+                // Run hooks and emit state transition events if status changed.
+                // Hooks run first so that post_healthcheck_fail completes before
+                // the Unhealthy event triggers an on-unhealthy restart.
                 if update.previous_status != update.new_status {
-                    // Emit Healthy or Unhealthy event based on new status
+                    run_status_change_hook(
+                        &service_name,
+                        update.previous_status,
+                        update.new_status,
+                        &handle,
+                    )
+                    .await;
+
+                    // Emit Healthy or Unhealthy event after hook completes
                     match update.new_status {
                         ServiceStatus::Healthy => {
                             handle.emit_event(&service_name, ServiceEvent::Healthy).await;
@@ -119,14 +139,6 @@ async fn health_check_loop(
                         }
                         _ => {}
                     }
-
-                    run_status_change_hook(
-                        &service_name,
-                        update.previous_status,
-                        update.new_status,
-                        &handle,
-                    )
-                    .await;
                 }
             }
             Err(e) => {

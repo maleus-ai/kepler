@@ -279,6 +279,9 @@ impl ServiceOrchestrator {
             // Check if any service has restart propagation enabled
             let needs_event_handler = ctx.config.services.values().any(|raw| {
                 !raw.depends_on.dependencies_with_restart().is_empty()
+                    || raw.restart.as_static()
+                        .map(|r| r.should_restart_on_unhealthy())
+                        .unwrap_or(false)
             });
 
             // Spawn event handler for restart propagation if needed and not already running

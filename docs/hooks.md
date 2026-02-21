@@ -30,7 +30,7 @@ Service hooks run at per-service lifecycle events. They are defined under `servi
 | `post_restart` | Runs after service restarts (after spawn) |
 | `post_exit` | Runs when the service process exits on its own (returns a status code) |
 | `post_healthcheck_success` | Runs when service becomes healthy |
-| `post_healthcheck_fail` | Runs when service becomes unhealthy |
+| `post_healthcheck_fail` | Runs when service becomes unhealthy (before `on-unhealthy` restart if configured) |
 
 ```yaml
 services:

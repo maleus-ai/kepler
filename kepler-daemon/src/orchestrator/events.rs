@@ -76,6 +76,16 @@ impl ServiceEventHandler {
                         service_name, e
                     );
                 }
+
+            // Handle unhealthy → restart (on-unhealthy policy)
+            if let ServiceEvent::Unhealthy = event {
+                if let Err(e) = self.handle_unhealthy_restart(service_name).await {
+                    error!(
+                        "Failed to handle unhealthy restart for {}: {}",
+                        service_name, e
+                    );
+                }
+            }
         }
 
         info!("ServiceEventHandler stopped for {:?}", self.config_path);
@@ -211,6 +221,50 @@ impl ServiceEventHandler {
                     service_name, restarted_service, e
                 );
             }
+        }
+
+        Ok(())
+    }
+
+    /// Handle unhealthy event: restart the service if its restart policy includes on-unhealthy
+    async fn handle_unhealthy_restart(&self, service_name: &str) -> Result<(), OrchestratorError> {
+        let config = match self.handle.get_config().await {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let raw = match config.services.get(service_name) {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+
+        let restart = raw.restart.as_static().cloned().unwrap_or_default();
+        if !restart.should_restart_on_unhealthy() {
+            return Ok(());
+        }
+
+        if !self.handle.is_service_running(service_name).await {
+            return Ok(());
+        }
+
+        info!(
+            "Restarting {} due to unhealthy status (on-unhealthy policy)",
+            service_name
+        );
+
+        if let Err(e) = self
+            .orchestrator
+            .restart_single_service_with_reason(
+                &self.config_path,
+                service_name,
+                RestartReason::Unhealthy,
+            )
+            .await
+        {
+            error!(
+                "Failed to restart {} on unhealthy: {}",
+                service_name, e
+            );
         }
 
         Ok(())

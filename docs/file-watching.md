@@ -47,12 +47,15 @@ Standard glob patterns are supported:
 
 ## Interaction with Restart Policy
 
-File watching requires a restart policy that allows restarts:
+File watching requires a restart policy that allows restarts (any non-`no` policy):
 
 | Policy | With `watch` | Behavior |
 |--------|-------------|----------|
-| `always` | Allowed | Restarts on file change and on exit |
+| `always` | Allowed | Restarts on file change, on exit, and on unhealthy |
 | `on-failure` | Allowed | Restarts on file change and on non-zero exit |
+| `on-success` | Allowed | Restarts on file change and on zero exit |
+| `on-unhealthy` | Allowed | Restarts on file change and on unhealthy |
+| Combined (e.g., `"on-failure\|on-unhealthy"`) | Allowed | Restarts on file change and per combined flags |
 | `no` | **Not allowed** | Cannot combine `policy: no` with `watch` |
 
 ```yaml

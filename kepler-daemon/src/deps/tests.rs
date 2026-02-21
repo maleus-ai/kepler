@@ -353,7 +353,7 @@ fn test_start_levels_asymmetric_paths() {
 
 #[test]
 fn test_restart_no_wont_restart() {
-    let restart = RestartConfig::Simple(RestartPolicy::No);
+    let restart = RestartConfig::Simple(RestartPolicy::no());
     assert!(!restart.should_restart_on_exit(Some(0)));
     assert!(!restart.should_restart_on_exit(Some(1)));
     assert!(!restart.should_restart_on_exit(None));
@@ -361,7 +361,7 @@ fn test_restart_no_wont_restart() {
 
 #[test]
 fn test_restart_always_will_restart() {
-    let restart = RestartConfig::Simple(RestartPolicy::Always);
+    let restart = RestartConfig::Simple(RestartPolicy::always());
     assert!(restart.should_restart_on_exit(Some(0)));
     assert!(restart.should_restart_on_exit(Some(1)));
     assert!(restart.should_restart_on_exit(None));
@@ -369,7 +369,7 @@ fn test_restart_always_will_restart() {
 
 #[test]
 fn test_restart_on_failure_only_on_nonzero() {
-    let restart = RestartConfig::Simple(RestartPolicy::OnFailure);
+    let restart = RestartConfig::Simple(RestartPolicy::on_failure());
     assert!(!restart.should_restart_on_exit(Some(0)), "Exit 0 should not restart");
     assert!(restart.should_restart_on_exit(Some(1)), "Exit 1 should restart");
     assert!(restart.should_restart_on_exit(None), "Signal kill (None) should restart");
@@ -387,7 +387,7 @@ fn make_state_with_status(status: ServiceStatus, exit_code: Option<i32>) -> Serv
 
 #[test]
 fn test_transient_exited_restart_always() {
-    let restart = RestartConfig::Simple(RestartPolicy::Always);
+    let restart = RestartConfig::Simple(RestartPolicy::always());
     let state = make_state_with_status(ServiceStatus::Exited, Some(0));
     assert!(is_transient_satisfaction(&state, &restart), "Exited(0) + restart:always should be transient");
 
@@ -397,7 +397,7 @@ fn test_transient_exited_restart_always() {
 
 #[test]
 fn test_transient_exited_restart_no() {
-    let restart = RestartConfig::Simple(RestartPolicy::No);
+    let restart = RestartConfig::Simple(RestartPolicy::no());
     let state = make_state_with_status(ServiceStatus::Exited, Some(0));
     assert!(!is_transient_satisfaction(&state, &restart), "Exited(0) + restart:no should NOT be transient");
 
@@ -407,7 +407,7 @@ fn test_transient_exited_restart_no() {
 
 #[test]
 fn test_transient_exited_restart_on_failure() {
-    let restart = RestartConfig::Simple(RestartPolicy::OnFailure);
+    let restart = RestartConfig::Simple(RestartPolicy::on_failure());
 
     // Exit 1 → will restart → transient
     let state = make_state_with_status(ServiceStatus::Exited, Some(1));
@@ -420,14 +420,14 @@ fn test_transient_exited_restart_on_failure() {
 
 #[test]
 fn test_transient_killed_restart_always() {
-    let restart = RestartConfig::Simple(RestartPolicy::Always);
+    let restart = RestartConfig::Simple(RestartPolicy::always());
     let state = make_state_with_status(ServiceStatus::Killed, None);
     assert!(is_transient_satisfaction(&state, &restart), "Killed + restart:always should be transient");
 }
 
 #[test]
 fn test_transient_failed_restart_always() {
-    let restart = RestartConfig::Simple(RestartPolicy::Always);
+    let restart = RestartConfig::Simple(RestartPolicy::always());
     let state = make_state_with_status(ServiceStatus::Failed, None);
     assert!(is_transient_satisfaction(&state, &restart), "Failed + restart:always should be transient");
 }
@@ -435,7 +435,7 @@ fn test_transient_failed_restart_always() {
 #[test]
 fn test_transient_stopped_never_transient() {
     // Stopped means explicitly stopped by user — never transient regardless of restart policy
-    let restart = RestartConfig::Simple(RestartPolicy::Always);
+    let restart = RestartConfig::Simple(RestartPolicy::always());
     let state = make_state_with_status(ServiceStatus::Stopped, Some(0));
     assert!(!is_transient_satisfaction(&state, &restart), "Stopped + restart:always should NOT be transient");
 }
@@ -443,21 +443,21 @@ fn test_transient_stopped_never_transient() {
 #[test]
 fn test_transient_running_not_transient() {
     // Running is not a terminal state — transient filter doesn't apply
-    let restart = RestartConfig::Simple(RestartPolicy::Always);
+    let restart = RestartConfig::Simple(RestartPolicy::always());
     let state = make_state_with_status(ServiceStatus::Running, None);
     assert!(!is_transient_satisfaction(&state, &restart), "Running should NOT be transient");
 }
 
 #[test]
 fn test_transient_waiting_not_transient() {
-    let restart = RestartConfig::Simple(RestartPolicy::Always);
+    let restart = RestartConfig::Simple(RestartPolicy::always());
     let state = make_state_with_status(ServiceStatus::Waiting, None);
     assert!(!is_transient_satisfaction(&state, &restart), "Waiting should NOT be transient");
 }
 
 #[test]
 fn test_transient_skipped_not_transient() {
-    let restart = RestartConfig::Simple(RestartPolicy::Always);
+    let restart = RestartConfig::Simple(RestartPolicy::always());
     let state = make_state_with_status(ServiceStatus::Skipped, None);
     assert!(!is_transient_satisfaction(&state, &restart), "Skipped should NOT be transient");
 }

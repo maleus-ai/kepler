@@ -384,36 +384,34 @@ pub fn is_condition_unreachable_by_policy(
     condition: &DependencyCondition,
     dep_restart_policy: &RestartPolicy,
 ) -> Option<String> {
-    match (condition, dep_restart_policy) {
-        // restart: always → service always restarts on any exit, so it can never
-        // permanently reach a failed/stopped/exited state
-        (DependencyCondition::ServiceFailed, RestartPolicy::Always) => {
+    let has_on_failure = dep_restart_policy.contains(RestartPolicy::ON_FAILURE);
+    let has_on_success = dep_restart_policy.contains(RestartPolicy::ON_SUCCESS);
+
+    match condition {
+        // service_failed requires non-zero exit. If on-failure is set, the service
+        // will always restart after a failure, so the condition can never be permanently met.
+        DependencyCondition::ServiceFailed if has_on_failure => {
             Some(format!(
-                "`{}` has restart policy `always` — it will always restart, \
+                "`{}` has restart policy with `on-failure` — it will always restart on failure, \
                  so `service_failed` can never be met",
                 dep_name
             ))
         }
-        (DependencyCondition::ServiceStopped, RestartPolicy::Always) => {
+        // service_stopped requires any terminal state. If both on-failure and on-success
+        // are set, the service restarts on any exit, so it can never stay stopped.
+        DependencyCondition::ServiceStopped if has_on_failure && has_on_success => {
             Some(format!(
-                "`{}` has restart policy `always` — it will always restart, \
+                "`{}` has restart policy with `on-failure` and `on-success` — it will always restart, \
                  so `service_stopped` can never be met",
                 dep_name
             ))
         }
-        (DependencyCondition::ServiceCompletedSuccessfully, RestartPolicy::Always) => {
+        // service_completed_successfully requires exit 0. If on-success is set, the
+        // service will always restart after a successful exit.
+        DependencyCondition::ServiceCompletedSuccessfully if has_on_success => {
             Some(format!(
-                "`{}` has restart policy `always` — it will always restart, \
+                "`{}` has restart policy with `on-success` — it will always restart on success, \
                  so `service_completed_successfully` can never be met",
-                dep_name
-            ))
-        }
-        // restart: on-failure → service restarts on non-zero exit, so service_failed
-        // (which requires non-zero exit) can never be permanently met
-        (DependencyCondition::ServiceFailed, RestartPolicy::OnFailure) => {
-            Some(format!(
-                "`{}` has restart policy `on-failure` — it will always restart on failure, \
-                 so `service_failed` can never be met",
                 dep_name
             ))
         }

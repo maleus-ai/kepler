@@ -110,7 +110,7 @@ async fn test_file_change_ignored_for_stopped_service() {
                 "-c".to_string(),
                 format!("echo 'started' >> {} && sleep 3600", marker_path.display()),
             ])
-            .with_restart(RestartPolicy::Always)
+            .with_restart(RestartPolicy::always())
             .build(),
         )
         .build();
@@ -202,7 +202,7 @@ async fn test_file_change_ignored_for_exited_service() {
                 "-c".to_string(),
                 "exit 0".to_string(),
             ])
-            .with_restart(RestartPolicy::No)
+            .with_restart(RestartPolicy::no())
             .build(),
         )
         .build();
@@ -287,7 +287,7 @@ async fn test_file_change_handler_deduplicates_events() {
                 "-c".to_string(),
                 format!("echo 'started' >> {} && sleep 3600", marker_path.display()),
             ])
-            .with_restart(RestartPolicy::Always)
+            .with_restart(RestartPolicy::always())
             .build(),
         )
         .build();
@@ -367,7 +367,7 @@ async fn test_file_change_handler_independent_services() {
                 "-c".to_string(),
                 format!("echo 'started' >> {} && sleep 3600", marker_a.display()),
             ])
-            .with_restart(RestartPolicy::Always)
+            .with_restart(RestartPolicy::always())
             .build(),
         )
         .add_service(
@@ -377,7 +377,7 @@ async fn test_file_change_handler_independent_services() {
                 "-c".to_string(),
                 format!("echo 'started' >> {} && sleep 3600", marker_b.display()),
             ])
-            .with_restart(RestartPolicy::Always)
+            .with_restart(RestartPolicy::always())
             .build(),
         )
         .build();
@@ -510,7 +510,7 @@ async fn test_watcher_not_active_during_pre_start() {
             ])
             .with_working_dir(temp_dir.path().to_path_buf())
             .with_restart_and_watch(
-                RestartPolicy::Always,
+                RestartPolicy::always(),
                 vec!["src/**/*.ts".to_string()],
             )
             .with_hooks(hooks)
@@ -605,7 +605,7 @@ async fn test_watcher_not_active_during_restart_hooks() {
             ])
             .with_working_dir(temp_dir.path().to_path_buf())
             .with_restart_and_watch(
-                RestartPolicy::Always,
+                RestartPolicy::always(),
                 vec!["src/**/*.ts".to_string()],
             )
             .with_hooks(hooks)
@@ -697,7 +697,7 @@ async fn test_watcher_reestablished_after_restart() {
             ])
             .with_working_dir(temp_dir.path().to_path_buf())
             .with_restart_and_watch(
-                RestartPolicy::Always,
+                RestartPolicy::always(),
                 vec!["src/**/*.ts".to_string()],
             )
             .build(),

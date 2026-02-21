@@ -81,7 +81,7 @@ async fn test_unhandled_failure_emitted_on_failed_service() {
         .add_service(
             "failing",
             TestServiceBuilder::exit_with_code(42)
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .build();
@@ -114,7 +114,7 @@ async fn test_no_unhandled_failure_on_clean_exit() {
         .add_service(
             "clean",
             TestServiceBuilder::exit_with_code(0)
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .build();
@@ -151,13 +151,13 @@ async fn test_no_unhandled_failure_when_service_failed_handler_exists() {
         .add_service(
             "failing",
             TestServiceBuilder::exit_with_code(1)
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .add_service(
             "handler",
             TestServiceBuilder::echo("handling failure")
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .with_depends_on_extended(DependsOn(vec![DependencyEntry::Extended(
                     HashMap::from([(
                         "failing".to_string(),
@@ -199,13 +199,13 @@ async fn test_no_unhandled_failure_when_service_stopped_handler_exists() {
         .add_service(
             "failing",
             TestServiceBuilder::exit_with_code(1)
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .add_service(
             "handler",
             TestServiceBuilder::echo("handling stop")
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .with_depends_on_extended(DependsOn(vec![DependencyEntry::Extended(
                     HashMap::from([(
                         "failing".to_string(),
@@ -251,7 +251,7 @@ async fn test_no_unhandled_failure_when_restart_policy_applies() {
         .add_service(
             "failing",
             TestServiceBuilder::exit_with_code(1)
-                .with_restart(RestartPolicy::OnFailure)
+                .with_restart(RestartPolicy::on_failure())
                 .build(),
         )
         .build();
@@ -282,7 +282,7 @@ async fn test_no_unhandled_failure_with_restart_always() {
         .add_service(
             "failing",
             TestServiceBuilder::exit_with_code(1)
-                .with_restart(RestartPolicy::Always)
+                .with_restart(RestartPolicy::always())
                 .build(),
         )
         .build();
@@ -313,19 +313,19 @@ async fn test_multiple_services_only_unhandled_one_emits() {
         .add_service(
             "handled_fail",
             TestServiceBuilder::exit_with_code(1)
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .add_service(
             "unhandled_fail",
             TestServiceBuilder::exit_with_code(2)
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .add_service(
             "error_handler",
             TestServiceBuilder::echo("handling")
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .with_depends_on_extended(DependsOn(vec![DependencyEntry::Extended(
                     HashMap::from([(
                         "handled_fail".to_string(),
@@ -365,14 +365,14 @@ async fn test_handler_failure_is_independently_checked() {
         .add_service(
             "failing",
             TestServiceBuilder::exit_with_code(1)
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .build(),
         )
         .add_service(
             "handler",
             // Handler itself fails with exit code 3
             TestServiceBuilder::exit_with_code(3)
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .with_depends_on_extended(DependsOn(vec![DependencyEntry::Extended(
                     HashMap::from([(
                         "failing".to_string(),
