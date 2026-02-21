@@ -22,6 +22,10 @@ pub struct HealthCheck {
     pub retries: u32,
     #[serde(default = "default_start_period", deserialize_with = "deserialize_duration", serialize_with = "serialize_duration")]
     pub start_period: Duration,
+    #[serde(default)]
+    pub user: ConfigValue<Option<String>>,
+    #[serde(default)]
+    pub groups: ConfigValue<Vec<ConfigValue<String>>>,
 }
 
 impl HealthCheck {

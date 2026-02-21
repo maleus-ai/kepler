@@ -146,7 +146,7 @@ async fn run_hook_step(
             spec.working_dir = params.working_dir.to_path_buf();
         }
 
-        // Apply user/group inheritance: hook user > service user > daemon user
+        // Apply user/group inheritance: hook user > service user (includes config owner fallback)
         if spec.user.is_none() {
             spec.user = params.service_user.map(|s| s.to_string());
         }

@@ -86,6 +86,7 @@ hooks:
   pre_restart:
     run: ./notify.sh
     user: admin                    # Run as specific user
+    groups: ["admin", "monitoring"] # Override supplementary groups
     working_dir: ./scripts         # Override working directory
     environment:                   # Sequence or mapping format
       SETUP_MODE: full
@@ -98,6 +99,7 @@ hooks:
 | `command` | `string[]` | Command array to execute (mutually exclusive with `run`) |
 | `if` | `bool` or `${{ expr }}$` / `!lua` | Condition expression. Hook only runs if truthy. Supports static bools and dynamic Lua expressions. See [Status Functions](#status-functions) |
 | `user` | `string` | User to run hook as (overrides service default) |
+| `groups` | `string[]` | Supplementary groups lockdown (overrides service default). See [Privilege Dropping](privilege-dropping.md) |
 | `working_dir` | `string` | Working directory (overrides service default) |
 | `environment` | `string[]\|object` | Additional environment variables (sequence or mapping format) |
 | `env_file` | `string` | Additional env file to load |
@@ -109,7 +111,8 @@ hooks:
 
 Service hooks inherit from their parent service by default:
 
-- **User**: Hook runs as the service's `user` unless overridden
+- **User**: Hook runs as the service's `user` unless overridden (which includes the config owner default). Use `user: daemon` to explicitly run as the daemon user instead.
+- **Groups**: Hook uses the service's `groups` unless overridden
 - **Environment**: Hook receives the service's environment, plus any additional vars from `environment`/`env_file`
 - **Working directory**: Hook uses the service's `working_dir` unless overridden
 
