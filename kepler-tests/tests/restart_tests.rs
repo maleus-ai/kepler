@@ -27,7 +27,7 @@ async fn test_restart_policy_no() {
                 "-c".to_string(),
                 format!("echo 'started' >> {} && exit 0", marker_path.display()),
             ])
-            .with_restart(RestartPolicy::No)
+            .with_restart(RestartPolicy::no())
             .build(),
         )
         .build();
@@ -71,7 +71,7 @@ async fn test_restart_policy_always() {
                 "-c".to_string(),
                 format!("echo 'started' >> {} && exit 0", marker_path.display()),
             ])
-            .with_restart(RestartPolicy::Always)
+            .with_restart(RestartPolicy::always())
             .build(),
         )
         .build();
@@ -116,7 +116,7 @@ async fn test_restart_policy_on_failure_with_failure() {
                 "-c".to_string(),
                 format!("echo 'started' >> {} && exit 1", marker_path.display()),
             ])
-            .with_restart(RestartPolicy::OnFailure)
+            .with_restart(RestartPolicy::on_failure())
             .build(),
         )
         .build();
@@ -161,7 +161,7 @@ async fn test_restart_policy_on_failure_with_success() {
                 "-c".to_string(),
                 format!("echo 'started' >> {} && exit 0", marker_path.display()),
             ])
-            .with_restart(RestartPolicy::OnFailure)
+            .with_restart(RestartPolicy::on_failure())
             .build(),
         )
         .build();
@@ -212,7 +212,7 @@ async fn test_on_restart_hook_fires() {
                 "-c".to_string(),
                 format!("echo 'started' >> {} && exit 1", started_path.display()),
             ])
-            .with_restart(RestartPolicy::Always)
+            .with_restart(RestartPolicy::always())
             .with_hooks(hooks)
             .build(),
         )
@@ -261,7 +261,7 @@ async fn test_restart_config_extended_policy_only() {
                 format!("echo 'started' >> {} && exit 0", marker_path.display()),
             ])
             .with_restart_config(RestartConfig::Extended {
-                policy: RestartPolicy::Always,
+                policy: RestartPolicy::always(),
                 watch: vec![].into(),
             })
             .build(),
@@ -317,7 +317,7 @@ async fn test_watch_triggers_restart() {
             ])
             .with_working_dir(temp_dir.path().to_path_buf())
             .with_restart_and_watch(
-                RestartPolicy::Always,
+                RestartPolicy::always(),
                 vec!["src/**/*.ts".to_string()],
             )
             .build(),
@@ -380,7 +380,7 @@ async fn test_watch_ignores_non_matching_files() {
             ])
             .with_working_dir(temp_dir.path().to_path_buf())
             .with_restart_and_watch(
-                RestartPolicy::Always,
+                RestartPolicy::always(),
                 vec!["src/**/*.ts".to_string()],
             )
             .build(),
@@ -442,7 +442,7 @@ async fn test_watch_multiple_patterns() {
             ])
             .with_working_dir(temp_dir.path().to_path_buf())
             .with_restart_and_watch(
-                RestartPolicy::Always,
+                RestartPolicy::always(),
                 vec![
                     "src/**/*.ts".to_string(),
                     "src/**/*.json".to_string(),
@@ -510,7 +510,7 @@ async fn test_watch_restart_fires_on_restart_hook() {
             ])
             .with_working_dir(temp_dir.path().to_path_buf())
             .with_restart_and_watch(
-                RestartPolicy::Always,
+                RestartPolicy::always(),
                 vec!["src/**/*.ts".to_string()],
             )
             .with_hooks(hooks)
@@ -566,7 +566,7 @@ async fn test_watch_new_file_triggers_restart() {
             ])
             .with_working_dir(temp_dir.path().to_path_buf())
             .with_restart_and_watch(
-                RestartPolicy::Always,
+                RestartPolicy::always(),
                 vec!["src/**/*.ts".to_string()],
             )
             .build(),
@@ -628,7 +628,7 @@ async fn test_watch_delete_file_triggers_restart() {
             ])
             .with_working_dir(temp_dir.path().to_path_buf())
             .with_restart_and_watch(
-                RestartPolicy::Always,
+                RestartPolicy::always(),
                 vec!["src/**/*.ts".to_string()],
             )
             .build(),
@@ -674,19 +674,19 @@ async fn test_watch_delete_file_triggers_restart() {
 #[test]
 fn test_should_restart_on_exit_helper() {
     // Policy: No
-    let config_no = RestartConfig::Simple(RestartPolicy::No);
+    let config_no = RestartConfig::Simple(RestartPolicy::no());
     assert!(!config_no.should_restart_on_exit(Some(0)));
     assert!(!config_no.should_restart_on_exit(Some(1)));
     assert!(!config_no.should_restart_on_exit(None));
 
     // Policy: Always
-    let config_always = RestartConfig::Simple(RestartPolicy::Always);
+    let config_always = RestartConfig::Simple(RestartPolicy::always());
     assert!(config_always.should_restart_on_exit(Some(0)));
     assert!(config_always.should_restart_on_exit(Some(1)));
     assert!(config_always.should_restart_on_exit(None));
 
     // Policy: OnFailure
-    let config_on_failure = RestartConfig::Simple(RestartPolicy::OnFailure);
+    let config_on_failure = RestartConfig::Simple(RestartPolicy::on_failure());
     assert!(!config_on_failure.should_restart_on_exit(Some(0))); // Success - no restart
     assert!(config_on_failure.should_restart_on_exit(Some(1)));  // Failure - restart
     assert!(config_on_failure.should_restart_on_exit(Some(127))); // Failure - restart
@@ -697,19 +697,19 @@ fn test_should_restart_on_exit_helper() {
 #[test]
 fn test_should_restart_on_file_change_helper() {
     // Simple form - no watch
-    let simple = RestartConfig::Simple(RestartPolicy::Always);
+    let simple = RestartConfig::Simple(RestartPolicy::always());
     assert!(!simple.should_restart_on_file_change());
 
     // Extended form - no watch
     let extended_no_watch = RestartConfig::Extended {
-        policy: RestartPolicy::Always,
+        policy: RestartPolicy::always(),
         watch: vec![].into(),
     };
     assert!(!extended_no_watch.should_restart_on_file_change());
 
     // Extended form - with watch
     let extended_with_watch = RestartConfig::Extended {
-        policy: RestartPolicy::Always,
+        policy: RestartPolicy::always(),
         watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
     };
     assert!(extended_with_watch.should_restart_on_file_change());
@@ -719,12 +719,12 @@ fn test_should_restart_on_file_change_helper() {
 #[test]
 fn test_watch_patterns_accessor() {
     // Simple form
-    let simple = RestartConfig::Simple(RestartPolicy::Always);
+    let simple = RestartConfig::Simple(RestartPolicy::always());
     assert!(simple.watch_patterns().is_empty());
 
     // Extended form with patterns
     let extended = RestartConfig::Extended {
-        policy: RestartPolicy::Always,
+        policy: RestartPolicy::always(),
         watch: ConfigValue::wrap_vec(vec!["src/**/*.ts".to_string(), "*.json".to_string()]).into(),
     };
     assert_eq!(extended.watch_patterns().len(), 2);
@@ -735,46 +735,238 @@ fn test_watch_patterns_accessor() {
 /// Test policy accessor
 #[test]
 fn test_policy_accessor() {
-    let simple_no = RestartConfig::Simple(RestartPolicy::No);
-    assert_eq!(simple_no.policy(), &RestartPolicy::No);
+    let simple_no = RestartConfig::Simple(RestartPolicy::no());
+    assert_eq!(simple_no.policy(), &RestartPolicy::no());
 
-    let simple_always = RestartConfig::Simple(RestartPolicy::Always);
-    assert_eq!(simple_always.policy(), &RestartPolicy::Always);
+    let simple_always = RestartConfig::Simple(RestartPolicy::always());
+    assert_eq!(simple_always.policy(), &RestartPolicy::always());
 
     let extended = RestartConfig::Extended {
-        policy: RestartPolicy::OnFailure,
+        policy: RestartPolicy::on_failure(),
         watch: vec![].into(),
     };
-    assert_eq!(extended.policy(), &RestartPolicy::OnFailure);
+    assert_eq!(extended.policy(), &RestartPolicy::on_failure());
 }
 
 /// Test validate method
 #[test]
 fn test_restart_config_validate() {
     // Valid: simple form
-    let simple = RestartConfig::Simple(RestartPolicy::No);
+    let simple = RestartConfig::Simple(RestartPolicy::no());
     assert!(simple.validate().is_ok());
 
     // Valid: extended with always + watch
     let extended_valid = RestartConfig::Extended {
-        policy: RestartPolicy::Always,
+        policy: RestartPolicy::always(),
         watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
     };
     assert!(extended_valid.validate().is_ok());
 
     // Valid: extended with on-failure + watch
     let extended_on_failure = RestartConfig::Extended {
-        policy: RestartPolicy::OnFailure,
+        policy: RestartPolicy::on_failure(),
         watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
     };
     assert!(extended_on_failure.validate().is_ok());
 
     // Invalid: policy: no + watch
     let invalid = RestartConfig::Extended {
-        policy: RestartPolicy::No,
+        policy: RestartPolicy::no(),
         watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
     };
     let result = invalid.validate();
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("watch patterns require restart"));
+}
+
+// ============================================================================
+// RestartPolicy Bitfield Tests
+// ============================================================================
+
+/// Test RestartPolicy named constructors
+#[test]
+fn test_restart_policy_constructors() {
+    assert!(RestartPolicy::no().is_no());
+    assert!(!RestartPolicy::on_failure().is_no());
+    assert!(!RestartPolicy::on_success().is_no());
+    assert!(!RestartPolicy::on_unhealthy().is_no());
+    assert!(!RestartPolicy::always().is_no());
+}
+
+/// Test RestartPolicy flag containment
+#[test]
+fn test_restart_policy_contains() {
+    let policy = RestartPolicy::on_failure();
+    assert!(policy.contains(RestartPolicy::ON_FAILURE));
+    assert!(!policy.contains(RestartPolicy::ON_SUCCESS));
+    assert!(!policy.contains(RestartPolicy::ON_UNHEALTHY));
+
+    let always = RestartPolicy::always();
+    assert!(always.contains(RestartPolicy::ON_FAILURE));
+    assert!(always.contains(RestartPolicy::ON_SUCCESS));
+    assert!(always.contains(RestartPolicy::ON_UNHEALTHY));
+}
+
+/// Test should_restart_on_exit with various policies
+#[test]
+fn test_restart_policy_should_restart_on_exit() {
+    // on-failure: restart on non-zero exit
+    let on_failure = RestartPolicy::on_failure();
+    assert!(on_failure.should_restart_on_exit(Some(1)));
+    assert!(on_failure.should_restart_on_exit(None));
+    assert!(!on_failure.should_restart_on_exit(Some(0)));
+
+    // on-success: restart on exit 0
+    let on_success = RestartPolicy::on_success();
+    assert!(on_success.should_restart_on_exit(Some(0)));
+    assert!(!on_success.should_restart_on_exit(Some(1)));
+    assert!(!on_success.should_restart_on_exit(None));
+
+    // always: restart on any exit
+    let always = RestartPolicy::always();
+    assert!(always.should_restart_on_exit(Some(0)));
+    assert!(always.should_restart_on_exit(Some(1)));
+    assert!(always.should_restart_on_exit(None));
+
+    // no: never restart
+    let no = RestartPolicy::no();
+    assert!(!no.should_restart_on_exit(Some(0)));
+    assert!(!no.should_restart_on_exit(Some(1)));
+    assert!(!no.should_restart_on_exit(None));
+}
+
+/// Test should_restart_on_unhealthy
+#[test]
+fn test_restart_policy_should_restart_on_unhealthy() {
+    assert!(!RestartPolicy::no().should_restart_on_unhealthy());
+    assert!(!RestartPolicy::on_failure().should_restart_on_unhealthy());
+    assert!(!RestartPolicy::on_success().should_restart_on_unhealthy());
+    assert!(RestartPolicy::on_unhealthy().should_restart_on_unhealthy());
+    assert!(RestartPolicy::always().should_restart_on_unhealthy());
+}
+
+/// Test RestartPolicy serde round-trip for single flags
+#[test]
+fn test_restart_policy_serde_single_flags() {
+    for (input, expected) in [
+        ("no", RestartPolicy::no()),
+        ("on-failure", RestartPolicy::on_failure()),
+        ("on-success", RestartPolicy::on_success()),
+        ("on-unhealthy", RestartPolicy::on_unhealthy()),
+        ("always", RestartPolicy::always()),
+    ] {
+        let yaml = format!("\"{}\"", input);
+        let parsed: RestartPolicy = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, expected, "parsing '{}'", input);
+
+        // Round-trip
+        let serialized = serde_yaml::to_string(&parsed).unwrap();
+        let reparsed: RestartPolicy = serde_yaml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed, expected, "round-trip '{}'", input);
+    }
+}
+
+/// Test RestartPolicy pipe combinator parsing
+#[test]
+fn test_restart_policy_pipe_combinator() {
+    let yaml = "\"on-failure|on-unhealthy\"";
+    let parsed: RestartPolicy = serde_yaml::from_str(yaml).unwrap();
+    assert!(parsed.contains(RestartPolicy::ON_FAILURE));
+    assert!(!parsed.contains(RestartPolicy::ON_SUCCESS));
+    assert!(parsed.contains(RestartPolicy::ON_UNHEALTHY));
+    assert!(parsed.should_restart_on_exit(Some(1)));
+    assert!(!parsed.should_restart_on_exit(Some(0)));
+    assert!(parsed.should_restart_on_unhealthy());
+}
+
+/// Test pipe combinator serde round-trip
+#[test]
+fn test_restart_policy_pipe_serde_roundtrip() {
+    let yaml = "\"on-failure|on-unhealthy\"";
+    let parsed: RestartPolicy = serde_yaml::from_str(yaml).unwrap();
+    let serialized = serde_yaml::to_string(&parsed).unwrap();
+    let reparsed: RestartPolicy = serde_yaml::from_str(&serialized).unwrap();
+    assert_eq!(parsed, reparsed);
+}
+
+/// Test that all-flags combined serializes as "always"
+#[test]
+fn test_restart_policy_all_flags_serialize_as_always() {
+    let yaml = "\"on-failure|on-success|on-unhealthy\"";
+    let parsed: RestartPolicy = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(parsed, RestartPolicy::always());
+
+    let serialized = serde_yaml::to_string(&parsed).unwrap().trim().to_string();
+    assert_eq!(serialized, "always");
+}
+
+/// Test "no" combined with other flags produces error
+#[test]
+fn test_restart_policy_no_combined_error() {
+    let yaml = "\"no|on-failure\"";
+    let result: Result<RestartPolicy, _> = serde_yaml::from_str(yaml);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("cannot be combined"), "error: {}", err);
+}
+
+/// Test unknown flag produces error
+#[test]
+fn test_restart_policy_unknown_flag_error() {
+    let yaml = "\"on-typo\"";
+    let result: Result<RestartPolicy, _> = serde_yaml::from_str(yaml);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("unknown restart policy flag"), "error: {}", err);
+}
+
+/// Test unknown flag mixed with valid flag produces error
+#[test]
+fn test_restart_policy_mixed_unknown_error() {
+    let yaml = "\"on-failure|invalid\"";
+    let result: Result<RestartPolicy, _> = serde_yaml::from_str(yaml);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("unknown restart policy flag"), "error: {}", err);
+}
+
+/// Test RestartConfig.should_restart_on_unhealthy delegates correctly
+#[test]
+fn test_restart_config_should_restart_on_unhealthy() {
+    let config = RestartConfig::Simple(RestartPolicy::on_unhealthy());
+    assert!(config.should_restart_on_unhealthy());
+
+    let config = RestartConfig::Simple(RestartPolicy::always());
+    assert!(config.should_restart_on_unhealthy());
+
+    let config = RestartConfig::Simple(RestartPolicy::on_failure());
+    assert!(!config.should_restart_on_unhealthy());
+
+    let config = RestartConfig::Simple(RestartPolicy::no());
+    assert!(!config.should_restart_on_unhealthy());
+}
+
+/// Test pipe syntax in extended restart config
+#[test]
+fn test_restart_config_extended_pipe_syntax() {
+    let yaml = r#"
+policy: "on-failure|on-unhealthy"
+watch:
+  - "*.ts"
+"#;
+    let config: RestartConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(config.policy().contains(RestartPolicy::ON_FAILURE));
+    assert!(config.policy().contains(RestartPolicy::ON_UNHEALTHY));
+    assert!(!config.policy().contains(RestartPolicy::ON_SUCCESS));
+    assert!(config.should_restart_on_file_change());
+}
+
+/// Test RestartConfig YAML simple form with pipe syntax
+#[test]
+fn test_restart_config_simple_pipe_yaml() {
+    let yaml = "\"on-failure|on-unhealthy\"";
+    let config: RestartConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(config.policy().should_restart_on_exit(Some(1)));
+    assert!(!config.policy().should_restart_on_exit(Some(0)));
+    assert!(config.policy().should_restart_on_unhealthy());
 }

@@ -96,7 +96,7 @@ async fn test_stop_cancels_file_watcher() {
             TestServiceBuilder::long_running()
                 .with_working_dir(temp_dir.path().to_path_buf())
                 .with_restart_and_watch(
-                    RestartPolicy::Always,
+                    RestartPolicy::always(),
                     vec!["src/**/*.ts".to_string()],
                 )
                 .build(),
@@ -134,7 +134,7 @@ async fn test_stop_cleans_all_resources() {
             TestServiceBuilder::long_running()
                 .with_working_dir(temp_dir.path().to_path_buf())
                 .with_restart_and_watch(
-                    RestartPolicy::Always,
+                    RestartPolicy::always(),
                     vec!["src/**/*.ts".to_string()],
                 )
                 .with_healthcheck(
@@ -484,7 +484,7 @@ async fn test_shutdown_full_cleanup() {
             TestServiceBuilder::long_running()
                 .with_working_dir(temp_dir.path().to_path_buf())
                 .with_restart_and_watch(
-                    RestartPolicy::Always,
+                    RestartPolicy::always(),
                     vec!["src/**/*.ts".to_string()],
                 )
                 .with_healthcheck(
@@ -725,7 +725,7 @@ async fn test_subscriber_not_leaked_across_restart() {
         .add_service(
             "svc",
             TestServiceBuilder::exit_with_code(1)
-                .with_restart(RestartPolicy::OnFailure)
+                .with_restart(RestartPolicy::on_failure())
                 .build(),
         )
         .build();

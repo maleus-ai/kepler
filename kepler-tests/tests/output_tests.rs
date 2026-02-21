@@ -281,7 +281,7 @@ async fn test_config_output_with_restart_no() {
         .add_service(
             "test",
             TestServiceBuilder::echo("hello")
-                .with_restart(RestartPolicy::No)
+                .with_restart(RestartPolicy::no())
                 .with_output(true)
                 .build(),
         )

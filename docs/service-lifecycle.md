@@ -56,6 +56,7 @@ stateDiagram-v2
     Running --> Healthy : healthcheck passes
     Healthy --> Unhealthy : healthcheck fails
     Unhealthy --> Healthy : healthcheck passes
+    Unhealthy --> Stopping : on-unhealthy restart
     Running --> Stopping : kepler stop
     Healthy --> Stopping : kepler stop
     Unhealthy --> Stopping : kepler stop
@@ -204,19 +205,26 @@ See [CLI Reference](cli-reference.md#kepler-start) for flag details.
 
 ### Restart Policies
 
-| Policy       | Behavior                      |
-| ------------ | ----------------------------- |
-| `no`         | Never restart (default)       |
-| `always`     | Always restart on exit        |
-| `on-failure` | Restart only on non-zero exit |
+Restart policies are flags that can be combined with the pipe (`|`) operator:
+
+| Flag           | Behavior                                            |
+| -------------- | --------------------------------------------------- |
+| `no`           | Never restart (default)                             |
+| `on-failure`   | Restart on non-zero exit                            |
+| `on-success`   | Restart on zero exit                                |
+| `on-unhealthy` | Restart when healthcheck marks service as unhealthy |
+| `always`       | All flags combined (`on-failure\|on-success\|on-unhealthy`) |
+
+Flags can be combined: `restart: "on-failure|on-unhealthy"` restarts on both non-zero exit and healthcheck failure. The `no` flag cannot be combined with other flags.
 
 ### Restart Triggers
 
 Services can restart due to:
 1. **Restart policy** -- automatic restart after exit (based on policy and exit code)
-2. **File watcher** -- file changes matching watch patterns
-3. **Manual restart** -- `kepler restart` command
-4. **Dependency restart** -- when `restart: true` is set on a dependency edge
+2. **Unhealthy restart** -- healthcheck failure when `on-unhealthy` flag is set
+3. **File watcher** -- file changes matching watch patterns
+4. **Manual restart** -- `kepler restart` command
+5. **Dependency restart** -- when `restart: true` is set on a dependency edge
 
 See [Dependencies](dependencies.md#restart-propagation) for details on restart propagation.
 

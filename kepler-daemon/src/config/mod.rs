@@ -1245,7 +1245,7 @@ impl KeplerConfig {
             }
 
             // Validate output/outputs require restart: no
-            let is_restart_no = restart.policy() == &crate::config::restart::RestartPolicy::No;
+            let is_restart_no = restart.policy().is_no();
             if let Some(Some(true)) = raw.output.as_static()
                 && !is_restart_no {
                     errors.push(format!(

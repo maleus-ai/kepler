@@ -193,26 +193,33 @@ See [Privilege Dropping](privilege-dropping.md) for details.
 
 ### Restart Configuration
 
+Restart policies are flags that can be combined with the pipe (`|`) operator.
+
 **Simple form:**
 
 ```yaml
-restart: always    # or: no, on-failure
+restart: always              # Single flag
+restart: "on-failure|on-unhealthy"  # Combined flags (quotes required for pipe syntax)
 ```
 
 **Extended form with file watching:**
 
 ```yaml
 restart:
-  policy: always      # no | always | on-failure
-  watch:              # Glob patterns for auto-restart
+  policy: "on-failure|on-unhealthy"   # Combinable flags
+  watch:                               # Glob patterns for auto-restart
     - "src/**/*.ts"
 ```
 
-| Policy | Description |
-|--------|-------------|
+| Flag | Description |
+|------|-------------|
 | `no` | Never restart (default) |
-| `always` | Always restart on exit |
-| `on-failure` | Restart only on non-zero exit |
+| `on-failure` | Restart on non-zero exit |
+| `on-success` | Restart on zero exit |
+| `on-unhealthy` | Restart when healthcheck marks service as unhealthy |
+| `always` | All flags combined (`on-failure\|on-success\|on-unhealthy`) |
+
+Flags are combined with `|`: `"on-failure|on-unhealthy"` restarts on both non-zero exit and healthcheck failure. The `no` flag cannot be combined with other flags.
 
 > **Note:** `policy: no` cannot be combined with `watch` patterns.
 

@@ -18,6 +18,8 @@ pub enum RestartReason {
     Manual,
     /// Restart triggered by a dependency restarting
     DependencyRestart { dependency: String },
+    /// Restart triggered by healthcheck failure (on-unhealthy policy)
+    Unhealthy,
 }
 
 /// Health check status

@@ -262,9 +262,9 @@ services:
     let on_failure = deser_svc(&config.services["on_failure"]);
 
     // Simple form uses policy() accessor
-    assert_eq!(no_restart.restart.policy(), &RestartPolicy::No);
-    assert_eq!(always_restart.restart.policy(), &RestartPolicy::Always);
-    assert_eq!(on_failure.restart.policy(), &RestartPolicy::OnFailure);
+    assert_eq!(no_restart.restart.policy(), &RestartPolicy::no());
+    assert_eq!(always_restart.restart.policy(), &RestartPolicy::always());
+    assert_eq!(on_failure.restart.policy(), &RestartPolicy::on_failure());
 
     // Simple form has no watch patterns
     assert!(no_restart.restart.watch_patterns().is_empty());
@@ -293,7 +293,7 @@ services:
 
     let svc = deser_svc(&config.services["always_restart"]);
     // Extended form with just policy (no watch)
-    assert_eq!(svc.restart.policy(), &RestartPolicy::Always);
+    assert_eq!(svc.restart.policy(), &RestartPolicy::always());
     assert!(svc.restart.watch_patterns().is_empty());
 }
 
@@ -466,7 +466,7 @@ services:
     use kepler_daemon::config::RestartPolicy;
 
     let svc = deser_svc(&config.services["test"]);
-    assert_eq!(svc.restart.policy(), &RestartPolicy::OnFailure);
+    assert_eq!(svc.restart.policy(), &RestartPolicy::on_failure());
     assert_eq!(svc.restart.watch_patterns(), &["*.ts".to_string()]);
     assert!(svc.restart.should_restart_on_file_change());
 }
