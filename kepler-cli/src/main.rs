@@ -8,6 +8,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::{commands::Commands, commands::DaemonCommands, config::Config, errors::{CliError, Result}};
@@ -215,9 +216,19 @@ async fn run() -> Result<()> {
                         hardening,
                     },
                 )?;
+                // Signal shared between start request and quiescence detection:
+                // prevents premature exit when the daemon's Subscribe recheck
+                // emits Quiescent before the Start request is processed.
+                let start_acknowledged = Arc::new(AtomicBool::new(false));
+                let start_ack_clone = Arc::clone(&start_acknowledged);
+                let wrapped_start = async move {
+                    let result = start_future.await;
+                    start_ack_clone.store(true, Ordering::Release);
+                    result
+                };
                 foreground_with_logs(
-                    start_future,
-                    follow_logs_until_quiescent(&client, &canonical_path, log_service, abort_on_failure),
+                    wrapped_start,
+                    follow_logs_until_quiescent(&client, &canonical_path, log_service, abort_on_failure, start_acknowledged),
                 ).await?;
             }
         }
@@ -1319,14 +1330,21 @@ async fn stream_cursor_logs(
                 }
                 _ = &mut quiescence, if !quiescent_received => {
                     quiescent_received = true;
-                    // All services are terminal — data is on disk. Drop the
-                    // in-flight long-poll (which may block for up to 2s) and
-                    // continue to the drain pass which reads without timeout.
-                    // Safe because: (1) the protocol is multiplexed so the
-                    // discarded response won't corrupt the stream, and (2) the
-                    // daemon's long-poll cursor hasn't advanced (no new writes
-                    // after quiescence means no Notify, so it's still waiting).
-                    continue;
+                    // The daemon's cursor is a server-side mutable iterator:
+                    // read_entries() advances the position immediately. If a
+                    // log write already notified the long-poll handler, the
+                    // daemon may have read and advanced past the new data.
+                    // Dropping cursor_fut would lose that data. Wait briefly
+                    // for the response; if it truly hasn't arrived yet (the
+                    // handler is still blocked), the timeout fires and we
+                    // fall through to the drain pass with the cursor intact.
+                    match tokio::time::timeout(
+                        Duration::from_millis(500),
+                        &mut cursor_fut,
+                    ).await {
+                        Ok(resp) => resp,
+                        Err(_) => continue,
+                    }
                 }
                 resp = &mut cursor_fut => resp,
             }
@@ -1491,13 +1509,18 @@ enum QuiescenceSignal {
 /// Event-driven quiescence monitor.
 ///
 /// Consumes progress events and sends signals when quiescence is reached
-/// or unhandled failures are detected. Requires at least one
-/// non-terminal observation before declaring quiescence, to prevent false
-/// positives from deferred services that appear as Stopped in the initial
-/// snapshot.
+/// or unhandled failures are detected. Requires at least one non-terminal
+/// observation (Waiting, Starting, etc.) before forwarding Quiescent, to
+/// prevent false positives when the daemon's `recheck_ready_quiescent()`
+/// fires during subscription setup before the Start request is processed.
+/// Without this guard, a second `kepler start` on an already-exited service
+/// would receive an immediate premature Quiescent and exit before the service
+/// even re-runs.
 async fn quiescence_monitor(
     mut progress_rx: mpsc::UnboundedReceiver<ServerEvent>,
     signal_tx: mpsc::UnboundedSender<QuiescenceSignal>,
+    seen_non_terminal: Arc<AtomicBool>,
+    start_acknowledged: Arc<AtomicBool>,
 ) {
     while let Some(event) = progress_rx.recv().await {
         match event {
@@ -1505,8 +1528,34 @@ async fn quiescence_monitor(
                 let _ = signal_tx.send(QuiescenceSignal::UnhandledFailure { service, exit_code });
             }
             ServerEvent::Quiescent { .. } => {
-                let _ = signal_tx.send(QuiescenceSignal::Quiescent);
-                return;
+                // Forward Quiescent only when we're confident it's genuine:
+                // - start_acknowledged: the daemon processed the Start request,
+                //   so services have actually been started (even if they exited
+                //   before the subscription was set up).
+                // - seen_non_terminal: we observed a service transition through
+                //   Waiting/Starting/etc., confirming real activity.
+                // Without either, this is a premature Quiescent from the daemon's
+                // recheck_ready_quiescent() during subscription setup, which fires
+                // before the Start request is processed.
+                if start_acknowledged.load(Ordering::Acquire)
+                    || seen_non_terminal.load(Ordering::Relaxed)
+                {
+                    let _ = signal_tx.send(QuiescenceSignal::Quiescent);
+                    return;
+                }
+                // Premature — ignore and wait for the real one.
+            }
+            ServerEvent::Progress { event: ref pe, .. } => {
+                if matches!(pe.phase,
+                    ServicePhase::Waiting
+                    | ServicePhase::Starting
+                    | ServicePhase::Stopping
+                    | ServicePhase::Cleaning
+                    | ServicePhase::Pending { .. }
+                    | ServicePhase::HookStarted { .. }
+                ) {
+                    seen_non_terminal.store(true, Ordering::Relaxed);
+                }
             }
             _ => {}
         }
@@ -1526,6 +1575,7 @@ async fn follow_logs_until_quiescent(
     config_path: &Path,
     service: Option<&str>,
     abort_on_failure: bool,
+    start_acknowledged: Arc<AtomicBool>,
 ) -> Result<()> {
     let use_color = colored::control::SHOULD_COLORIZE.should_colorize();
     let mut color_map: HashMap<String, Color> = HashMap::new();
@@ -1539,15 +1589,14 @@ async fn follow_logs_until_quiescent(
         service.map(|s| vec![s.to_string()]),
     ).await?;
 
+    // Shared flag: set by the quiescence monitor when it observes any service
+    // transition to a non-terminal phase (Waiting, Starting, …). Both the monitor
+    // and the fallback poll use this to avoid acting on premature quiescence that
+    // fires before the Start request is processed.
+    let seen_non_terminal = Arc::new(AtomicBool::new(false));
+
     // Spawn quiescence monitor task
-    //
-    // With guaranteed event delivery (unbounded channels, no drops), the monitor
-    // tracks which services have been seen and which are terminal. It requires
-    // at least one non-terminal observation before declaring quiescence, to avoid
-    // false positives from deferred services that appear as Stopped in the initial
-    // snapshot. The 2s fallback poll handles the edge case where ALL services
-    // are already terminal at subscription time.
-    tokio::spawn(quiescence_monitor(progress_rx, signal_tx));
+    tokio::spawn(quiescence_monitor(progress_rx, signal_tx, Arc::clone(&seen_non_terminal), Arc::clone(&start_acknowledged)));
 
     // Track whether any unhandled failure was seen
     let mut has_unhandled_failure = false;
@@ -1557,6 +1606,8 @@ async fn follow_logs_until_quiescent(
     // (all services already terminal at snapshot time, daemon bugs, empty config)
     let quiescence_future = {
         let config_path = config_path.to_path_buf();
+        let seen_non_terminal = Arc::clone(&seen_non_terminal);
+        let start_acknowledged = Arc::clone(&start_acknowledged);
         async move {
             loop {
                 tokio::select! {
@@ -1578,7 +1629,15 @@ async fn follow_logs_until_quiescent(
                         }
                     }
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                        // Fallback: poll status to handle missed events / daemon bugs
+                        // Fallback: poll status to handle missed events / daemon bugs.
+                        // Only act if we know services have started (via start_acknowledged
+                        // or seen_non_terminal); otherwise we'd prematurely exit before
+                        // the Start request is processed.
+                        if !start_acknowledged.load(Ordering::Acquire)
+                            && !seen_non_terminal.load(Ordering::Relaxed)
+                        {
+                            continue;
+                        }
                         if let Ok((_, resp_future)) = client.status(Some(config_path.clone()))
                             && let Ok(Response::Ok { data: Some(ResponseData::ServiceStatus(services)), .. }) = resp_future.await {
                                 let all_terminal = services.values().all(|info| {

@@ -1,0 +1,8 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  oneshot:
+    command: ["sh", "-c", "echo FOREGROUND_MARKER; exit 0"]
+    restart: "no"
