@@ -8,6 +8,7 @@ Kepler can run services and hooks as specific users/groups with resource limits.
 - [Supplementary Groups](#supplementary-groups)
 - [How Privilege Dropping Works](#how-privilege-dropping-works)
 - [Hook Inheritance](#hook-inheritance)
+- [Health Check Inheritance](#health-check-inheritance)
 - [Resource Limits](#resource-limits)
 - [Examples](#examples)
 
@@ -119,22 +120,53 @@ This ensures the service process never runs as root, even momentarily after spaw
 
 ## Hook Inheritance
 
-Service hooks inherit the service's `user` by default. Since the config owner's UID:GID is baked into services without an explicit `user:`, service hooks also inherit this default:
+Service hooks inherit the service's `user` and `groups` by default. Since the config owner's UID:GID is baked into services without an explicit `user:`, service hooks also inherit this default:
 
 ```yaml
 services:
   backend:
     command: ["./server"]
     user: appuser
+    groups: ["docker", "kepler"]
     hooks:
       pre_start:
-        run: ./setup.sh          # Runs as appuser
+        run: ./setup.sh          # Runs as appuser with groups [docker, kepler]
       pre_stop:
         run: ./teardown.sh
         user: root               # Override: runs as root
+        groups: ["root"]         # Override: restrict to root group only
 ```
 
-Each hook can override `user` to run as a different user.
+Each hook can override `user` and `groups` to run with different privileges. Use `user: daemon` to explicitly run as the daemon user (no privilege drop), bypassing the service's user and the config owner default.
+
+---
+
+## Health Check Inheritance
+
+Health checks also inherit the service's `user` and `groups` by default, following the same inheritance chain as hooks:
+
+- **Health check `user`** > **Service `user`** > config owner
+- **Health check `groups`** > **Service `groups`**
+
+```yaml
+services:
+  backend:
+    command: ["./server"]
+    user: appuser
+    healthcheck:
+      run: "curl -f http://localhost:3000/health"   # Runs as appuser
+      interval: 10s
+
+  worker:
+    command: ["./worker"]
+    user: appuser
+    healthcheck:
+      command: ["./check-health"]
+      user: healthchecker        # Override: run healthcheck as different user
+      groups: ["monitoring"]     # Override: restrict supplementary groups
+```
+
+Use `user: daemon` to explicitly run the health check as the daemon user, bypassing the service's user and the config owner default.
 
 ---
 

@@ -1,0 +1,16 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  svc:
+    command: ["sh", "-c", "echo SVC_START; sleep 300"]
+    user: testuser1
+    healthcheck:
+      # Override: run healthcheck as testuser2 instead of testuser1
+      run: 'test "$(whoami)" = "testuser2"'
+      user: testuser2
+      interval: 2s
+      timeout: 5s
+      retries: 2
+      start_period: 0s

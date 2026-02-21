@@ -316,6 +316,8 @@ pub struct TestHealthCheckBuilder {
     timeout: Duration,
     retries: u32,
     start_period: Duration,
+    user: Option<String>,
+    groups: Vec<String>,
 }
 
 impl TestHealthCheckBuilder {
@@ -327,6 +329,8 @@ impl TestHealthCheckBuilder {
             timeout: Duration::from_secs(5),
             retries: 3,
             start_period: Duration::from_secs(0),
+            user: None,
+            groups: Vec::new(),
         }
     }
 
@@ -349,6 +353,8 @@ impl TestHealthCheckBuilder {
             timeout: Duration::from_secs(5),
             retries: 3,
             start_period: Duration::from_secs(0),
+            user: None,
+            groups: Vec::new(),
         }
     }
 
@@ -389,6 +395,18 @@ impl TestHealthCheckBuilder {
         self
     }
 
+    /// Set the user to run the health check as
+    pub fn with_user(mut self, user: &str) -> Self {
+        self.user = Some(user.to_string());
+        self
+    }
+
+    /// Set the supplementary groups for the health check
+    pub fn with_groups(mut self, groups: Vec<String>) -> Self {
+        self.groups = groups;
+        self
+    }
+
     pub fn build(self) -> HealthCheck {
         let command = match self.command {
             Some(cmd) => ConfigValue::Static(ConfigValue::wrap_vec(cmd)),
@@ -398,6 +416,15 @@ impl TestHealthCheckBuilder {
             Some(script) => ConfigValue::Static(Some(script)),
             None => ConfigValue::default(),
         };
+        let user = match self.user {
+            Some(u) => ConfigValue::Static(Some(u)),
+            None => ConfigValue::default(),
+        };
+        let groups = if self.groups.is_empty() {
+            ConfigValue::default()
+        } else {
+            ConfigValue::Static(ConfigValue::wrap_vec(self.groups))
+        };
         HealthCheck {
             command,
             run,
@@ -405,6 +432,8 @@ impl TestHealthCheckBuilder {
             timeout: self.timeout,
             retries: self.retries,
             start_period: self.start_period,
+            user,
+            groups,
         }
     }
 }

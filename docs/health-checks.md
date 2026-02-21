@@ -38,6 +38,8 @@ services:
 | `timeout` | `duration` | `30s` | Timeout per check |
 | `retries` | `int` | `3` | Consecutive failures before marking unhealthy |
 | `start_period` | `duration` | `0s` | Grace period before health checks begin |
+| `user` | `string` | service user | User to run the health check as. Overrides the service's `user`. See [Privilege Dropping](privilege-dropping.md) |
+| `groups` | `string[]` | service groups | Supplementary groups lockdown. Overrides the service's `groups`. See [Privilege Dropping](privilege-dropping.md) |
 
 Either `command` or `run` is required (but not both).
 
@@ -103,7 +105,28 @@ healthcheck:
 - **Any other exit code**: unhealthy
 - **Timeout**: counts as a failure
 
-The command runs in the service's environment (with the service's user, working directory, and environment variables).
+The command runs in the service's environment (working directory and environment variables). By default, it runs as the service's `user`. Use the `user` and `groups` fields to override:
+
+```yaml
+services:
+  backend:
+    command: ["./server"]
+    user: appuser
+    healthcheck:
+      run: "curl -f http://localhost:3000/health"
+      user: healthchecker    # Override: run healthcheck as a different user
+      groups: ["monitoring"] # Override: restrict supplementary groups
+```
+
+### User Inheritance
+
+Health checks follow the same inheritance chain as hooks:
+
+- **Health check `user`** > **Service `user`** > config owner
+- **Health check `groups`** > **Service `groups`**
+- The special value `"daemon"` means run as the daemon user (no privilege drop)
+
+When neither the health check nor the service specifies a `user`, the health check runs as the config owner (the user who loaded the config). See [Privilege Dropping](privilege-dropping.md) for details on config owner defaults.
 
 ---
 

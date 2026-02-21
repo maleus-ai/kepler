@@ -1137,7 +1137,7 @@ impl KeplerConfig {
         let user = user.or_else(|| default_user.map(String::from));
         let groups = resolve_nested_vec(&raw.groups, evaluator, ctx, config_path, &format!("{}.groups", name), &mut shared_env)?;
         let healthcheck: Option<HealthCheck> = raw.healthcheck.resolve_with_env(evaluator, ctx, config_path, &format!("{}.healthcheck", name), &mut shared_env)?;
-        // Resolve inner ConfigValue fields of HealthCheck (command/run)
+        // Resolve inner ConfigValue fields of HealthCheck (command/run, user, groups)
         let healthcheck = healthcheck.map(|mut hc| -> crate::errors::Result<HealthCheck> {
             let has_run = match &hc.run {
                 ConfigValue::Static(v) => v.is_some(),
@@ -1164,6 +1164,17 @@ impl KeplerConfig {
                 )?;
                 hc.command = ConfigValue::Static(ConfigValue::wrap_vec(resolved));
             }
+            // Resolve user and groups
+            let hc_user: Option<String> = hc.user.resolve_with_env(
+                evaluator, ctx, config_path,
+                &format!("{}.healthcheck.user", name), &mut shared_env,
+            )?;
+            hc.user = ConfigValue::Static(hc_user);
+            let hc_groups: Vec<String> = resolve_nested_vec(
+                &hc.groups, evaluator, ctx, config_path,
+                &format!("{}.healthcheck.groups", name), &mut shared_env,
+            )?;
+            hc.groups = ConfigValue::Static(ConfigValue::wrap_vec(hc_groups));
             Ok(hc)
         }).transpose()?;
         let limits = raw.limits.resolve_with_env(evaluator, ctx, config_path, &format!("{}.limits", name), &mut shared_env)?;

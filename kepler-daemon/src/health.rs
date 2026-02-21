@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
-use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
@@ -10,6 +8,7 @@ use crate::config::HealthCheck;
 use crate::config_actor::ConfigActorHandle;
 use crate::events::{HealthStatus, ServiceEvent};
 use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
+use crate::process::{spawn_blocking, BlockingMode, CommandSpec};
 use crate::state::ServiceStatus;
 
 /// Spawn a health check monitoring task for a service
@@ -63,7 +62,38 @@ async fn health_check_loop(
         let cmd: Vec<String> = config.command.as_static()
             .map(|v| v.iter().filter_map(|cv| cv.as_static().cloned()).collect())
             .unwrap_or_default();
-        let passed = run_health_check(&cmd, config.timeout, &ctx.env, &ctx.working_dir).await;
+
+        // Resolve user/groups: healthcheck user > service user (includes config owner fallback)
+        let resolved = ctx.resolved_config.as_ref();
+        let service_user = resolved.and_then(|r| r.user.as_deref());
+        let service_groups = resolved.map(|r| r.groups.as_slice()).unwrap_or(&[]);
+
+        let mut user: Option<String> = config.user.as_static()
+            .and_then(|v| v.clone());
+        let mut groups: Vec<String> = config.groups.as_static()
+            .map(|v| v.iter().filter_map(|cv| cv.as_static().cloned()).collect())
+            .unwrap_or_default();
+
+        // Inherit from service if healthcheck doesn't specify
+        if user.is_none() {
+            user = service_user.map(|s| s.to_string());
+        }
+        // "daemon" means run as daemon user (no privilege drop)
+        if user.as_deref() == Some("daemon") {
+            user = None;
+        }
+        if groups.is_empty() {
+            groups = service_groups.to_vec();
+        }
+
+        let passed = run_health_check(
+            &cmd,
+            config.timeout,
+            &ctx.env,
+            &ctx.working_dir,
+            user.as_deref(),
+            &groups,
+        ).await;
 
         // Update state based on result
         let update_result = handle
@@ -245,33 +275,33 @@ async fn run_status_change_hook(
     }
 }
 
-/// Execute a single health check command with the service's environment
+/// Execute a single health check command via kepler-exec (CommandSpec + spawn_blocking).
+///
+/// Runs as the resolved user/groups. Inheritance chain:
+/// healthcheck user > service user > config owner.
 async fn run_health_check(
     test: &[String],
     check_timeout: Duration,
     env: &HashMap<String, String>,
     working_dir: &Path,
+    user: Option<&str>,
+    groups: &[String],
 ) -> bool {
     if test.is_empty() {
         return true;
     }
 
-    // Execute command directly - first element is program, rest are args
-    let program = &test[0];
-    let args = &test[1..];
+    let spec = CommandSpec::new(
+        test.to_vec(),
+        working_dir.to_path_buf(),
+        env.clone(),
+        user.map(|s| s.to_string()),
+        groups.to_vec(),
+    );
 
     let result = timeout(check_timeout, async {
-        let mut cmd = Command::new(program);
-        cmd.args(args)
-            .env_clear()
-            .envs(env)
-            .current_dir(working_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-
-        match cmd.status().await {
-            Ok(status) => status.success(),
+        match spawn_blocking(spec, BlockingMode::Silent).await {
+            Ok(result) => result.exit_code == Some(0),
             Err(e) => {
                 debug!("Health check command failed to execute: {}", e);
                 false
