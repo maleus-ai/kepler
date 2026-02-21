@@ -1,0 +1,8 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  oneshot-no-restart:
+    command: ["sh", "-c", "echo ONESHOT_NO_RESTART_RAN; exit 0"]
+    restart: "no"
