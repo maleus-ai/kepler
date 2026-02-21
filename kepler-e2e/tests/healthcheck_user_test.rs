@@ -3,7 +3,7 @@
 //! Tests that healthchecks run as the correct user:
 //! - Inherit service user when healthcheck doesn't specify one
 //! - Override to a different user
-//! - Use "daemon" sentinel to run as daemon user (root)
+//! - Use uid 0 to run as root
 
 use kepler_e2e::{E2eHarness, E2eResult};
 use std::time::Duration;
@@ -52,8 +52,8 @@ async fn test_healthcheck_user_override() -> E2eResult<()> {
     Ok(())
 }
 
-/// Healthcheck user "daemon" runs as the daemon user (root), not the service user.
-/// Service runs as testuser1, healthcheck specifies user: daemon.
+/// Healthcheck user "0" runs as root, not the service user.
+/// Service runs as testuser1, healthcheck specifies user: "0".
 #[tokio::test]
 async fn test_healthcheck_daemon_user() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -64,7 +64,7 @@ async fn test_healthcheck_daemon_user() -> E2eResult<()> {
     let output = harness.start_services(&config_path).await?;
     output.assert_success();
 
-    // Healthcheck uses "daemon" sentinel → runs as root, `whoami` check passes → healthy
+    // Healthcheck uses user: "0" → runs as root, `whoami` check passes → healthy
     harness
         .wait_for_service_status(&config_path, "svc", "healthy", Duration::from_secs(15))
         .await?;

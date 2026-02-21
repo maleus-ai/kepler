@@ -38,6 +38,17 @@ kepler daemon start -d     # Start in background (detached)
 
 The daemon requires root privileges. It creates the state directory, socket, and PID file, then begins accepting CLI connections.
 
+#### Daemon Options
+
+The daemon binary (`kepler-daemon`) accepts the following options:
+
+| Option | Description |
+|--------|-------------|
+| `--hardening <level>` | Set privilege hardening level: `none` (default), `no-root`, `strict` |
+| `-h, --help` | Show help message |
+
+The hardening level can also be set via the `KEPLER_HARDENING` environment variable (CLI flag takes precedence). See [Security Model -- Hardening](security-model.md#hardening) for details.
+
 ### `kepler daemon stop`
 
 Stop the daemon. All running services across all configs are stopped first.
@@ -84,6 +95,7 @@ kepler start -e A=1 -e B=2              # Override multiple env vars
 kepler start --refresh-env               # Refresh all sys_env from current shell
 kepler start --abort-on-failure            # Stop all services immediately on unhandled failure
 kepler start -d --wait --no-abort-on-failure  # Don't stop services on failure, just exit 1
+kepler start --hardening strict          # Start with per-config hardening
 ```
 
 | Flag | Description |
@@ -95,6 +107,7 @@ kepler start -d --wait --no-abort-on-failure  # Don't stop services on failure, 
 | `-r, --refresh-env` | Replace all baked system environment variables with the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
 | `--abort-on-failure` | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`) |
 | `--no-abort-on-failure` | Don't stop services on unhandled failure (requires `--wait`) |
+| `--hardening <LEVEL>` | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening) |
 
 **Behavior by mode:**
 
@@ -172,12 +185,39 @@ kepler restart --refresh-env             # Restart with refreshed shell env
 Stop all services, re-bake the config snapshot, and start all services again. This re-evaluates environment variables and Lua scripts with the latest config file.
 
 ```bash
-kepler recreate
+kepler recreate                          # Recreate with current settings
+kepler recreate --hardening strict       # Recreate with per-config hardening
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--hardening <LEVEL>` | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening) |
 
 This is equivalent to running `kepler stop --clean` followed by `kepler start`, but also re-bakes the config snapshot in between.
 
 See [Configuration](configuration.md#config-immutability) for details on the baking process.
+
+### Per-Config Hardening
+
+The `--hardening` flag on `kepler start` and `kepler recreate` sets a per-config hardening level that is baked into the config snapshot. This allows untrusted configs to be loaded with stricter hardening while others remain unrestricted.
+
+The effective hardening level for a config is:
+
+```
+effective = max(daemon_hardening, config_hardening)
+```
+
+The daemon sets a floor via its `--hardening` flag; the CLI can raise the level per-config but never lower it below the daemon's floor.
+
+```bash
+# Daemon started with --hardening no-root
+# Config started with --hardening none → effective = no-root (daemon floor)
+# Config started with --hardening strict → effective = strict (raised above daemon)
+```
+
+The per-config hardening level persists across daemon restarts (baked into the config snapshot). To change it, use `kepler recreate --hardening <new-level>`.
+
+See [Security Model -- Hardening](security-model.md#hardening) for full details on hardening levels.
 
 ### `kepler ps`
 

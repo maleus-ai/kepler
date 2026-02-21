@@ -37,6 +37,9 @@ pub enum Commands {
         /// Don't stop services on unhandled failure (--wait mode only)
         #[arg(long, requires = "wait")]
         no_abort_on_failure: bool,
+        /// Per-config hardening level (none, no-root, strict)
+        #[arg(long)]
+        hardening: Option<String>,
     },
     /// Stop services (requires daemon to be running)
     Stop {
@@ -74,7 +77,11 @@ pub enum Commands {
         refresh_env: bool,
     },
     /// Recreate config (stop, re-bake config snapshot, start)
-    Recreate,
+    Recreate {
+        /// Per-config hardening level (none, no-root, strict)
+        #[arg(long)]
+        hardening: Option<String>,
+    },
     /// View service logs
     Logs {
         /// Specific service to view logs for (shows all if not specified)

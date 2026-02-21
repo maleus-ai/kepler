@@ -28,6 +28,7 @@ The daemon uses an actor-based architecture:
 | `deps.rs` | Dependency graph, topological sort, condition checking, startup cluster computation |
 | `cursor.rs` | Server-side log cursor management for streaming |
 | `events.rs` | Service event types and channel creation |
+| `hardening.rs` | Hardening levels for privilege escalation prevention |
 | `health.rs` | Health check loop and event emission |
 | `hooks.rs` | Lifecycle hook execution |
 | `lua_eval.rs` | Luau sandbox, frozen tables, script evaluation |

@@ -608,10 +608,10 @@ services:
         run: echo starting
       pre_stop:
         run: echo stopping
-        user: daemon
+        user: "0"
       pre_restart:
         command: ["echo", "restarting"]
-        user: root
+        user: "1000:1000"
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
@@ -625,15 +625,15 @@ services:
     assert!(matches!(hook, HookCommand::Script { .. }), "Expected Script hook");
     assert!(hook.user().is_none());
 
-    // on_stop has user: daemon
+    // on_stop has user: "0"
     let hook = &hooks.pre_stop.as_ref().unwrap().0[0];
     assert!(matches!(hook, HookCommand::Script { .. }), "Expected Script hook");
-    assert_eq!(hook.user(), Some("daemon"));
+    assert_eq!(hook.user(), Some("0"));
 
-    // on_restart has user: root
+    // on_restart has user: "1000:1000"
     let hook = &hooks.pre_restart.as_ref().unwrap().0[0];
     assert!(matches!(hook, HookCommand::Command { .. }), "Expected Command hook");
-    assert_eq!(hook.user(), Some("root"));
+    assert_eq!(hook.user(), Some("1000:1000"));
 }
 
 /// Hook environment and env_file parse correctly from YAML

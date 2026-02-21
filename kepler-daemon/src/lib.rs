@@ -13,6 +13,7 @@ pub mod env;
 pub mod errors;
 pub mod events;
 pub mod fd_count;
+pub mod hardening;
 pub mod health;
 pub mod hooks;
 pub mod logs;

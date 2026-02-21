@@ -5,6 +5,7 @@ use tracing::{debug, error, info};
 use crate::config::{resolve_log_store, ConfigValue, HookCommand, HookList, LogConfig, ResolvableCommand, ServiceHooks};
 use crate::config_actor::ConfigActorHandle;
 use crate::errors::{DaemonError, Result};
+use crate::hardening::HardeningLevel;
 use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
 use crate::lua_eval::{DepInfo, EvalContext, HookEvalContext, LuaEvaluator, ServiceEvalContext};
 use crate::process::{spawn_blocking, BlockingMode, OutputCaptureConfig};
@@ -50,6 +51,12 @@ pub struct ServiceHookParams<'a> {
     pub config_path: Option<&'a Path>,
     /// Config directory for relative path resolution
     pub config_dir: Option<&'a Path>,
+    /// Hardening level for privilege escalation checks
+    pub hardening: HardeningLevel,
+    /// Config owner UID for privilege escalation checks
+    pub owner_uid: Option<u32>,
+    /// Kepler group GID for group stripping
+    pub kepler_gid: Option<u32>,
 }
 
 /// Types of service hooks
@@ -150,12 +157,38 @@ async fn run_hook_step(
         if spec.user.is_none() {
             spec.user = params.service_user.map(|s| s.to_string());
         }
-        // "daemon" means run as daemon user (no change)
-        if spec.user.as_deref() == Some("daemon") {
-            spec.user = None;
+
+        // Check privilege escalation before daemon→None conversion
+        #[cfg(unix)]
+        {
+            let context = format!("hook '{}.{}'", service_name, hook_name);
+            crate::auth::check_privilege_escalation(
+                params.hardening,
+                spec.user.as_deref(),
+                params.owner_uid,
+                &context,
+            ).map_err(|e| DaemonError::Config(e))?;
         }
+
         if spec.groups.is_empty() {
             spec.groups = params.service_groups.to_vec();
+        }
+
+        // Strip kepler group from supplementary groups when hardening is enabled
+        #[cfg(unix)]
+        if params.hardening >= HardeningLevel::NoRoot
+            && spec.groups.is_empty()
+            && spec.user.is_some()
+        {
+            if let Some(kepler_gid) = params.kepler_gid {
+                let user_spec = spec.user.as_deref().unwrap();
+                match crate::user::compute_groups_excluding(user_spec, kepler_gid) {
+                    Ok(g) => spec.groups = g,
+                    Err(e) => {
+                        debug!("Failed to compute groups for hook {}.{}: {}", service_name, hook_name, e);
+                    }
+                }
+            }
         }
 
         debug!(

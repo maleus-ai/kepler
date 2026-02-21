@@ -81,5 +81,43 @@ pub fn resolve_group(group: &str) -> Result<u32> {
     Ok(grp.gid.as_raw())
 }
 
+/// Compute supplementary groups for a user, excluding a specific GID.
+///
+/// Resolves the user spec, gets all supplementary groups via `getgrouplist`,
+/// filters out `exclude_gid`, and returns numeric GID strings suitable for
+/// explicit `--groups` lockdown in kepler-exec.
+///
+/// This is used when hardening is enabled to strip the kepler group from
+/// spawned processes, preventing them from accessing the daemon socket.
+pub fn compute_groups_excluding(user_spec: &str, exclude_gid: u32) -> Result<Vec<String>> {
+    let resolved = resolve_user(user_spec)?;
+
+    // Get the username for getgrouplist (needs CString)
+    let username = match &resolved.username {
+        Some(name) => name.clone(),
+        None => {
+            // Numeric-only user with no passwd entry — just return primary gid
+            // (minus excluded) since we can't call getgrouplist without a username
+            return if resolved.gid == exclude_gid {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![resolved.gid.to_string()])
+            };
+        }
+    };
+
+    let c_name = std::ffi::CString::new(username.as_str())
+        .map_err(|_| DaemonError::Internal("invalid username for group lookup".to_string()))?;
+
+    let gids = kepler_unix::groups::getgrouplist(&c_name, resolved.gid)
+        .map_err(|e| DaemonError::Internal(format!("getgrouplist failed: {}", e)))?;
+
+    Ok(gids
+        .into_iter()
+        .filter(|&gid| gid != exclude_gid)
+        .map(|gid| gid.to_string())
+        .collect())
+}
+
 #[cfg(test)]
 mod tests;

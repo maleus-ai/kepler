@@ -50,6 +50,8 @@ async fn setup_orchestrator(
         exit_tx.clone(),
         restart_tx.clone(),
         cursor_manager,
+        kepler_daemon::hardening::HardeningLevel::None,
+        None,
     ));
 
     (orchestrator, config_path, exit_tx, restart_tx)
@@ -98,7 +100,7 @@ async fn test_restart_calls_restart_hooks() {
     // Start the service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -198,7 +200,7 @@ async fn test_restart_preserves_baked_config() {
     let mut sys_env: HashMap<String, String> = std::env::vars().collect();
     sys_env.insert(env_var_name.clone(), "original_value".to_string());
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -305,7 +307,7 @@ async fn test_recreate_rebakes_config() {
     let mut sys_env: HashMap<String, String> = std::env::vars().collect();
     sys_env.insert(env_var_name.clone(), "original_value".to_string());
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -334,7 +336,7 @@ async fn test_recreate_rebakes_config() {
     let mut new_sys_env: HashMap<String, String> = std::env::vars().collect();
     new_sys_env.insert(env_var_name.clone(), "changed_value".to_string());
     orchestrator
-        .recreate_services(&config_path, Some(new_sys_env.clone()), None, None)
+        .recreate_services(&config_path, Some(new_sys_env.clone()), None, None, None)
         .await
         .unwrap();
 
@@ -400,7 +402,7 @@ async fn test_recreate_runs_pre_start_hooks() {
     // Start the service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -419,7 +421,7 @@ async fn test_recreate_runs_pre_start_hooks() {
 
     // Recreate config (stops services, rebakes/clears state, starts again)
     orchestrator
-        .recreate_services(&config_path, Some(sys_env.clone()), None, None)
+        .recreate_services(&config_path, Some(sys_env.clone()), None, None, None)
         .await
         .unwrap();
 
@@ -486,7 +488,7 @@ async fn test_restart_specific_service_hooks() {
     // Start both services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -567,7 +569,7 @@ async fn test_restart_respects_dependency_order() {
     // Start both services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -690,7 +692,7 @@ async fn test_stop_respects_reverse_dependency_order() {
     // Start all services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -769,7 +771,7 @@ async fn test_recreate_stops_and_restarts_services() {
     // Start both services
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -778,7 +780,7 @@ async fn test_recreate_stops_and_restarts_services() {
 
     // Recreate should succeed even while services are running (stops them first)
     let result = orchestrator
-        .recreate_services(&config_path, Some(sys_env.clone()), None, None)
+        .recreate_services(&config_path, Some(sys_env.clone()), None, None, None)
         .await;
     assert!(result.is_ok(), "Recreate should succeed: {:?}", result.err());
 
@@ -828,7 +830,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     // Start service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -845,7 +847,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
 
     // Recreate config (stops services, rebakes, starts again — all hooks fire)
     orchestrator
-        .recreate_services(&config_path, Some(sys_env.clone()), None, None)
+        .recreate_services(&config_path, Some(sys_env.clone()), None, None, None)
         .await
         .unwrap();
 
@@ -894,7 +896,7 @@ async fn test_recreate_stops_running_services_automatically() {
     // Start service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -903,7 +905,7 @@ async fn test_recreate_stops_running_services_automatically() {
 
     // Recreate while running — should succeed (stops services automatically)
     let result = orchestrator
-        .recreate_services(&config_path, Some(sys_env), None, None)
+        .recreate_services(&config_path, Some(sys_env), None, None, None)
         .await;
     assert!(result.is_ok(), "Recreate should succeed: {:?}", result.err());
 
@@ -954,7 +956,7 @@ async fn test_restart_calls_all_restart_hooks_in_order() {
     // Start service
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await
         .unwrap();
 

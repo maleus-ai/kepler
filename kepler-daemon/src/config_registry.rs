@@ -13,6 +13,7 @@ use tokio::sync::OnceCell;
 
 use crate::config_actor::{ConfigActor, ConfigActorHandle};
 use crate::errors::Result;
+use crate::hardening::HardeningLevel;
 use kepler_protocol::protocol::ConfigStatus;
 
 /// Registry for config actors - allows multiple CLI clients to share actors
@@ -57,6 +58,7 @@ impl ConfigRegistry {
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
         config_owner: Option<(u32, u32)>,
+        hardening: Option<HardeningLevel>,
     ) -> Result<ConfigActorHandle> {
         // Canonicalize path first
         let canonical_path = std::fs::canonicalize(&config_path).map_err(|e| {
@@ -80,7 +82,7 @@ impl ConfigRegistry {
 
         // Exactly one caller initializes; others await the result
         let result = cell.get_or_try_init(|| async {
-            let (handle, actor) = ConfigActor::create(config_path, sys_env, config_owner)?;
+            let (handle, actor) = ConfigActor::create(config_path, sys_env, config_owner, hardening)?;
             tokio::spawn(actor.run());
             Ok(handle)
         }).await;

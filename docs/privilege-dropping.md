@@ -7,6 +7,7 @@ Kepler can run services and hooks as specific users/groups with resource limits.
 - [User Configuration](#user-configuration)
 - [Supplementary Groups](#supplementary-groups)
 - [How Privilege Dropping Works](#how-privilege-dropping-works)
+- [Hardening](#hardening)
 - [Hook Inheritance](#hook-inheritance)
 - [Health Check Inheritance](#health-check-inheritance)
 - [Resource Limits](#resource-limits)
@@ -118,6 +119,31 @@ This ensures the service process never runs as root, even momentarily after spaw
 
 ---
 
+## Hardening
+
+The daemon supports a `--hardening` flag that restricts which users non-root config owners can specify. See [Security Model -- Hardening](security-model.md#hardening) for full details.
+
+| Level | Non-root config owners can run as |
+|-------|-----------------------------------|
+| `none` (default) | Any user (including root) |
+| `no-root` | Any user except root (uid 0) |
+| `strict` | Only their own uid |
+
+When hardening is `no-root` or `strict`, the `kepler` group is also stripped from spawned processes' supplementary groups to prevent socket access.
+
+### Per-Config Hardening
+
+In addition to the daemon-level `--hardening` flag, hardening can be set per-config on `kepler start` and `kepler recreate`:
+
+```bash
+kepler start --hardening strict          # Strict hardening for this config
+kepler recreate --hardening no-root      # Re-bake with no-root hardening
+```
+
+The effective hardening = `max(daemon, config)`. The daemon sets a floor; the CLI can raise it per-config but never lower it. The per-config level is baked into the config snapshot and persists across daemon restarts.
+
+---
+
 ## Hook Inheritance
 
 Service hooks inherit the service's `user` and `groups` by default. Since the config owner's UID:GID is baked into services without an explicit `user:`, service hooks also inherit this default:
@@ -137,7 +163,7 @@ services:
         groups: ["root"]         # Override: restrict to root group only
 ```
 
-Each hook can override `user` and `groups` to run with different privileges. Use `user: daemon` to explicitly run as the daemon user (no privilege drop), bypassing the service's user and the config owner default.
+Each hook can override `user` and `groups` to run with different privileges. Use `user: root` to explicitly run as root, bypassing the service's user and the config owner default.
 
 ---
 
@@ -166,7 +192,7 @@ services:
       groups: ["monitoring"]     # Override: restrict supplementary groups
 ```
 
-Use `user: daemon` to explicitly run the health check as the daemon user, bypassing the service's user and the config owner default.
+Use `user: root` to explicitly run the health check as root, bypassing the service's user and the config owner default.
 
 ---
 

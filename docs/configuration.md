@@ -88,7 +88,7 @@ services:
         run: echo "Backend restarting..."
       pre_stop:
         run: ./cleanup.sh
-        user: daemon
+        user: root
 
   frontend:
     working_dir: ./apps/frontend

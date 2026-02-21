@@ -50,7 +50,7 @@ fn create_actor_with_state_dir_and_env(
         std::env::set_var("KEPLER_DAEMON_PATH", &state_dir);
     }
 
-    let (handle, actor) = ConfigActor::create(config_path, Some(sys_env), None)?;
+    let (handle, actor) = ConfigActor::create(config_path, Some(sys_env), None, None)?;
     let task = tokio::spawn(actor.run());
     Ok((handle, task))
 }
@@ -423,6 +423,7 @@ services:
         sys_env: sys_env.clone(),
         owner_uid: Some(1000),
         owner_gid: None,
+        hardening: None,
         // Backward-compat fields (not serialized, only for deserialization of old snapshots)
         service_envs: HashMap::new(),
         service_working_dirs: HashMap::new(),
