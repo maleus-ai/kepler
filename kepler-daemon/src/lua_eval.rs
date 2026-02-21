@@ -6,9 +6,10 @@
 use mlua::{FromLua, Lua, LuaSerdeExt, Result as LuaResult, Table, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::config::{DynamicExpr, expr::OwnedExprToken};
+use crate::hardening::HardeningLevel;
 
 /// Result of evaluating a hook `if:` condition.
 #[derive(Debug, Clone)]
@@ -99,6 +100,14 @@ pub struct HookEvalContext {
     pub had_failure: Option<bool>,
 }
 
+/// Owner identity context — who loaded the config.
+#[derive(Debug, Clone, Default)]
+pub struct OwnerEvalContext {
+    pub uid: u32,
+    pub gid: u32,
+    pub user: Option<String>,
+}
+
 /// Context passed to each Lua evaluation.
 #[derive(Debug, Clone, Default)]
 pub struct EvalContext {
@@ -106,6 +115,10 @@ pub struct EvalContext {
     pub hook: Option<HookEvalContext>,
     /// Dependency service states (keyed by dep service name)
     pub deps: HashMap<String, DepInfo>,
+    /// Config owner identity (None for root-owned or legacy configs)
+    pub owner: Option<OwnerEvalContext>,
+    /// Hardening level for privilege checks in os.getgroups()
+    pub hardening: HardeningLevel,
 }
 
 impl EvalContext {
@@ -401,6 +414,118 @@ impl LuaEvaluator {
         // Add `deps` table (frozen, from EvalContext.deps)
         let deps_table = self.build_deps_table(ctx)?;
         env_table.set("deps", deps_table)?;
+
+        // Build `owner` table if present
+        if let Some(ref owner) = ctx.owner {
+            let owner_table = self.lua.create_table()?;
+            owner_table.raw_set("uid", owner.uid)?;
+            owner_table.raw_set("gid", owner.gid)?;
+            if let Some(ref user) = owner.user {
+                owner_table.raw_set("user", user.as_str())?;
+            }
+            owner_table.set_readonly(true);
+            env_table.set("owner", owner_table)?;
+        }
+
+        // Build per-context `os` table with `getgroups` + fallback to global os
+        {
+            let os_table = self.lua.create_table()?;
+
+            let hardening = ctx.hardening;
+            let owner_uid = ctx.owner.as_ref().map(|o| o.uid);
+            // Cache resolved groups per user spec for the lifetime of this env context.
+            // Avoids redundant syscalls when multiple !lua / ${{ }}$ blocks query the same user.
+            let groups_cache: Arc<Mutex<HashMap<String, Vec<String>>>> =
+                Arc::new(Mutex::new(HashMap::new()));
+            let getgroups_fn = self.lua.create_function(move |lua, user_spec: Option<String>| {
+                let Some(spec) = user_spec else {
+                    return Err(mlua::Error::RuntimeError(
+                        "os.getgroups: expected a username or uid argument".to_string(),
+                    ));
+                };
+
+                // Check cache first (keyed by raw spec string)
+                {
+                    let cache = groups_cache.lock().unwrap();
+                    if let Some(cached) = cache.get(&spec) {
+                        let result = lua.create_table()?;
+                        for (i, name) in cached.iter().enumerate() {
+                            result.raw_set(i + 1, name.as_str())?;
+                        }
+                        result.set_readonly(true);
+                        return Ok(mlua::Value::Table(result));
+                    }
+                }
+
+                // Resolve user spec to uid/gid/username
+                let resolved = crate::user::resolve_user(&spec)
+                    .map_err(|e| mlua::Error::RuntimeError(format!("os.getgroups: {}", e)))?;
+
+                // Hardening checks
+                match hardening {
+                    HardeningLevel::NoRoot | HardeningLevel::Strict if resolved.uid == 0 => {
+                        return Err(mlua::Error::RuntimeError(
+                            format!("os.getgroups: access denied for user '{}' (uid 0) — hardening level: {}", spec, hardening)
+                        ));
+                    }
+                    HardeningLevel::Strict => {
+                        if let Some(owner) = owner_uid {
+                            if resolved.uid != owner {
+                                return Err(mlua::Error::RuntimeError(
+                                    format!("os.getgroups: access denied for user '{}' (uid {}) — only config owner uid {} allowed (hardening level: strict)", spec, resolved.uid, owner)
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Get the username for getgrouplist
+                let username = match &resolved.username {
+                    Some(name) => name.clone(),
+                    None => {
+                        // Numeric-only user with no passwd entry — cache and return empty
+                        groups_cache.lock().unwrap().insert(spec, Vec::new());
+                        let t = lua.create_table()?;
+                        t.set_readonly(true);
+                        return Ok(mlua::Value::Table(t));
+                    }
+                };
+
+                let c_name = std::ffi::CString::new(username.as_str())
+                    .map_err(|_| mlua::Error::RuntimeError("os.getgroups: invalid username".to_string()))?;
+
+                let gids = kepler_unix::groups::getgrouplist(&c_name, resolved.gid)
+                    .map_err(|e| mlua::Error::RuntimeError(format!("os.getgroups: getgrouplist failed: {}", e)))?;
+
+                // Resolve each gid to group name
+                let mut group_names = Vec::new();
+                for gid in gids {
+                    if let Ok(Some(group)) = nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(gid)) {
+                        group_names.push(group.name);
+                    }
+                }
+
+                // Store in cache
+                groups_cache.lock().unwrap().insert(spec, group_names.clone());
+
+                let result = lua.create_table()?;
+                for (i, name) in group_names.iter().enumerate() {
+                    result.raw_set(i + 1, name.as_str())?;
+                }
+                result.set_readonly(true);
+                Ok(mlua::Value::Table(result))
+            })?;
+            os_table.set("getgroups", getgroups_fn)?;
+
+            // Fallback to global os table (os.clock, os.date, etc.)
+            if let Ok(global_os) = self.lua.globals().get::<Table>("os") {
+                let os_meta = self.lua.create_table()?;
+                os_meta.set("__index", global_os)?;
+                os_table.set_metatable(Some(os_meta));
+            }
+            env_table.set("os", os_table)?;
+        }
 
         // Add `global` (shared mutable table)
         let global: Table = self.lua.globals().get("global")?;

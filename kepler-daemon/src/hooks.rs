@@ -7,7 +7,7 @@ use crate::config_actor::ConfigActorHandle;
 use crate::errors::{DaemonError, Result};
 use crate::hardening::HardeningLevel;
 use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
-use crate::lua_eval::{DepInfo, EvalContext, HookEvalContext, LuaEvaluator, ServiceEvalContext};
+use crate::lua_eval::{DepInfo, EvalContext, HookEvalContext, LuaEvaluator, OwnerEvalContext, ServiceEvalContext};
 use crate::process::{spawn_blocking, BlockingMode, OutputCaptureConfig};
 use kepler_protocol::protocol::{ProgressEvent, ServicePhase};
 use kepler_protocol::server::ProgressSender;
@@ -55,6 +55,10 @@ pub struct ServiceHookParams<'a> {
     pub hardening: HardeningLevel,
     /// Config owner UID for privilege escalation checks
     pub owner_uid: Option<u32>,
+    /// Config owner GID for Lua owner context
+    pub owner_gid: Option<u32>,
+    /// Config owner username for Lua owner context
+    pub owner_user: Option<&'a str>,
     /// Kepler group GID for group stripping
     pub kepler_gid: Option<u32>,
 }
@@ -308,6 +312,12 @@ pub async fn run_service_hook(
                 had_failure: Some(had_failure),
             }),
             deps: params.deps.clone(),
+            owner: params.owner_uid.map(|uid| OwnerEvalContext {
+                uid,
+                gid: params.owner_gid.unwrap_or(uid),
+                user: params.owner_user.map(|s| s.to_string()),
+            }),
+            hardening: params.hardening,
         };
 
         // Evaluate the `if` condition (ConfigValue-based)

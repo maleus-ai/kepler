@@ -1,0 +1,14 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  clock-fallback-svc:
+    command: !lua |
+      -- os.clock should still work via metatable fallback
+      local clock = os.clock()
+      if type(clock) == "number" then
+        return {"sh", "-c", "echo OS_CLOCK_WORKS; sleep 300"}
+      else
+        return {"sh", "-c", "echo OS_CLOCK_FAILED; sleep 300"}
+      end

@@ -334,7 +334,13 @@ impl ConfigActor {
         let dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), dep_watchers.clone(), owner_uid, owner_gid, resolved_hardening);
+        // Resolve owner username from UID via passwd lookup
+        let owner_user = owner_uid.and_then(|uid|
+            nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+                .ok().flatten().map(|u| u.name)
+        );
+
+        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), dep_watchers.clone(), owner_uid, owner_gid, resolved_hardening, owner_user);
 
         let actor = ConfigActor {
             config_path: canonical_path,

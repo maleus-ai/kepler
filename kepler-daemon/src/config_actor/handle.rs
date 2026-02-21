@@ -40,6 +40,8 @@ pub struct ConfigActorHandle {
     owner_gid: Option<u32>,
     /// Per-config hardening level (baked at load time)
     hardening: Option<HardeningLevel>,
+    /// Resolved username for owner_uid (reverse-lookup from passwd)
+    owner_user: Option<String>,
 }
 
 impl ConfigActorHandle {
@@ -53,6 +55,7 @@ impl ConfigActorHandle {
         owner_uid: Option<u32>,
         owner_gid: Option<u32>,
         hardening: Option<HardeningLevel>,
+        owner_user: Option<String>,
     ) -> Self {
         Self {
             config_path,
@@ -63,6 +66,7 @@ impl ConfigActorHandle {
             owner_uid,
             owner_gid,
             hardening,
+            owner_user,
         }
     }
 
@@ -89,6 +93,11 @@ impl ConfigActorHandle {
     /// Get the per-config hardening level (if set at load time)
     pub fn hardening(&self) -> Option<HardeningLevel> {
         self.hardening
+    }
+
+    /// Get the resolved username for the config owner (if available)
+    pub fn owner_user(&self) -> Option<&str> {
+        self.owner_user.as_deref()
     }
 
     /// Subscribe to config events (status changes, Ready, Quiescent).

@@ -1,0 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  owner-inline-svc:
+    command: ["sh", "-c", "echo INLINE_UID=${{ owner and tostring(owner.uid) or 'none' }}$ INLINE_USER=${{ owner and (owner.user or 'no_user') or 'none' }}$; sleep 300"]

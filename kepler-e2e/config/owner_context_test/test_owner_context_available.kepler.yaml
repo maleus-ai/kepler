@@ -1,0 +1,11 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  owner-ctx-svc:
+    command: !lua |
+      local uid = owner and tostring(owner.uid) or "nil"
+      local gid = owner and tostring(owner.gid) or "nil"
+      local user = owner and (owner.user or "nil") or "nil"
+      return {"sh", "-c", "echo OWNER_UID=" .. uid .. " OWNER_GID=" .. gid .. " OWNER_USER=" .. user .. "; sleep 300"}

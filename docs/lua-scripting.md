@@ -143,6 +143,16 @@ Available in hook expressions:
 | `hook.env` | Read-only full merged environment (raw_env + env_file + environment) |
 | `hook.had_failure` | Whether a previous hook step in the list has failed |
 
+### Owner Context
+
+Available when the config was loaded via the CLI (nil for legacy configs without CLI user info):
+
+| Variable | Description |
+|----------|-------------|
+| `owner.uid` | Config owner's UID (number) |
+| `owner.gid` | Config owner's GID (number) |
+| `owner.user` | Config owner's username (string, or nil for numeric-only UIDs) |
+
 ### Shortcuts and Shared Tables
 
 | Variable | Description |
@@ -316,6 +326,31 @@ environment: !lua |
 
 Both libraries are available in all contexts: `!lua` blocks, `${{ }}$` inline expressions, `if` conditions, and the `lua:` directive.
 
+### `os.getgroups()`
+
+Query supplementary group names for a system user:
+
+| Function | Description |
+|----------|-------------|
+| `os.getgroups(user)` | Returns an array of group name strings for the given username or uid |
+
+```yaml
+services:
+  app:
+    environment: !lua |
+      local groups = os.getgroups(tostring(owner.uid))
+      return {GROUPS = table.concat(groups, ",")}
+```
+
+**Hardening restrictions:** `os.getgroups()` respects the config's hardening level:
+- **none**: any user allowed
+- **no-root**: rejects uid 0 (root)
+- **strict**: only the config owner's own uid allowed
+
+Calling `os.getgroups()` without an argument raises an error.
+
+See [Security Model — Kepler Group Stripping](security-model.md#kepler-group-stripping) for a practical example using `os.getgroups()` to filter supplementary groups.
+
 ---
 
 ## Sandbox Restrictions
@@ -332,6 +367,7 @@ The Lua environment provides a **restricted subset** of the standard library:
 | `type`, `select`, `unpack` | `debug` — Debug library |
 | `json` — JSON parse/stringify | |
 | `yaml` — YAML parse/stringify | |
+| `os.getgroups` — Supplementary group query | |
 
 **No filesystem access**: Scripts cannot read, write, or modify files on disk.
 

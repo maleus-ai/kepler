@@ -982,3 +982,209 @@ fn test_json_yaml_available_in_inline() {
     let result = eval.eval_inline_expr(r#"yaml.stringify({x = 1})"#, &ctx, "test").unwrap();
     assert!(result.as_str().is_some(), "yaml.stringify should return a string");
 }
+
+// --- Owner context tests ---
+
+#[test]
+fn test_owner_uid_gid_user_accessible() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        owner: Some(super::OwnerEvalContext {
+            uid: 1000,
+            gid: 1000,
+            user: Some("alice".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    let uid: i64 = eval.eval(r#"return owner.uid"#, &ctx, "test").unwrap();
+    assert_eq!(uid, 1000);
+
+    let gid: i64 = eval.eval(r#"return owner.gid"#, &ctx, "test").unwrap();
+    assert_eq!(gid, 1000);
+
+    let user: String = eval.eval(r#"return owner.user"#, &ctx, "test").unwrap();
+    assert_eq!(user, "alice");
+}
+
+#[test]
+fn test_owner_nil_when_not_set() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result: Value = eval.eval(r#"return owner"#, &ctx, "test").unwrap();
+    assert!(matches!(result, Value::Nil), "owner should be nil when not set");
+}
+
+#[test]
+fn test_owner_user_nil_for_numeric_uid() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        owner: Some(super::OwnerEvalContext {
+            uid: 9999,
+            gid: 9999,
+            user: None,
+        }),
+        ..Default::default()
+    };
+
+    let result: Value = eval.eval(r#"return owner.user"#, &ctx, "test").unwrap();
+    assert!(matches!(result, Value::Nil), "owner.user should be nil for numeric-only UIDs");
+
+    // uid and gid should still work
+    let uid: i64 = eval.eval(r#"return owner.uid"#, &ctx, "test").unwrap();
+    assert_eq!(uid, 9999);
+}
+
+#[test]
+fn test_owner_table_readonly() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        owner: Some(super::OwnerEvalContext {
+            uid: 1000,
+            gid: 1000,
+            user: Some("alice".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    let result = eval.eval::<Value>(r#"owner.uid = 0"#, &ctx, "test");
+    assert!(result.is_err(), "Writing to owner table should fail");
+}
+
+// --- os.getgroups() tests ---
+
+#[test]
+fn test_os_getgroups_no_arg_errors() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result = eval.eval::<Value>(r#"return os.getgroups()"#, &ctx, "test");
+    assert!(result.is_err(), "os.getgroups() with no argument should error");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("expected a username or uid"), "Error should mention missing argument: {}", err);
+}
+
+#[test]
+fn test_os_getgroups_root_returns_groups_hardening_none() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        hardening: super::HardeningLevel::None,
+        ..Default::default()
+    };
+
+    // With hardening=none, querying root should succeed
+    let result: Value = eval.eval(r#"return os.getgroups("root")"#, &ctx, "test").unwrap();
+    assert!(matches!(result, Value::Table(_)), "os.getgroups('root') should return a table, got: {:?}", result);
+}
+
+#[test]
+fn test_os_getgroups_root_errors_hardening_no_root() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        hardening: super::HardeningLevel::NoRoot,
+        ..Default::default()
+    };
+
+    let result = eval.eval::<Value>(r#"return os.getgroups("root")"#, &ctx, "test");
+    assert!(result.is_err(), "os.getgroups('root') should error with no-root hardening");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("access denied"), "Error should mention access denied: {}", err);
+}
+
+#[test]
+fn test_os_getgroups_root_errors_hardening_strict() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        hardening: super::HardeningLevel::Strict,
+        owner: Some(super::OwnerEvalContext {
+            uid: 1000,
+            gid: 1000,
+            user: Some("testuser".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    let result = eval.eval::<Value>(r#"return os.getgroups("root")"#, &ctx, "test");
+    assert!(result.is_err(), "os.getgroups('root') should error with strict hardening");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("access denied"), "Error should mention access denied: {}", err);
+}
+
+#[test]
+fn test_os_getgroups_other_user_errors_hardening_strict() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        hardening: super::HardeningLevel::Strict,
+        owner: Some(super::OwnerEvalContext {
+            uid: 1000,
+            gid: 1000,
+            user: Some("testuser".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    // Querying a different user should fail under strict hardening
+    // Use uid "0" to trigger uid mismatch (root uid) — this also hits the no-root check
+    let result = eval.eval::<Value>(r#"return os.getgroups("0")"#, &ctx, "test");
+    assert!(result.is_err(), "os.getgroups('0') should error with strict hardening when owner uid is 1000");
+}
+
+#[test]
+fn test_os_clock_still_works_metatable_fallback() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    // os.clock should still be accessible through the metatable fallback
+    let result: Value = eval.eval(r#"return os.clock()"#, &ctx, "test").unwrap();
+    assert!(matches!(result, Value::Number(_)), "os.clock() should return a number, got: {:?}", result);
+}
+
+#[test]
+fn test_os_date_still_works_metatable_fallback() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    // os.date should still be accessible
+    let result: Value = eval.eval(r#"return type(os.date)"#, &ctx, "test").unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "function");
+}
+
+#[test]
+fn test_os_getgroups_available_in_inline_expr() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    // os.getgroups should be accessible from inline expressions too
+    let result = eval.eval_inline_expr(r#"type(os.getgroups)"#, &ctx, "test").unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "function");
+}
+
+#[test]
+fn test_os_getgroups_available_in_condition() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    // os.getgroups should be accessible from condition expressions
+    let result = eval.eval_condition("type(os.getgroups) == 'function'", &ctx).unwrap();
+    assert!(result.value, "os.getgroups should be available in condition context");
+}
+
+#[test]
+fn test_owner_available_in_condition() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        owner: Some(super::OwnerEvalContext {
+            uid: 1000,
+            gid: 1000,
+            user: Some("alice".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    let result = eval.eval_condition("owner.uid == 1000", &ctx).unwrap();
+    assert!(result.value, "owner.uid should be accessible in condition context");
+
+    let result = eval.eval_condition("owner.user == 'alice'", &ctx).unwrap();
+    assert!(result.value, "owner.user should be accessible in condition context");
+}
