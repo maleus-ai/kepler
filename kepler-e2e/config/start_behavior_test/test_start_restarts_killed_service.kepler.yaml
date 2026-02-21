@@ -1,0 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  killable:
+    command: ["sh", "-c", "echo KILLABLE_STARTED; sleep 300"]

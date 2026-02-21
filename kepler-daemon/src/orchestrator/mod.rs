@@ -173,10 +173,10 @@ impl ServiceOrchestrator {
         };
 
         // Check if any services need starting.
-        // A service needs starting if it's in a non-active state AND either:
-        // - Its restart policy says it should restart on its exit code, OR
-        // - It has never run (no exit code recorded)
-        // Completed one-shots (Exited + restart:no) and Skipped services are "done".
+        // A service needs starting if it's in a non-active state.
+        // An explicit `kepler start` always restarts terminal services
+        // (Exited, Failed, Killed, Stopped) and re-evaluates Skipped services
+        // (their `if:` condition may now succeed after dependencies restart).
         let any_need_starting = {
             let mut found = false;
             for svc in &services_to_start {
@@ -244,7 +244,7 @@ impl ServiceOrchestrator {
             handle.set_startup_in_progress(true).await;
 
             // Mark services that need starting as Waiting.
-            // Skip: already-active services, completed one-shots, skipped services.
+            // Skip: already-active services only.
             let mut newly_waiting = Vec::new();
             for service_name in &services_to_start {
                 if !self.service_needs_starting(service_name, &config, &handle).await {
@@ -270,7 +270,7 @@ impl ServiceOrchestrator {
                 let evaluator_clone = shared_evaluator.clone();
                 tokio::spawn(async move {
                     if let Err(e) = self_clone.start_single_service_with_evaluator(
-                        &handle_clone, &service_name_clone, &progress_clone, Some(evaluator_clone), false, false,
+                        &handle_clone, &service_name_clone, &progress_clone, Some(evaluator_clone), false, no_deps,
                     ).await {
                         warn!("Failed to start service {}: {}", service_name_clone, e);
                     }
@@ -1990,20 +1990,21 @@ impl ServiceOrchestrator {
 
     // --- Internal helpers ---
 
-    /// Check if a service needs starting.
+    /// Check if a service needs starting for an explicit `kepler start` command.
     ///
     /// Returns false for:
     /// - Already active services (Running, Healthy, Waiting, Starting, etc.)
-    /// - Completed one-shots: Exited/Failed/Killed where restart policy says don't restart
-    /// - Skipped services
     ///
-    /// Returns true for:
-    /// - Stopped services (user explicitly stopped → always re-start on `kepler start`)
-    /// - Services whose restart policy says they should restart on their exit code
+    /// Returns true for all non-active states:
+    /// - Stopped, Exited, Failed, Killed — terminal states that should restart
+    /// - Skipped — `if:` condition will be re-evaluated (dependencies may have changed)
+    ///
+    /// The restart policy is intentionally NOT checked here — it only governs
+    /// automatic restarts by the daemon, not user-initiated starts.
     async fn service_needs_starting(
         &self,
         service_name: &str,
-        config: &KeplerConfig,
+        _config: &KeplerConfig,
         handle: &ConfigActorHandle,
     ) -> bool {
         let state = match handle.get_service_state(service_name).await {
@@ -2016,25 +2017,10 @@ impl ServiceOrchestrator {
             return false;
         }
 
-        // Skipped services are "done"
-        if state.status == ServiceStatus::Skipped {
-            return false;
-        }
-
-        // Stopped by user — always re-start on `kepler start`
-        if state.status == ServiceStatus::Stopped {
-            return true;
-        }
-
-        // Exited/Failed/Killed — check restart policy
-        if let Some(raw) = config.services.get(service_name) {
-            let restart = raw.restart.as_static().cloned().unwrap_or_default();
-            if !restart.should_restart_on_exit(state.exit_code) {
-                // Restart policy says don't restart → service is "done"
-                return false;
-            }
-        }
-
+        // Non-active state (Stopped, Exited, Failed, Killed, Skipped).
+        // For terminal states: restart the service.
+        // For Skipped: re-evaluate the `if:` condition since dependencies
+        // may now be in a different state after restarting.
         true
     }
 
@@ -2522,3 +2508,6 @@ fn dir_size(path: &Path) -> u64 {
     }
     size
 }
+
+#[cfg(test)]
+mod tests;

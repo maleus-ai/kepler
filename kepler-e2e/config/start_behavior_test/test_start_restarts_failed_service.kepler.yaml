@@ -1,0 +1,7 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  failing:
+    command: ["sh", "-c", "echo FAILING_RAN; exit 1"]
