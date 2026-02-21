@@ -82,6 +82,15 @@ async fn run() -> Result<()> {
         .map_err(|e| CliError::Server(format!("Cannot determine daemon socket path: {}", e)))?;
     let client = match Client::connect(&daemon_socket).await {
         Ok(c) => c,
+        Err(kepler_protocol::errors::ClientError::Connect(ref e))
+            if e.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            eprintln!("Permission denied: cannot connect to daemon socket at {}", daemon_socket.display());
+            eprintln!("Your user may not be a member of the 'kepler' group.");
+            eprintln!("Add yourself with: sudo usermod -aG kepler $USER");
+            eprintln!("Then log out and back in for the change to take effect.");
+            std::process::exit(2);
+        }
         Err(kepler_protocol::errors::ClientError::Connect(_)) => {
             eprintln!("Daemon is not running. Start it with: kepler daemon start");
             eprintln!("Or use: kepler daemon start -d (to run in background)");
@@ -144,7 +153,7 @@ async fn run() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Start { services, detach, wait, timeout, no_deps, override_envs, refresh_env, abort_on_failure, no_abort_on_failure } => {
+        Commands::Start { services, detach, wait, timeout, no_deps, override_envs, refresh_env, abort_on_failure, no_abort_on_failure, hardening } => {
             let override_envs = build_override_envs(override_envs, refresh_env, &sys_env);
             if no_deps && services.is_empty() {
                 eprintln!("Error: --no-deps requires specifying at least one service");
@@ -166,6 +175,7 @@ async fn run() -> Result<()> {
                         sys_env: Some(sys_env),
                         no_deps,
                         override_envs: override_envs.clone(),
+                        hardening: hardening.clone(),
                     },
                 )?;
                 if let Some(timeout_str) = &timeout {
@@ -188,7 +198,7 @@ async fn run() -> Result<()> {
                 }
             } else if detach {
                 // -d: Fire start, exit immediately
-                let (_progress_rx, response_future) = client.start(canonical_path, services, Some(sys_env), no_deps, override_envs.clone())?;
+                let (_progress_rx, response_future) = client.start(canonical_path, services, Some(sys_env), no_deps, override_envs.clone(), hardening.clone())?;
                 let response = response_future.await?;
                 handle_response(response);
             } else {
@@ -202,6 +212,7 @@ async fn run() -> Result<()> {
                         sys_env: Some(sys_env),
                         no_deps,
                         override_envs,
+                        hardening,
                     },
                 )?;
                 foreground_with_logs(
@@ -285,8 +296,8 @@ async fn run() -> Result<()> {
             }
         }
 
-        Commands::Recreate => {
-            let (progress_rx, response_future) = client.recreate(canonical_path.clone(), Some(sys_env))?;
+        Commands::Recreate { hardening } => {
+            let (progress_rx, response_future) = client.recreate(canonical_path.clone(), Some(sys_env), hardening)?;
             let response = run_with_progress(progress_rx, response_future).await?;
             handle_response(response);
         }

@@ -111,7 +111,7 @@ hooks:
 
 Service hooks inherit from their parent service by default:
 
-- **User**: Hook runs as the service's `user` unless overridden (which includes the config owner default). Use `user: daemon` to explicitly run as the daemon user instead.
+- **User**: Hook runs as the service's `user` unless overridden (which includes the config owner default). Use `user: root` to explicitly run as root instead.
 - **Groups**: Hook uses the service's `groups` unless overridden
 - **Environment**: Hook receives the service's environment, plus any additional vars from `environment`/`env_file`
 - **Working directory**: Hook uses the service's `working_dir` unless overridden

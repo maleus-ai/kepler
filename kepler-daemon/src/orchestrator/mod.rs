@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{resolve_log_retention, resolve_sys_env, DependsOn, KeplerConfig, LogRetention, RawServiceConfig, ServiceHooks, SysEnvPolicy};
+use crate::hardening::HardeningLevel;
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
 use crate::deps::{check_dependency_satisfied, get_start_order, get_stop_order, is_condition_unreachable_by_policy, is_dependency_permanently_unsatisfied, is_transient_satisfaction};
@@ -72,6 +73,8 @@ pub struct ServiceOrchestrator {
     exit_tx: mpsc::Sender<ProcessExitEvent>,
     restart_tx: mpsc::Sender<FileChangeEvent>,
     cursor_manager: Arc<CursorManager>,
+    hardening: HardeningLevel,
+    kepler_gid: Option<u32>,
 }
 
 impl ServiceOrchestrator {
@@ -81,18 +84,28 @@ impl ServiceOrchestrator {
         exit_tx: mpsc::Sender<ProcessExitEvent>,
         restart_tx: mpsc::Sender<FileChangeEvent>,
         cursor_manager: Arc<CursorManager>,
+        hardening: HardeningLevel,
+        kepler_gid: Option<u32>,
     ) -> Self {
         Self {
             registry,
             exit_tx,
             restart_tx,
             cursor_manager,
+            hardening,
+            kepler_gid,
         }
     }
 
     /// Get the registry
     pub fn registry(&self) -> &SharedConfigRegistry {
         &self.registry
+    }
+
+    /// Compute the effective hardening level for a config.
+    /// Result = max(daemon_hardening, config_hardening).
+    fn effective_hardening(&self, handle: &ConfigActorHandle) -> HardeningLevel {
+        std::cmp::max(self.hardening, handle.hardening().unwrap_or_default())
     }
 
     /// Start services for a config
@@ -115,6 +128,7 @@ impl ServiceOrchestrator {
         progress: Option<ProgressSender>,
         no_deps: bool,
         override_envs: Option<HashMap<String, String>>,
+        hardening: Option<HardeningLevel>,
     ) -> Result<String, OrchestratorError> {
         if let Some(fd_count) = crate::fd_count::count_open_fds() {
             debug!("FD count at start_services entry: {}", fd_count);
@@ -123,7 +137,7 @@ impl ServiceOrchestrator {
         // Get or create the config actor
         let handle = self
             .registry
-            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner)
+            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening)
             .await?;
 
         // Merge override envs into stored sys_env if provided
@@ -497,6 +511,18 @@ impl ServiceOrchestrator {
         };
         debug!("[timeit] {} resolve_service completed in {:?}", service_name, resolve_start.elapsed());
 
+        // Check for privilege escalation before proceeding
+        #[cfg(unix)]
+        {
+            let context = format!("service '{}'", service_name);
+            crate::auth::check_privilege_escalation(
+                self.effective_hardening(handle),
+                resolved.user.as_deref(),
+                handle.owner_uid(),
+                &context,
+            ).map_err(OrchestratorError::ConfigError)?;
+        }
+
         let svc_ctx = eval_ctx.service.as_ref().unwrap();
 
         // Build computed_env respecting sys_env policy.
@@ -724,6 +750,18 @@ impl ServiceOrchestrator {
             handle.config_path(),
             default_user.as_deref(),
         ).map_err(|e| OrchestratorError::ConfigError(e.to_string()))?;
+
+        // Check for privilege escalation on re-resolve (dynamic user may change)
+        #[cfg(unix)]
+        {
+            let context = format!("service '{}'", service_name);
+            crate::auth::check_privilege_escalation(
+                self.effective_hardening(handle),
+                resolved.user.as_deref(),
+                handle.owner_uid(),
+                &context,
+            ).map_err(OrchestratorError::ConfigError)?;
+        }
 
         let svc_ctx = eval_ctx.service.as_ref().unwrap();
 
@@ -1405,6 +1443,7 @@ impl ServiceOrchestrator {
         sys_env: Option<HashMap<String, String>>,
         config_owner: Option<(u32, u32)>,
         progress: Option<ProgressSender>,
+        hardening: Option<HardeningLevel>,
     ) -> Result<String, OrchestratorError> {
         info!("Recreating config for {:?}", config_path);
 
@@ -1427,7 +1466,7 @@ impl ServiceOrchestrator {
         // Re-load config with new sys_env (re-reads source, re-expands env vars)
         let handle = self
             .registry
-            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner)
+            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening)
             .await?;
 
         // Persist the rebaked config snapshot
@@ -1436,7 +1475,7 @@ impl ServiceOrchestrator {
         }
 
         // Start all services
-        self.start_services(config_path, &[], sys_env, config_owner, progress, false, None).await?;
+        self.start_services(config_path, &[], sys_env, config_owner, progress, false, None, hardening).await?;
 
         Ok(String::new())
     }
@@ -2038,6 +2077,9 @@ impl ServiceOrchestrator {
             evaluator: evaluator.as_ref(),
             config_path: handle.map(|h| h.config_path()),
             config_dir: Some(&ctx.config_dir),
+            hardening: handle.map(|h| self.effective_hardening(h)).unwrap_or(self.hardening),
+            owner_uid: handle.and_then(|h| h.owner_uid()),
+            kepler_gid: self.kepler_gid,
         };
 
         // Read prior hook outputs from disk and set output_max_size
@@ -2174,12 +2216,36 @@ impl ServiceOrchestrator {
         );
         let clear_env = sys_env_policy == SysEnvPolicy::Clear;
 
+        // Compute groups, stripping kepler GID when hardening is enabled
+        #[cfg(unix)]
+        let groups = if self.effective_hardening(handle) >= HardeningLevel::NoRoot
+            && resolved.groups.is_empty()
+            && resolved.user.is_some()
+        {
+            if let Some(kepler_gid) = self.kepler_gid {
+                let user_spec = resolved.user.as_deref().unwrap();
+                match crate::user::compute_groups_excluding(user_spec, kepler_gid) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        warn!("Failed to compute groups for {}: {}, using empty groups", service_name, e);
+                        resolved.groups.clone()
+                    }
+                }
+            } else {
+                resolved.groups.clone()
+            }
+        } else {
+            resolved.groups.clone()
+        };
+        #[cfg(not(unix))]
+        let groups = resolved.groups.clone();
+
         let spec = crate::process::CommandSpec::with_all_options(
             resolved.command.clone(),
             ctx.working_dir.clone(),
             ctx.env.clone(),
             resolved.user.clone(),
-            resolved.groups.clone(),
+            groups,
             resolved.limits.clone(),
             clear_env,
         );
@@ -2235,6 +2301,8 @@ impl ServiceOrchestrator {
                 service_name.to_string(),
                 health_config.clone(),
                 handle.clone(),
+                self.effective_hardening(handle),
+                self.kepler_gid,
             );
             handle
                 .store_task_handle(service_name, TaskHandleType::HealthCheck, task_handle)

@@ -190,6 +190,7 @@ impl Client {
         sys_env: Option<HashMap<String, String>>,
         no_deps: bool,
         override_envs: Option<HashMap<String, String>>,
+        hardening: Option<String>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Start {
             config_path,
@@ -197,6 +198,7 @@ impl Client {
             sys_env,
             no_deps,
             override_envs,
+            hardening,
         })
     }
 
@@ -239,10 +241,12 @@ impl Client {
         &self,
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
+        hardening: Option<String>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Recreate {
             config_path,
             sys_env,
+            hardening,
         })
     }
 

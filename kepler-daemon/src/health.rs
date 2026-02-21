@@ -7,6 +7,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::HealthCheck;
 use crate::config_actor::ConfigActorHandle;
 use crate::events::{HealthStatus, ServiceEvent};
+use crate::hardening::HardeningLevel;
 use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use crate::process::{spawn_blocking, BlockingMode, CommandSpec};
 use crate::state::ServiceStatus;
@@ -16,9 +17,11 @@ pub fn spawn_health_checker(
     service_name: String,
     health_config: HealthCheck,
     handle: ConfigActorHandle,
+    hardening: HardeningLevel,
+    kepler_gid: Option<u32>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        health_check_loop(service_name, health_config, handle).await;
+        health_check_loop(service_name, health_config, handle, hardening, kepler_gid).await;
     })
 }
 
@@ -26,6 +29,8 @@ async fn health_check_loop(
     service_name: String,
     config: HealthCheck,
     handle: ConfigActorHandle,
+    hardening: HardeningLevel,
+    kepler_gid: Option<u32>,
 ) {
     // Wait for start_period before beginning checks
     if !config.start_period.is_zero() {
@@ -78,12 +83,43 @@ async fn health_check_loop(
         if user.is_none() {
             user = service_user.map(|s| s.to_string());
         }
-        // "daemon" means run as daemon user (no privilege drop)
-        if user.as_deref() == Some("daemon") {
-            user = None;
+
+        // Check privilege escalation before daemon→None conversion
+        #[cfg(unix)]
+        {
+            let context = format!("healthcheck for service '{}'", service_name);
+            if let Err(e) = crate::auth::check_privilege_escalation(
+                hardening,
+                user.as_deref(),
+                handle.owner_uid(),
+                &context,
+            ) {
+                error!("Health check for {} blocked: {}", service_name, e);
+                // Skip this health check iteration — don't crash the loop
+                sleep(config.interval).await;
+                continue;
+            }
         }
+
         if groups.is_empty() {
             groups = service_groups.to_vec();
+        }
+
+        // Strip kepler group from supplementary groups when hardening is enabled
+        #[cfg(unix)]
+        if hardening >= HardeningLevel::NoRoot
+            && groups.is_empty()
+            && user.is_some()
+        {
+            if let Some(kgid) = kepler_gid {
+                let user_spec = user.as_deref().unwrap();
+                match crate::user::compute_groups_excluding(user_spec, kgid) {
+                    Ok(g) => groups = g,
+                    Err(e) => {
+                        debug!("Failed to compute groups for healthcheck {}: {}", service_name, e);
+                    }
+                }
+            }
         }
 
         let passed = run_health_check(
@@ -156,6 +192,8 @@ async fn health_check_loop(
                         update.previous_status,
                         update.new_status,
                         &handle,
+                        hardening,
+                        kepler_gid,
                     )
                     .await;
 
@@ -192,6 +230,8 @@ async fn run_status_change_hook(
     previous_status: ServiceStatus,
     new_status: ServiceStatus,
     handle: &ConfigActorHandle,
+    hardening: HardeningLevel,
+    kepler_gid: Option<u32>,
 ) {
     let hook_type = match new_status {
         ServiceStatus::Healthy
@@ -249,6 +289,9 @@ async fn run_status_change_hook(
             evaluator: evaluator.as_ref(),
             config_path: Some(handle.config_path()),
             config_dir: Some(&ctx.config_dir),
+            hardening,
+            owner_uid: handle.owner_uid(),
+            kepler_gid,
         };
 
         // Hooks are always available from resolved config (inner fields may still

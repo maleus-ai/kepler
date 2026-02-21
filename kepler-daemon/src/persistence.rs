@@ -40,6 +40,9 @@ pub struct ExpandedConfigSnapshot {
     /// GID of the CLI user who loaded this config (for default user fallback)
     #[serde(default)]
     pub owner_gid: Option<u32>,
+    /// Per-config hardening level (baked at load time)
+    #[serde(default)]
+    pub hardening: Option<String>,
 
     // Backward-compat fields from old snapshots (ignored, kept for deserialization)
     #[serde(default, skip_serializing)]

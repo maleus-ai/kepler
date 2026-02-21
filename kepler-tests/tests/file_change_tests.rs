@@ -39,6 +39,8 @@ fn create_test_orchestrator(
         exit_tx,
         restart_tx,
         cursor_manager,
+        kepler_daemon::hardening::HardeningLevel::None,
+        None,
     ));
     (orchestrator, registry, exit_rx, restart_rx)
 }
@@ -130,7 +132,7 @@ async fn test_file_change_ignored_for_stopped_service() {
 
     // Start the service
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -221,7 +223,7 @@ async fn test_file_change_ignored_for_exited_service() {
     let sys_env: HashMap<String, String> = std::env::vars().collect();
 
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -306,7 +308,7 @@ async fn test_file_change_handler_deduplicates_events() {
     let sys_env: HashMap<String, String> = std::env::vars().collect();
 
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -396,7 +398,7 @@ async fn test_file_change_handler_independent_services() {
     let sys_env: HashMap<String, String> = std::env::vars().collect();
 
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -535,7 +537,7 @@ async fn test_watcher_not_active_during_pre_start() {
     let handler = orchestrator.clone().spawn_file_change_handler(restart_rx);
 
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -630,7 +632,7 @@ async fn test_watcher_not_active_during_restart_hooks() {
     let handler = orchestrator.clone().spawn_file_change_handler(restart_rx);
 
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await
         .unwrap();
 
@@ -721,7 +723,7 @@ async fn test_watcher_reestablished_after_restart() {
     let handler = orchestrator.clone().spawn_file_change_handler(restart_rx);
 
     orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await
         .unwrap();
 

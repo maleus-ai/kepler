@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
 use crate::errors::{DaemonError, Result};
 use crate::events::{ServiceEvent, ServiceEventReceiver};
+use crate::hardening::HardeningLevel;
 use crate::lua_eval::{ConditionResult, EvalContext};
 use crate::logs::LogWriterConfig;
 use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
@@ -37,6 +38,8 @@ pub struct ConfigActorHandle {
     owner_uid: Option<u32>,
     /// GID of the CLI user who loaded this config (for default user fallback)
     owner_gid: Option<u32>,
+    /// Per-config hardening level (baked at load time)
+    hardening: Option<HardeningLevel>,
 }
 
 impl ConfigActorHandle {
@@ -49,6 +52,7 @@ impl ConfigActorHandle {
         dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>>,
         owner_uid: Option<u32>,
         owner_gid: Option<u32>,
+        hardening: Option<HardeningLevel>,
     ) -> Self {
         Self {
             config_path,
@@ -58,6 +62,7 @@ impl ConfigActorHandle {
             dep_watchers,
             owner_uid,
             owner_gid,
+            hardening,
         }
     }
 
@@ -79,6 +84,11 @@ impl ConfigActorHandle {
     /// Get the owner GID of this config (who loaded it)
     pub fn owner_gid(&self) -> Option<u32> {
         self.owner_gid
+    }
+
+    /// Get the per-config hardening level (if set at load time)
+    pub fn hardening(&self) -> Option<HardeningLevel> {
+        self.hardening
     }
 
     /// Subscribe to config events (status changes, Ready, Quiescent).

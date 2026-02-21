@@ -10,6 +10,7 @@
 //! Tests run inside Docker as root with kepler group and test users available.
 
 use kepler_daemon::config::{HookCommand, HookCommon, HookList, ServiceHooks};
+use kepler_daemon::hardening::HardeningLevel;
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::{TestDaemonHarness, UMASK_LOCK};
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -198,8 +199,7 @@ async fn test_hook_inherits_service_user() {
 /// Verify that hooks can override the service user
 /// Requires root to drop privileges to another user
 ///
-/// Note: The special user value "daemon" means "run as the daemon process user" (no privilege drop),
-/// so we use numeric UIDs to test actual user overrides.
+/// We use numeric UIDs to test actual user overrides for cross-platform compatibility.
 #[tokio::test]
 #[cfg(unix)]
 async fn test_hook_user_override() {
@@ -1595,4 +1595,395 @@ fn test_log_truncation_symlink_blocked() {
         content, "original content",
         "Target file should not be modified through symlink"
     );
+}
+
+// ============================================================================
+// Per-Config Hardening Tests
+// ============================================================================
+// These tests verify per-config hardening (--hardening on `kepler start`).
+// The effective hardening = max(daemon_hardening, config_hardening).
+// The daemon sets a floor; the CLI can raise it per-config but never lower it.
+
+/// Verify that per-config hardening `no-root` blocks running as root
+/// when the config owner is non-root.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_per_config_hardening_no_root_blocks_uid_zero() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "blocked",
+            TestServiceBuilder::long_running()
+                .with_user("0") // Try to run as root
+                .build(),
+        )
+        .build();
+
+    // daemon_hardening=None, config_hardening=NoRoot, config owner=65534
+    // effective = max(None, NoRoot) = NoRoot
+    let harness = TestDaemonHarness::new_with_hardening(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+        HardeningLevel::None,
+        Some(HardeningLevel::NoRoot),
+    )
+    .await
+    .unwrap();
+
+    let result = harness.start_service("blocked").await;
+
+    assert!(
+        result.is_err(),
+        "Per-config no-root hardening should block running as root"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Privilege escalation denied"),
+        "Error should mention privilege escalation: {}",
+        err
+    );
+}
+
+/// Verify that per-config hardening `strict` blocks running as a different user
+/// when the config owner is non-root.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_per_config_hardening_strict_blocks_different_user() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "blocked",
+            TestServiceBuilder::long_running()
+                .with_user("65533") // Different from config owner (65534)
+                .build(),
+        )
+        .build();
+
+    // daemon_hardening=None, config_hardening=Strict, config owner=65534
+    // effective = max(None, Strict) = Strict
+    let harness = TestDaemonHarness::new_with_hardening(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+        HardeningLevel::None,
+        Some(HardeningLevel::Strict),
+    )
+    .await
+    .unwrap();
+
+    let result = harness.start_service("blocked").await;
+
+    assert!(
+        result.is_err(),
+        "Per-config strict hardening should block running as a different user"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Privilege escalation denied"),
+        "Error should mention privilege escalation: {}",
+        err
+    );
+}
+
+/// Verify that per-config hardening allows running as the config owner's uid
+/// under strict mode.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_per_config_hardening_strict_allows_same_uid() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+    std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "allowed",
+            TestServiceBuilder::long_running()
+                .with_user("65534") // Same as config owner
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new_with_hardening(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+        HardeningLevel::None,
+        Some(HardeningLevel::Strict),
+    )
+    .await
+    .unwrap();
+
+    let result = harness.start_service("allowed").await;
+
+    assert!(
+        result.is_ok(),
+        "Strict hardening should allow running as config owner's uid: {:?}",
+        result.err()
+    );
+
+    harness.stop_service("allowed").await.unwrap();
+}
+
+/// Verify that effective hardening cannot be lowered below daemon level.
+/// daemon_hardening=NoRoot, config_hardening=None → effective=NoRoot
+#[tokio::test]
+#[cfg(unix)]
+async fn test_effective_hardening_cannot_be_lowered() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "blocked",
+            TestServiceBuilder::long_running()
+                .with_user("0") // Try to run as root
+                .build(),
+        )
+        .build();
+
+    // daemon_hardening=NoRoot, config_hardening=None
+    // effective = max(NoRoot, None) = NoRoot — config cannot lower below daemon
+    let harness = TestDaemonHarness::new_with_hardening(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+        HardeningLevel::NoRoot,
+        None, // No per-config hardening (defaults to None)
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        harness.effective_hardening(),
+        HardeningLevel::NoRoot,
+        "Effective hardening should be NoRoot (daemon floor), not None"
+    );
+
+    let result = harness.start_service("blocked").await;
+
+    assert!(
+        result.is_err(),
+        "Daemon-level NoRoot hardening should block running as root even when config hardening is None"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Privilege escalation denied"),
+        "Error should mention privilege escalation: {}",
+        err
+    );
+}
+
+/// Verify that per-config hardening can raise above daemon level.
+/// daemon_hardening=None, config_hardening=Strict → effective=Strict
+#[tokio::test]
+#[cfg(unix)]
+async fn test_per_config_hardening_raises_above_daemon() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "blocked",
+            TestServiceBuilder::long_running()
+                .with_user("65533") // Different non-root user
+                .build(),
+        )
+        .build();
+
+    // daemon_hardening=None, config_hardening=Strict
+    // effective = max(None, Strict) = Strict — config raises above daemon
+    let harness = TestDaemonHarness::new_with_hardening(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+        HardeningLevel::None,
+        Some(HardeningLevel::Strict),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        harness.effective_hardening(),
+        HardeningLevel::Strict,
+        "Effective hardening should be Strict (config raised above daemon)"
+    );
+
+    let result = harness.start_service("blocked").await;
+
+    assert!(
+        result.is_err(),
+        "Config-level Strict hardening should block running as different user"
+    );
+}
+
+/// Verify that root-owned configs are unrestricted even with per-config hardening.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_per_config_hardening_unrestricted_for_root_owner() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "allowed",
+            TestServiceBuilder::long_running()
+                .with_user("65534") // Different user from root owner
+                .build(),
+        )
+        .build();
+
+    // Root-owned config (uid 0) should be unrestricted at any hardening level
+    let harness = TestDaemonHarness::new_with_hardening(
+        config,
+        temp_dir.path(),
+        Some((0, 0)), // Root owner
+        HardeningLevel::Strict,
+        Some(HardeningLevel::Strict),
+    )
+    .await
+    .unwrap();
+
+    let result = harness.start_service("allowed").await;
+
+    assert!(
+        result.is_ok(),
+        "Root-owned config should be unrestricted at any hardening level: {:?}",
+        result.err()
+    );
+
+    harness.stop_service("allowed").await.unwrap();
+}
+
+/// Verify that no-user services (running as config owner) are allowed under strict hardening.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_per_config_hardening_strict_allows_no_user_spec() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+    std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "no-user",
+            TestServiceBuilder::long_running().build(), // No .with_user()
+        )
+        .build();
+
+    // No user spec means process runs as config owner — always allowed
+    let harness = TestDaemonHarness::new_with_hardening(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+        HardeningLevel::Strict,
+        Some(HardeningLevel::Strict),
+    )
+    .await
+    .unwrap();
+
+    let result = harness.start_service("no-user").await;
+
+    assert!(
+        result.is_ok(),
+        "Service without user: field should be allowed under strict hardening: {:?}",
+        result.err()
+    );
+
+    harness.stop_service("no-user").await.unwrap();
+}
+
+/// Verify that daemon_hardening=Strict + config_hardening=NoRoot → effective=Strict
+/// (max semantics: Strict > NoRoot)
+#[tokio::test]
+#[cfg(unix)]
+async fn test_effective_hardening_takes_max() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "blocked",
+            TestServiceBuilder::long_running()
+                .with_user("65533") // Different non-root user
+                .build(),
+        )
+        .build();
+
+    // daemon_hardening=Strict, config_hardening=NoRoot
+    // effective = max(Strict, NoRoot) = Strict
+    let harness = TestDaemonHarness::new_with_hardening(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+        HardeningLevel::Strict,
+        Some(HardeningLevel::NoRoot),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        harness.effective_hardening(),
+        HardeningLevel::Strict,
+        "max(Strict, NoRoot) should be Strict"
+    );
+
+    // Under Strict, non-root owner 65534 trying to run as 65533 should fail
+    let result = harness.start_service("blocked").await;
+    assert!(
+        result.is_err(),
+        "Effective Strict hardening should block different non-root user"
+    );
+}
+
+/// Verify that per-config no-root hardening allows non-root users other than the owner.
+/// no-root only blocks uid 0, not other non-root users.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_per_config_hardening_no_root_allows_different_nonroot() {
+    let _guard = UMASK_LOCK.lock().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+    std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "allowed",
+            TestServiceBuilder::long_running()
+                .with_user("65533") // Different non-root user
+                .build(),
+        )
+        .build();
+
+    // no-root only blocks uid 0, not other non-root users
+    let harness = TestDaemonHarness::new_with_hardening(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+        HardeningLevel::None,
+        Some(HardeningLevel::NoRoot),
+    )
+    .await
+    .unwrap();
+
+    let result = harness.start_service("allowed").await;
+
+    assert!(
+        result.is_ok(),
+        "NoRoot hardening should allow running as different non-root user: {:?}",
+        result.err()
+    );
+
+    harness.stop_service("allowed").await.unwrap();
 }

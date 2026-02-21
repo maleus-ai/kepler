@@ -124,9 +124,8 @@ Health checks follow the same inheritance chain as hooks:
 
 - **Health check `user`** > **Service `user`** > config owner
 - **Health check `groups`** > **Service `groups`**
-- The special value `"daemon"` means run as the daemon user (no privilege drop)
 
-When neither the health check nor the service specifies a `user`, the health check runs as the config owner (the user who loaded the config). See [Privilege Dropping](privilege-dropping.md) for details on config owner defaults.
+When neither the health check nor the service specifies a `user`, the health check runs as the config owner (the user who loaded the config). Use `user: root` to explicitly run the health check as root. See [Privilege Dropping](privilege-dropping.md) for details on config owner defaults.
 
 ---
 

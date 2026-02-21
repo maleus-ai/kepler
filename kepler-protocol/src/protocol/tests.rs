@@ -34,6 +34,7 @@ fn roundtrip_envelope_start() {
             sys_env: Some(HashMap::from([("PATH".into(), "/usr/bin".into())])),
             no_deps: true,
             override_envs: None,
+            hardening: None,
         },
     };
     let bytes = encode_envelope(&envelope).unwrap();
@@ -466,6 +467,7 @@ fn request_variant_names() {
             sys_env: None,
             no_deps: false,
             override_envs: None,
+            hardening: None,
         }.variant_name(),
         "Start"
     );

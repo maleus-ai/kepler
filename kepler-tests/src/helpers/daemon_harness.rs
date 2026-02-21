@@ -3,6 +3,7 @@
 use kepler_daemon::config::{KeplerConfig, LogRetention, RawServiceConfig, ServiceConfig, ServiceHooks, resolve_log_store};
 use kepler_daemon::config_actor::{ConfigActor, ConfigActorHandle, TaskHandleType};
 use kepler_daemon::env::{insert_env_entries, load_env_file};
+use kepler_daemon::hardening::HardeningLevel;
 use kepler_daemon::health::spawn_health_checker;
 use kepler_daemon::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
 use kepler_daemon::logs::{BufferedLogWriter, LogReader, LogStream, LogWriterConfig, LogLine};
@@ -49,6 +50,8 @@ pub struct TestDaemonHarness {
     restart_rx: Option<mpsc::Receiver<FileChangeEvent>>,
     /// Track spawned PIDs so Drop can kill their process groups on panic
     tracked_pids: Arc<Mutex<Vec<u32>>>,
+    /// Daemon-level hardening (simulates --hardening flag on daemon startup)
+    daemon_hardening: HardeningLevel,
 }
 
 impl TestDaemonHarness {
@@ -90,6 +93,30 @@ impl TestDaemonHarness {
         Self::finish(handle, actor, config_path, config_dir)
     }
 
+    /// Create a new test harness with hardening support.
+    ///
+    /// - `config_owner`: simulates the CLI user who loaded the config
+    /// - `daemon_hardening`: the daemon-level hardening floor (simulates `--hardening` on daemon startup)
+    /// - `config_hardening`: per-config hardening (simulates `--hardening` on `kepler start`)
+    ///
+    /// The effective hardening = max(daemon_hardening, config_hardening).
+    pub async fn new_with_hardening(
+        config: KeplerConfig,
+        config_dir: &Path,
+        config_owner: Option<(u32, u32)>,
+        daemon_hardening: HardeningLevel,
+        config_hardening: Option<HardeningLevel>,
+    ) -> std::io::Result<Self> {
+        let config_path = Self::write_config(&config, config_dir)?;
+
+        let (handle, actor) = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            Self::create_actor_with_owner_and_hardening(&config_path, config_dir, config_owner, config_hardening)?
+        };
+
+        Self::finish_with_hardening(handle, actor, config_path, config_dir, daemon_hardening)
+    }
+
     fn write_config(config: &KeplerConfig, config_dir: &Path) -> std::io::Result<PathBuf> {
         let config_path = config_dir.join("kepler.yaml");
         let config_yaml = serde_yaml::to_string(config)
@@ -107,16 +134,29 @@ impl TestDaemonHarness {
         config_dir: &Path,
         config_owner: Option<(u32, u32)>,
     ) -> std::io::Result<(ConfigActorHandle, ConfigActor)> {
+        Self::create_actor_with_owner_and_hardening(config_path, config_dir, config_owner, None)
+    }
+
+    fn create_actor_with_owner_and_hardening(
+        config_path: &Path,
+        config_dir: &Path,
+        config_owner: Option<(u32, u32)>,
+        config_hardening: Option<HardeningLevel>,
+    ) -> std::io::Result<(ConfigActorHandle, ConfigActor)> {
         let kepler_state_dir = config_dir.join(".kepler");
         // SAFETY: Caller must hold ENV_LOCK to prevent races with parallel tests.
         unsafe {
             std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
         }
-        ConfigActor::create(config_path.to_path_buf(), Some(std::env::vars().collect()), config_owner)
+        ConfigActor::create(config_path.to_path_buf(), Some(std::env::vars().collect()), config_owner, config_hardening)
             .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     fn finish(handle: ConfigActorHandle, actor: ConfigActor, config_path: PathBuf, config_dir: &Path) -> std::io::Result<Self> {
+        Self::finish_with_hardening(handle, actor, config_path, config_dir, HardeningLevel::None)
+    }
+
+    fn finish_with_hardening(handle: ConfigActorHandle, actor: ConfigActor, config_path: PathBuf, config_dir: &Path, daemon_hardening: HardeningLevel) -> std::io::Result<Self> {
         tokio::spawn(actor.run());
 
         let (exit_tx, exit_rx) = mpsc::channel(32);
@@ -131,6 +171,7 @@ impl TestDaemonHarness {
             restart_tx,
             restart_rx: Some(restart_rx),
             tracked_pids: Arc::new(Mutex::new(Vec::new())),
+            daemon_hardening,
         })
     }
 
@@ -168,6 +209,12 @@ impl TestDaemonHarness {
     /// Get a clone of the restart event sender
     pub fn restart_tx(&self) -> mpsc::Sender<FileChangeEvent> {
         self.restart_tx.clone()
+    }
+
+    /// Compute the effective hardening level for this harness.
+    /// Result = max(daemon_hardening, config_hardening).
+    pub fn effective_hardening(&self) -> HardeningLevel {
+        std::cmp::max(self.daemon_hardening, self.handle.hardening().unwrap_or_default())
     }
 
     /// Get the config actor handle
@@ -237,6 +284,18 @@ impl TestDaemonHarness {
             .map(|wd| self.config_dir.join(wd))
             .unwrap_or_else(|| self.config_dir.clone());
 
+        // Check for privilege escalation before proceeding
+        #[cfg(unix)]
+        {
+            let context = format!("service '{}'", service_name);
+            kepler_daemon::auth::check_privilege_escalation(
+                self.effective_hardening(),
+                resolved.user.as_deref(),
+                self.handle.owner_uid(),
+                &context,
+            ).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        }
+
         // Store resolved config + computed state in the actor
         let svc_env_file = eval_ctx.service.as_ref().unwrap().env_file.clone();
         self.handle.store_resolved_config(
@@ -276,6 +335,9 @@ impl TestDaemonHarness {
             evaluator: Some(&lua_evaluator),
             config_path: Some(&self.config_path),
             config_dir: Some(&self.config_dir),
+            hardening: self.effective_hardening(),
+            owner_uid: None,
+            kepler_gid: None,
         };
 
         if should_mark_initialized {
@@ -402,6 +464,8 @@ impl TestDaemonHarness {
                 service_name.to_string(),
                 health_config,
                 self.handle.clone(),
+                self.effective_hardening(),
+                None,
             );
 
             // Store the health check handle
@@ -455,6 +519,9 @@ impl TestDaemonHarness {
             evaluator: lua_evaluator.as_ref(),
             config_path: Some(&self.config_path),
             config_dir: Some(&self.config_dir),
+            hardening: self.effective_hardening(),
+            owner_uid: None,
+            kepler_gid: None,
         };
 
         run_service_hook(
@@ -511,6 +578,9 @@ impl TestDaemonHarness {
             evaluator: lua_evaluator.as_ref(),
             config_path: Some(&self.config_path),
             config_dir: Some(&self.config_dir),
+            hardening: self.effective_hardening(),
+            owner_uid: None,
+            kepler_gid: None,
         };
 
         run_service_hook(
@@ -570,6 +640,7 @@ impl TestDaemonHarness {
         let handle = self.handle.clone();
         let exit_tx = self.exit_tx.clone();
         let tracked_pids = self.tracked_pids.clone();
+        let effective_hardening = self.effective_hardening();
 
         tokio::spawn(async move {
             while let Some(event) = restart_rx.recv().await {
@@ -615,6 +686,9 @@ impl TestDaemonHarness {
                     evaluator: lua_evaluator.as_ref(),
                     config_path: Some(&config_path),
                     config_dir: Some(&config_dir),
+                    hardening: effective_hardening,
+                    owner_uid: None,
+                    kepler_gid: None,
                 };
 
                 let _ = run_service_hook(
@@ -707,6 +781,7 @@ impl TestDaemonHarness {
         let handle = self.handle.clone();
         let exit_tx = self.exit_tx.clone();
         let tracked_pids = self.tracked_pids.clone();
+        let effective_hardening = self.effective_hardening();
 
         tokio::spawn(async move {
             while let Some(event) = exit_rx.recv().await {
@@ -755,6 +830,9 @@ impl TestDaemonHarness {
                     evaluator: lua_evaluator.as_ref(),
                     config_path: Some(&config_path),
                     config_dir: Some(&config_dir),
+                    hardening: effective_hardening,
+                    owner_uid: None,
+                    kepler_gid: None,
                 };
 
                 let _ = run_service_hook(

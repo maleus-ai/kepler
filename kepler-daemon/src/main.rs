@@ -11,6 +11,7 @@ use kepler_daemon::config_actor::context::ConfigEvent;
 use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
 use kepler_daemon::cursor::CursorManager;
 use kepler_daemon::errors::DaemonError;
+use kepler_daemon::hardening::HardeningLevel;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::persistence::ConfigPersistence;
 use kepler_daemon::process::{kill_process_by_pid, parse_signal_name, validate_running_process, ProcessExitEvent};
@@ -33,6 +34,61 @@ fn resolve_kepler_group_gid() -> anyhow::Result<u32> {
     nix::unistd::Group::from_name("kepler")?
         .map(|g| g.gid.as_raw())
         .ok_or_else(|| anyhow::anyhow!("kepler group does not exist. Create it with: groupadd kepler"))
+}
+
+/// Parse CLI arguments for the daemon.
+///
+/// Supports:
+/// - `--hardening <none|no-root|strict>` (or `KEPLER_HARDENING` env var)
+/// - `--help` / `-h`
+fn parse_hardening_level() -> HardeningLevel {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Check for --help / -h
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        eprintln!("Usage: kepler-daemon [OPTIONS]");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  --hardening <level>  Set privilege hardening level (default: none)");
+        eprintln!("                       Levels: none, no-root, strict");
+        eprintln!("  -h, --help           Show this help message");
+        eprintln!();
+        eprintln!("Environment variables:");
+        eprintln!("  KEPLER_HARDENING     Same as --hardening (CLI flag takes precedence)");
+        std::process::exit(0);
+    }
+
+    // Check for --hardening <level>
+    let mut hardening_arg = None;
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--hardening" {
+            match iter.next() {
+                Some(val) => {
+                    hardening_arg = Some(val.clone());
+                    break;
+                }
+                None => {
+                    eprintln!("Error: --hardening requires a value (none, no-root, strict)");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
+    // CLI flag takes precedence over env var
+    let raw = hardening_arg.or_else(|| std::env::var("KEPLER_HARDENING").ok());
+
+    match raw {
+        Some(val) => match val.parse::<HardeningLevel>() {
+            Ok(level) => level,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        },
+        None => HardeningLevel::default(),
+    }
 }
 
 /// Canonicalize a config path, returning an error if the path doesn't exist
@@ -72,6 +128,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(fd_count) = kepler_daemon::fd_count::count_open_fds() {
         info!("FD count at daemon start: {}", fd_count);
     }
+    // Parse --hardening flag (before root check so --help works for anyone)
+    let hardening = parse_hardening_level();
+    if hardening != HardeningLevel::None {
+        info!("Hardening level: {}", hardening);
+    }
+
     info!("Starting Kepler daemon");
 
     // Require root (the kepler group controls CLI access)
@@ -96,6 +158,8 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
+    #[cfg(unix)]
+    let kepler_gid = resolve_kepler_group_gid()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -127,7 +191,6 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // chown state dir to root:kepler
-        let kepler_gid = resolve_kepler_group_gid()?;
         nix::unistd::chown(
             &state_dir,
             Some(nix::unistd::Uid::from_raw(0)),
@@ -185,11 +248,17 @@ async fn main() -> anyhow::Result<()> {
     let cursor_manager = Arc::new(CursorManager::new(cursor_ttl_seconds));
 
     // Create ServiceOrchestrator (needs cursor_manager to invalidate cursors on stop --clean)
+    #[cfg(unix)]
+    let kepler_gid_for_orchestrator = Some(kepler_gid);
+    #[cfg(not(unix))]
+    let kepler_gid_for_orchestrator: Option<u32> = None;
     let orchestrator = Arc::new(ServiceOrchestrator::new(
         registry.clone(),
         exit_tx.clone(),
         restart_tx.clone(),
         cursor_manager.clone(),
+        hardening,
+        kepler_gid_for_orchestrator,
     ));
 
     // Spawn cursor cleanup task (runs every 5 seconds)
@@ -353,13 +422,19 @@ async fn handle_request(
             sys_env,
             no_deps,
             override_envs,
+            hardening,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
+            let hardening_level = match hardening.as_deref().map(|s| s.parse::<HardeningLevel>()) {
+                Some(Ok(level)) => Some(level),
+                Some(Err(e)) => return Response::error(e),
+                None => None,
+            };
             match orchestrator
-                .start_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps, override_envs)
+                .start_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps, override_envs, hardening_level)
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -624,14 +699,20 @@ async fn handle_request(
         Request::Recreate {
             config_path,
             sys_env,
+            hardening,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
+            let hardening_level = match hardening.as_deref().map(|s| s.parse::<HardeningLevel>()) {
+                Some(Ok(level)) => Some(level),
+                Some(Err(e)) => return Response::error(e),
+                None => None,
+            };
 
             match orchestrator
-                .recreate_services(&config_path, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()))
+                .recreate_services(&config_path, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), hardening_level)
                 .await
             {
                 Ok(msg) if msg.is_empty() => Response::Ok { message: None, data: None },
@@ -1112,7 +1193,7 @@ async fn discover_existing_configs(
 
         // Load the config (will restore from snapshot)
         info!("Restoring config from {:?}", source_path);
-        match registry.get_or_create(source_path.clone(), None, None).await {
+        match registry.get_or_create(source_path.clone(), None, None, None).await {
             Ok(handle) => {
                 restored += 1;
 

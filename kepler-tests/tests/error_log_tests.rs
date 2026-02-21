@@ -35,7 +35,7 @@ fn create_test_orchestrator(
     let (exit_tx, exit_rx) = mpsc::channel(32);
     let (restart_tx, restart_rx) = mpsc::channel(32);
     let cursor_manager = Arc::new(kepler_daemon::cursor::CursorManager::new(300));
-    let orchestrator = ServiceOrchestrator::new(registry.clone(), exit_tx, restart_tx, cursor_manager);
+    let orchestrator = ServiceOrchestrator::new(registry.clone(), exit_tx, restart_tx, cursor_manager, kepler_daemon::hardening::HardeningLevel::None, None,);
     (orchestrator, registry, exit_rx, restart_rx)
 }
 
@@ -104,7 +104,7 @@ services:
 
     // Start the service — resolution should fail due to Lua error
     let _result = orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await;
 
     // Wait for the service to reach Failed status
@@ -175,7 +175,7 @@ async fn test_hook_failure_logged_to_stderr() {
 
     // Start the service — pre_start hook should fail
     let _result = orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await;
 
     // Wait for the service to reach Failed status
@@ -244,7 +244,7 @@ services:
 
     // Start the service — hook resolution should fail due to Lua error
     let _result = orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None)
         .await;
 
     // Wait for the service to reach Failed status

@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::config::{resolve_log_buffer_size, resolve_log_max_size, DependencyConfig, KeplerConfig, ServiceConfig};
+use crate::hardening::HardeningLevel;
 use crate::deps::{get_start_order, is_condition_met, is_failure_handled};
 use crate::lua_eval::{ConditionResult, EvalContext};
 use crate::errors::{DaemonError, Result};
@@ -73,6 +74,8 @@ pub struct ConfigActor {
     owner_uid: Option<u32>,
     /// GID of the CLI user who loaded this config
     owner_gid: Option<u32>,
+    /// Per-config hardening level (baked at load time)
+    hardening: Option<HardeningLevel>,
 
     /// Subscriber registry for config events (used by Subscribe handler)
     subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ConfigEvent>>>>,
@@ -120,6 +123,7 @@ impl ConfigActor {
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
         config_owner: Option<(u32, u32)>,
+        hardening: Option<HardeningLevel>,
     ) -> Result<(ConfigActorHandle, Self)> {
         // Canonicalize path first
         let canonical_path = std::fs::canonicalize(&config_path).map_err(|e| {
@@ -159,7 +163,7 @@ impl ConfigActor {
         let _ = persistence.save_source_path(&canonical_path);
 
         // Check if we have an existing expanded config snapshot
-        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_sys_env, owner_uid, owner_gid) =
+        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_sys_env, owner_uid, owner_gid, resolved_hardening) =
             if let Ok(Some(snapshot)) = persistence.load_expanded_config() {
                 info!(
                     "Restoring config from snapshot (taken at {})",
@@ -211,6 +215,9 @@ impl ConfigActor {
                 let restored_sys_env = snapshot.sys_env;
                 let owner_uid = snapshot.owner_uid;
                 let owner_gid = snapshot.owner_gid;
+                let restored_hardening = snapshot.hardening
+                    .as_deref()
+                    .and_then(|s| s.parse::<HardeningLevel>().ok());
 
                 let config = snapshot.config;
 
@@ -224,6 +231,7 @@ impl ConfigActor {
                     restored_sys_env,
                     owner_uid,
                     owner_gid,
+                    restored_hardening,
                 )
             } else {
                 // No snapshot - parse fresh from source
@@ -311,6 +319,7 @@ impl ConfigActor {
                     resolved_sys_env,
                     config_owner.map(|(uid, _)| uid),
                     config_owner.map(|(_, gid)| gid),
+                    hardening,
                 )
             };
 
@@ -325,7 +334,7 @@ impl ConfigActor {
         let dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), dep_watchers.clone(), owner_uid, owner_gid);
+        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), dep_watchers.clone(), owner_uid, owner_gid, resolved_hardening);
 
         let actor = ConfigActor {
             config_path: canonical_path,
@@ -347,6 +356,7 @@ impl ConfigActor {
             sys_env: resolved_sys_env,
             owner_uid,
             owner_gid,
+            hardening: resolved_hardening,
             subscribers,
             dep_watchers,
             lua_eval_tx: None,
@@ -983,6 +993,7 @@ impl ConfigActor {
                         sys_env: self.sys_env.clone(),
                         owner_uid: self.owner_uid,
                         owner_gid: self.owner_gid,
+                        hardening: self.hardening.map(|h| h.to_string()),
                     };
                     if let Err(e) = self.persistence.save_expanded_config(&snapshot) {
                         warn!("Failed to re-save snapshot after MergeSysEnv: {}", e);
@@ -1022,6 +1033,7 @@ impl ConfigActor {
             sys_env: self.sys_env.clone(),
             owner_uid: self.owner_uid,
             owner_gid: self.owner_gid,
+            hardening: self.hardening.map(|h| h.to_string()),
         };
 
         // Save the snapshot

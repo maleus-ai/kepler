@@ -70,6 +70,9 @@ pub enum Request {
         /// Override specific system environment variables (merged into stored sys_env)
         #[serde(default)]
         override_envs: Option<HashMap<String, String>>,
+        /// Per-config hardening level (e.g. "none", "no-root", "strict")
+        #[serde(default)]
+        hardening: Option<String>,
     },
     /// Stop service(s)
     Stop {
@@ -107,6 +110,9 @@ pub enum Request {
         /// System environment variables captured from CLI (for re-baking config snapshot)
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
+        /// Per-config hardening level (e.g. "none", "no-root", "strict")
+        #[serde(default)]
+        hardening: Option<String>,
     },
     /// Get status of services
     Status {
