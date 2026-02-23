@@ -109,6 +109,8 @@ pub enum Commands {
         #[arg(short, long)]
         all: bool,
     },
+    /// Inspect config and service state (JSON output)
+    Inspect,
     /// Prune all stopped/orphaned config state directories
     Prune {
         /// Force prune even if services appear running

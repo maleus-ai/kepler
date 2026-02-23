@@ -197,6 +197,11 @@ pub enum Request {
         /// Services to watch (None = all)
         services: Option<Vec<String>>,
     },
+    /// Inspect config and runtime state (JSON output)
+    Inspect {
+        /// Path to the config file
+        config_path: PathBuf,
+    },
 }
 
 impl Request {
@@ -217,6 +222,7 @@ impl Request {
             Request::Prune { .. } => "Prune",
             Request::LogsCursor { .. } => "LogsCursor",
             Request::Subscribe { .. } => "Subscribe",
+            Request::Inspect { .. } => "Inspect",
         }
     }
 }
@@ -282,6 +288,8 @@ pub enum ResponseData {
     DaemonInfo(DaemonInfo),
     /// Pruned configs info
     PrunedConfigs(Vec<PrunedConfigInfo>),
+    /// Inspect output (pre-built JSON string)
+    Inspect(String),
 }
 
 /// Information about a pruned config

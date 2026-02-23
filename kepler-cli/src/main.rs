@@ -342,6 +342,24 @@ async fn run() -> Result<()> {
             unreachable!("Prune commands are handled by early return above")
         }
 
+        Commands::Inspect => {
+            let (_progress_rx, response_future) = client.inspect(canonical_path)?;
+            let response = response_future.await?;
+            match response {
+                Response::Ok { data: Some(ResponseData::Inspect(json)), .. } => {
+                    println!("{}", json);
+                }
+                Response::Error { message } => {
+                    eprintln!("Error: {}", message);
+                    std::process::exit(1);
+                }
+                _ => {
+                    eprintln!("Unexpected response");
+                    std::process::exit(1);
+                }
+            }
+        }
+
     }
 
     Ok(())
