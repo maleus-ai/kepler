@@ -993,6 +993,64 @@ fn test_json_yaml_available_in_inline() {
     assert!(result.as_str().is_some(), "yaml.stringify should return a string");
 }
 
+// --- json/yaml table frozen tests ---
+
+#[test]
+fn test_json_table_frozen() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result = eval.eval::<Value>(r#"json.parse = function() end"#, &ctx, "test");
+    assert!(result.is_err(), "Writing to json table should fail");
+}
+
+#[test]
+fn test_yaml_table_frozen() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result = eval.eval::<Value>(r#"yaml.parse = function() end"#, &ctx, "test");
+    assert!(result.is_err(), "Writing to yaml table should fail");
+}
+
+#[test]
+fn test_os_table_frozen() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    // Per-env os table should be frozen
+    let result = eval.eval::<Value>(r#"os.getgroups = function() end"#, &ctx, "test");
+    assert!(result.is_err(), "Writing to per-env os table should fail");
+
+    // Global os functions inherited via metatable should also be safe
+    let result = eval.eval::<Value>(r#"os.clock = function() return 0 end"#, &ctx, "test");
+    assert!(result.is_err(), "Writing os.clock on frozen per-env os table should fail");
+}
+
+#[test]
+fn test_global_stdlib_tables_cannot_be_overridden() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    // Check if stdlib tables can be overridden from a sandboxed env
+    for name in &["string", "math", "table", "coroutine", "bit32", "utf8", "buffer"] {
+        let code = format!("{}.fake = function() end", name);
+        let result = eval.eval::<Value>(&code, &ctx, "test");
+        if result.is_ok() {
+            panic!("Global stdlib table '{}' is NOT frozen — Lua code can mutate it", name);
+        }
+    }
+}
+
+#[test]
+fn test_global_os_table_frozen() {
+    let eval = LuaEvaluator::new().unwrap();
+
+    // The lua: block runs in global scope — verify global os table is frozen
+    let result = eval.load_inline(r#"os.clock = function() return 0 end"#);
+    assert!(result.is_err(), "Writing to global os table should fail");
+}
+
 // --- Owner context tests ---
 
 #[test]

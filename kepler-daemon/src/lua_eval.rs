@@ -197,6 +197,7 @@ impl LuaEvaluator {
                 .map_err(|e| mlua::Error::RuntimeError(format!("json.stringify: {}", e)))
             })?,
         )?;
+        json_table.set_readonly(true);
         lua.globals().set("json", json_table)?;
 
         // Register yaml stdlib
@@ -217,7 +218,15 @@ impl LuaEvaluator {
                     .map_err(|e| mlua::Error::RuntimeError(format!("yaml.stringify: {}", e)))
             })?,
         )?;
+        yaml_table.set_readonly(true);
         lua.globals().set("yaml", yaml_table)?;
+
+        // Freeze standard library tables to prevent tampering
+        for name in &["string", "math", "table", "coroutine", "bit32", "utf8", "buffer", "os"] {
+            if let Ok(tbl) = lua.globals().get::<Table>(*name) {
+                tbl.set_readonly(true);
+            }
+        }
 
         Ok(Self { lua })
     }
@@ -523,6 +532,7 @@ impl LuaEvaluator {
                 os_meta.set("__index", global_os)?;
                 os_table.set_metatable(Some(os_meta));
             }
+            os_table.set_readonly(true);
             env_table.set("os", os_table)?;
         }
 
