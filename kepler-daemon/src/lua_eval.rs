@@ -117,6 +117,8 @@ pub struct EvalContext {
     pub hardening: HardeningLevel,
     /// Kepler-level environment variables (replaces raw_env / sys_env)
     pub kepler_env: HashMap<String, String>,
+    /// When true, `kepler.env` access raises a Lua error (autostart: true without environment)
+    pub kepler_env_denied: bool,
 }
 
 impl EvalContext {
@@ -537,12 +539,33 @@ impl LuaEvaluator {
         }
 
         // Build `kepler` table — always created so kepler.env.X resolves to nil.
+        // When kepler_env_denied is true (autostart: true without environment),
+        // accessing kepler.env.X raises a Lua error explaining the issue.
         // When no service/hook context and freeze_env is false (mutable path), the
         // kepler.env sub-table stays unfrozen since set_env() will add entries later.
         let needs_mutable_kepler = active_env_sub.is_none() && !freeze_env;
         let kepler_env_table = {
             let kepler_table = self.lua.create_table()?;
-            let kepler_env_sub = if !needs_mutable_kepler {
+            let kepler_env_sub = if ctx.kepler_env_denied {
+                // Error-raising table: any access to kepler.env.X calls error()
+                let t = self.lua.create_table()?;
+                let meta = self.lua.create_table()?;
+                let error_fn = self.lua.create_function(|_, (_tbl, key): (Table, mlua::Value)| -> LuaResult<mlua::Value> {
+                    let key_str = match &key {
+                        mlua::Value::String(s) => s.to_string_lossy().to_string(),
+                        _ => "...".to_string(),
+                    };
+                    Err(mlua::Error::RuntimeError(format!(
+                        "kepler.env.{key} is not available: kepler.autostart is enabled but kepler.autostart.environment is not set. \
+                         To fix, add 'kepler.autostart.environment: [{key}, ...]' or set 'kepler.autostart: false' to use the full CLI environment.",
+                        key = key_str
+                    )))
+                })?;
+                meta.set("__index", error_fn)?;
+                t.set_metatable(Some(meta));
+                t.set_readonly(true);
+                t
+            } else if !needs_mutable_kepler {
                 self.create_frozen_env(&ctx.kepler_env)?
             } else {
                 // No service/hook: kepler.env is the mutable target

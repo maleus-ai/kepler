@@ -341,6 +341,7 @@ impl TestDaemonHarness {
             owner_gid: None,
             owner_user: None,
             kepler_gid: None,
+            kepler_env_denied: false,
         };
 
         if should_mark_initialized {
@@ -527,6 +528,7 @@ impl TestDaemonHarness {
             owner_gid: None,
             owner_user: None,
             kepler_gid: None,
+            kepler_env_denied: false,
         };
 
         run_service_hook(
@@ -588,6 +590,7 @@ impl TestDaemonHarness {
             owner_gid: None,
             owner_user: None,
             kepler_gid: None,
+            kepler_env_denied: false,
         };
 
         run_service_hook(
@@ -698,6 +701,7 @@ impl TestDaemonHarness {
                     owner_gid: None,
                     owner_user: None,
                     kepler_gid: None,
+                    kepler_env_denied: false,
                 };
 
                 let _ = run_service_hook(
@@ -844,6 +848,7 @@ impl TestDaemonHarness {
                     owner_gid: None,
                     owner_user: None,
                     kepler_gid: None,
+                    kepler_env_denied: false,
                 };
 
                 let _ = run_service_hook(

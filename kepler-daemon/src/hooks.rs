@@ -61,6 +61,8 @@ pub struct ServiceHookParams<'a> {
     pub owner_user: Option<&'a str>,
     /// Kepler group GID for group stripping
     pub kepler_gid: Option<u32>,
+    /// When true, `kepler.env` access raises a Lua error (autostart: true without environment)
+    pub kepler_env_denied: bool,
 }
 
 /// Types of service hooks
@@ -321,6 +323,7 @@ pub async fn run_service_hook(
             }),
             hardening: params.hardening,
             kepler_env: params.kepler_env.clone(),
+            kepler_env_denied: params.kepler_env_denied,
         };
 
         // Evaluate the `if` condition (ConfigValue-based)

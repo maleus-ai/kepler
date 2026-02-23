@@ -1256,3 +1256,37 @@ fn test_owner_available_in_condition() {
     let result = eval.eval_condition("owner.user == 'alice'", &ctx).unwrap();
     assert!(result.value, "owner.user should be accessible in condition context");
 }
+
+#[test]
+fn test_kepler_env_denied_raises_error() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut kepler_env = HashMap::new();
+    kepler_env.insert("MY_VAR".to_string(), "should_not_be_visible".to_string());
+    let ctx = EvalContext {
+        kepler_env,
+        kepler_env_denied: true,
+        ..Default::default()
+    };
+
+    let err = eval.eval::<Value>(r#"return kepler.env.MY_VAR"#, &ctx, "test")
+        .expect_err("kepler.env access should error when denied");
+    let msg = err.to_string();
+    assert!(msg.contains("kepler.env.MY_VAR is not available"), "error should name the key: {msg}");
+    assert!(msg.contains("kepler.autostart"), "error should reference kepler.autostart: {msg}");
+    assert!(msg.contains("kepler.autostart.environment"), "error should reference kepler.autostart.environment: {msg}");
+}
+
+#[test]
+fn test_kepler_env_denied_false_allows_access() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut kepler_env = HashMap::new();
+    kepler_env.insert("MY_VAR".to_string(), "hello".to_string());
+    let ctx = EvalContext {
+        kepler_env,
+        kepler_env_denied: false,
+        ..Default::default()
+    };
+
+    let result: String = eval.eval(r#"return kepler.env.MY_VAR"#, &ctx, "test").unwrap();
+    assert_eq!(result, "hello");
+}

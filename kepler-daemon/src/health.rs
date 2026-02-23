@@ -273,6 +273,7 @@ async fn run_status_change_hook(
         // Get kepler_env for hook context
         let kepler_env = handle.get_kepler_env().await;
 
+        let kepler_env_denied = config.as_ref().map(|c| c.is_kepler_env_denied()).unwrap_or(false);
         let hook_params = ServiceHookParams {
             working_dir: &ctx.working_dir,
             env: &ctx.env,
@@ -294,6 +295,7 @@ async fn run_status_change_hook(
             owner_gid: handle.owner_gid(),
             owner_user: handle.owner_user(),
             kepler_gid,
+            kepler_env_denied,
         };
 
         // Hooks are always available from resolved config (inner fields may still

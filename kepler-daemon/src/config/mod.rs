@@ -1468,6 +1468,13 @@ impl KeplerConfig {
         self.kepler.as_ref().and_then(|k| k.autostart.environment())
     }
 
+    /// Returns true when `autostart: true` (Enabled) without an environment declaration.
+    /// In this mode, `kepler.env` access should raise a Lua error instead of silently
+    /// returning nil, because CLI environment variables are not persisted.
+    pub fn is_kepler_env_denied(&self) -> bool {
+        self.global_autostart() && self.autostart_environment().is_none()
+    }
+
     /// Get service names
     pub fn service_names(&self) -> Vec<String> {
         self.services.keys().cloned().collect()

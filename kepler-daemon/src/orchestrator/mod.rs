@@ -471,6 +471,7 @@ impl ServiceOrchestrator {
 
         let state = handle.get_service_state(service_name).await;
         let effective_hardening = self.effective_hardening(handle);
+        let kepler_env_denied = config.is_kepler_env_denied();
         let mut eval_ctx = EvalContext {
             service: Some(ServiceEvalContext {
                 name: service_name.to_string(),
@@ -487,6 +488,7 @@ impl ServiceOrchestrator {
             owner: Self::build_owner_ctx(handle),
             hardening: effective_hardening,
             kepler_env: kepler_env.clone(),
+            kepler_env_denied,
         };
         debug!("[timeit] {} eval context built in {:?}", service_name, ctx_start.elapsed());
 
@@ -731,6 +733,7 @@ impl ServiceOrchestrator {
         // Get current service state for restart_count
         let service_state = handle.get_service_state(service_name).await;
 
+        let kepler_env_denied = config.is_kepler_env_denied();
         let mut eval_ctx = EvalContext {
             service: Some(ServiceEvalContext {
                 name: service_name.to_string(),
@@ -747,6 +750,7 @@ impl ServiceOrchestrator {
             owner: Self::build_owner_ctx(handle),
             hardening: self.effective_hardening(handle),
             kepler_env: kepler_env.clone(),
+            kepler_env_denied,
         };
 
         // Create fresh evaluator and resolve
@@ -1852,6 +1856,7 @@ impl ServiceOrchestrator {
                             }),
                             hook: None,
                             deps: HashMap::new(),
+                            kepler_env_denied: config.is_kepler_env_denied(),
                             ..Default::default()
                         };
 
@@ -2065,6 +2070,7 @@ impl ServiceOrchestrator {
             HashMap::new()
         };
 
+        let kepler_env_denied = config.as_ref().map(|c| c.is_kepler_env_denied()).unwrap_or(false);
         let mut hook_params = ServiceHookParams {
             working_dir: &ctx.working_dir,
             env: &ctx.env,
@@ -2086,6 +2092,7 @@ impl ServiceOrchestrator {
             owner_gid: handle.and_then(|h| h.owner_gid()),
             owner_user: handle.and_then(|h| h.owner_user()),
             kepler_gid: self.kepler_gid,
+            kepler_env_denied,
         };
 
         // Read prior hook outputs from disk and set output_max_size
