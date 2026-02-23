@@ -19,14 +19,14 @@ Kepler supports inline Lua expressions in configuration values using `${{ expr }
 | Syntax                        | Description                        |
 | ----------------------------- | ---------------------------------- |
 | `${{ expr }}$`                 | Evaluate a Lua expression inline   |
-| `${{ env.VAR }}$`              | Reference an environment variable  |
-| `${{ env.VAR or "default" }}$` | Use `"default"` if `VAR` is unset  |
+| `${{ service.env.VAR }}$`              | Reference a service environment variable  |
+| `${{ service.env.VAR or "default" }}$` | Use `"default"` if `VAR` is unset  |
 | `${{ deps.svc.status }}$`      | Reference dependency status        |
 | `${{ deps.svc.outputs.key }}$` | Reference a dependency's output value |
 | `${{ hooks.pre_start.outputs.step1.token }}$` | Reference a hook step output |
 | `${{ service.name }}$`         | Reference the current service name |
 
-Expressions are evaluated as Lua code with access to `env`, `service`, `hook`, `deps`, `hooks`, `global`, and built-in libraries (`json`, `yaml`).
+Expressions are evaluated as Lua code with access to `service`, `hook`, `kepler`, `deps`, `hooks`, `global`, and built-in libraries (`json`, `yaml`).
 
 ---
 
@@ -46,7 +46,7 @@ command: ${{ {"echo", "hello"} }}$  # table → sequence
 
 ```yaml
 environment:
-  - DATABASE_URL=postgres://${{ env.DB_HOST }}$:${{ env.DB_PORT }}$/mydb
+  - DATABASE_URL=postgres://${{ service.env.DB_HOST }}$:${{ service.env.DB_PORT }}$/mydb
 ```
 
 Type coercion rules:
@@ -82,14 +82,14 @@ The following fields support `${{ }}$`:
 - `limits.memory`
 - `logs` settings
 
-**Special case: `env_file` paths** are expanded eagerly at config load time using system environment only, to ensure the env_file is available for snapshot persistence.
+**Special case: `env_file` paths** are expanded eagerly at config load time using `kepler.env` only, to ensure the env_file is available for snapshot persistence.
 
 ---
 
 ## Where Expressions Are NOT Evaluated
 
 - **`depends_on` service names** — Service names (keys/entries) in dependencies must be literal strings. They are needed at config load time for dependency graph construction.
-- **`depends_on` config fields** (`condition`, `timeout`, `restart`, `exit_code`) — These fields **do** support `!lua` tags and `${{ }}$` expressions, evaluated eagerly at config load time with system environment only.
+- **`depends_on` config fields** (`condition`, `timeout`, `restart`, `exit_code`) — These fields **do** support `!lua` tags and `${{ }}$` expressions, evaluated eagerly at config load time with `kepler.env` only.
 
 ---
 
@@ -100,7 +100,7 @@ The available context depends on the evaluation stage:
 ### Stage 1: env_file Path (config load time)
 
 ```yaml
-env_file: ${{ env.CONFIG_DIR }}$/.env    # Only system env available
+env_file: ${{ kepler.env.CONFIG_DIR }}$/.env    # Only kepler.env available
 ```
 
 ### Stage 2: environment (service start time)
@@ -111,23 +111,23 @@ Evaluated **sequentially** — each entry's result is added to the context for s
 # Sequence format
 environment:
   - BASE_DIR=/opt/app
-  - CONFIG=${{ env.BASE_DIR }}$/config   # Can reference BASE_DIR from previous entry
-  - DB_HOST=${{ env.DB_HOST or "localhost" }}$
+  - CONFIG=${{ service.env.BASE_DIR }}$/config   # Can reference BASE_DIR from previous entry
+  - DB_HOST=${{ service.env.DB_HOST or "localhost" }}$
 
 # Mapping format (equivalent)
 environment:
   BASE_DIR: /opt/app
-  CONFIG: ${{ env.BASE_DIR }}$/config
-  DB_HOST: ${{ env.DB_HOST or "localhost" }}$
+  CONFIG: ${{ service.env.BASE_DIR }}$/config
+  DB_HOST: ${{ service.env.DB_HOST or "localhost" }}$
 ```
 
 ### Stage 3: Other Fields (service start time)
 
-All remaining fields are evaluated with the full context (system env + env_file + environment + deps):
+All remaining fields are evaluated with the full context (`kepler.env` + env_file + environment + deps):
 
 ```yaml
-working_dir: ${{ env.APP_DIR }}$
-user: ${{ env.SERVICE_USER or "nobody" }}$
+working_dir: ${{ service.env.APP_DIR }}$
+user: ${{ service.env.SERVICE_USER or "nobody" }}$
 ```
 
 ### Available Variables
@@ -136,7 +136,6 @@ user: ${{ env.SERVICE_USER or "nobody" }}$
 
 | Variable                  | Description                                                |
 | ------------------------- | ---------------------------------------------------------- |
-| `env.VAR`                 | Shortcut: `hook.env` in hook context, else `service.env`   |
 | `service.name`            | Current service name                                       |
 | `service.raw_env.VAR`     | Inherited base environment (from daemon/CLI)               |
 | `service.env_file.VAR`    | Service env_file variables only                            |
@@ -157,6 +156,12 @@ user: ${{ env.SERVICE_USER or "nobody" }}$
 | `hook.env.VAR`            | Full merged environment (raw_env + env_file + environment) |
 | `hook.had_failure`        | Whether a previous hook step has failed                    |
 
+#### Kepler Context
+
+| Variable                  | Description                                                |
+| ------------------------- | ---------------------------------------------------------- |
+| `kepler.env.VAR`          | Kepler environment (declared via `autostart.environment`, or full CLI env when autostart is disabled) |
+
 #### Shortcuts and Shared Tables
 
 | Variable                  | Description                                                |
@@ -174,7 +179,7 @@ user: ${{ env.SERVICE_USER or "nobody" }}$
 | `yaml.parse(str)`        | Deserialize a YAML string into a Lua value                 |
 | `yaml.stringify(val)`    | Serialize a Lua value to a YAML string                     |
 
-> **Note:** Bare variable names like `${{ HOME }}$` resolve to nil. To access environment variables, use `env.HOME` or `service.env.HOME`.
+> **Note:** Bare variable names like `${{ HOME }}$` resolve to nil. To access environment variables, use `service.env.HOME` (or `hook.env.HOME` in hook context, `kepler.env.HOME` for global context).
 
 ---
 
@@ -184,16 +189,16 @@ Use Lua's `or` operator for default values:
 
 ```yaml
 environment:
-  - PORT=${{ env.PORT or "8080" }}$
-  - DB_HOST=${{ env.DB_HOST or "localhost" }}$
-  - LOG_LEVEL=${{ env.LOG_LEVEL or "info" }}$
+  - PORT=${{ service.env.PORT or "8080" }}$
+  - DB_HOST=${{ service.env.DB_HOST or "localhost" }}$
+  - LOG_LEVEL=${{ service.env.LOG_LEVEL or "info" }}$
 ```
 
 For numeric defaults:
 
 ```yaml
 environment:
-  - WORKERS=${{ tonumber(env.WORKERS) or 4 }}$
+  - WORKERS=${{ tonumber(service.env.WORKERS) or 4 }}$
 ```
 
 ---
@@ -206,8 +211,8 @@ environment:
 services:
   app:
     environment:
-      - DATABASE_URL=postgres://${{ env.DB_HOST }}$:${{ env.DB_PORT }}$/${{ env.DB_NAME }}$
-      - REDIS_URL=redis://${{ env.REDIS_HOST or "localhost" }}$:6379
+      - DATABASE_URL=postgres://${{ service.env.DB_HOST }}$:${{ service.env.DB_PORT }}$/${{ service.env.DB_NAME }}$
+      - REDIS_URL=redis://${{ service.env.REDIS_HOST or "localhost" }}$:6379
 ```
 
 ### Sequential Environment References
@@ -217,8 +222,8 @@ services:
   app:
     environment:
       - APP_DIR=/opt/app
-      - CONFIG_PATH=${{ env.APP_DIR }}$/config.yaml
-      - LOG_DIR=${{ env.APP_DIR }}$/logs
+      - CONFIG_PATH=${{ service.env.APP_DIR }}$/config.yaml
+      - LOG_DIR=${{ service.env.APP_DIR }}$/logs
 ```
 
 ### Using Dependency Information

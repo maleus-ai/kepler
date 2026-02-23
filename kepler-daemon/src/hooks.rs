@@ -30,8 +30,8 @@ async fn emit_hook_event(
 pub struct ServiceHookParams<'a> {
     pub working_dir: &'a Path,
     pub env: &'a HashMap<String, String>,
-    /// Base env before transforms (daemon/CLI env for services)
-    pub raw_env: &'a HashMap<String, String>,
+    /// Kepler-level environment variables
+    pub kepler_env: &'a HashMap<String, String>,
     /// Service's env_file vars
     pub env_file_vars: &'a HashMap<String, String>,
     pub log_config: Option<&'a LogWriterConfig>,
@@ -295,7 +295,6 @@ pub async fn run_service_hook(
         let mut eval_ctx = EvalContext {
             service: Some(ServiceEvalContext {
                 name: service_name.to_string(),
-                raw_env: params.raw_env.clone(),
                 env_file: params.env_file_vars.clone(),
                 env: params.env.clone(),
                 initialized: state.as_ref().map(|s| s.initialized),
@@ -306,9 +305,12 @@ pub async fn run_service_hook(
             }),
             hook: Some(HookEvalContext {
                 name: hook_type.as_str().to_string(),
-                raw_env: params.env.clone(),
                 env_file: HashMap::new(),
-                env: params.env.clone(),
+                env: if hook.common().inherit_env == Some(false) {
+                    HashMap::new()
+                } else {
+                    params.env.clone()
+                },
                 had_failure: Some(had_failure),
             }),
             deps: params.deps.clone(),
@@ -318,6 +320,7 @@ pub async fn run_service_hook(
                 user: params.owner_user.map(|s| s.to_string()),
             }),
             hardening: params.hardening,
+            kepler_env: params.kepler_env.clone(),
         };
 
         // Evaluate the `if` condition (ConfigValue-based)

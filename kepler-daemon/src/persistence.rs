@@ -32,8 +32,8 @@ pub struct ExpandedConfigSnapshot {
     pub config_dir: PathBuf,
     /// Unix timestamp of when the snapshot was taken
     pub snapshot_time: i64,
-    /// System environment variables captured from the CLI at config load time
-    pub sys_env: HashMap<String, String>,
+    /// Kepler-level environment variables (resolved from CLI env + kepler.environment)
+    pub kepler_env: HashMap<String, String>,
     /// UID of the CLI user who loaded this config (for per-request authorization)
     #[serde(default)]
     pub owner_uid: Option<u32>,

@@ -1238,7 +1238,7 @@ services:
         .resolve_service("test", &mut ctx, &evaluator, &config_path, None)
         .unwrap();
 
-    let expected_shell = kepler_daemon::config::resolve_shell(&ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default());
+    let expected_shell = kepler_daemon::config::resolve_shell(&ctx.kepler_env);
     assert_eq!(resolved.command, vec![expected_shell, "-c".to_string(), "echo hello && sleep 3600".to_string()]);
 }
 
@@ -1254,7 +1254,7 @@ fn test_run_field_dynamic_resolves() {
     let yaml = r#"
 services:
   test:
-    run: "echo ${{ env.MY_VAR }}$"
+    run: "echo ${{ service.env.MY_VAR }}$"
 "#;
 
     std::fs::write(&config_path, yaml).unwrap();
@@ -1274,6 +1274,6 @@ services:
         .resolve_service("test", &mut ctx, &evaluator, &config_path, None)
         .unwrap();
 
-    let expected_shell = kepler_daemon::config::resolve_shell(&ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default());
+    let expected_shell = kepler_daemon::config::resolve_shell(&ctx.kepler_env);
     assert_eq!(resolved.command, vec![expected_shell, "-c".to_string(), "echo world".to_string()]);
 }

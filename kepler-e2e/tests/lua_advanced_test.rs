@@ -393,7 +393,7 @@ async fn test_lua_service_readonly() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test granular service.raw_env, service.env_file, and env separation
+/// Test granular kepler.env, service.env_file, and env separation
 #[tokio::test]
 async fn test_lua_granular_env() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;

@@ -236,7 +236,7 @@ impl TestDaemonHarness {
             .ok_or("Service not found")?;
 
         // Build evaluation context and resolve service (evaluate ${{ }}$ + !lua + deserialize)
-        let sys_env = self.handle.get_sys_env().await;
+        let sys_env = self.handle.get_kepler_env().await;
         let config = self.handle.get_config().await
             .ok_or("Config not found")?;
 
@@ -250,13 +250,13 @@ impl TestDaemonHarness {
         let mut eval_ctx = kepler_daemon::lua_eval::EvalContext {
             service: Some(kepler_daemon::lua_eval::ServiceEvalContext {
                 name: service_name.to_string(),
-                raw_env: sys_env.clone(),
                 env_file: env_file_vars.clone(),
                 env: full_env,
                 ..Default::default()
             }),
             hook: None,
             deps: HashMap::new(),
+            kepler_env: sys_env.clone(),
             ..Default::default()
         };
 
@@ -323,7 +323,7 @@ impl TestDaemonHarness {
         let hook_params = ServiceHookParams {
             working_dir: &working_dir,
             env: &computed_env,
-            raw_env: &sys_env,
+            kepler_env: &sys_env,
             env_file_vars: &env_file_vars,
             log_config: Some(&ctx.log_config),
             service_user: resolved.user.as_deref(),
@@ -505,11 +505,11 @@ impl TestDaemonHarness {
             .unwrap_or_else(|| self.config_dir.clone());
         let lua_evaluator = self.handle.get_config().await
             .and_then(|c| c.create_lua_evaluator().ok());
-        let raw_env = self.handle.get_sys_env().await;
+        let kepler_env = self.handle.get_kepler_env().await;
         let hook_params = ServiceHookParams {
             working_dir: &working_dir,
             env: &ctx.env,
-            raw_env: &raw_env,
+            kepler_env: &kepler_env,
             env_file_vars: &ctx.env_file_vars,
             log_config: Some(&ctx.log_config),
             service_user: resolved.user.as_deref(),
@@ -566,11 +566,11 @@ impl TestDaemonHarness {
             .unwrap_or_else(|| self.config_dir.clone());
         let lua_evaluator = self.handle.get_config().await
             .and_then(|c| c.create_lua_evaluator().ok());
-        let raw_env = self.handle.get_sys_env().await;
+        let kepler_env = self.handle.get_kepler_env().await;
         let hook_params = ServiceHookParams {
             working_dir: &working_dir,
             env: &ctx.env,
-            raw_env: &raw_env,
+            kepler_env: &kepler_env,
             env_file_vars: &ctx.env_file_vars,
             log_config: Some(&ctx.log_config),
             service_user: resolved.user.as_deref(),
@@ -676,11 +676,11 @@ impl TestDaemonHarness {
                     .and_then(|c| c.create_lua_evaluator().ok());
                 let config_path = handle.config_path().to_path_buf();
                 let config_dir = config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-                let raw_env = handle.get_sys_env().await;
+                let kepler_env = handle.get_kepler_env().await;
                 let hook_params = ServiceHookParams {
                     working_dir: &working_dir,
                     env: &ctx.env,
-                    raw_env: &raw_env,
+                    kepler_env: &kepler_env,
                     env_file_vars: &ctx.env_file_vars,
                     log_config: Some(&ctx.log_config),
                     service_user: resolved.user.as_deref(),
@@ -822,11 +822,11 @@ impl TestDaemonHarness {
                     .and_then(|c| c.create_lua_evaluator().ok());
                 let config_path = handle.config_path().to_path_buf();
                 let config_dir = config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-                let raw_env = handle.get_sys_env().await;
+                let kepler_env = handle.get_kepler_env().await;
                 let hook_params = ServiceHookParams {
                     working_dir: &working_dir,
                     env: &ctx.env,
-                    raw_env: &raw_env,
+                    kepler_env: &kepler_env,
                     env_file_vars: &ctx.env_file_vars,
                     log_config: Some(&ctx.log_config),
                     service_user: resolved.user.as_deref(),

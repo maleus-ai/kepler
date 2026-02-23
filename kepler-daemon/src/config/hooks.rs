@@ -41,6 +41,9 @@ pub struct HookCommon {
     pub environment: ConfigValue<EnvironmentEntries>,
     #[serde(default)]
     pub env_file: ConfigValue<Option<PathBuf>>,
+    /// Whether to inherit the parent service's computed environment into the hook's base env. Defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit_env: Option<bool>,
     /// Runtime Lua condition. When present, the hook is only executed if this
     /// expression evaluates to a truthy value at runtime.
     /// Supports static bools (`if: true`/`if: false`) and dynamic expressions

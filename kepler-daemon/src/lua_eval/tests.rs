@@ -137,8 +137,25 @@ fn test_lua_nil_for_missing_context() {
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
 
-    // service should be nil when not set
+    // service/hook/kepler are always tables (stubs when context is absent)
+    // so that service.env.X / hook.env.X / kepler.env.X resolve to nil instead of erroring
     let result: Value = eval.eval(r#"return service"#, &ctx, "test").unwrap();
+    assert!(matches!(result, Value::Table(_)));
+
+    // env sub-tables exist but accessing missing keys returns nil
+    let result: Value = eval
+        .eval(r#"return service.env.NONEXISTENT"#, &ctx, "test")
+        .unwrap();
+    assert!(matches!(result, Value::Nil));
+
+    let result: Value = eval
+        .eval(r#"return hook.env.NONEXISTENT"#, &ctx, "test")
+        .unwrap();
+    assert!(matches!(result, Value::Nil));
+
+    let result: Value = eval
+        .eval(r#"return kepler.env.NONEXISTENT"#, &ctx, "test")
+        .unwrap();
     assert!(matches!(result, Value::Nil));
 }
 
@@ -511,7 +528,7 @@ fn test_inline_expr_returns_string() {
     env.insert("FOO".to_string(), "bar".to_string());
     let ctx = EvalContext { service: Some(ServiceEvalContext { env, ..Default::default() }), ..Default::default() };
 
-    let result = eval.eval_inline_expr("env.FOO", &ctx, "test").unwrap();
+    let result = eval.eval_inline_expr("service.env.FOO", &ctx, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "bar");
 }
 
@@ -543,18 +560,15 @@ fn test_inline_expr_returns_table() {
 }
 
 #[test]
-fn test_inline_expr_env_shortcut() {
+fn test_inline_expr_service_env() {
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("MY_VAR".to_string(), "hello".to_string());
     let ctx = EvalContext { service: Some(ServiceEvalContext { env, ..Default::default() }), ..Default::default() };
 
-    // env.MY_VAR should work as shortcut for service.env.MY_VAR
-    let result = eval.eval_inline_expr("env.MY_VAR", &ctx, "test").unwrap();
+    // service.env.MY_VAR should work
+    let result = eval.eval_inline_expr("service.env.MY_VAR", &ctx, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "hello");
-
-    let result2 = eval.eval_inline_expr("service.env.MY_VAR", &ctx, "test").unwrap();
-    assert_eq!(result2.as_str().unwrap().to_string(), "hello");
 }
 
 #[test]
@@ -593,10 +607,10 @@ fn test_inline_expr_bare_var_returns_nil() {
 #[test]
 fn test_inline_expr_or_default() {
     let eval = LuaEvaluator::new().unwrap();
-    let ctx = EvalContext::default();
+    let ctx = EvalContext { service: Some(ServiceEvalContext::default()), ..Default::default() };
 
-    // env.MISSING is nil, so `or "default"` should return "default"
-    let result = eval.eval_inline_expr("env.MISSING or \"default\"", &ctx, "test").unwrap();
+    // service.env.MISSING is nil (not set), so `or "default"` should return "default"
+    let result = eval.eval_inline_expr("service.env.MISSING or \"default\"", &ctx, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "default");
 }
 
@@ -620,8 +634,8 @@ fn test_inline_expr_lua_block_functions() {
 }
 
 #[test]
-fn test_lua_eval_has_deps_and_env_shortcut() {
-    // Verify that !lua blocks also get deps and env shortcut
+fn test_lua_eval_has_deps_and_service_env() {
+    // Verify that !lua blocks get deps and service.env
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("FOO".to_string(), "bar".to_string());
@@ -632,7 +646,7 @@ fn test_lua_eval_has_deps_and_env_shortcut() {
     });
     let ctx = EvalContext { service: Some(ServiceEvalContext { env, ..Default::default() }), deps, ..Default::default() };
 
-    let result: String = eval.eval(r#"return env.FOO"#, &ctx, "test").unwrap();
+    let result: String = eval.eval(r#"return service.env.FOO"#, &ctx, "test").unwrap();
     assert_eq!(result, "bar");
 
     let result: String = eval.eval(r#"return deps.db.status"#, &ctx, "test").unwrap();
@@ -758,21 +772,17 @@ fn test_prepared_env_set_env_visible_in_lua() {
     let prepared = eval.prepare_env_mutable(&ctx).unwrap();
 
     // Initial env var is visible
-    let result = eval.eval_inline_expr_with_env("env.INITIAL", &prepared.table, "test").unwrap();
+    let result = eval.eval_inline_expr_with_env("service.env.INITIAL", &prepared.table, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "yes");
 
     // Lua cannot write to env (it's frozen from Lua's perspective)
-    let result = eval.eval_with_env::<Value>(r#"env.HACK = "bad""#, &prepared.table, "test");
-    assert!(result.is_err(), "Lua should not be able to write to env before freeze_env");
+    let result = eval.eval_with_env::<Value>(r#"service.env.HACK = "bad""#, &prepared.table, "test");
+    assert!(result.is_err(), "Lua should not be able to write to service.env before freeze_env");
 
     // Add a new env var via set_env (Rust-side toggle)
     prepared.set_env("ADDED", "new_value").unwrap();
 
-    // New env var is visible in subsequent evaluations
-    let result = eval.eval_inline_expr_with_env("env.ADDED", &prepared.table, "test").unwrap();
-    assert_eq!(result.as_str().unwrap().to_string(), "new_value");
-
-    // Also visible via service.env
+    // New env var is visible in subsequent evaluations via service.env
     let result = eval.eval_inline_expr_with_env("service.env.ADDED", &prepared.table, "test").unwrap();
     assert_eq!(result.as_str().unwrap().to_string(), "new_value");
 }
@@ -803,9 +813,9 @@ fn test_prepared_env_lua_cannot_mutate_frozen_env() {
     let prepared = eval.prepare_env_mutable(&ctx).unwrap();
     prepared.freeze_env();
 
-    // Lua code should not be able to write to env
-    let result = eval.eval_with_env::<Value>(r#"env.NEW = "value""#, &prepared.table, "test");
-    assert!(result.is_err(), "Lua should not be able to write to frozen env");
+    // Lua code should not be able to write to service.env
+    let result = eval.eval_with_env::<Value>(r#"service.env.NEW = "value""#, &prepared.table, "test");
+    assert!(result.is_err(), "Lua should not be able to write to frozen service.env");
 }
 
 #[test]
@@ -819,7 +829,7 @@ fn test_eval_with_env_reuses_table() {
     prepared.freeze_env();
 
     // eval_with_env should work with the prepared table
-    let result: String = eval.eval_with_env(r#"return env.PORT"#, &prepared.table, "test").unwrap();
+    let result: String = eval.eval_with_env(r#"return service.env.PORT"#, &prepared.table, "test").unwrap();
     assert_eq!(result, "3000");
 
     // Global state should be shared across calls

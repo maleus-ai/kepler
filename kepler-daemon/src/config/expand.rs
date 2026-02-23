@@ -14,25 +14,18 @@
 
 use std::path::Path;
 
-use super::SysEnvPolicy;
 use crate::config::lua::lua_to_yaml;
 use crate::errors::{DaemonError, Result};
 use crate::lua_eval::{EvalContext, LuaEvaluator};
 
-/// Resolve sys_env policy for a service.
-/// Priority: service explicit setting > global setting > default (Inherit)
-///
-/// Uses `Option<SysEnvPolicy>` so we can properly distinguish between
-/// "not specified" (`None`) and an explicit value (`Some(...)`).
-pub fn resolve_sys_env(
-    service_sys_env: Option<&SysEnvPolicy>,
-    global_sys_env: Option<&SysEnvPolicy>,
-) -> SysEnvPolicy {
-    // Service explicit setting > Global > Default(Inherit)
-    service_sys_env
-        .or(global_sys_env)
-        .cloned()
-        .unwrap_or(SysEnvPolicy::Inherit)
+/// Resolve inherit_env for a service/hook/healthcheck.
+/// Priority: local > service > global > default (true)
+pub fn resolve_inherit_env(
+    local: Option<bool>,
+    service: Option<bool>,
+    global: Option<bool>,
+) -> bool {
+    local.or(service).or(global).unwrap_or(true)
 }
 
 // ============================================================================

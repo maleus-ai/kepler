@@ -1,9 +1,9 @@
 //! Programmatic config creation with builder pattern
 
 use kepler_daemon::config::{
-    ConfigValue, DependsOn, EnvironmentEntries, HealthCheck, HookCommand, HookCommon, KeplerConfig,
-    KeplerGlobalConfig, LogConfig, RawServiceConfig, ResourceLimits, RestartConfig, RestartPolicy,
-    ServiceConfig, ServiceHooks, SysEnvPolicy,
+    AutostartConfig, ConfigValue, DependsOn, EnvironmentEntries, HealthCheck, HookCommand,
+    HookCommon, KeplerConfig, KeplerGlobalConfig, LogConfig, RawServiceConfig, ResourceLimits,
+    RestartConfig, RestartPolicy, ServiceConfig, ServiceHooks,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,7 +13,8 @@ use std::time::Duration;
 pub struct TestConfigBuilder {
     lua: Option<String>,
     logs: Option<LogConfig>,
-    sys_env: Option<SysEnvPolicy>,
+    default_inherit_env: Option<bool>,
+    autostart: AutostartConfig,
     services: HashMap<String, ServiceConfig>,
 }
 
@@ -22,7 +23,8 @@ impl TestConfigBuilder {
         Self {
             lua: None,
             logs: None,
-            sys_env: None,
+            default_inherit_env: None,
+            autostart: AutostartConfig::Disabled,
             services: HashMap::new(),
         }
     }
@@ -37,8 +39,20 @@ impl TestConfigBuilder {
         self
     }
 
-    pub fn with_global_sys_env(mut self, sys_env: SysEnvPolicy) -> Self {
-        self.sys_env = Some(sys_env);
+    pub fn with_global_default_inherit_env(mut self, inherit_env: bool) -> Self {
+        self.default_inherit_env = Some(inherit_env);
+        self
+    }
+
+    pub fn with_autostart(mut self, autostart: bool) -> Self {
+        self.autostart = if autostart { AutostartConfig::Enabled } else { AutostartConfig::Disabled };
+        self
+    }
+
+    pub fn with_autostart_environment(mut self, env: Vec<String>) -> Self {
+        self.autostart = AutostartConfig::WithEnvironment {
+            environment: ConfigValue::Static(EnvironmentEntries(ConfigValue::wrap_vec(env))),
+        };
         self
     }
 
@@ -49,14 +63,15 @@ impl TestConfigBuilder {
 
     /// Build the KeplerGlobalConfig from the builder fields
     fn build_kepler_global(&self) -> Option<KeplerGlobalConfig> {
-        if self.logs.is_none() && self.sys_env.is_none() {
+        if self.logs.is_none() && self.default_inherit_env.is_none() && matches!(self.autostart, AutostartConfig::Disabled) {
             return None;
         }
         Some(KeplerGlobalConfig {
-            sys_env: self.sys_env.clone(),
+            default_inherit_env: self.default_inherit_env,
             logs: self.logs.clone(),
             timeout: None,
             output_max_size: None,
+            autostart: self.autostart.clone(),
         })
     }
 
@@ -112,7 +127,7 @@ pub struct TestServiceBuilder {
     working_dir: Option<PathBuf>,
     environment: Vec<String>,
     env_file: Option<PathBuf>,
-    sys_env: Option<SysEnvPolicy>,
+    inherit_env: Option<bool>,
     restart: RestartConfig,
     depends_on: Vec<String>,
     depends_on_extended: Option<DependsOn>,
@@ -133,7 +148,7 @@ impl TestServiceBuilder {
             working_dir: None,
             environment: Vec::new(),
             env_file: None,
-            sys_env: None,
+            inherit_env: None,
             restart: RestartConfig::default(),
             depends_on: Vec::new(),
             depends_on_extended: None,
@@ -202,9 +217,9 @@ impl TestServiceBuilder {
         self
     }
 
-    /// Set system environment inheritance policy
-    pub fn with_sys_env(mut self, policy: SysEnvPolicy) -> Self {
-        self.sys_env = Some(policy);
+    /// Set environment inheritance
+    pub fn with_inherit_env(mut self, inherit: bool) -> Self {
+        self.inherit_env = Some(inherit);
         self
     }
 
@@ -292,7 +307,7 @@ impl TestServiceBuilder {
             working_dir: self.working_dir,
             environment: self.environment,
             env_file: self.env_file,
-            sys_env: self.sys_env,
+            inherit_env: self.inherit_env,
             restart: self.restart,
             depends_on,
             healthcheck: self.healthcheck,
@@ -481,6 +496,41 @@ impl TestHookBuilder {
         HookCommand::Script {
             run: script.to_string().into(),
             common: HookCommon { env_file: Some(env_file).into(), ..Default::default() },
+        }
+    }
+
+    /// Create a script hook with inherit_env control
+    pub fn script_with_inherit_env(script: &str, inherit_env: bool) -> HookCommand {
+        HookCommand::Script {
+            run: script.to_string().into(),
+            common: HookCommon {
+                inherit_env: Some(inherit_env),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Create a script hook with inherit_env control and environment variables
+    pub fn script_with_inherit_env_and_env(script: &str, inherit_env: bool, environment: Vec<String>) -> HookCommand {
+        HookCommand::Script {
+            run: script.to_string().into(),
+            common: HookCommon {
+                inherit_env: Some(inherit_env),
+                environment: EnvironmentEntries(ConfigValue::wrap_vec(environment)).into(),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Create a script hook with inherit_env control and an env_file
+    pub fn script_with_inherit_env_and_env_file(script: &str, inherit_env: bool, env_file: PathBuf) -> HookCommand {
+        HookCommand::Script {
+            run: script.to_string().into(),
+            common: HookCommon {
+                inherit_env: Some(inherit_env),
+                env_file: Some(env_file).into(),
+                ..Default::default()
+            },
         }
     }
 

@@ -1,0 +1,13 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  worker:
+    command: ["sleep", "300"]
+    environment:
+      - SERVICE_VAR=from_service
+    hooks:
+      pre_start:
+        - run: "echo SERVICE_VAR=${SERVICE_VAR:-MISSING}"
+          inherit_env: true

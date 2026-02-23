@@ -377,13 +377,13 @@ Error: Privilege escalation denied for service 'myservice': user 'www-data' (uid
 
 ## Environment Isolation
 
-By default, Kepler inherits the system environment when starting services and hooks (`sys_env: inherit`). This ensures services have access to `PATH` and other standard variables that most programs expect. Services and hooks inherit the `sys_env` policy from `kepler.sys_env` unless explicitly overridden at the service level.
+By default, Kepler inherits the kepler environment (`kepler.env`) when starting services and hooks (`inherit_env: true`). This ensures services have access to `PATH` and other standard variables. Services and hooks inherit the `inherit_env` policy from `kepler.default_inherit_env` unless explicitly overridden at the service level.
 
-For production environments where environment isolation is important, use `sys_env: clear` (globally or per-service) to prevent unintended leakage of sensitive environment variables:
+For production environments where environment isolation is important, use `inherit_env: false` (globally or per-service) to prevent unintended leakage of sensitive environment variables:
 
-- `AWS_SECRET_KEY`, `API_TOKENS`, etc. from your shell are NOT passed to services or hooks
+- `AWS_SECRET_KEY`, `API_TOKENS`, etc. from `kepler.env` are NOT injected into the service's process environment
 - Only explicitly configured `environment` entries and `env_file` variables are available
-- System env vars captured at config load time are available for variable expansion but not passed to processes
+- `kepler.env` values are still available for `${{ }}$` expression evaluation — `inherit_env` only controls the process environment, not expression resolution
 
 See [Environment Variables](environment-variables.md) for details.
 
@@ -402,7 +402,7 @@ Kepler's Lua scripting uses a sandboxed Luau runtime with restricted capabilitie
 - No native library loading
 
 **Protected:**
-- Environment tables (`service.env`, `service.raw_env`, `service.env_file`, `hook.env`, `hook.raw_env`, `hook.env_file`) are frozen via metatable proxies
+- Environment tables (`service.env`, `service.raw_env`, `service.env_file`, `hook.env`, `hook.raw_env`, `hook.env_file`, `kepler.env`) are frozen via metatable proxies
 - Writes to frozen tables raise runtime errors
 - Metatables are protected from removal
 

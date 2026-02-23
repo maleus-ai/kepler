@@ -2,6 +2,7 @@
 # Producer exits with outputs, consumer should still read them after daemon restart
 
 kepler:
+  autostart: true
   logs:
     buffer_size: 0
 

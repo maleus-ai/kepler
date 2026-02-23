@@ -71,9 +71,15 @@ async fn test_start_specific_without_no_deps_still_waits() -> E2eResult<()> {
     let output = harness.start_services(&config_path).await?;
     output.assert_success();
 
-    // Wait for dependency to be running, then stop all
+    // Wait for both services to be running before stopping.
+    // `dependent` is started asynchronously via a background task; if we stop
+    // before it finishes, the background task may set it back to Running after
+    // stop completes.
     harness
         .wait_for_service_status(&config_path, "dependency", "running", Duration::from_secs(10))
+        .await?;
+    harness
+        .wait_for_service_status(&config_path, "dependent", "running", Duration::from_secs(10))
         .await?;
     let output = harness.stop_services(&config_path).await?;
     output.assert_success();

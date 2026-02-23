@@ -90,9 +90,9 @@ kepler start -d                          # Detach immediately
 kepler start -d --wait                   # Block until startup cluster ready
 kepler start -d --wait --timeout 30s     # Block with timeout
 kepler start backend                     # Start a specific service
-kepler start -e MY_VAR=hello             # Override a system env var
+kepler start -e MY_VAR=hello             # Override a kepler.env variable
 kepler start -e A=1 -e B=2              # Override multiple env vars
-kepler start --refresh-env               # Refresh all sys_env from current shell
+kepler start --refresh-env               # Refresh all kepler env from current shell
 kepler start --abort-on-failure            # Stop all services immediately on unhandled failure
 kepler start -d --wait --no-abort-on-failure  # Don't stop services on failure, just exit 1
 kepler start --hardening strict          # Start with per-config hardening
@@ -103,8 +103,8 @@ kepler start --hardening strict          # Start with per-config hardening
 | `-d, --detach` | Return immediately, startup runs in background |
 | `--wait` | Block until startup cluster is ready (requires `-d`) |
 | `--timeout <DURATION>` | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait` |
-| `-e, --override-envs <KEY=VALUE>` | Override specific system environment variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services |
-| `-r, --refresh-env` | Replace all baked system environment variables with the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
+| `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services |
+| `-r, --refresh-env` | Re-capture the entire `kepler.env` from the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
 | `--abort-on-failure` | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`) |
 | `--no-abort-on-failure` | Don't stop services on unhandled failure (requires `--wait`) |
 | `--hardening <LEVEL>` | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening) |
@@ -167,8 +167,8 @@ kepler restart --refresh-env             # Restart with refreshed shell env
 | `--wait` | Block until restart completes with progress bars (mutually exclusive with `--follow`) |
 | `--timeout <DURATION>` | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait` |
 | `--follow` | Follow logs after restart completes. Ctrl+C exits log following, services keep running (mutually exclusive with `--wait`) |
-| `-e, --override-envs <KEY=VALUE>` | Override specific system environment variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services |
-| `-r, --refresh-env` | Replace all baked system environment variables with the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
+| `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services |
+| `-r, --refresh-env` | Re-capture the entire `kepler.env` from the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
 | `--no-deps` | Skip dependency ordering (requires specifying service names) |
 
 **Behavior by mode:**

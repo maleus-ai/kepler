@@ -29,7 +29,7 @@ lua: |
   end
 
 kepler:
-  sys_env: inherit
+  default_inherit_env: true
   timeout: 30s
   logs:
     max_size: "1M"
@@ -79,7 +79,7 @@ services:
   redis:
     command: ["sh", "-c", "echo Redis starting; exec sleep 300"]
     restart: always
-    sys_env: clear
+    inherit_env: false
     healthcheck:
       command: ["true"]
       interval: 1s

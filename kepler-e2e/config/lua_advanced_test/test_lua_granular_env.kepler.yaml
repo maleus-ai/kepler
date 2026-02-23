@@ -8,19 +8,19 @@ services:
     environment:
       - ENV_VAR=from_environment
     command: !lua |
-      -- Verify service.raw_env has PATH but not FILE_VAR or ENV_VAR
-      local sys_has_path = service.raw_env.PATH ~= nil
-      local sys_no_file = service.env_file.FILE_VAR == nil  -- raw_env should not have FILE_VAR
-      local sys_no_env = service.raw_env.ENV_VAR == nil
+      -- Verify kepler.env has PATH but not FILE_VAR or ENV_VAR
+      local sys_has_path = kepler.env.PATH ~= nil
+      local sys_no_file = service.env_file.FILE_VAR == nil  -- kepler.env should not have FILE_VAR
+      local sys_no_env = kepler.env.ENV_VAR == nil
 
       -- Verify service.env_file has FILE_VAR but not ENV_VAR
       local file_has_var = service.env_file.FILE_VAR == "from_file"
       local file_no_env = service.env_file.ENV_VAR == nil
 
       -- Verify env has all three
-      local env_has_path = env.PATH ~= nil
-      local env_has_file = env.FILE_VAR == "from_file"
-      local env_has_env = env.ENV_VAR == "from_environment"
+      local env_has_path = service.env.PATH ~= nil
+      local env_has_file = service.env.FILE_VAR == "from_file"
+      local env_has_env = service.env.ENV_VAR == "from_environment"
 
       -- Build result
       local checks = {}

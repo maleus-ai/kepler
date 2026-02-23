@@ -1,11 +1,14 @@
 # Test that restart preserves baked config (doesn't re-expand env vars)
 kepler:
+  autostart:
+    environment:
+      - TEST_RESTART_VAR
   logs:
     buffer_size: 0
 services:
   env-service:
     command: ["sh", "-c", "echo VAR=$TEST_RESTART_VAR && sleep 3600"]
-    sys_env: inherit
+    inherit_env: true
     environment:
-      - TEST_RESTART_VAR=${{ env.TEST_RESTART_VAR }}$
+      - TEST_RESTART_VAR=${{ service.env.TEST_RESTART_VAR }}$
     restart: no

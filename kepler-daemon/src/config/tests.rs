@@ -11,39 +11,34 @@ fn test_parse_duration() {
 }
 
 #[test]
-fn test_resolve_sys_env_service_overrides_global() {
-    let service_sys_env = Some(SysEnvPolicy::Clear);
-    let global_sys_env = Some(SysEnvPolicy::Inherit);
-    let result = resolve_sys_env(service_sys_env.as_ref(), global_sys_env.as_ref());
-    assert_eq!(result, SysEnvPolicy::Clear);
+fn test_resolve_inherit_env_service_overrides_global() {
+    let result = resolve_inherit_env(None, Some(false), Some(true));
+    assert_eq!(result, false);
 }
 
 #[test]
-fn test_resolve_sys_env_service_inherit_overrides_global_clear() {
-    let service_sys_env = Some(SysEnvPolicy::Inherit);
-    let global_sys_env = Some(SysEnvPolicy::Clear);
-    let result = resolve_sys_env(service_sys_env.as_ref(), global_sys_env.as_ref());
-    assert_eq!(result, SysEnvPolicy::Inherit);
+fn test_resolve_inherit_env_service_true_overrides_global_false() {
+    let result = resolve_inherit_env(None, Some(true), Some(false));
+    assert_eq!(result, true);
 }
 
 #[test]
-fn test_resolve_sys_env_uses_global_when_service_unset() {
-    let global_sys_env = Some(SysEnvPolicy::Clear);
-    let result = resolve_sys_env(None, global_sys_env.as_ref());
-    assert_eq!(result, SysEnvPolicy::Clear);
+fn test_resolve_inherit_env_uses_global_when_service_unset() {
+    let result = resolve_inherit_env(None, None, Some(false));
+    assert_eq!(result, false);
 }
 
 #[test]
-fn test_resolve_sys_env_falls_back_to_inherit() {
-    let result = resolve_sys_env(None, None);
-    assert_eq!(result, SysEnvPolicy::Inherit);
+fn test_resolve_inherit_env_falls_back_to_true() {
+    let result = resolve_inherit_env(None, None, None);
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_kepler_namespace_parsing() {
     let yaml = r#"
 kepler:
-  sys_env: inherit
+  default_inherit_env: true
 
 services:
   app:
@@ -53,8 +48,8 @@ services:
 
     assert!(config.kepler.is_some());
     let kepler = config.kepler.as_ref().unwrap();
-    assert_eq!(kepler.sys_env, Some(SysEnvPolicy::Inherit));
-    assert_eq!(config.global_sys_env(), Some(&SysEnvPolicy::Inherit));
+    assert_eq!(kepler.default_inherit_env, Some(true));
+    assert_eq!(config.global_default_inherit_env(), Some(true));
 }
 
 #[test]
@@ -66,7 +61,7 @@ services:
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     assert!(config.kepler.is_none());
-    assert!(config.global_sys_env().is_none());
+    assert!(config.global_default_inherit_env().is_none());
     assert!(config.global_logs().is_none());
 }
 
@@ -116,9 +111,9 @@ environment:
     // With the new design, sequences are always Static at the outer level.
     // Inner elements with ${{ }}$ are individually Dynamic.
     let yaml_dynamic = r#"
-command: ["./app", "${{ env.HOME }}$"]
+command: ["./app", "${{ service.env.HOME }}$"]
 environment:
-  - FOO=${{ env.HOME }}$
+  - FOO=${{ service.env.HOME }}$
 "#;
     let raw_dyn: RawServiceConfig = serde_yaml::from_str(yaml_dynamic).unwrap();
     // Outer level is Static (sequence), inner elements have dynamic content
@@ -134,7 +129,7 @@ environment:
     // Top-level !lua makes the outer ConfigValue dynamic
     let yaml_lua = r#"
 command: !lua |
-  return {"./app", env.HOME}
+  return {"./app", service.env.HOME}
 "#;
     let raw_lua: RawServiceConfig = serde_yaml::from_str(yaml_lua).unwrap();
     assert!(raw_lua.command.is_dynamic());
@@ -280,7 +275,7 @@ services:
 #[test]
 fn test_run_field_dynamic() {
     let yaml = r#"
-run: "echo ${{ env.HOME }}$"
+run: "echo ${{ service.env.HOME }}$"
 "#;
     let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
     assert!(raw.has_run());
@@ -333,7 +328,7 @@ services:
     let resolved = config
         .resolve_service("svc", &mut ctx, &evaluator, &config_path, None)
         .unwrap();
-    let expected_shell = super::resolve_shell(&ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default());
+    let expected_shell = super::resolve_shell(&ctx.kepler_env);
     assert_eq!(resolved.command, vec![expected_shell, "-c".to_string(), "echo hello && echo world".to_string()]);
 }
 
@@ -548,7 +543,7 @@ fn test_environment_map_format_dynamic_value() {
     let yaml = r#"
 command: ["./app"]
 environment:
-  HOME: "${{ env.HOME }}$"
+  HOME: "${{ service.env.HOME }}$"
 "#;
     let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
     let entries = &raw.environment.as_static().unwrap().0;
@@ -562,7 +557,7 @@ fn test_environment_map_format_embedded_dynamic() {
     let yaml = r#"
 command: ["./app"]
 environment:
-  GREETING: "hello_${{ env.USER }}$_world"
+  GREETING: "hello_${{ service.env.USER }}$_world"
 "#;
     let raw: RawServiceConfig = serde_yaml::from_str(yaml).unwrap();
     let entries = &raw.environment.as_static().unwrap().0;

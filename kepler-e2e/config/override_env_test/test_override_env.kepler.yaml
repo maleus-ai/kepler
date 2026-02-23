@@ -7,5 +7,5 @@ kepler:
 services:
   env-printer:
     command: ["sh", "-c", "echo OVERRIDE_A=${OVERRIDE_A:-EMPTY} OVERRIDE_B=${OVERRIDE_B:-EMPTY} && sleep 30"]
-    sys_env: inherit
+    inherit_env: true
     restart: no

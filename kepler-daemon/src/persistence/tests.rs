@@ -26,7 +26,7 @@ service_envs: {}
 service_working_dirs: {}
 config_dir: /tmp
 snapshot_time: 1700000000
-sys_env: {}
+kepler_env: {}
 "#;
     let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(snapshot.owner_uid, None);
@@ -41,7 +41,7 @@ config:
   services: {}
 config_dir: /tmp
 snapshot_time: 1700000000
-sys_env: {}
+kepler_env: {}
 owner_uid: 1000
 owner_gid: 1000
 "#;

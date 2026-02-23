@@ -24,7 +24,7 @@ const RESTART_DELAY: Duration = Duration::from_millis(500);
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{resolve_log_retention, resolve_sys_env, DependsOn, KeplerConfig, LogRetention, RawServiceConfig, ServiceHooks, SysEnvPolicy};
+use crate::config::{resolve_log_retention, resolve_inherit_env, DependsOn, KeplerConfig, LogRetention, RawServiceConfig, ServiceHooks};
 use crate::hardening::HardeningLevel;
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
@@ -150,9 +150,9 @@ impl ServiceOrchestrator {
             .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening)
             .await?;
 
-        // Merge override envs into stored sys_env if provided
+        // Merge override envs into stored kepler_env if provided
         if let Some(overrides) = override_envs {
-            handle.merge_sys_env(overrides).await;
+            handle.merge_kepler_env(overrides).await;
         }
 
         // Get config and determine services to start
@@ -435,10 +435,10 @@ impl ServiceOrchestrator {
         // Transition: Waiting → Starting (dependencies satisfied)
         handle.set_service_status(service_name, ServiceStatus::Starting).await?;
 
-        // Build evaluation context (sys_env + deps).
+        // Build evaluation context (kepler_env + deps).
         // env_file vars are loaded inside resolve_service (step 0) so that
         // !lua env_file tags are evaluated before environment.
-        let sys_env = handle.get_sys_env().await;
+        let kepler_env = handle.get_kepler_env().await;
         let config = handle.get_config().await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
         let config_dir = handle.get_config_dir().await;
@@ -466,7 +466,7 @@ impl ServiceOrchestrator {
         // For !lua env_file tags, this returns empty — resolve_service will handle them.
         let env_file_vars = self.load_service_env_file(service_name, &ctx.service_config, &config_dir, handle).await;
 
-        let mut full_env = sys_env.clone();
+        let mut full_env = kepler_env.clone();
         full_env.extend(env_file_vars.clone());
 
         let state = handle.get_service_state(service_name).await;
@@ -474,7 +474,6 @@ impl ServiceOrchestrator {
         let mut eval_ctx = EvalContext {
             service: Some(ServiceEvalContext {
                 name: service_name.to_string(),
-                raw_env: sys_env.clone(),
                 env_file: env_file_vars,
                 env: full_env,
                 initialized: state.as_ref().map(|s| s.initialized),
@@ -487,6 +486,7 @@ impl ServiceOrchestrator {
             deps: dep_infos,
             owner: Self::build_owner_ctx(handle),
             hardening: effective_hardening,
+            kepler_env: kepler_env.clone(),
         };
         debug!("[timeit] {} eval context built in {:?}", service_name, ctx_start.elapsed());
 
@@ -538,15 +538,16 @@ impl ServiceOrchestrator {
 
         let svc_ctx = eval_ctx.service.as_ref().unwrap();
 
-        // Build computed_env respecting sys_env policy.
-        // svc_ctx.env has raw_env + env_file + environment (needed for Lua evaluation).
-        // But with sys_env: clear, the process should NOT inherit raw_env vars.
-        let sys_env_policy = resolve_sys_env(
-            resolved.sys_env.as_ref(),
-            config.global_sys_env(),
+        // Build computed_env respecting inherit_env policy.
+        // svc_ctx.env has kepler_env + env_file + environment (needed for Lua evaluation).
+        // But with inherit_env: false, the process should NOT inherit kepler_env vars.
+        let inherit = resolve_inherit_env(
+            None,
+            resolved.inherit_env,
+            config.global_default_inherit_env(),
         );
-        let computed_env = if sys_env_policy == SysEnvPolicy::Clear {
-            // Only env_file + environment entries (no inherited raw_env)
+        let computed_env = if !inherit {
+            // Only env_file + environment entries (no inherited kepler_env)
             let mut env = svc_ctx.env_file.clone();
             crate::env::insert_env_entries(&mut env, &resolved.environment);
             env
@@ -703,7 +704,7 @@ impl ServiceOrchestrator {
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
         let config_dir = handle.get_config_dir().await;
         let state_dir = handle.get_state_dir().await;
-        let sys_env = handle.get_sys_env().await;
+        let kepler_env = handle.get_kepler_env().await;
 
         // Build dependency info from current service states
         let mut dep_infos = HashMap::new();
@@ -724,7 +725,7 @@ impl ServiceOrchestrator {
         // Pre-load env_file vars for plain string paths
         let env_file_vars = self.load_service_env_file(service_name, &ctx.service_config, &config_dir, handle).await;
 
-        let mut full_env = sys_env.clone();
+        let mut full_env = kepler_env.clone();
         full_env.extend(env_file_vars.clone());
 
         // Get current service state for restart_count
@@ -733,7 +734,6 @@ impl ServiceOrchestrator {
         let mut eval_ctx = EvalContext {
             service: Some(ServiceEvalContext {
                 name: service_name.to_string(),
-                raw_env: sys_env.clone(),
                 env_file: env_file_vars,
                 env: full_env,
                 initialized: service_state.as_ref().map(|s| s.initialized),
@@ -746,6 +746,7 @@ impl ServiceOrchestrator {
             deps: dep_infos,
             owner: Self::build_owner_ctx(handle),
             hardening: self.effective_hardening(handle),
+            kepler_env: kepler_env.clone(),
         };
 
         // Create fresh evaluator and resolve
@@ -780,12 +781,13 @@ impl ServiceOrchestrator {
 
         let svc_ctx = eval_ctx.service.as_ref().unwrap();
 
-        // Build computed_env respecting sys_env policy
-        let sys_env_policy = resolve_sys_env(
-            resolved.sys_env.as_ref(),
-            config.global_sys_env(),
+        // Build computed_env respecting inherit_env
+        let inherit = resolve_inherit_env(
+            None,
+            resolved.inherit_env,
+            config.global_default_inherit_env(),
         );
-        let computed_env = if sys_env_policy == SysEnvPolicy::Clear {
+        let computed_env = if !inherit {
             let mut env = svc_ctx.env_file.clone();
             crate::env::insert_env_entries(&mut env, &resolved.environment);
             env
@@ -1268,9 +1270,9 @@ impl ServiceOrchestrator {
         let handle = self.registry.get(&config_path.to_path_buf())
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
-        // Merge override envs into stored sys_env if provided
+        // Merge override envs into stored kepler_env if provided
         if let Some(overrides) = override_envs {
-            handle.merge_sys_env(overrides).await;
+            handle.merge_kepler_env(overrides).await;
         }
 
         let config = handle
@@ -2056,9 +2058,9 @@ impl ServiceOrchestrator {
         let evaluator = config.as_ref()
             .and_then(|c| c.create_lua_evaluator().ok());
 
-        // Get raw_env (sys_env from daemon/CLI) for hook context
-        let raw_env = if let Some(h) = handle {
-            h.get_sys_env().await
+        // Get kepler_env for hook context
+        let kepler_env = if let Some(h) = handle {
+            h.get_kepler_env().await
         } else {
             HashMap::new()
         };
@@ -2066,7 +2068,7 @@ impl ServiceOrchestrator {
         let mut hook_params = ServiceHookParams {
             working_dir: &ctx.working_dir,
             env: &ctx.env,
-            raw_env: &raw_env,
+            kepler_env: &kepler_env,
             env_file_vars: &ctx.env_file_vars,
             log_config: Some(&ctx.log_config),
             service_user: resolved.user.as_deref(),
@@ -2214,11 +2216,12 @@ impl ServiceOrchestrator {
         let raw = config.services.get(service_name)
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
-        let sys_env_policy = resolve_sys_env(
-            raw.sys_env.as_ref(),
-            config.global_sys_env(),
+        let inherit = resolve_inherit_env(
+            None,
+            raw.inherit_env,
+            config.global_default_inherit_env(),
         );
-        let clear_env = sys_env_policy == SysEnvPolicy::Clear;
+        let clear_env = !inherit;
 
         // Compute groups, stripping kepler GID when hardening is enabled
         #[cfg(unix)]

@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use super::context::{DiagnosticCounts, HealthCheckUpdate, ServiceContext, TaskHandleType};
-use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
+use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig};
 use crate::watcher::FileWatcherHandle;
 
 /// Stdout and stderr capture task handles taken from a process handle.
@@ -78,10 +78,7 @@ pub enum ConfigCommand {
     GetGlobalLogConfig {
         reply: oneshot::Sender<Option<LogConfig>>,
     },
-    GetGlobalSysEnv {
-        reply: oneshot::Sender<Option<SysEnvPolicy>>,
-    },
-    GetSysEnv {
+    GetKeplerEnv {
         reply: oneshot::Sender<HashMap<String, String>>,
     },
     IsServiceRunning {
@@ -299,8 +296,8 @@ pub enum ConfigCommand {
         context: Box<EvalContext>,
         reply: oneshot::Sender<Result<ConditionResult>>,
     },
-    /// Merge overrides into the stored sys_env, re-save snapshot, and clear resolved config cache
-    MergeSysEnv {
+    /// Merge overrides into the stored kepler_env, re-save snapshot, and clear resolved config cache
+    MergeKeplerEnv {
         overrides: HashMap<String, String>,
         reply: oneshot::Sender<()>,
     },

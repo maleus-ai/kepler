@@ -11,10 +11,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::config::{resolve_log_buffer_size, resolve_log_max_size, DependencyConfig, KeplerConfig, ServiceConfig};
+use crate::config::{resolve_log_buffer_size, resolve_log_max_size, ConfigValue, DependencyConfig, EnvironmentEntries, KeplerConfig, ServiceConfig};
 use crate::hardening::HardeningLevel;
 use crate::deps::{get_start_order, is_condition_met, is_failure_handled};
-use crate::lua_eval::{ConditionResult, EvalContext};
+use crate::lua_eval::{ConditionResult, EvalContext, LuaEvaluator};
 use crate::errors::{DaemonError, Result};
 use crate::events::{service_event_channel, ServiceEventMessage, ServiceEventSender};
 use crate::logs::{LogReader, LogWriterConfig, DEFAULT_BUFFER_SIZE};
@@ -68,8 +68,8 @@ pub struct ConfigActor {
     restored_from_snapshot: bool,
     /// Whether an event handler has been spawned for this config
     event_handler_spawned: bool,
-    /// System environment variables captured from the CLI
-    sys_env: HashMap<String, String>,
+    /// Kepler-level environment variables (resolved from CLI env + kepler.environment)
+    kepler_env: HashMap<String, String>,
     /// UID of the CLI user who loaded this config
     owner_uid: Option<u32>,
     /// GID of the CLI user who loaded this config
@@ -83,6 +83,10 @@ pub struct ConfigActor {
     /// Per-service dependency watchers.
     /// Maps service_name -> list of channels to notify when that service's state changes.
     dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>>,
+
+    /// Lua evaluator owned by this actor. Created in create(), used for kepler.environment
+    /// resolution, then moved to the spawn_blocking Lua worker thread on first runtime eval.
+    evaluator: Option<crate::lua_eval::LuaEvaluator>,
 
     /// Channel to the dedicated Lua worker thread (lazily spawned)
     lua_eval_tx: Option<mpsc::UnboundedSender<LuaEvalRequest>>,
@@ -163,7 +167,7 @@ impl ConfigActor {
         let _ = persistence.save_source_path(&canonical_path);
 
         // Check if we have an existing expanded config snapshot
-        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_sys_env, owner_uid, owner_gid, resolved_hardening) =
+        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_kepler_env, owner_uid, owner_gid, resolved_hardening, evaluator) =
             if let Ok(Some(snapshot)) = persistence.load_expanded_config() {
                 info!(
                     "Restoring config from snapshot (taken at {})",
@@ -212,7 +216,7 @@ impl ConfigActor {
                     .map(|ps| ps.config_initialized)
                     .unwrap_or(false);
 
-                let restored_sys_env = snapshot.sys_env;
+                let restored_sys_env = snapshot.kepler_env;
                 let owner_uid = snapshot.owner_uid;
                 let owner_gid = snapshot.owner_gid;
                 let restored_hardening = snapshot.hardening
@@ -220,6 +224,16 @@ impl ConfigActor {
                     .and_then(|s| s.parse::<HardeningLevel>().ok());
 
                 let config = snapshot.config;
+
+                // After restoring config from snapshot, create evaluator for runtime use
+                let evaluator = LuaEvaluator::new().map_err(|e| DaemonError::Internal(
+                    format!("Failed to create Lua evaluator: {}", e),
+                ))?;
+                if let Some(ref code) = config.lua {
+                    if let Err(e) = evaluator.load_inline(code) {
+                        warn!("Failed to load lua: block from snapshot (runtime Lua evals may fail): {}", e);
+                    }
+                }
 
                 (
                     config,
@@ -232,12 +246,13 @@ impl ConfigActor {
                     owner_uid,
                     owner_gid,
                     restored_hardening,
+                    Some(evaluator),
                 )
             } else {
                 // No snapshot - parse fresh from source
                 info!("Loading config fresh from source (no snapshot)");
 
-                let resolved_sys_env = match sys_env {
+                let cli_env = match sys_env {
                     Some(env) => env,
                     None => {
                         warn!("No sys_env provided and no snapshot exists; using empty environment");
@@ -269,9 +284,9 @@ impl ConfigActor {
                         .map_err(DaemonError::ConfigCopy)?;
                 }
 
-                // Parse config from the secure copy (baking with sys_env)
+                // Parse config from the secure copy (baking with cli_env initially)
                 // Map error to show the original config path, not the internal copy
-                let mut config = KeplerConfig::load(&copied_config_path, &resolved_sys_env)
+                let mut config = KeplerConfig::load(&copied_config_path, &cli_env)
                     .map_err(|e| match e {
                         DaemonError::ConfigParse { source, .. } => DaemonError::ConfigParse {
                             path: canonical_path.clone(),
@@ -279,6 +294,21 @@ impl ConfigActor {
                         },
                         other => other,
                     })?;
+
+                // Create the LuaEvaluator that the actor will own for its lifetime.
+                // This is the same evaluator later used by handle_lua_eval() for runtime conditions.
+                let evaluator = LuaEvaluator::new().map_err(|e| DaemonError::Internal(
+                    format!("Failed to create Lua evaluator: {}", e),
+                ))?;
+                if let Some(ref code) = config.lua {
+                    evaluator.load_inline(code).map_err(|e| DaemonError::LuaError {
+                        path: canonical_path.clone(),
+                        message: format!("Error in lua: block: {}", e),
+                    })?;
+                }
+
+                // Resolve kepler.environment using the actor's evaluator
+                let resolved_kepler_env = Self::compute_kepler_env(&config, &cli_env, &evaluator)?;
 
                 // Bake default user into services based on CLI user
                 if let Some((uid, gid)) = config_owner {
@@ -291,8 +321,11 @@ impl ConfigActor {
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| PathBuf::from("."));
 
-                // Copy env_files to state directory for snapshot self-containment
-                let _ = persistence.copy_env_files(&config.services, &config_dir);
+                // Copy env_files to state directory when autostart is enabled,
+                // so they survive even if the originals are deleted before snapshot time.
+                if config.global_autostart() {
+                    let _ = persistence.copy_env_files(&config.services, &config_dir);
+                }
 
                 // Initialize service states with empty computed_env and working_dir.
                 // These are built lazily at service start time via ${{}}$ expansion.
@@ -316,10 +349,11 @@ impl ConfigActor {
                     false, // not initialized
                     false, // snapshot not yet taken
                     false, // not restored from snapshot
-                    resolved_sys_env,
+                    resolved_kepler_env,
                     config_owner.map(|(uid, _)| uid),
                     config_owner.map(|(_, gid)| gid),
                     hardening,
+                    Some(evaluator),
                 )
             };
 
@@ -359,12 +393,13 @@ impl ConfigActor {
             snapshot_taken,
             restored_from_snapshot,
             event_handler_spawned: false,
-            sys_env: resolved_sys_env,
+            kepler_env: resolved_kepler_env,
             owner_uid,
             owner_gid,
             hardening: resolved_hardening,
             subscribers,
             dep_watchers,
+            evaluator,
             lua_eval_tx: None,
             event_handler_task: None,
             event_forwarder_tasks: Vec::new(),
@@ -419,34 +454,35 @@ impl ConfigActor {
     ) {
         if self.lua_eval_tx.is_none() {
             let (tx, mut rx) = mpsc::unbounded_channel::<LuaEvalRequest>();
+            // Take the actor's evaluator (already has lua: block loaded)
+            let taken_evaluator = self.evaluator.take();
             let config_lua = self.config.lua.clone();
             tokio::task::spawn_blocking(move || {
-                use crate::lua_eval::LuaEvaluator;
-
-                let evaluator = match LuaEvaluator::new() {
-                    Ok(e) => e,
-                    Err(e) => {
-                        // Drain and fail all pending requests
-                        let err_msg = format!("Failed to create Lua evaluator: {}", e);
-                        let _ = rx; // drop rx after draining
-                        // Can't drain an already-moved rx, so just log the error.
-                        // The channel will be dropped, causing all future sends to fail.
-                        tracing::error!("{}", err_msg);
-                        return;
+                // Use actor's evaluator, or create fresh one as fallback
+                let evaluator = match taken_evaluator {
+                    Some(e) => e,
+                    None => {
+                        let e = match LuaEvaluator::new() {
+                            Ok(e) => e,
+                            Err(e) => {
+                                tracing::error!("Failed to create Lua evaluator: {}", e);
+                                return;
+                            }
+                        };
+                        if let Some(ref code) = config_lua {
+                            if let Err(err) = e.load_inline(code) {
+                                tracing::error!("Failed to load Lua code: {}", err);
+                                while let Ok(req) = rx.try_recv() {
+                                    let _ = req.reply.send(Err(DaemonError::Internal(
+                                        format!("Lua initialization failed: {}", err),
+                                    )));
+                                }
+                                return;
+                            }
+                        }
+                        e
                     }
                 };
-
-                if let Some(ref code) = config_lua
-                    && let Err(e) = evaluator.load_inline(code) {
-                        tracing::error!("Failed to load Lua code: {}", e);
-                        // Drain remaining requests with error
-                        while let Ok(req) = rx.try_recv() {
-                            let _ = req.reply.send(Err(DaemonError::Internal(
-                                format!("Lua initialization failed: {}", e),
-                            )));
-                        }
-                        return;
-                    }
 
                 while let Some(req) = rx.blocking_recv() {
                     // Set 10s interrupt watchdog for runtime conditions
@@ -552,11 +588,8 @@ impl ConfigActor {
             ConfigCommand::GetGlobalLogConfig { reply } => {
                 let _ = reply.send(self.config.global_logs().cloned());
             }
-            ConfigCommand::GetGlobalSysEnv { reply } => {
-                let _ = reply.send(self.config.global_sys_env().cloned());
-            }
-            ConfigCommand::GetSysEnv { reply } => {
-                let _ = reply.send(self.sys_env.clone());
+            ConfigCommand::GetKeplerEnv { reply } => {
+                let _ = reply.send(self.kepler_env.clone());
             }
             ConfigCommand::IsServiceRunning {
                 service_name,
@@ -984,25 +1017,25 @@ impl ConfigActor {
                 // Handled in run() before process_command — should never reach here
                 unreachable!("EvalIfCondition handled in run() loop");
             }
-            ConfigCommand::MergeSysEnv { overrides, reply } => {
-                // Merge overrides into sys_env
-                self.sys_env.extend(overrides);
+            ConfigCommand::MergeKeplerEnv { overrides, reply } => {
+                // Merge overrides into kepler_env
+                self.kepler_env.extend(overrides);
 
-                // Re-save snapshot with updated sys_env
-                if self.snapshot_taken {
+                // Re-save snapshot only when autostart is enabled
+                if self.snapshot_taken && self.config.global_autostart() {
                     let snapshot = ExpandedConfigSnapshot {
                         config: self.config.clone(),
                         service_envs: Default::default(),
                         service_working_dirs: Default::default(),
                         config_dir: self.config_dir.clone(),
                         snapshot_time: chrono::Utc::now().timestamp(),
-                        sys_env: self.sys_env.clone(),
+                        kepler_env: self.kepler_env.clone(),
                         owner_uid: self.owner_uid,
                         owner_gid: self.owner_gid,
                         hardening: self.hardening.map(|h| h.to_string()),
                     };
                     if let Err(e) = self.persistence.save_expanded_config(&snapshot) {
-                        warn!("Failed to re-save snapshot after MergeSysEnv: {}", e);
+                        warn!("Failed to re-save snapshot after MergeKeplerEnv: {}", e);
                     }
                 }
 
@@ -1016,9 +1049,14 @@ impl ConfigActor {
     }
 
     /// Take a snapshot of the expanded config if not already taken.
-    /// Returns Ok(true) if snapshot was taken, Ok(false) if already existed.
+    /// Returns Ok(true) if snapshot was taken, Ok(false) if already taken or autostart is disabled.
     fn take_snapshot_if_needed(&mut self) -> Result<bool> {
         if self.snapshot_taken {
+            return Ok(false);
+        }
+
+        // Only persist snapshot when autostart is enabled
+        if !self.config.global_autostart() {
             return Ok(false);
         }
 
@@ -1036,7 +1074,7 @@ impl ConfigActor {
             service_working_dirs: Default::default(),
             config_dir: self.config_dir.clone(),
             snapshot_time: chrono::Utc::now().timestamp(),
-            sys_env: self.sys_env.clone(),
+            kepler_env: self.kepler_env.clone(),
             owner_uid: self.owner_uid,
             owner_gid: self.owner_gid,
             hardening: self.hardening.map(|h| h.to_string()),
@@ -1549,6 +1587,106 @@ impl ConfigActor {
             .or_else(|| self.config.services.get(dep_name)
                 .map(|raw| raw.restart.as_static().cloned().unwrap_or_default()));
         is_condition_met(state, dep_config, dep_restart.as_ref())
+    }
+
+    /// Compute kepler_env based on AutostartConfig.
+    ///
+    /// | autostart variant      | kepler_env                       |
+    /// |------------------------|----------------------------------|
+    /// | Disabled               | full CLI env (memory only)       |
+    /// | Enabled                | empty HashMap (no declared env)  |
+    /// | WithEnvironment{..}    | resolved entries (persisted)     |
+    fn compute_kepler_env(
+        config: &KeplerConfig,
+        cli_env: &HashMap<String, String>,
+        evaluator: &LuaEvaluator,
+    ) -> Result<HashMap<String, String>> {
+        use crate::config::AutostartConfig;
+
+        let autostart = config.kepler.as_ref()
+            .map(|k| &k.autostart)
+            .unwrap_or(&AutostartConfig::Disabled);
+
+        match autostart {
+            AutostartConfig::Disabled => Ok(cli_env.clone()),
+            AutostartConfig::Enabled => Ok(HashMap::new()),
+            AutostartConfig::WithEnvironment { environment } => {
+                Self::resolve_kepler_environment(environment, cli_env, evaluator)
+            }
+        }
+    }
+
+    /// Resolve kepler.environment entries eagerly with full Lua support.
+    /// Handles static KEY=VALUE, bare KEY (from cli_env), ${{ expr }}$, and !lua.
+    fn resolve_kepler_environment(
+        env_config: &ConfigValue<EnvironmentEntries>,
+        cli_env: &HashMap<String, String>,
+        evaluator: &LuaEvaluator,
+    ) -> Result<HashMap<String, String>> {
+        let config_path = PathBuf::from("<kepler.environment>");
+
+        // No service/hook context — only kepler_env is set.
+        // Lua code can access cli_env vars via kepler.env.VAR
+        let mut ctx = EvalContext {
+            kepler_env: cli_env.clone(),
+            ..Default::default()
+        };
+
+        // Build PreparedEnv ONCE — reused for both top-level and per-entry evaluation
+        let prepared = evaluator.prepare_env_mutable(&ctx).map_err(|e| DaemonError::LuaError {
+            path: config_path.clone(),
+            message: format!("Error building Lua environment: {}", e),
+        })?;
+
+        // Get inner entries using the prepared table
+        let entries: Vec<ConfigValue<String>> = match env_config {
+            ConfigValue::Static(entries) => entries.0.clone(),
+            ConfigValue::Dynamic(expr) => {
+                let yaml = expr.evaluate(evaluator, &prepared.table, &config_path, "kepler.environment")?;
+                let env: EnvironmentEntries = serde_yaml::from_value(yaml).map_err(|e| {
+                    DaemonError::Config(format!("kepler.environment: {}", e))
+                })?;
+                env.0
+            }
+        };
+
+        // Resolve entries sequentially, reusing prepared.table
+        let mut result = HashMap::new();
+        for (i, entry) in entries.iter().enumerate() {
+            let resolved: String = match entry {
+                ConfigValue::Static(s) => s.clone(),
+                ConfigValue::Dynamic(expr) => {
+                    let yaml = expr.evaluate(
+                        evaluator, &prepared.table, &config_path,
+                        &format!("kepler.environment[{}]", i),
+                    )?;
+                    serde_yaml::from_value(yaml).map_err(|e| {
+                        DaemonError::Config(format!("kepler.environment[{}]: {}", i, e))
+                    })?
+                }
+            };
+            if let Some((k, v)) = resolved.split_once('=') {
+                result.insert(k.to_string(), v.to_string());
+                // Update the kepler.env Lua table so subsequent entries see this
+                prepared.set_env(k, v).map_err(|e| DaemonError::LuaError {
+                    path: config_path.clone(),
+                    message: format!("Error updating Lua env table: {}", e),
+                })?;
+                ctx.kepler_env.insert(k.to_string(), v.to_string());
+            } else {
+                // Bare key: resolve from CLI env
+                if let Some(v) = cli_env.get(&resolved) {
+                    result.insert(resolved.clone(), v.clone());
+                    prepared.set_env(&resolved, v).map_err(|e| DaemonError::LuaError {
+                        path: config_path.clone(),
+                        message: format!("Error updating Lua env table: {}", e),
+                    })?;
+                    ctx.kepler_env.insert(resolved, v.clone());
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// Cleanup all resources when shutting down

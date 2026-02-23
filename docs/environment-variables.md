@@ -5,6 +5,7 @@ How Kepler handles environment variables, including inheritance, expansion, and 
 ## Table of Contents
 
 - [Kepler Environment Variables](#kepler-environment-variables)
+- [Kepler Environment Declaration](#kepler-environment-declaration)
 - [Environment Inheritance](#environment-inheritance)
 - [Environment Sources](#environment-sources)
 - [Three-Stage Expansion](#three-stage-expansion)
@@ -29,41 +30,93 @@ This only changes where state files are stored. All security checks (root requir
 
 ---
 
-## Environment Inheritance
+## Kepler Environment Declaration
 
-By default, Kepler **inherits** the system environment when starting services. This means services have access to `PATH`, `HOME`, and other standard environment variables, which is what most users expect.
-
-The `sys_env` option controls this behavior:
-
-| Value | Description |
-|-------|-------------|
-| `inherit` (default) | Inherit all system environment variables captured from the CLI at config load time |
-| `clear` | Start with empty environment, only explicit vars are passed |
-
-**Inheritance chain:** `kepler.sys_env` sets the global default (defaults to `inherit` when not specified). Each service and its hooks inherit from `kepler.sys_env` unless the service explicitly overrides it with its own `sys_env` setting.
+The `autostart.environment` field declares which environment variables are available to services. When `autostart` is configured, only declared variables are persisted in the config snapshot and survive daemon restarts.
 
 ```yaml
 kepler:
-  sys_env: clear      # All services and hooks default to clear
+  autostart:
+    environment:
+      - HOME                           # Bare key: resolved from CLI environment
+      - PATH                           # Bare key: resolved from CLI environment
+      - DATABASE_URL=postgres://localhost:5432/app  # Static KEY=VALUE
+      - APP_ENV=${{ kepler.env.NODE_ENV or "production" }}$  # Dynamic expression
+```
+
+### Entry Formats
+
+| Format | Description |
+|--------|-------------|
+| `KEY` | Bare key — resolved from the CLI environment at config load time |
+| `KEY=VALUE` | Static value — used as-is |
+| `KEY=${{ expr }}$` | Dynamic — Lua expression evaluated at config load time |
+| `!lua` | The entire list can be generated dynamically |
+
+### Behavior Matrix
+
+| `autostart` form | Behavior |
+|------------------|----------|
+| `false` (default) | Full CLI environment captured at config load time and stored in memory. Not persisted — lost on daemon restart. |
+| `true` | Autostart enabled with empty environment — no variables available after daemon restart |
+| `{ environment: [...] }` | Declared variables resolved and persisted in snapshot — survives daemon restart |
+
+> **Important:** Even with `autostart: false`, the CLI environment is captured **once** at config load time and reused for every subsequent `start` or `restart`. If your shell environment changes after loading the config, services will still see the old values. To pick up new values, either use `--refresh-env` or unload the config with `kepler stop --clean` and reload it.
+
+### Lua Access
+
+The resolved kepler environment is accessible in Lua as `kepler.env`:
+
+```yaml
+kepler:
+  autostart:
+    environment:
+      - APP_PORT=8080
+
+services:
+  app:
+    command: !lua |
+      local port = kepler.env.APP_PORT or "3000"
+      return {"./app", "--port", port}
+```
+
+---
+
+## Environment Inheritance
+
+By default, Kepler **inherits** the kepler environment (`kepler.env`) when starting services. This means services have access to `PATH`, `HOME`, and other standard variables from the kepler environment, which is what most users expect.
+
+The `inherit_env` option controls whether `kepler.env` is injected into the service's process environment:
+
+| Value | Description |
+|-------|-------------|
+| `true` (default) | Inherit all variables from `kepler.env` into the service's process environment |
+| `false` | Start with empty base environment — only the service's `env_file` and `environment` entries are passed |
+
+**Inheritance chain:** `kepler.default_inherit_env` sets the global default (defaults to `true` when not specified). Each service and its hooks inherit from `kepler.default_inherit_env` unless the service explicitly overrides it with its own `inherit_env` setting.
+
+```yaml
+kepler:
+  default_inherit_env: false   # All services and hooks default to no inheritance
 
 services:
   app:
     command: ["./app"]
-    # sys_env not set → inherits clear from kepler.sys_env
+    # inherit_env not set → inherits false from kepler.default_inherit_env
   worker:
     command: ["./worker"]
-    sys_env: inherit  # Explicitly overrides to inherit for this service and its hooks
+    inherit_env: true  # Explicitly overrides to inherit for this service and its hooks
 ```
 
 ---
 
 ## Environment Sources
 
-Services receive their environment from these sources (highest to lowest priority):
+Services receive their process environment from these sources (highest to lowest priority):
 
 1. **`environment`** — Explicit variables in the service config (sequence or mapping format)
 2. **`env_file`** — Variables loaded from the specified `.env` file
-3. **System environment** — If `sys_env: inherit`, all env vars captured from the CLI environment at config load time
+3. **Kepler environment** (`kepler.env`) — If `inherit_env: true`, all variables from `kepler.env` are inherited. This is either the full CLI environment (when `autostart: false`) or the declared subset (when `autostart` has `environment`).
 
 Higher-priority sources override lower-priority ones when keys conflict.
 
@@ -75,23 +128,23 @@ Inline Lua expressions (`${{ expr }}$`) are evaluated in three stages, each buil
 
 ### Stage 1: env_file Path
 
-The `env_file` path is expanded using **system environment only** (at config load time):
+The `env_file` path is expanded using **`kepler.env` only** (at config load time):
 
 ```yaml
-env_file: ${{ env.CONFIG_DIR }}$/.env    # env.CONFIG_DIR from system env
+env_file: ${{ kepler.env.CONFIG_DIR }}$/.env    # kepler.env.CONFIG_DIR from kepler environment
 ```
 
 ### Stage 2: environment
 
-The `environment` entries are expanded **sequentially** using **system env + env_file variables** (at service start time). Each entry's result is added to the context for subsequent entries.
+The `environment` entries are expanded **sequentially** using **`kepler.env` + env_file variables** (at service start time). Each entry's result is added to the context for subsequent entries.
 
 **Sequence format** (list of `KEY=VALUE` strings):
 
 ```yaml
 environment:
   - BASE_DIR=/opt/app
-  - DB_URL=postgres://${{ env.DB_HOST }}$/mydb    # DB_HOST from system env or .env file
-  - CONFIG=${{ env.BASE_DIR }}$/config             # BASE_DIR from the entry above
+  - DB_URL=postgres://${{ service.env.DB_HOST }}$/mydb    # DB_HOST from kepler.env or .env file
+  - CONFIG=${{ service.env.BASE_DIR }}$/config             # BASE_DIR from the entry above
 ```
 
 **Mapping format** (key-value pairs):
@@ -99,28 +152,28 @@ environment:
 ```yaml
 environment:
   BASE_DIR: /opt/app
-  DB_URL: postgres://${{ env.DB_HOST }}$/mydb
-  CONFIG: ${{ env.BASE_DIR }}$/config
+  DB_URL: postgres://${{ service.env.DB_HOST }}$/mydb
+  CONFIG: ${{ service.env.BASE_DIR }}$/config
 ```
 
 Both formats are equivalent. The mapping format is often more readable, especially for static values. Values can be strings, numbers, booleans, or null (empty value). Dynamic values (`${{ }}$` and `!lua`) are supported in both formats.
 
 ### Stage 3: Other Fields
 
-Remaining config fields are expanded using **system env + env_file + environment array + deps**:
+Remaining config fields are expanded using **`kepler.env` + env_file + environment array + deps**:
 
 ```yaml
-working_dir: ${{ env.APP_DIR }}$         # Can reference vars from environment array
-user: ${{ env.SERVICE_USER or "nobody" }}$
+working_dir: ${{ service.env.APP_DIR }}$         # Can reference vars from environment array
+user: ${{ service.env.SERVICE_USER or "nobody" }}$
 ```
 
 ### Summary
 
 | Stage | What is expanded | Expansion context |
 |-------|------------------|-------------------|
-| 1 | `env_file` path | System environment only |
-| 2 | `environment` entries | System env + env_file variables (sequential) |
-| 3 | All other fields | System env + env_file + environment + deps |
+| 1 | `env_file` path | `kepler.env` only |
+| 2 | `environment` entries | `kepler.env` + env_file variables (sequential) |
+| 3 | All other fields | `kepler.env` + env_file + environment + deps |
 
 See [Inline Expressions](variable-expansion.md) for the full syntax reference.
 
@@ -182,7 +235,7 @@ services:
     command: ["sh", "-c", "echo Hello $NAME"]  # Shell expands $NAME at runtime
     environment:
       - NAME=World                             # Set in process env
-      - DB_URL=postgres://${{ env.DB_HOST }}$/db  # Expanded at service start time
+      - DB_URL=postgres://${{ service.env.DB_HOST }}$/db  # Expanded at service start time
 ```
 
 Both approaches work. Use `${{ }}$` when you want Kepler to resolve values at start time, and shell `$VAR` when you want the shell to resolve them at runtime.
@@ -191,31 +244,39 @@ Both approaches work. Use `${{ }}$` when you want Kepler to resolve values at st
 
 ## Runtime Environment Overrides
 
-By default, system environment variables are captured once from the CLI at config load time and baked into the config snapshot. To change them without a full `recreate`, use the `-e` or `--refresh-env` flags on `start` or `restart`.
+The kepler environment (`kepler.env`) is built **once** at config load time from the CLI environment. With `autostart`, it is persisted to disk in the config snapshot. Without `autostart`, it is held in memory by the daemon. In both cases, services always see the same captured environment — changes to your shell after config load have no effect until you explicitly update the kepler environment.
+
+To update the kepler environment without unloading the config (`kepler stop --clean`), use the `-e` or `--refresh-env` flags on `start` or `restart`.
 
 ### Override Specific Variables (`-e`)
 
-Use `-e KEY=VALUE` (repeatable) to merge specific overrides into the stored `sys_env`:
+Use `-e KEY=VALUE` (repeatable) to merge specific overrides into the stored kepler environment:
 
 ```bash
 kepler start -e DB_HOST=newhost -e DB_PORT=5433
 kepler restart -e API_KEY=updated_key
 ```
 
-Overrides are merged into the existing `sys_env` — keys not specified are preserved. The updated `sys_env` is persisted to the on-disk snapshot, so subsequent `restart` (without `-e`) will still use the overridden values.
+Overrides are merged into the existing kepler environment — keys not specified are preserved. The updated environment is persisted to the on-disk snapshot, so subsequent `restart` (without `-e`) will still use the overridden values.
 
-> **Note:** `-e` and `--refresh-env` operate on the **entire config snapshot**, not on individual services. Even when targeting specific services (e.g., `kepler restart -e FOO=bar svc1`), the overrides are applied to the shared `sys_env` and will affect **all** services on their next start or restart.
+> **Note:** `-e` and `--refresh-env` operate on the **entire config snapshot**, not on individual services. Even when targeting specific services (e.g., `kepler restart -e FOO=bar svc1`), the overrides are applied to the shared kepler environment and will affect **all** services on their next start or restart.
 
 ### Refresh All Variables (`--refresh-env`)
 
-Use `--refresh-env` to replace the entire baked `sys_env` with the current shell environment:
+Use `--refresh-env` to replace the entire kepler environment with the current shell environment:
 
 ```bash
 kepler start --refresh-env
 kepler restart --refresh-env
 ```
 
-This is useful when your shell environment has changed significantly and you want services to pick up all new values without doing a full `recreate`.
+This re-captures all environment variables from the current shell and replaces the in-memory (or persisted) kepler environment. Without this flag, the kepler environment stays frozen from the original config load — even with `autostart: false`.
+
+**When to use `--refresh-env`:**
+- Your shell environment changed after loading the config (e.g., new `export` or updated `.bashrc`)
+- You want services to pick up new values without doing `kepler stop --clean` + reload
+
+The alternative is to unload the config entirely with `kepler stop --clean`, which drops the in-memory environment and forces a fresh capture on the next load.
 
 `--refresh-env` and `-e` can be combined: the CLI environment is refreshed first, then `-e` overrides are applied on top.
 
@@ -223,21 +284,22 @@ This is useful when your shell environment has changed significantly and you wan
 
 ## Security Considerations
 
-**Default inheritance (`sys_env: inherit`):**
-- All environment variables from the CLI session at config load time are passed
+**Default inheritance (`inherit_env: true`):**
+- All variables from `kepler.env` are injected into the service's process environment
 - Services have access to `PATH`, `HOME`, `USER`, and other standard variables
 - This is the default, matching user expectations for most development and deployment workflows
 
-**Isolated environment (`sys_env: clear`):**
-- Sensitive variables from your shell (`AWS_SECRET_KEY`, `API_TOKENS`, etc.) are NOT automatically passed to services
-- Only explicitly configured variables are available
+**Isolated environment (`inherit_env: false`):**
+- `kepler.env` is NOT injected — sensitive variables (`AWS_SECRET_KEY`, `API_TOKENS`, etc.) are not automatically passed to services
+- Only the service's own `env_file` and `environment` entries are available
 - Recommended for production environments where environment isolation is important
+- Note: `${{ service.env.* }}$` expressions can still reference `kepler.env` values at expansion time — `inherit_env` only controls the process environment, not expression evaluation
 
 ```yaml
 services:
   app:
     command: ["./app"]
-    sys_env: clear
+    inherit_env: false
     environment:
       - PATH=/usr/bin:/bin
       - NODE_ENV=production
@@ -247,13 +309,13 @@ services:
 
 ## Examples
 
-### Inherit System Environment (Default)
+### Inherit Kepler Environment (Default)
 
 ```yaml
 services:
   my-app:
     command: ["./my-app"]
-    # sys_env: inherit  # This is the default
+    # inherit_env: true  # This is the default
     environment:
       - EXTRA_VAR=value  # Additional vars on top of inherited
 ```
@@ -266,11 +328,11 @@ Sequence format:
 services:
   app:
     command: ["./app"]
-    sys_env: clear     # Opt into isolated environment
+    inherit_env: false  # Opt into isolated environment
     environment:
       - PATH=/usr/bin:/bin       # Explicit PATH
       - NODE_ENV=production
-      - DATABASE_URL=${{ env.DB_URL }}$   # Expanded from system env at start time
+      - DATABASE_URL=${{ service.env.DB_URL }}$   # Expanded from kepler.env at start time
     env_file: .env               # Additional vars from file
 ```
 
@@ -280,25 +342,25 @@ Mapping format (equivalent):
 services:
   app:
     command: ["./app"]
-    sys_env: clear
+    inherit_env: false
     environment:
       PATH: /usr/bin:/bin
       NODE_ENV: production
-      DATABASE_URL: ${{ env.DB_URL }}$
+      DATABASE_URL: ${{ service.env.DB_URL }}$
     env_file: .env
 ```
 
-### Selective Passthrough (with clear)
+### Selective Passthrough (with inherit_env: false)
 
 ```yaml
 services:
   app:
     command: ["./app"]
-    sys_env: clear
+    inherit_env: false
     environment:
-      - PATH=${{ env.PATH }}$
-      - HOME=${{ env.HOME }}$
-      - USER=${{ env.USER }}$
+      - PATH=${{ service.env.PATH }}$
+      - HOME=${{ service.env.HOME }}$
+      - USER=${{ service.env.USER }}$
       - NODE_ENV=production
 ```
 
@@ -321,8 +383,8 @@ services:
     command: ["./app"]
     environment:
       APP_DIR: /opt/app
-      CONFIG_PATH: ${{ env.APP_DIR }}$/config.yaml
-      LOG_DIR: ${{ env.APP_DIR }}$/logs
+      CONFIG_PATH: ${{ service.env.APP_DIR }}$/config.yaml
+      LOG_DIR: ${{ service.env.APP_DIR }}$/logs
 ```
 
 ---

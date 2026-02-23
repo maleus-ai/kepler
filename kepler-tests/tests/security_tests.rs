@@ -838,15 +838,15 @@ fn test_lua_rawset_cannot_modify_env() {
     };
 
     // First verify the value is accessible
-    let result: String = eval.eval(r#"return env.SECRET"#, &ctx, "test").unwrap();
+    let result: String = eval.eval(r#"return service.env.SECRET"#, &ctx, "test").unwrap();
     assert_eq!(result, "original");
 
     // rawset on a frozen table should error
     let code = r#"
         if rawset then
-            rawset(env, "SECRET", "hacked")
+            rawset(service.env, "SECRET", "hacked")
         end
-        return env.SECRET
+        return service.env.SECRET
     "#;
     let result = eval.eval::<mlua::Value>(code, &ctx, "test");
     // Either rawset throws on the frozen table, or if rawset is not available,
@@ -880,11 +880,11 @@ fn test_lua_getmetatable_frozen() {
 
     // On a Luau-frozen table, getmetatable returns nil (metatable is protected)
     let result: mlua::Value = eval
-        .eval(r#"return getmetatable(env)"#, &ctx, "test")
+        .eval(r#"return getmetatable(service.env)"#, &ctx, "test")
         .unwrap();
     assert!(
         matches!(result, mlua::Value::Nil),
-        "getmetatable on frozen env should return nil, got: {:?}",
+        "getmetatable on frozen service.env should return nil, got: {:?}",
         result
     );
 }
@@ -996,6 +996,7 @@ async fn test_env_file_baked_changes_ignored() {
     std::fs::write(&env_file_path, "BAKED_VAR=original_value\n").unwrap();
 
     let config = TestConfigBuilder::new()
+        .with_autostart(true)
         .add_service(
             "test",
             TestServiceBuilder::new(vec![
@@ -1015,7 +1016,7 @@ async fn test_env_file_baked_changes_ignored() {
         .await
         .unwrap();
 
-    // First start - env_file is baked
+    // First start - env_file is baked (autostart: true enables snapshot)
     harness.start_service("test").await.unwrap();
 
     let content = marker

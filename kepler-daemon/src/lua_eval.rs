@@ -75,10 +75,8 @@ pub struct DepInfo {
 #[derive(Debug, Clone, Default)]
 pub struct ServiceEvalContext {
     pub name: String,
-    /// Inherited env from daemon/CLI (was sys_env)
-    pub raw_env: HashMap<String, String>,
     pub env_file: HashMap<String, String>,
-    /// Fully resolved: raw_env + env_file + environment
+    /// Fully resolved: kepler_env + env_file + environment
     pub env: HashMap<String, String>,
     pub initialized: Option<bool>,
     pub restart_count: Option<u32>,
@@ -92,10 +90,8 @@ pub struct ServiceEvalContext {
 #[derive(Debug, Clone, Default)]
 pub struct HookEvalContext {
     pub name: String,
-    /// Inherited env from parent service (= service.env)
-    pub raw_env: HashMap<String, String>,
     pub env_file: HashMap<String, String>,
-    /// Fully resolved: raw_env + env_file + environment
+    /// Fully resolved: service env + hook env_file + hook environment
     pub env: HashMap<String, String>,
     pub had_failure: Option<bool>,
 }
@@ -119,6 +115,8 @@ pub struct EvalContext {
     pub owner: Option<OwnerEvalContext>,
     /// Hardening level for privilege checks in os.getgroups()
     pub hardening: HardeningLevel,
+    /// Kepler-level environment variables (replaces raw_env / sys_env)
+    pub kepler_env: HashMap<String, String>,
 }
 
 impl EvalContext {
@@ -232,9 +230,9 @@ impl LuaEvaluator {
     /// Evaluate a `!lua` block and return the result.
     ///
     /// The code runs with a custom environment containing:
-    /// - `service.*`: Read-only table with service context (name, env, raw_env, env_file, etc.)
-    /// - `hook.*`: Read-only table with hook context (name, env, raw_env, env_file, had_failure)
-    /// - `env`: Shortcut for active env (hook.env if in hook, else service.env)
+    /// - `service.*`: Read-only table with service context (name, env, env_file, etc.)
+    /// - `hook.*`: Read-only table with hook context (name, env, env_file, had_failure)
+    /// - `kepler.*`: Read-only table with kepler-level context (env)
     /// - `hooks`: Shortcut for service.hooks
     /// - `global`: Shared mutable table for cross-block state
     /// - Access to all functions defined in `lua:` block and standard library
@@ -303,7 +301,7 @@ impl LuaEvaluator {
     /// Evaluate an inline `${{ expr }}$` expression and return the raw Lua value.
     ///
     /// Uses the same environment as `!lua` blocks: includes `service`, `hook`,
-    /// `deps`, `env` shortcut, `global`, and a `__index` fallback to Lua globals.
+    /// `deps`, `kepler`, `global`, and a `__index` fallback to Lua globals.
     pub fn eval_inline_expr(&self, expr: &str, ctx: &EvalContext, chunk_name: &str) -> LuaResult<Value> {
         let env_table = self.build_inline_env_table(ctx)?;
         let wrapped = format!("return ({})", expr);
@@ -332,11 +330,11 @@ impl LuaEvaluator {
 
     /// Build a mutable environment table for sequential env resolution.
     ///
-    /// Same as `prepare_env` but leaves the active env (hook.env or service.env)
-    /// unfrozen so new entries can be added via `PreparedEnv::set_env()`. The
-    /// `env` shortcut alias points to the same unfrozen table. Call
-    /// `PreparedEnv::freeze_env()` after env resolution completes, then reuse
-    /// `PreparedEnv::table` for all remaining field resolutions.
+    /// Same as `prepare_env` but leaves the active env (hook.env, service.env,
+    /// or kepler.env when no service/hook context) unfrozen so new entries can
+    /// be added via `PreparedEnv::set_env()`. Call `PreparedEnv::freeze_env()`
+    /// after env resolution completes, then reuse `PreparedEnv::table` for all
+    /// remaining field resolutions.
     pub fn prepare_env_mutable(&self, ctx: &EvalContext) -> LuaResult<PreparedEnv> {
         let (table, env_table) = self.build_full_env_table(ctx, false)?;
         Ok(PreparedEnv {
@@ -357,13 +355,13 @@ impl LuaEvaluator {
 
     /// Build the custom environment table for a `!lua` block.
     ///
-    /// Includes `service`, `hook`, `deps`, `env` shortcut, `hooks` shortcut,
+    /// Includes `service`, `hook`, `deps`, `hooks` shortcut,
     /// `global`, and a `__index` fallback to Lua globals (stdlib + user functions).
     fn build_env_table(&self, ctx: &EvalContext) -> LuaResult<Table> {
         self.build_full_env_table(ctx, true).map(|(table, _)| table)
     }
 
-    /// Build the full environment table with service/hook tables, deps, env shortcut, global, and metatable.
+    /// Build the full environment table with service/hook tables, deps, kepler, global, and metatable.
     ///
     /// When `freeze_env` is true, the active env sub-table is frozen (normal path).
     /// When false, it stays unfrozen for `PreparedEnv::set_env()`.
@@ -373,7 +371,7 @@ impl LuaEvaluator {
         let mut active_env_sub: Option<Table> = None;
         let mut hooks_table_for_shortcut: Option<Table> = None;
 
-        // Build `service` table if present
+        // Build `service` table if present, otherwise stub with empty env
         if let Some(ref svc) = ctx.service {
             // When hook is present, service.env is always frozen (it's the base).
             // When no hook, use the freeze_env parameter.
@@ -386,25 +384,26 @@ impl LuaEvaluator {
             if ctx.hook.is_none() {
                 active_env_sub = Some(svc_env);
             }
+        } else {
+            // Stub so service.env.X resolves to nil instead of erroring
+            let stub = self.lua.create_table()?;
+            stub.raw_set("env", self.create_frozen_env(&HashMap::new())?)?;
+            stub.set_readonly(true);
+            env_table.set("service", stub)?;
         }
 
-        // Build `hook` table if present
+        // Build `hook` table if present, otherwise stub with empty env
         if let Some(ref hook) = ctx.hook {
             let (hook_table, hook_env) = self.build_hook_table(hook, freeze_env)?;
             env_table.set("hook", hook_table)?;
             active_env_sub = Some(hook_env);
+        } else {
+            // Stub so hook.env.X resolves to nil instead of erroring
+            let stub = self.lua.create_table()?;
+            stub.raw_set("env", self.create_frozen_env(&HashMap::new())?)?;
+            stub.set_readonly(true);
+            env_table.set("hook", stub)?;
         }
-
-        // `env` shortcut → points to hook.env if in hook, else service.env
-        let env_sub = active_env_sub.unwrap_or_else(|| {
-            // Fallback: create an empty table (frozen unless freeze_env is false)
-            let t = self.lua.create_table().unwrap();
-            if freeze_env {
-                t.set_readonly(true);
-            }
-            t
-        });
-        env_table.set("env", env_sub.clone())?;
 
         // `hooks` shortcut → from service.hooks
         if let Some(hooks_shortcut) = hooks_table_for_shortcut {
@@ -527,6 +526,32 @@ impl LuaEvaluator {
             env_table.set("os", os_table)?;
         }
 
+        // Build `kepler` table — always created so kepler.env.X resolves to nil.
+        // When no service/hook context and freeze_env is false (mutable path), the
+        // kepler.env sub-table stays unfrozen since set_env() will add entries later.
+        let needs_mutable_kepler = active_env_sub.is_none() && !freeze_env;
+        let kepler_env_table = {
+            let kepler_table = self.lua.create_table()?;
+            let kepler_env_sub = if !needs_mutable_kepler {
+                self.create_frozen_env(&ctx.kepler_env)?
+            } else {
+                // No service/hook: kepler.env is the mutable target
+                let t = self.lua.create_table()?;
+                for (k, v) in &ctx.kepler_env {
+                    t.raw_set(k.as_str(), v.as_str())?;
+                }
+                t.set_readonly(true);
+                t
+            };
+            kepler_table.raw_set("env", kepler_env_sub.clone())?;
+            kepler_table.set_readonly(true);
+            env_table.set("kepler", kepler_table)?;
+            kepler_env_sub
+        };
+
+        // Determine mutable env sub-table for PreparedEnv
+        let env_sub = active_env_sub.unwrap_or(kepler_env_table);
+
         // Add `global` (shared mutable table)
         let global: Table = self.lua.globals().get("global")?;
         env_table.set("global", global)?;
@@ -543,7 +568,7 @@ impl LuaEvaluator {
 
     /// Build the `service` Lua table from a `ServiceEvalContext`.
     ///
-    /// Contains: name, raw_env, env_file, env, initialized, restart_count, exit_code, status, hooks.
+    /// Contains: name, env_file, env, initialized, restart_count, exit_code, status, hooks.
     /// When `freeze_env` is true, service.env is frozen; when false, it stays unfrozen
     /// for `PreparedEnv::set_env()`.
     /// Returns `(service_table, env_sub_table)`.
@@ -551,10 +576,6 @@ impl LuaEvaluator {
         let table = self.lua.create_table()?;
 
         table.raw_set("name", svc.name.as_str())?;
-
-        // raw_env (read-only)
-        let raw_env = self.create_frozen_env(&svc.raw_env)?;
-        table.raw_set("raw_env", raw_env)?;
 
         // env_file (read-only)
         let env_file = self.create_frozen_env(&svc.env_file)?;
@@ -612,7 +633,7 @@ impl LuaEvaluator {
 
     /// Build the `hook` Lua table from a `HookEvalContext`.
     ///
-    /// Contains: name, raw_env, env_file, env, had_failure.
+    /// Contains: name, env_file, env, had_failure.
     /// When `freeze_env` is true, hook.env is frozen; when false, it stays unfrozen
     /// for `PreparedEnv::set_env()`.
     /// Returns `(hook_table, env_sub_table)`.
@@ -620,10 +641,6 @@ impl LuaEvaluator {
         let table = self.lua.create_table()?;
 
         table.raw_set("name", hook.name.as_str())?;
-
-        // raw_env (read-only)
-        let raw_env = self.create_frozen_env(&hook.raw_env)?;
-        table.raw_set("raw_env", raw_env)?;
 
         // env_file (read-only)
         let env_file = self.create_frozen_env(&hook.env_file)?;
@@ -692,7 +709,7 @@ impl LuaEvaluator {
     /// - `skipped(name)` — requires a dependency name, returns `true` if that dependency
     ///   has status "skipped".
     fn build_condition_env_table(&self, ctx: &EvalContext) -> LuaResult<(Table, Arc<AtomicBool>)> {
-        // Start with the base env table (service/hook, deps, env shortcut, global, __index→globals)
+        // Start with the base env table (service/hook, deps, kepler, global, __index→globals)
         let env_table = self.build_env_table(ctx)?;
 
         // Flag to track whether `failure()` (no args) was called

@@ -21,7 +21,7 @@ lua: |
   end
 
 kepler:
-  sys_env: inherit
+  default_inherit_env: true
   timeout: 30s
 
 services:
@@ -717,7 +717,7 @@ services:
 
   # 51 — conditional, skipped by default
   optional-profiler:
-    if: ${{ env.ENABLE_PROFILING ~= nil }}$
+    if: ${{ service.env.ENABLE_PROFILING ~= nil }}$
     run: echo "[optional-profiler] Profiling run complete"
     restart: no
     depends_on:

@@ -2,7 +2,6 @@
 #![allow(clippy::await_holding_lock)]
 //! Environment variable handling and merging tests
 
-use kepler_daemon::config::SysEnvPolicy;
 use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::{TestDaemonHarness, ENV_LOCK};
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
@@ -166,7 +165,7 @@ async fn test_env_array_overrides_env_file() {
     harness.stop_service("test").await.unwrap();
 }
 
-/// Variable expansion using `${{ env.VAR }}$` syntax works
+/// Variable expansion using `${{ service.env.VAR }}$` syntax works
 #[tokio::test]
 async fn test_env_variable_expansion() {
     let temp_dir = TempDir::new().unwrap();
@@ -186,7 +185,7 @@ async fn test_env_variable_expansion() {
             ])
             .with_environment(vec![
                 "BASE_VAR=base".to_string(),
-                "EXPANDED=${{ env.BASE_VAR }}$_expanded".to_string(),
+                "EXPANDED=${{ service.env.BASE_VAR }}$_expanded".to_string(),
             ])
             .build(),
         )
@@ -213,7 +212,7 @@ async fn test_env_variable_expansion() {
     harness.stop_service("test").await.unwrap();
 }
 
-/// Variable expansion using `${{ env.VAR }}$` can reference env_file variables
+/// Variable expansion using `${{ service.env.VAR }}$` can reference env_file variables
 #[tokio::test]
 async fn test_env_expansion_references_env_file() {
     let temp_dir = TempDir::new().unwrap();
@@ -236,7 +235,7 @@ async fn test_env_expansion_references_env_file() {
                 ),
             ])
             .with_env_file(env_file_path)
-            .with_environment(vec!["EXPANDED=${{ env.FILE_BASE }}$_plus_more".to_string()])
+            .with_environment(vec!["EXPANDED=${{ service.env.FILE_BASE }}$_plus_more".to_string()])
             .build(),
         )
         .build();
@@ -351,10 +350,10 @@ async fn test_service_env_overrides_system_env() {
     harness.stop_service("test").await.unwrap();
 }
 
-/// All system variables ARE passed to service and CAN also be accessed via `${{ env.VAR }}$` expansion
+/// All system variables ARE passed to service and CAN also be accessed via `${{ service.env.VAR }}$` expansion
 ///
 /// NOTE: We use `printenv` to check if a variable exists in the runtime environment.
-/// The `${{ env.VAR }}$` expansion happens at service start time, so if we define EXPANDED_VAR=${{ env.KEPLER_TEST_VAR }}$
+/// The `${{ service.env.VAR }}$` expansion happens at service start time, so if we define EXPANDED_VAR=${{ service.env.KEPLER_TEST_VAR }}$
 /// in the environment array, it becomes EXPANDED_VAR=test_value_123 at start time.
 /// ALL system vars are now inherited (changed from only PATH,HOME,USER,SHELL).
 #[tokio::test]
@@ -381,10 +380,10 @@ async fn test_system_var_passed_and_expandable() {
                     marker_path.display()
                 ),
             ])
-            // Use ${{ env.VAR }}$ syntax to explicitly reference the var at config time
-            .with_environment(vec!["EXPANDED_VAR=${{ env.KEPLER_TEST_VAR }}$".to_string()])
+            // Use ${{ service.env.VAR }}$ syntax to explicitly reference the var at config time
+            .with_environment(vec!["EXPANDED_VAR=${{ service.env.KEPLER_TEST_VAR }}$".to_string()])
             // Enable sys_env inheritance to get system vars in runtime env
-            .with_sys_env(SysEnvPolicy::Inherit)
+            .with_inherit_env(true)
             .build(),
         )
         .build();
@@ -426,7 +425,7 @@ async fn test_system_var_passed_and_expandable() {
     // EXPANDED_VAR should have the value that was expanded at config time
     assert!(
         content.contains("EXPANDED=test_value_123"),
-        "Var expanded via ${{ env.VAR }}$ at config time should be in runtime env. Got: {}",
+        "Var expanded via ${{ service.env.VAR }}$ at config time should be in runtime env. Got: {}",
         content
     );
 
@@ -474,7 +473,7 @@ async fn test_env_merge_priority_chain() {
                 "VAR_ONLY_ARRAY=only_in_array".to_string(),
             ])
             // Enable sys_env inheritance to get system vars (like HOME) in runtime env
-            .with_sys_env(SysEnvPolicy::Inherit)
+            .with_inherit_env(true)
             .build(),
         )
         .build();

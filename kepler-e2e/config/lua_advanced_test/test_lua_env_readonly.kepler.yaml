@@ -6,7 +6,7 @@ services:
   readonly-service:
     environment: !lua |
       -- This should fail because env is read-only
-      env.NEW_VAR = "test"
+      service.env.NEW_VAR = "test"
       return {"RESULT=should_not_reach"}
     command: ["sh", "-c", "echo $RESULT && sleep 30"]
     restart: no

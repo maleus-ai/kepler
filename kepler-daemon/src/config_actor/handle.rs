@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig, SysEnvPolicy};
+use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig};
 use crate::errors::{DaemonError, Result};
 use crate::events::{ServiceEvent, ServiceEventReceiver};
 use crate::hardening::HardeningLevel;
@@ -384,32 +384,18 @@ impl ConfigActorHandle {
         reply_rx.await.ok().flatten()
     }
 
-    /// Get the stored sys_env (system environment captured from the CLI)
-    pub async fn get_sys_env(&self) -> HashMap<String, String> {
+    /// Get the stored kepler_env (kepler-level environment variables)
+    pub async fn get_kepler_env(&self) -> HashMap<String, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .tx
-            .send(ConfigCommand::GetSysEnv { reply: reply_tx })
+            .send(ConfigCommand::GetKeplerEnv { reply: reply_tx })
             .await
             .is_err()
         {
-            warn!("Config actor closed, cannot send GetSysEnv");
+            warn!("Config actor closed, cannot send GetKeplerEnv");
         }
         reply_rx.await.unwrap_or_default()
-    }
-
-    /// Get global sys_env policy
-    pub async fn get_global_sys_env(&self) -> Option<SysEnvPolicy> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(ConfigCommand::GetGlobalSysEnv { reply: reply_tx })
-            .await
-            .is_err()
-        {
-            warn!("Config actor closed, cannot send GetGlobalSysEnv");
-        }
-        reply_rx.await.ok().flatten()
     }
 
     /// Check if a service is running
@@ -1066,19 +1052,19 @@ impl ConfigActorHandle {
 
     // === Environment Override ===
 
-    /// Merge overrides into the stored sys_env, re-save snapshot, and clear resolved config cache.
-    pub async fn merge_sys_env(&self, overrides: HashMap<String, String>) {
+    /// Merge overrides into the stored kepler_env, re-save snapshot, and clear resolved config cache.
+    pub async fn merge_kepler_env(&self, overrides: HashMap<String, String>) {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .tx
-            .send(ConfigCommand::MergeSysEnv {
+            .send(ConfigCommand::MergeKeplerEnv {
                 overrides,
                 reply: reply_tx,
             })
             .await
             .is_err()
         {
-            warn!("Config actor closed, cannot send MergeSysEnv");
+            warn!("Config actor closed, cannot send MergeKeplerEnv");
         }
         let _ = reply_rx.await;
     }
