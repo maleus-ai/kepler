@@ -1,0 +1,15 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  worker:
+    command: ["sleep", "300"]
+    environment:
+      - SERVICE_VAR=from_service
+    hooks:
+      pre_start:
+        - run: "echo CAPTURED=${CAPTURED:-MISSING}"
+          inherit_env: false
+          environment:
+            - CAPTURED=${{ service.env.SERVICE_VAR }}$

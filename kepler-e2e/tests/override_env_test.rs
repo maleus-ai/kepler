@@ -1,8 +1,8 @@
 //! E2E tests for --override-envs (-e) and --refresh-env flags
 //!
 //! These tests verify that:
-//! - `-e KEY=VALUE` overrides specific sys_env variables
-//! - `--refresh-env` replaces all sys_env with the current CLI environment
+//! - `-e KEY=VALUE` overrides specific kepler_env variables
+//! - `--refresh-env` replaces all kepler_env with the current CLI environment
 //! - Overrides persist across restarts (baked into snapshot)
 //! - Both start and restart support these flags
 
@@ -179,7 +179,7 @@ async fn test_override_persists_across_restart() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that `start --refresh-env` replaces all sys_env with the current CLI env.
+/// Test that `start --refresh-env` replaces all kepler_env with the current CLI env.
 #[tokio::test]
 async fn test_start_with_refresh_env() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -247,7 +247,7 @@ async fn test_start_with_refresh_env() -> E2eResult<()> {
         .await?;
     assert!(
         logs.stdout_contains(&format!("{}={}", TEST_VAR, REFRESHED_VALUE)),
-        "--refresh-env should replace sys_env with current CLI env. stdout: {}",
+        "--refresh-env should replace kepler_env with current CLI env. stdout: {}",
         logs.stdout
     );
 

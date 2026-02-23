@@ -1,5 +1,5 @@
 kepler:
-  autostart: true
+  autostart: false
   logs:
     buffer_size: 0
 

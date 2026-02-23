@@ -8,5 +8,5 @@ kepler:
 services:
   env-checker:
     command: ["sh", "-c", "echo CLI_TEST_VAR=$CLI_TEST_VAR && sleep 30"]
-    sys_env: inherit
+    inherit_env: true
     restart: no

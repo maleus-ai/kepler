@@ -41,10 +41,10 @@ Best for simple value references and short expressions:
 ```yaml
 services:
   app:
-    command: ["./app", "--port", "${{ env.PORT or '8080' }}$"]
+    command: ["./app", "--port", "${{ service.env.PORT or '8080' }}$"]
     environment:
-      - DATABASE_URL=postgres://${{ env.DB_HOST }}$:${{ env.DB_PORT }}$/mydb
-    working_dir: ${{ env.APP_DIR or "/opt/app" }}$
+      - DATABASE_URL=postgres://${{ service.env.DB_HOST }}$:${{ service.env.DB_PORT }}$/mydb
+    working_dir: ${{ service.env.APP_DIR or "/opt/app" }}$
 ```
 
 ### `!lua` — Code Blocks
@@ -62,7 +62,7 @@ services:
       end
     environment: !lua |
       local vars = {NODE_ENV="production"}
-      if env.DEBUG then
+      if service.env.DEBUG then
         vars.LOG_LEVEL = "debug"
       end
       return vars
@@ -81,7 +81,7 @@ Both `${{ }}$` and `!lua` can be used in the same config file, even in the same 
 Key points:
 - **Standalone** `${{ expr }}$` preserves Lua types (bool, number, table)
 - **Embedded** `${{ expr }}$` in a string coerces results to strings
-- Bare variable names resolve to nil — use `env.VAR` to access environment variables
+- Bare variable names resolve to nil — use `service.env.VAR` to access environment variables
 
 ---
 
@@ -93,10 +93,10 @@ The `!lua` YAML tag allows full Lua code blocks that return a value:
 services:
   backend:
     command: !lua |
-      return {"node", "server.js", "--port", tostring(env.PORT or 8080)}
+      return {"node", "server.js", "--port", tostring(service.env.PORT or 8080)}
     environment: !lua |
       local vars = {NODE_ENV="production"}
-      if env.DEBUG then
+      if service.env.DEBUG then
         vars.DEBUG = "true"
       end
       return vars
@@ -153,11 +153,18 @@ Available when the config was loaded via the CLI (nil for legacy configs without
 | `owner.gid` | Config owner's GID (number) |
 | `owner.user` | Config owner's username (string, or nil for numeric-only UIDs) |
 
+### Kepler Context
+
+Available in all contexts (including `lua:` directive and `autostart.environment` resolution):
+
+| Variable | Description |
+|----------|-------------|
+| `kepler.env` | Read-only kepler environment (declared via `autostart.environment`, or full CLI env when autostart is disabled) |
+
 ### Shortcuts and Shared Tables
 
 | Variable | Description |
 |----------|-------------|
-| `env` | Shortcut: points to `hook.env` if in hook context, else `service.env` |
 | `hooks` | Shortcut for `service.hooks` |
 | `deps` | Dependency information table |
 | `global` | Shared mutable table for cross-block state |
@@ -219,7 +226,7 @@ services:
 
 ### Global Config (eagerly at load time)
 
-The `kepler:` namespace (logs, hooks) and the `lua:` directive are evaluated **once at config load time**. Only system environment is available.
+The `kepler:` namespace (logs, hooks) and the `lua:` directive are evaluated **once at config load time**. Only `kepler.env` is available.
 
 ### Service Config (lazily at start time)
 
@@ -238,19 +245,19 @@ To force re-evaluation of global config, use `kepler recreate`.
 
 Within a service, evaluation happens in this order:
 
-| Order | What | `env` contains |
-|-------|------|---------------|
-| 1 | `lua:` directive | System env only |
-| 2 | `env_file` path `${{ }}$` | System env only |
-| 3 | `environment` `${{ }}$` / `!lua` | System env + env_file (sequential) |
-| 4 | All other fields `${{ }}$` and `!lua` | System env + env_file + environment |
+| Order | What | Available context |
+|-------|------|-------------------|
+| 1 | `lua:` directive | `kepler.env` only |
+| 2 | `env_file` path `${{ }}$` | `kepler.env` + `service.raw_env` |
+| 3 | `environment` `${{ }}$` / `!lua` | `kepler.env` + `service.raw_env` + `service.env_file` + `service.env` (sequential) |
+| 4 | All other fields `${{ }}$` and `!lua` | `kepler.env` + `service.raw_env` + `service.env_file` + `service.env` + `deps` |
 
 **Sequential environment evaluation:** Each `environment` entry is evaluated in order, and its result is added to the context for subsequent entries:
 
 ```yaml
 environment:
   BASE: /opt/app
-  CONFIG: ${{ env.BASE }}$/config    # Can see BASE from previous entry
+  CONFIG: ${{ service.env.BASE }}$/config    # Can see BASE from previous entry
 ```
 
 ---
@@ -379,7 +386,7 @@ The Lua environment provides a **restricted subset** of the standard library:
 
 ## Security Model
 
-- **Environment tables are frozen** — `service.env`, `service.raw_env`, `service.env_file`, `hook.env`, `hook.raw_env`, `hook.env_file` are read-only via Luau's `table.freeze`
+- **Environment tables are frozen** — `service.env`, `service.raw_env`, `service.env_file`, `hook.env`, `hook.raw_env`, `hook.env_file`, `kepler.env` are read-only via Luau's `table.freeze`
 - **Writes to `service.*` / `hook.*` tables raise runtime errors**
 - **Metatables are protected** from removal
 - **`require()` is blocked** — external module loading is not permitted
@@ -393,9 +400,9 @@ The Lua environment provides a **restricted subset** of the standard library:
 
 ```yaml
 lua: |
-  global.base_port = tonumber(env.BASE_PORT or "3000")
   function port_for(offset)
-    return tostring(global.base_port + offset)
+    local base = tonumber(service.env.BASE_PORT) or 3000
+    return tostring(base + offset)
   end
 
 services:
@@ -419,11 +426,11 @@ services:
   app:
     environment: !lua |
       local vars = {NODE_ENV="production"}
-      if env.ENABLE_METRICS then
+      if service.env.ENABLE_METRICS then
         vars.METRICS = "true"
         vars.METRICS_PORT = "9090"
       end
-      if env.DEBUG then
+      if service.env.DEBUG then
         vars.LOG_LEVEL = "debug"
       end
       return vars
@@ -436,7 +443,7 @@ services:
   app:
     environment: !lua |
       local vars = {"NODE_ENV=production"}
-      if env.ENABLE_METRICS then
+      if service.env.ENABLE_METRICS then
         table.insert(vars, "METRICS=true")
         table.insert(vars, "METRICS_PORT=9090")
       end
@@ -460,9 +467,9 @@ services:
         condition: service_healthy
       cache:
         condition: !lua |
-          return env.CACHE_CONDITION or "service_started"
+          return kepler.env.CACHE_CONDITION or "service_started"
         restart: !lua |
-          return env.USE_CACHE == "true"
+          return kepler.env.USE_CACHE == "true"
 ```
 
 ### Recovery Mode on Restart
@@ -512,7 +519,7 @@ services:
 ## See Also
 
 - [Inline Expressions](variable-expansion.md) — `${{ expr }}$` syntax reference
-- [Environment Variables](environment-variables.md) — How `env` is built
+- [Environment Variables](environment-variables.md) — How environment is built
 - [Configuration](configuration.md) — Full config reference
 - [Architecture](architecture.md#lua-scripting-security) — Internal sandbox implementation
 - [Outputs](outputs.md) — Hook step outputs, process outputs, and cross-service output passing

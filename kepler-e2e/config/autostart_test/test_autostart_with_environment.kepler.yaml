@@ -1,0 +1,11 @@
+kepler:
+  autostart:
+    environment:
+      - PERSIST_VAR=persisted_value
+  logs:
+    buffer_size: 0
+
+services:
+  worker:
+    command: ["sh", "-c", "echo PERSIST_VAR=$PERSIST_VAR; sleep 300"]
+    inherit_env: true

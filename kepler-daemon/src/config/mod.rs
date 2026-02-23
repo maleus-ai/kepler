@@ -24,13 +24,13 @@ pub use deps::{
 pub use duration::{format_duration, parse_duration};
 pub use expand::{
     evaluate_expression_string, evaluate_expression_string_with_env,
-    evaluate_value_tree, evaluate_value_tree_with_env, resolve_sys_env,
+    evaluate_value_tree, evaluate_value_tree_with_env, resolve_inherit_env,
 };
 pub use health::HealthCheck;
 pub use hooks::{HookCommand, HookCommon, HookList, ServiceHooks};
 pub use logs::{LogConfig, LogRetention, LogRetentionConfig, LogStoreConfig};
 pub use resolvable::ResolvableCommand;
-pub use resources::{ResourceLimits, SysEnvPolicy, parse_memory_limit};
+pub use resources::{ResourceLimits, parse_memory_limit};
 pub use restart::{RestartConfig, RestartPolicy};
 
 use serde::Deserialize;
@@ -344,12 +344,6 @@ impl<T: Clone + DeserializeOwned> ConfigValue<T> {
     }
 }
 
-/// Resolve a `ConfigValue<Vec<ConfigValue<T>>>` into a flat `Vec<T>`.
-///
-/// If the outer ConfigValue is Dynamic (!lua), evaluates it to get a
-/// `serde_yaml::Value` sequence, deserializes as `Vec<ConfigValue<T>>`,
-/// then resolves each inner element. If the outer is Static, resolves
-/// each inner element directly.
 /// Get or lazily build a cached Lua env table.
 pub(crate) fn get_or_build_env(
     evaluator: &LuaEvaluator,
@@ -370,6 +364,12 @@ pub(crate) fn get_or_build_env(
     }
 }
 
+/// Resolve a `ConfigValue<Vec<ConfigValue<T>>>` into a flat `Vec<T>`.
+///
+/// If the outer ConfigValue is Dynamic (!lua), evaluates it to get a
+/// `serde_yaml::Value` sequence, deserializes as `Vec<ConfigValue<T>>`,
+/// then resolves each inner element. If the outer is Static, resolves
+/// each inner element directly.
 pub(crate) fn resolve_nested_vec<T: Clone + DeserializeOwned>(
     cv: &ConfigValue<Vec<ConfigValue<T>>>,
     evaluator: &LuaEvaluator,
@@ -412,7 +412,7 @@ pub(crate) fn resolve_nested_vec<T: Clone + DeserializeOwned>(
 /// Fields are parsed at config load time. Static values are available immediately;
 /// dynamic values (containing `${{ }}$` or `!lua`) are resolved lazily at service start time.
 ///
-/// `depends_on` and `sys_env` are always static (not wrapped in ConfigValue).
+/// `depends_on` and `inherit_env` are always static (not wrapped in ConfigValue).
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawServiceConfig {
@@ -428,9 +428,9 @@ pub struct RawServiceConfig {
     pub environment: ConfigValue<EnvironmentEntries>,
     #[serde(default)]
     pub env_file: ConfigValue<Option<PathBuf>>,
-    /// System environment inheritance policy (always static)
+    /// Whether to inherit kepler_env into the service's process environment
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sys_env: Option<SysEnvPolicy>,
+    pub inherit_env: Option<bool>,
     #[serde(default)]
     pub restart: ConfigValue<RestartConfig>,
     /// Dependencies (always static — used for dep graph before evaluation)
@@ -467,7 +467,7 @@ impl Default for RawServiceConfig {
             working_dir: ConfigValue::default(),
             environment: ConfigValue::Static(EnvironmentEntries::default()),
             env_file: ConfigValue::default(),
-            sys_env: None,
+            inherit_env: None,
             restart: ConfigValue::default(),
             depends_on: DependsOn::default(),
             healthcheck: ConfigValue::default(),
@@ -703,14 +703,117 @@ pub fn resolve_log_buffer_size(
 // Main configuration types
 // ============================================================================
 
+// ============================================================================
+// AutostartConfig enum
+// ============================================================================
+
+/// Autostart configuration for the Kepler daemon.
+///
+/// Supported YAML forms:
+/// - `autostart: false` or omitted → `Disabled` (default)
+/// - `autostart: true` → `Enabled` (no declared environment)
+/// - `autostart: { environment: [...] }` → `WithEnvironment`
+#[derive(Debug, Clone)]
+pub enum AutostartConfig {
+    Disabled,
+    Enabled,
+    WithEnvironment { environment: ConfigValue<EnvironmentEntries> },
+}
+
+impl Default for AutostartConfig {
+    fn default() -> Self { AutostartConfig::Disabled }
+}
+
+impl AutostartConfig {
+    pub fn is_enabled(&self) -> bool { !matches!(self, AutostartConfig::Disabled) }
+    pub fn environment(&self) -> Option<&ConfigValue<EnvironmentEntries>> {
+        match self {
+            AutostartConfig::WithEnvironment { environment } => Some(environment),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AutostartConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct AutostartVisitor;
+
+        impl<'de> de::Visitor<'de> for AutostartVisitor {
+            type Value = AutostartConfig;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a boolean or a mapping with 'environment' key")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> std::result::Result<AutostartConfig, E>
+            where
+                E: de::Error,
+            {
+                Ok(if v { AutostartConfig::Enabled } else { AutostartConfig::Disabled })
+            }
+
+            fn visit_unit<E>(self) -> std::result::Result<AutostartConfig, E>
+            where
+                E: de::Error,
+            {
+                Ok(AutostartConfig::Disabled)
+            }
+
+            fn visit_map<A>(self, map: A) -> std::result::Result<AutostartConfig, A::Error>
+            where
+                A: de::MapAccess<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct AutostartMapping {
+                    environment: ConfigValue<EnvironmentEntries>,
+                }
+                let mapping = AutostartMapping::deserialize(
+                    de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(AutostartConfig::WithEnvironment { environment: mapping.environment })
+            }
+        }
+
+        deserializer.deserialize_any(AutostartVisitor)
+    }
+}
+
+impl serde::Serialize for AutostartConfig {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            AutostartConfig::Disabled => serializer.serialize_bool(false),
+            AutostartConfig::Enabled => serializer.serialize_bool(true),
+            AutostartConfig::WithEnvironment { environment } => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("environment", environment)?;
+                map.end()
+            }
+        }
+    }
+}
+
+// ============================================================================
+// KeplerGlobalConfig
+// ============================================================================
+
 /// Global Kepler configuration (under the `kepler` namespace)
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeplerGlobalConfig {
-    /// Global system environment inheritance policy
-    /// Applied to all services unless overridden at the service level
+    /// Global default inherit_env setting
+    /// Applied to all services/hooks/healthchecks unless overridden
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sys_env: Option<SysEnvPolicy>,
+    pub default_inherit_env: Option<bool>,
 
     /// Global log configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -730,6 +833,10 @@ pub struct KeplerGlobalConfig {
     /// Defaults to 1MB if not specified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_max_size: Option<String>,
+
+    /// Autostart configuration: false (default), true, or { environment: [...] }
+    #[serde(default)]
+    pub autostart: AutostartConfig,
 }
 
 /// Root configuration structure
@@ -766,9 +873,9 @@ pub struct ServiceConfig {
     pub environment: Vec<String>,
     #[serde(default)]
     pub env_file: Option<PathBuf>,
-    /// System environment inheritance policy
+    /// Whether to inherit kepler_env into the service's process environment
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sys_env: Option<SysEnvPolicy>,
+    pub inherit_env: Option<bool>,
     #[serde(default)]
     pub restart: RestartConfig,
     /// Dependencies (always static)
@@ -927,10 +1034,10 @@ impl KeplerConfig {
         // graph, so we evaluate it eagerly here (before RawServiceConfig parsing).
         let sys_env_ctx = EvalContext {
             service: Some(crate::lua_eval::ServiceEvalContext {
-                raw_env: sys_env.clone(),
                 env: sys_env.clone(),
                 ..Default::default()
             }),
+            kepler_env: sys_env.clone(),
             ..Default::default()
         };
 
@@ -984,10 +1091,10 @@ impl KeplerConfig {
                     let ctx = EvalContext {
                         service: Some(crate::lua_eval::ServiceEvalContext {
                             name: name.to_string(),
-                            raw_env: sys_env.clone(),
                             env: sys_env.clone(),
                             ..Default::default()
                         }),
+                        kepler_env: sys_env.clone(),
                         ..Default::default()
                     };
                     match dep_val {
@@ -1122,7 +1229,7 @@ impl KeplerConfig {
             let run = raw.run.resolve_with_env(evaluator, ctx, config_path, &format!("{}.run", name), &mut shared_env)?;
             match run {
                 Some(script) => {
-                    let shell = resolve_shell(&ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default());
+                    let shell = resolve_shell(&ctx.kepler_env);
                     vec![shell, "-c".to_string(), script]
                 },
                 None => Vec::new(),
@@ -1149,9 +1256,7 @@ impl KeplerConfig {
                     &format!("{}.healthcheck.run", name), &mut shared_env,
                 )?;
                 if let Some(script) = script {
-                    let shell = resolve_shell(
-                        &ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default()
-                    );
+                    let shell = resolve_shell(&ctx.kepler_env);
                     hc.command = ConfigValue::Static(ConfigValue::wrap_vec(
                         vec![shell, "-c".to_string(), script]
                     ));
@@ -1208,7 +1313,7 @@ impl KeplerConfig {
             working_dir,
             environment,
             env_file,
-            sys_env: raw.sys_env.clone(),
+            inherit_env: raw.inherit_env,
             restart,
             depends_on: raw.depends_on.clone(),
             healthcheck,
@@ -1348,9 +1453,19 @@ impl KeplerConfig {
         self.kepler.as_ref().and_then(|k| k.logs.as_ref())
     }
 
-    /// Get global sys_env policy
-    pub fn global_sys_env(&self) -> Option<&SysEnvPolicy> {
-        self.kepler.as_ref().and_then(|k| k.sys_env.as_ref())
+    /// Get global default_inherit_env setting
+    pub fn global_default_inherit_env(&self) -> Option<bool> {
+        self.kepler.as_ref().and_then(|k| k.default_inherit_env)
+    }
+
+    /// Get global autostart setting (defaults to false)
+    pub fn global_autostart(&self) -> bool {
+        self.kepler.as_ref().map(|k| k.autostart.is_enabled()).unwrap_or(false)
+    }
+
+    /// Get autostart environment config (if WithEnvironment variant)
+    pub fn autostart_environment(&self) -> Option<&ConfigValue<EnvironmentEntries>> {
+        self.kepler.as_ref().and_then(|k| k.autostart.environment())
     }
 
     /// Get service names

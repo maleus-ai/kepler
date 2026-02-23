@@ -402,8 +402,8 @@ Kepler uses `${{ expr }}$` inline Lua expressions for dynamic values in configur
 
 | Syntax | Description |
 |--------|-------------|
-| `${{ env.VAR }}$` | Environment variable reference |
-| `${{ env.VAR or "default" }}$` | Default value if unset |
+| `${{ service.env.VAR }}$` | Service environment variable reference |
+| `${{ service.env.VAR or "default" }}$` | Default value if unset |
 | `${{ deps.svc.status }}$` | Dependency status |
 | `${{ service.name }}$` | Current service name |
 
@@ -416,24 +416,24 @@ Expression evaluation happens in three stages, each building on the previous con
 ```mermaid
 flowchart TD
     subgraph Stage1[Stage 1 - Config Load Time]
-        A[env_file path] --> B[Evaluate with system env]
+        A[env_file path] --> B[Evaluate with kepler.env]
         B --> C[Load env_file content]
     end
     subgraph Stage2[Stage 2 - Service Start Time]
         C --> D[environment array]
-        D --> E[Evaluate sequentially with system env + env_file]
+        D --> E[Evaluate sequentially with kepler.env + env_file]
     end
     subgraph Stage3[Stage 3 - Service Start Time]
         E --> F[All other fields]
-        F --> G[Evaluate with system env + env_file + environment + deps]
+        F --> G[Evaluate with kepler.env + env_file + environment + deps]
     end
 ```
 
 | Stage | What is evaluated | Evaluation context |
 |-------|-------------------|-------------------|
-| 1 | `env_file` path | System environment only (config load time) |
-| 2 | `environment` array entries | System env + env_file variables (sequential, service start time) |
-| 3 | All other fields (`command`, `working_dir`, `user`, hooks, etc.) | System env + env_file + environment + deps (service start time) |
+| 1 | `env_file` path | `kepler.env` only (config load time) |
+| 2 | `environment` array entries | `kepler.env` + env_file variables (sequential, service start time) |
+| 3 | All other fields (`command`, `working_dir`, `user`, hooks, etc.) | `kepler.env` + env_file + environment + deps (service start time) |
 
 See [Environment Variables](environment-variables.md) for the full reference.
 
@@ -447,7 +447,7 @@ When building the final process environment for a service (highest to lowest pri
 
 1. **Service `environment` array** (highest priority)
 2. **Service `env_file` variables**
-3. **System environment variables** (lowest priority)
+3. **Kepler environment** (`kepler.env`) (lowest priority, only if `inherit_env: true`)
 
 Higher priority values override lower priority ones when keys conflict.
 
@@ -493,7 +493,7 @@ The Lua environment provides a **restricted subset** of the standard library:
 
 | Symbol | Description |
 |--------|-------------|
-| `env` | Shortcut: `hook.env` in hook context, else `service.env` |
+| `kepler.env` | Read-only kepler environment (declared via `autostart.environment`, or full CLI env when autostart is disabled) |
 | `service.env` | Read-only full environment (raw_env + env_file + environment) |
 | `service.raw_env` | Read-only inherited base environment (from daemon/CLI) |
 | `service.env_file` | Read-only env_file variables only |
@@ -511,33 +511,32 @@ The Lua environment provides a **restricted subset** of the standard library:
 - **Metatables protected** from removal
 - **`require()` is blocked** to prevent loading external modules
 
-### Single Evaluation
+### Evaluation Model
 
-- Lua scripts evaluated **once** when config is first loaded
-- Results "baked" into the configuration
-- No runtime re-evaluation
-- Global state persists across all evaluations in a single config load
+- **Global config** (`kepler:` namespace, `lua:` directive): evaluated **once** at config load time
+- **Service config** (`${{ }}$`, `!lua`): re-evaluated **on every service start/restart** with the current runtime context (deps, restart_count, etc.)
+- Global state persists across all evaluations in a single evaluation pass
 
 ### Execution Order
 
-Lua scripts run in a specific order that mirrors shell expansion, with `env` progressively building up:
+Lua scripts run in a specific order that mirrors shell expansion, with `service.env` progressively building up:
 
-| Order | Block | `env` contains |
-|-------|-------|---------------|
-| 1 | `lua:` directive | System env only |
-| 2 | `env_file: !lua` | System env only |
-| 3 | `environment: !lua` | System env + env_file |
-| 4 | All other `!lua` blocks | System env + env_file + environment array |
+| Order | Block | Available context |
+|-------|-------|-------------------|
+| 1 | `lua:` directive | `kepler.env` only |
+| 2 | `env_file: !lua` | `kepler.env` + `service.raw_env` |
+| 3 | `environment: !lua` | `kepler.env` + `service.raw_env` + `service.env_file` + `service.env` (sequential) |
+| 4 | All other `!lua` blocks | `kepler.env` + `service.raw_env` + `service.env_file` + `service.env` + `deps` |
 
 **Details:**
 
-1. **`lua:` directive** runs first in global scope, defining functions available to all subsequent blocks. `env` contains only system environment variables.
+1. **`lua:` directive** runs first in global scope, defining functions available to all subsequent blocks. Only `kepler.env` is available (the kepler environment).
 
-2. **`env_file: !lua`** blocks run next (if any). `env` still contains only system environment, since env_file hasn't been loaded yet.
+2. **`env_file: !lua`** blocks run next (if any). `kepler.env` and `service.raw_env` are available, but env_file hasn't been loaded yet.
 
-3. **`environment: !lua`** array blocks run after env_file is loaded. `env` now contains system env merged with env_file variables.
+3. **`environment: !lua`** array blocks run after env_file is loaded. `service.env` now progressively builds up with each resolved entry.
 
-4. **All other `!lua` blocks** run in declaration order. `env` contains the full merged environment (system + env_file + environment array).
+4. **All other `!lua` blocks** run in declaration order. `service.env` contains the full merged environment (raw_env + env_file + environment array), and `deps` is available.
 
 This ordering ensures that each stage has access to the variables it needs while maintaining deterministic evaluation.
 
@@ -572,7 +571,7 @@ Services can run as specific user/groups:
 
 ### Environment Isolation
 
-Services receive a controlled environment built from: (1) system environment, (2) env_file variables, (3) service-defined environment - with later sources overriding earlier ones.
+Services receive a controlled environment built from: (1) kepler environment (`kepler.env`, if `inherit_env: true`), (2) env_file variables, (3) service-defined environment — with later sources overriding earlier ones.
 
 See [Environment Variables](environment-variables.md) for the full reference.
 

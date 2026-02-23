@@ -1,18 +1,18 @@
-//! E2E tests for sys_env architecture
+//! E2E tests for inherit_env architecture
 //!
 //! These tests verify that:
 //! - Environment variables come from CLI, not daemon
-//! - sys_env: inherit works correctly with CLI env
-//! - sys_env: clear properly excludes system env
+//! - inherit_env: true works correctly with CLI env
+//! - inherit_env: false properly excludes system env
 
 use kepler_e2e::{E2eHarness, E2eResult};
 use std::time::Duration;
 
 const TEST_MODULE: &str = "sys_env_test";
 
-/// Test that sys_env comes from the CLI process, not the daemon process.
+/// Test that system environment comes from the CLI process, not the daemon process.
 ///
-/// This test verifies the core sys_env architecture:
+/// This test verifies the core inherit_env architecture:
 /// 1. Start daemon WITHOUT a specific test variable in its environment
 /// 2. Run CLI WITH that variable set
 /// 3. Verify the service sees the CLI's variable (proving it came from CLI, not daemon)
@@ -59,7 +59,7 @@ async fn test_cli_env_used_not_daemon() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that sys_env: clear properly excludes CLI environment variables
+/// Test that inherit_env: false properly excludes CLI environment variables
 #[tokio::test]
 async fn test_sys_env_clear_excludes_cli_env() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -69,7 +69,7 @@ async fn test_sys_env_clear_excludes_cli_env() -> E2eResult<()> {
 
     harness.start_daemon().await?;
 
-    // Create a config that uses sys_env: clear
+    // Create a config that uses inherit_env: false
     let config_content = r#"
 kepler:
   logs:
@@ -77,7 +77,7 @@ kepler:
 services:
   clear-checker:
     command: ["sh", "-c", "echo CLEAR_TEST_VAR=${CLEAR_TEST_VAR:-EMPTY} && sleep 30"]
-    sys_env: clear
+    inherit_env: false
     restart: no
 "#;
     let config_path = harness.create_test_config(config_content)?;
@@ -92,14 +92,14 @@ services:
         .wait_for_service_status(&config_path, "clear-checker", "running", Duration::from_secs(10))
         .await?;
 
-    // Check logs - with sys_env: clear, the CLI env should NOT be visible
+    // Check logs - with inherit_env: false, the CLI env should NOT be visible
     let logs = harness
         .wait_for_log_content(&config_path, "CLEAR_TEST_VAR=", Duration::from_secs(5))
         .await?;
 
     assert!(
         logs.stdout_contains("CLEAR_TEST_VAR=EMPTY"),
-        "With sys_env: clear, CLI env should NOT be inherited. stdout: {}",
+        "With inherit_env: false, CLI env should NOT be inherited. stdout: {}",
         logs.stdout
     );
 
@@ -132,7 +132,7 @@ kepler:
 services:
   env-checker:
     command: ["sh", "-c", "echo {}=${} && sleep 30"]
-    sys_env: inherit
+    inherit_env: true
     restart: no
 "#,
         TEST_VAR, TEST_VAR
@@ -228,7 +228,7 @@ kepler:
 services:
   env-checker:
     command: ["sh", "-c", "echo {}=${} && sleep 30"]
-    sys_env: inherit
+    inherit_env: true
     restart: no
 "#,
         TEST_VAR, TEST_VAR

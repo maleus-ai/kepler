@@ -1,0 +1,12 @@
+kepler:
+  autostart:
+    environment:
+      - KEPLER_TEST_VAR=lua_test_value
+  logs:
+    buffer_size: 0
+
+services:
+  lua-checker:
+    command: !lua |
+      local val = kepler.env.KEPLER_TEST_VAR or "MISSING"
+      return {"sh", "-c", "echo LUA_SAW=" .. val .. " && sleep 300"}

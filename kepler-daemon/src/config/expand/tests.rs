@@ -123,15 +123,15 @@ fn test_basic_lookup() {
     let (eval, ctx) = make_evaluator_and_ctx();
     let path = test_path();
     assert_eq!(
-        evaluate_expression_string("${{ env.HOME }}$", &eval, &ctx, &path, "test").unwrap(),
+        evaluate_expression_string("${{ service.env.HOME }}$", &eval, &ctx, &path, "test").unwrap(),
         "/home/user"
     );
     assert_eq!(
-        evaluate_expression_string("${{ env.DB_HOST }}$", &eval, &ctx, &path, "test").unwrap(),
+        evaluate_expression_string("${{ service.env.DB_HOST }}$", &eval, &ctx, &path, "test").unwrap(),
         "localhost"
     );
     assert_eq!(
-        evaluate_expression_string("${{ env.APP_PORT }}$", &eval, &ctx, &path, "test").unwrap(),
+        evaluate_expression_string("${{ service.env.APP_PORT }}$", &eval, &ctx, &path, "test").unwrap(),
         "8080"
     );
 }
@@ -141,13 +141,13 @@ fn test_missing_var_nil_to_empty() {
     let (eval, ctx) = make_evaluator_and_ctx();
     let path = test_path();
     assert_eq!(
-        evaluate_expression_string("${{ env.NONEXISTENT }}$", &eval, &ctx, &path, "test")
+        evaluate_expression_string("${{ service.env.NONEXISTENT }}$", &eval, &ctx, &path, "test")
             .unwrap(),
         ""
     );
     assert_eq!(
         evaluate_expression_string(
-            "prefix_${{ env.NONEXISTENT }}$_suffix",
+            "prefix_${{ service.env.NONEXISTENT }}$_suffix",
             &eval,
             &ctx,
             &path,
@@ -165,7 +165,7 @@ fn test_or_default_syntax() {
     // Set variable — should use set value
     assert_eq!(
         evaluate_expression_string(
-            "${{ env.HOME or '/default' }}$",
+            "${{ service.env.HOME or '/default' }}$",
             &eval,
             &ctx,
             &path,
@@ -177,7 +177,7 @@ fn test_or_default_syntax() {
     // Unset variable — should use default
     assert_eq!(
         evaluate_expression_string(
-            "${{ env.MISSING or 'fallback' }}$",
+            "${{ service.env.MISSING or 'fallback' }}$",
             &eval,
             &ctx,
             &path,
@@ -296,7 +296,7 @@ fn test_multiple_expressions() {
     let path = test_path();
     assert_eq!(
         evaluate_expression_string(
-            "${{ env.HOME }}$/app:${{ env.APP_PORT }}$",
+            "${{ service.env.HOME }}$/app:${{ service.env.APP_PORT }}$",
             &eval,
             &ctx,
             &path,
@@ -322,7 +322,7 @@ fn test_no_closing_braces() {
 fn test_evaluate_value_tree_basic() {
     let (eval, ctx) = make_evaluator_and_ctx();
     let path = test_path();
-    let mut value = serde_yaml::Value::String("${{ env.HOME }}$/app".to_string());
+    let mut value = serde_yaml::Value::String("${{ service.env.HOME }}$/app".to_string());
     evaluate_value_tree(&mut value, &eval, &ctx, &path, "test").unwrap();
     assert_eq!(value.as_str().unwrap(), "/home/user/app");
 }
@@ -335,7 +335,7 @@ fn test_evaluate_value_tree_skips_depends_on() {
 depends_on:
   - db
   - cache
-command: ["${{ env.HOME }}$/app"]
+command: ["${{ service.env.HOME }}$/app"]
 "#;
     let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
     evaluate_value_tree(&mut value, &eval, &ctx, &path, "test").unwrap();
@@ -446,12 +446,12 @@ fn test_evaluate_expression_string_with_env() {
     let env_table = eval.prepare_env(&ctx).unwrap();
 
     assert_eq!(
-        evaluate_expression_string_with_env("${{ env.HOME }}$", &eval, &env_table, &path, "test").unwrap(),
+        evaluate_expression_string_with_env("${{ service.env.HOME }}$", &eval, &env_table, &path, "test").unwrap(),
         "/home/user"
     );
     assert_eq!(
         evaluate_expression_string_with_env(
-            "${{ env.HOME }}$/app:${{ env.APP_PORT }}$",
+            "${{ service.env.HOME }}$/app:${{ service.env.APP_PORT }}$",
             &eval, &env_table, &path, "test"
         ).unwrap(),
         "/home/user/app:8080"
@@ -465,13 +465,13 @@ fn test_evaluate_value_tree_with_env_shared_cache() {
     let mut cached_env: Option<mlua::Table> = None;
 
     // First call populates cache
-    let mut value1 = serde_yaml::Value::String("${{ env.HOME }}$/app".to_string());
+    let mut value1 = serde_yaml::Value::String("${{ service.env.HOME }}$/app".to_string());
     evaluate_value_tree_with_env(&mut value1, &eval, &ctx, &path, "test1", &mut cached_env).unwrap();
     assert_eq!(value1.as_str().unwrap(), "/home/user/app");
     assert!(cached_env.is_some(), "Cache should be populated after first call");
 
     // Second call reuses cache (no rebuild)
-    let mut value2 = serde_yaml::Value::String("${{ env.DB_HOST }}$:${{ env.APP_PORT }}$".to_string());
+    let mut value2 = serde_yaml::Value::String("${{ service.env.DB_HOST }}$:${{ service.env.APP_PORT }}$".to_string());
     evaluate_value_tree_with_env(&mut value2, &eval, &ctx, &path, "test2", &mut cached_env).unwrap();
     assert_eq!(value2.as_str().unwrap(), "localhost:8080");
 }

@@ -8,6 +8,6 @@ services:
     command: ["sh", "-c", "echo HOOK_WD_SERVICE_RUNNING && sleep 30"]
     hooks:
       pre_start:
-        working_dir: ${{ env.HOOK_DIR }}$
+        working_dir: ${{ hook.env.HOOK_DIR }}$
         run: "pwd >> __MARKER_FILE__"
     restart: no

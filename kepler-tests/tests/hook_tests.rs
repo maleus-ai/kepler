@@ -1,7 +1,7 @@
 //! Hook execution tests
 
 use kepler_daemon::config::{ConfigValue, DynamicExpr, EnvironmentEntries, HookCommand, HookCommon, HookList, ServiceHooks};
-use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
+use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestHookBuilder, TestServiceBuilder};
 use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
 use kepler_tests::helpers::marker_files::MarkerFileHelper;
 use std::time::Duration;
@@ -523,7 +523,7 @@ async fn test_hook_env_expansion_with_service_env() {
         pre_start: Some(HookList(vec![HookCommand::Script {
             run: format!("echo \"COMBINED=$COMBINED\" >> {}", marker_path.display()).into(),
             common: HookCommon {
-                environment: EnvironmentEntries(ConfigValue::wrap_vec(vec!["COMBINED=${{ env.SERVICE_VAR }}$_plus_hook".to_string()])).into(),
+                environment: EnvironmentEntries(ConfigValue::wrap_vec(vec!["COMBINED=${{ hook.env.SERVICE_VAR }}$_plus_hook".to_string()])).into(),
                 ..Default::default()
             },
         }])),
@@ -641,6 +641,422 @@ async fn test_hook_env_priority() {
         content.contains("VAR3=hook_env"),
         "VAR3 should come from hook environment. Got: {}",
         content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+// ============================================================================
+// Hook inherit_env Tests
+// ============================================================================
+
+/// Default inherit_env (not set) — hook sees service env vars in process env
+#[tokio::test]
+async fn test_hook_inherit_env_default_sees_service_vars() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("inherit_default");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![HookCommand::script(
+            format!("printenv SERVICE_VAR >> {}", marker_path.display()),
+        )])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_environment(vec!["SERVICE_VAR=from_service".to_string()])
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("inherit_default", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Hook should execute");
+    let content = content.unwrap();
+    assert!(
+        content.contains("from_service"),
+        "Default inherit_env should see service vars. Got: {}",
+        content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// inherit_env: false — hook does NOT see service env vars in process env
+#[tokio::test]
+async fn test_hook_inherit_env_false_hides_service_vars() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("inherit_false");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![TestHookBuilder::script_with_inherit_env(
+            &format!("echo ${{SERVICE_VAR:-MISSING}} >> {}", marker_path.display()),
+            false,
+        )])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_environment(vec!["SERVICE_VAR=from_service".to_string()])
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("inherit_false", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Hook should execute");
+    let content = content.unwrap();
+    assert!(
+        content.contains("MISSING"),
+        "inherit_env: false should hide service vars. Got: {}",
+        content
+    );
+    assert!(
+        !content.contains("from_service"),
+        "inherit_env: false should not contain service var value. Got: {}",
+        content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// inherit_env: false — hook's own environment still works
+#[tokio::test]
+async fn test_hook_inherit_env_false_keeps_own_env() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("own_env");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![TestHookBuilder::script_with_inherit_env_and_env(
+            &format!("printenv HOOK_VAR >> {}", marker_path.display()),
+            false,
+            vec!["HOOK_VAR=from_hook".to_string()],
+        )])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_environment(vec!["SERVICE_VAR=from_service".to_string()])
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("own_env", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Hook should execute");
+    let content = content.unwrap();
+    assert!(
+        content.contains("from_hook"),
+        "Hook's own env should work with inherit_env: false. Got: {}",
+        content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// inherit_env: false — hook's env_file still loads
+#[tokio::test]
+async fn test_hook_inherit_env_false_keeps_own_env_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("env_file_test");
+
+    // Create an env file for the hook
+    let env_file_path = temp_dir.path().join(".env.hook_inherit");
+    std::fs::write(&env_file_path, "FILE_VAR=from_file\n").unwrap();
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![TestHookBuilder::script_with_inherit_env_and_env_file(
+            &format!(
+                "echo FILE_VAR=$(printenv FILE_VAR) >> {} && echo SERVICE_VAR=${{SERVICE_VAR:-MISSING}} >> {}",
+                marker_path.display(),
+                marker_path.display()
+            ),
+            false,
+            env_file_path,
+        )])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_environment(vec!["SERVICE_VAR=from_service".to_string()])
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("env_file_test", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Hook should execute");
+    let content = content.unwrap();
+    assert!(
+        content.contains("FILE_VAR=from_file"),
+        "Hook's env_file should work with inherit_env: false. Got: {}",
+        content
+    );
+    assert!(
+        content.contains("SERVICE_VAR=MISSING"),
+        "Service vars should be hidden with inherit_env: false. Got: {}",
+        content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// inherit_env: false — Lua service.env.* is still accessible for hook environment expressions
+#[tokio::test]
+async fn test_hook_inherit_env_false_lua_service_env_still_accessible() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("lua_access");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![HookCommand::Script {
+            run: format!("printenv CAPTURED >> {}", marker_path.display()).into(),
+            common: HookCommon {
+                inherit_env: Some(false),
+                environment: EnvironmentEntries(ConfigValue::wrap_vec(vec![
+                    "CAPTURED=${{ service.env.SERVICE_VAR }}$".to_string(),
+                ])).into(),
+                ..Default::default()
+            },
+        }])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_environment(vec!["SERVICE_VAR=from_service".to_string()])
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("lua_access", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Hook should execute");
+    let content = content.unwrap();
+    assert!(
+        content.contains("from_service"),
+        "Lua service.env should still be accessible with inherit_env: false. Got: {}",
+        content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Explicit inherit_env: true works same as default
+#[tokio::test]
+async fn test_hook_inherit_env_explicit_true() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("explicit_true");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![TestHookBuilder::script_with_inherit_env(
+            &format!("printenv SERVICE_VAR >> {}", marker_path.display()),
+            true,
+        )])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_environment(vec!["SERVICE_VAR=from_service".to_string()])
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("explicit_true", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Hook should execute");
+    let content = content.unwrap();
+    assert!(
+        content.contains("from_service"),
+        "Explicit inherit_env: true should see service vars. Got: {}",
+        content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// inherit_env: false with global kepler env — hook does NOT see service vars
+#[tokio::test]
+async fn test_hook_inherit_env_false_with_kepler_env() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("kepler_env");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![TestHookBuilder::script_with_inherit_env(
+            &format!("echo SERVICE_VAR=${{SERVICE_VAR:-MISSING}} >> {}", marker_path.display()),
+            false,
+        )])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .with_global_default_inherit_env(true)
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_environment(vec!["SERVICE_VAR=from_service".to_string()])
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    let content = marker
+        .wait_for_marker_content("kepler_env", Duration::from_secs(2))
+        .await;
+
+    assert!(content.is_some(), "Hook should execute");
+    let content = content.unwrap();
+    assert!(
+        content.contains("SERVICE_VAR=MISSING"),
+        "inherit_env: false should hide service vars even with global inherit_env. Got: {}",
+        content
+    );
+
+    harness.stop_service("test").await.unwrap();
+}
+
+/// Mixed inherit_env in same hook list — first false, second default (true)
+#[tokio::test]
+async fn test_hook_mixed_inherit_env() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker1_path = marker.marker_path("mixed1");
+    let marker2_path = marker.marker_path("mixed2");
+
+    let hooks = ServiceHooks {
+        pre_start: Some(HookList(vec![
+            TestHookBuilder::script_with_inherit_env(
+                &format!("echo SHARED=${{SHARED:-MISSING}} >> {}", marker1_path.display()),
+                false,
+            ),
+            HookCommand::script(
+                format!("echo SHARED=$(printenv SHARED) >> {}", marker2_path.display()),
+            ),
+        ])),
+        ..Default::default()
+    };
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::long_running()
+                .with_environment(vec!["SHARED=from_service".to_string()])
+                .with_hooks(hooks)
+                .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    // Wait for both markers
+    let content1 = marker
+        .wait_for_marker_content("mixed1", Duration::from_secs(2))
+        .await;
+    let content2 = marker
+        .wait_for_marker_content("mixed2", Duration::from_secs(2))
+        .await;
+
+    assert!(content1.is_some(), "First hook should execute");
+    let content1 = content1.unwrap();
+    assert!(
+        content1.contains("SHARED=MISSING"),
+        "First hook (inherit_env: false) should not see service vars. Got: {}",
+        content1
+    );
+
+    assert!(content2.is_some(), "Second hook should execute");
+    let content2 = content2.unwrap();
+    assert!(
+        content2.contains("SHARED=from_service"),
+        "Second hook (default inherit_env) should see service vars. Got: {}",
+        content2
     );
 
     harness.stop_service("test").await.unwrap();

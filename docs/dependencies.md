@@ -291,7 +291,7 @@ By default, when a dependency is skipped, the dependent service is also skipped.
 ```yaml
 services:
   profiler:
-    if: ${{ env.ENABLE_PROFILING ~= nil }}$
+    if: ${{ service.env.ENABLE_PROFILING ~= nil }}$
     command: ["./profiler"]
     restart: no
 

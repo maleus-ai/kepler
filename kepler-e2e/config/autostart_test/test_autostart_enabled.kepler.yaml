@@ -1,5 +1,7 @@
 kepler:
-  autostart: true
+  autostart:
+    environment:
+      - AUTOSTART_TEST_VAR=hello_from_kepler
   logs:
     buffer_size: 0
 

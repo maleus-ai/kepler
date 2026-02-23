@@ -1,0 +1,12 @@
+kepler:
+  autostart:
+    environment:
+      - HOME
+      - CUSTOM_VAR=custom_value
+  logs:
+    buffer_size: 0
+
+services:
+  env-checker:
+    command: ["sh", "-c", "echo HOME=$HOME CUSTOM_VAR=$CUSTOM_VAR SHOULD_MISS=${SHOULD_NOT_EXIST:-MISSING} && sleep 300"]
+    inherit_env: true

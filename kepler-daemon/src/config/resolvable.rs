@@ -11,7 +11,7 @@ use crate::process::CommandSpec;
 
 use super::hooks::HookCommand;
 use super::resources::ResourceLimits;
-use super::{ConfigValue, EnvironmentEntries, RawServiceConfig};
+use super::{ConfigValue, EnvironmentEntries};
 
 /// Unresolved process specification referencing ConfigValue<T> fields.
 ///
@@ -33,20 +33,6 @@ pub struct ResolvableCommand<'a> {
 }
 
 impl<'a> ResolvableCommand<'a> {
-    /// Create from a RawServiceConfig (borrows fields, clones only run and command).
-    pub fn from_service(raw: &'a RawServiceConfig) -> Self {
-        Self {
-            run: raw.run.clone(),
-            command: raw.command.clone(),
-            user: &raw.user,
-            groups: &raw.groups,
-            working_dir: &raw.working_dir,
-            environment: &raw.environment,
-            env_file: &raw.env_file,
-            limits: &raw.limits,
-        }
-    }
-
     /// Create from a HookCommand (borrows common fields, owns run/command).
     pub fn from_hook(hook: &'a HookCommand) -> Self {
         let common = hook.common();
@@ -204,7 +190,7 @@ impl<'a> ResolvableCommand<'a> {
             )?;
             match run {
                 Some(script) => {
-                    let shell = super::resolve_shell(&ctx.service.as_ref().map(|s| &s.raw_env).cloned().unwrap_or_default());
+                    let shell = super::resolve_shell(&ctx.kepler_env);
                     vec![shell, "-c".to_string(), script]
                 },
                 None => Vec::new(),

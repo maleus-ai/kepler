@@ -6,6 +6,6 @@ services:
   vars-service:
     env_file: __ENV_FILE__
     environment:
-      - FULL_PATH=${{ env.BASE_PATH }}$/${{ env.SUB_PATH }}$
+      - FULL_PATH=${{ service.env.BASE_PATH }}$/${{ service.env.SUB_PATH }}$
     command: ["sh", "-c", "echo $FULL_PATH && sleep 30"]
     restart: no

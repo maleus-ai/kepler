@@ -24,7 +24,7 @@ fn load_config_from_string(yaml: &str, dir: &Path) -> Result<KeplerConfig, Strin
     KeplerConfig::load(&config_path, &sys_env).map_err(|e| e.to_string())
 }
 
-/// Helper to resolve a service config with Lua evaluation and ${{ env.VAR }}$ expansion.
+/// Helper to resolve a service config with Lua evaluation and ${{ service.env.VAR }}$ expansion.
 /// Uses the current process environment as sys_env.
 fn resolve_svc(config: &KeplerConfig, name: &str, config_path: &Path) -> kepler_daemon::config::ServiceConfig {
     let sys_env: HashMap<String, String> = std::env::vars().collect();
@@ -41,10 +41,10 @@ fn resolve_svc_with_env(
     use kepler_daemon::lua_eval::ServiceEvalContext;
     let mut ctx = EvalContext {
         service: Some(ServiceEvalContext {
-            raw_env: sys_env.clone(),
             env: sys_env.clone(),
             ..Default::default()
         }),
+        kepler_env: sys_env.clone(),
         ..Default::default()
     };
     let evaluator = config.create_lua_evaluator().unwrap();
@@ -57,10 +57,10 @@ fn try_resolve_svc(config: &KeplerConfig, name: &str, config_path: &Path) -> Res
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     let mut ctx = EvalContext {
         service: Some(ServiceEvalContext {
-            raw_env: sys_env.clone(),
-            env: sys_env,
+            env: sys_env.clone(),
             ..Default::default()
         }),
+        kepler_env: sys_env,
         ..Default::default()
     };
     let evaluator = config.create_lua_evaluator().map_err(|e| e.to_string())?;
@@ -123,7 +123,7 @@ services:
   test:
     command: ["echo", "hello"]
     environment: !lua |
-      return {"MY_VAR=" .. (env.KEPLER_LUA_TEST_VAR or "default")}
+      return {"MY_VAR=" .. (service.env.KEPLER_LUA_TEST_VAR or "default")}
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
@@ -147,7 +147,7 @@ services:
   test:
     command: ["echo", "hello"]
     working_dir: !lua |
-      env.NEW_VAR = "should fail"
+      service.env.NEW_VAR = "should fail"
       return "/tmp"
 "#;
 
@@ -273,7 +273,7 @@ services:
   test:
     command: ["echo", "hello"]
     environment: !lua |
-      if env.KEPLER_ENV == "production" then
+      if service.env.KEPLER_ENV == "production" then
         return {"LOG_LEVEL=warn"}
       else
         return {"LOG_LEVEL=debug"}
@@ -307,7 +307,7 @@ services:
     command: ["echo", "hello"]
     healthcheck:
       command: !lua |
-        local port = env.KEPLER_HEALTH_PORT or "80"
+        local port = service.env.KEPLER_HEALTH_PORT or "80"
         return {"sh", "-c", "curl -f http://localhost:" .. port .. "/health"}
       interval: 10s
       timeout: 5s
@@ -353,7 +353,7 @@ services:
     assert!(service.environment.contains(&"MAX=5".to_string()));
 }
 
-/// Test: env_file evaluation order (Lua sees system vars via service.raw_env)
+/// Test: env_file evaluation order (Lua sees system vars via kepler.env)
 #[test]
 fn test_lua_env_file_evaluation_order() {
     let _guard = ENV_LOCK.lock();
@@ -368,7 +368,7 @@ services:
   test:
     command: ["echo", "hello"]
     env_file: !lua |
-      return service.raw_env.KEPLER_BASE_PATH .. "/.env"
+      return kepler.env.KEPLER_BASE_PATH .. "/.env"
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
@@ -406,12 +406,12 @@ fn test_lua_env_transform() {
 services:
   test:
     command: ["echo", "hello"]
-    sys_env: clear
+    inherit_env: false
     environment: !lua |
       local result = {}
       local prefix = "KEPLER_BACKEND_"
       local new_prefix = "APP_"
-      for key, value in pairs(env) do
+      for key, value in pairs(service.env) do
         if string.sub(key, 1, #prefix) == prefix then
           local new_key = new_prefix .. string.sub(key, #prefix + 1)
           table.insert(result, new_key .. "=" .. value)
@@ -481,7 +481,7 @@ services:
   test:
     command: ["echo", "hello"]
     environment: !lua |
-      local val = env.KEPLER_NONEXISTENT_VAR
+      local val = service.env.KEPLER_NONEXISTENT_VAR
       if val == nil then
         return {"STATUS=not_found"}
       else
@@ -574,9 +574,9 @@ fn test_lua_global_logs_config() {
 kepler:
   logs:
     max_size: !lua |
-      return env.KEPLER_LOG_MAX_SIZE or "10M"
+      return service.env.KEPLER_LOG_MAX_SIZE or "10M"
     buffer_size: !lua |
-      return tonumber(env.KEPLER_LOG_BUFFER) or 0
+      return tonumber(service.env.KEPLER_LOG_BUFFER) or 0
 
 services:
   test:
@@ -613,7 +613,7 @@ services:
     command: ["echo", "hello"]
     logs:
       max_size: !lua |
-        return env.KEPLER_SERVICE_MAX_SIZE or "20M"
+        return service.env.KEPLER_SERVICE_MAX_SIZE or "20M"
       buffer_size: !lua |
         return 0  -- sync writes for this service
 "#;
@@ -736,9 +736,9 @@ services:
     depends_on:
       database:
         condition: !lua |
-          return env.KEPLER_DEP_CONDITION or "service_started"
+          return service.env.KEPLER_DEP_CONDITION or "service_started"
         timeout: !lua |
-          return env.KEPLER_DEP_TIMEOUT or "30s"
+          return service.env.KEPLER_DEP_TIMEOUT or "30s"
         restart: !lua |
           return true
 "#;
@@ -784,7 +784,7 @@ services:
       cache:
         condition: service_started
         restart: !lua |
-          return env.KEPLER_USE_CACHE == "true"
+          return service.env.KEPLER_USE_CACHE == "true"
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();

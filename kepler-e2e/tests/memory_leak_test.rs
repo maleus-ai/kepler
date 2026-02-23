@@ -8,7 +8,7 @@
 //! start/stop/restart, healthcheck hooks, if-conditions), healthchecks,
 //! log buffers, resource limits, dependency chains (service_healthy,
 //! service_completed_successfully, service_started, service_failed), Lua
-//! depends_on/command/environment/healthcheck, sys_env overrides, etc.
+//! depends_on/command/environment/healthcheck, kepler_env overrides, etc.
 //!
 //! Run manually with:
 //!   cargo test -p kepler-e2e --test memory_leak_test -- --ignored --nocapture

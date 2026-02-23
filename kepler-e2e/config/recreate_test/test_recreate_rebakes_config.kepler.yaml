@@ -1,11 +1,14 @@
 # Test that recreate re-bakes config (re-expands env vars)
 kepler:
+  autostart:
+    environment:
+      - TEST_RECREATE_VAR
   logs:
     buffer_size: 0
 services:
   env-service:
     command: ["sh", "-c", "echo VAR=$TEST_RECREATE_VAR && sleep 3600"]
-    sys_env: inherit
+    inherit_env: true
     environment:
-      - TEST_RECREATE_VAR=${{ env.TEST_RECREATE_VAR }}$
+      - TEST_RECREATE_VAR=${{ service.env.TEST_RECREATE_VAR }}$
     restart: no

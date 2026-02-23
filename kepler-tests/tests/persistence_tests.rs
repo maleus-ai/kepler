@@ -61,8 +61,10 @@ async fn test_snapshot_taken_on_first_start() {
     let config_dir = temp_dir.path().to_path_buf();
     let state_dir = config_dir.join(".kepler");
 
-    // Create a simple config
+    // Create a simple config with autostart: true to enable snapshots
     let config_content = r#"
+kepler:
+  autostart: true
 services:
   test:
     command: ["sleep", "infinity"]
@@ -114,8 +116,10 @@ async fn test_config_restored_from_snapshot_on_restart() {
     let config_dir = temp_dir.path().to_path_buf();
     let state_dir = config_dir.join(".kepler");
 
-    // Create a config with an environment variable
+    // Create a config with an environment variable and autostart for snapshots
     let config_content = r#"
+kepler:
+  autostart: true
 services:
   test:
     command: ["sleep", "infinity"]
@@ -148,6 +152,8 @@ services:
 
     // Modify the source config file (but snapshot should be used)
     let modified_config = r#"
+kepler:
+  autostart: true
 services:
   test:
     command: ["sleep", "infinity"]
@@ -188,13 +194,17 @@ async fn test_clear_snapshot_forces_reexpansion() {
     let config_dir = temp_dir.path().to_path_buf();
     let state_dir = config_dir.join(".kepler");
 
-    // Create a config with a sys_env-expanded value
+    // Create a config with a sys_env-expanded value and autostart for snapshots
     let config_content = r#"
+kepler:
+  autostart:
+    environment:
+      - MY_CLEAR_VAR
 services:
   test:
     command: ["sleep", "infinity"]
     environment:
-      - TEST_VAR=${{ env.MY_CLEAR_VAR }}$
+      - TEST_VAR=${{ service.env.MY_CLEAR_VAR }}$
 "#;
     let config_path = config_dir.join("kepler.yaml");
     std::fs::write(&config_path, config_content).unwrap();
@@ -237,7 +247,7 @@ services:
     );
 
     // The sys_env should be the NEW value since snapshot was cleared
-    let sys_env2 = handle2.get_sys_env().await;
+    let sys_env2 = handle2.get_kepler_env().await;
     assert_eq!(
         sys_env2.get("MY_CLEAR_VAR").map(|s| s.as_str()),
         Some("new_value"),
@@ -291,8 +301,10 @@ async fn test_state_persistence_across_shutdown() {
     let config_dir = temp_dir.path().to_path_buf();
     let state_dir = config_dir.join(".kepler");
 
-    // Create a config
+    // Create a config with autostart for snapshot persistence
     let config_content = r#"
+kepler:
+  autostart: true
 services:
   test:
     command: ["sleep", "infinity"]
@@ -339,13 +351,17 @@ async fn test_env_expansion_only_happens_once() {
     let config_dir = temp_dir.path().to_path_buf();
     let state_dir = config_dir.join(".kepler");
 
-    // Create a config that references an env var via ${{ env.VAR }}$ syntax
+    // Create a config that references an env var via ${{ service.env.VAR }}$ syntax
     let config_content = r#"
+kepler:
+  autostart:
+    environment:
+      - MY_TEST_VAR
 services:
   test:
     command: ["sleep", "infinity"]
     environment:
-      - EXPANDED_VAR=${{ env.MY_TEST_VAR }}$
+      - EXPANDED_VAR=${{ service.env.MY_TEST_VAR }}$
 "#;
     let config_path = config_dir.join("kepler.yaml");
     std::fs::write(&config_path, config_content).unwrap();
@@ -359,7 +375,7 @@ services:
             .unwrap();
 
     // Verify sys_env was captured
-    let sys_env1 = handle1.get_sys_env().await;
+    let sys_env1 = handle1.get_kepler_env().await;
     assert_eq!(
         sys_env1.get("MY_TEST_VAR").map(|s| s.as_str()),
         Some("first_expansion"),
@@ -384,7 +400,7 @@ services:
     );
 
     // The sys_env should be from the SNAPSHOT (first_expansion), not the new CLI env
-    let sys_env2 = handle2.get_sys_env().await;
+    let sys_env2 = handle2.get_kepler_env().await;
     assert_eq!(
         sys_env2.get("MY_TEST_VAR").map(|s| s.as_str()),
         Some("first_expansion"),
@@ -420,7 +436,7 @@ services:
         config,
         config_dir: PathBuf::from("/home/user/project"),
         snapshot_time: 1234567890,
-        sys_env: sys_env.clone(),
+        kepler_env: sys_env.clone(),
         owner_uid: Some(1000),
         owner_gid: None,
         hardening: None,
@@ -436,7 +452,7 @@ services:
     let loaded = persistence.load_expanded_config().unwrap().unwrap();
     assert_eq!(loaded.config_dir, PathBuf::from("/home/user/project"));
     assert_eq!(loaded.snapshot_time, 1234567890);
-    assert_eq!(loaded.sys_env, sys_env);
+    assert_eq!(loaded.kepler_env, sys_env);
     assert_eq!(loaded.owner_uid, Some(1000));
     // Verify raw service config is preserved
     assert!(loaded.config.service_names().contains(&"test".to_string()));
@@ -457,13 +473,13 @@ async fn test_sys_env_only_uses_cli_env_not_daemon_env() {
         std::env::set_var("KEPLER_DAEMON_ONLY_VAR", "daemon_value");
     }
 
-    // Create a config that references an env var via ${{ env.VAR }}$ expansion
+    // Create a config that references an env var via ${{ service.env.VAR }}$ expansion
     let config_content = r#"
 services:
   test:
     command: ["sleep", "infinity"]
     environment:
-      - LEAKED=${{ env.KEPLER_DAEMON_ONLY_VAR }}$
+      - LEAKED=${{ service.env.KEPLER_DAEMON_ONLY_VAR }}$
 "#;
     let config_path = config_dir.join("kepler.yaml");
     std::fs::write(&config_path, config_content).unwrap();
@@ -478,9 +494,9 @@ services:
             .unwrap();
 
     // Verify that the daemon's process env var is NOT in the actor's sys_env.
-    // With lazy expansion, ${{ env.KEPLER_DAEMON_ONLY_VAR }}$ will resolve using sys_env,
+    // With lazy expansion, ${{ service.env.KEPLER_DAEMON_ONLY_VAR }}$ will resolve using sys_env,
     // which should NOT contain the daemon-only var.
-    let sys_env = handle.get_sys_env().await;
+    let sys_env = handle.get_kepler_env().await;
     assert!(
         !sys_env.contains_key("KEPLER_DAEMON_ONLY_VAR"),
         "Daemon process env must NOT leak into sys_env"
@@ -501,6 +517,11 @@ async fn test_sys_env_persisted_in_snapshot() {
     let state_dir = config_dir.join(".kepler");
 
     let config_content = r#"
+kepler:
+  autostart:
+    environment:
+      - CLI_VAR
+      - ANOTHER
 services:
   test:
     command: ["sleep", "infinity"]
@@ -517,8 +538,8 @@ services:
         create_actor_with_state_dir_and_env(config_path.clone(), state_dir.clone(), cli_env.clone())
             .unwrap();
 
-    // Verify get_sys_env returns what we passed
-    let stored = handle.get_sys_env().await;
+    // Verify get_kepler_env returns what we passed
+    let stored = handle.get_kepler_env().await;
     assert_eq!(stored.get("CLI_VAR"), Some(&"from_cli".to_string()));
     assert_eq!(stored.get("ANOTHER"), Some(&"value".to_string()));
 
@@ -529,8 +550,8 @@ services:
     let persistence = ConfigPersistence::new(state_dir.join("configs").join(&config_hash));
     let snapshot = persistence.load_expanded_config().unwrap().unwrap();
 
-    assert_eq!(snapshot.sys_env.get("CLI_VAR"), Some(&"from_cli".to_string()));
-    assert_eq!(snapshot.sys_env.get("ANOTHER"), Some(&"value".to_string()));
+    assert_eq!(snapshot.kepler_env.get("CLI_VAR"), Some(&"from_cli".to_string()));
+    assert_eq!(snapshot.kepler_env.get("ANOTHER"), Some(&"value".to_string()));
 
     handle.shutdown().await;
     let _ = actor_task.await;
@@ -543,6 +564,10 @@ async fn test_sys_env_restored_from_snapshot_not_daemon() {
     let state_dir = config_dir.join(".kepler");
 
     let config_content = r#"
+kepler:
+  autostart:
+    environment:
+      - CLI_ORIGINAL
 services:
   test:
     command: ["sleep", "infinity"]
@@ -578,7 +603,7 @@ services:
     );
 
     // The sys_env should be from the SNAPSHOT, not the new CLI env
-    let restored = handle2.get_sys_env().await;
+    let restored = handle2.get_kepler_env().await;
     assert_eq!(
         restored.get("CLI_ORIGINAL"),
         Some(&"original_value".to_string()),

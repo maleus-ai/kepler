@@ -48,7 +48,7 @@ lua: |
   end
 
 kepler:
-  sys_env: inherit
+  default_inherit_env: true
   timeout: 30s
   output_max_size: "2mb"
 
@@ -111,7 +111,7 @@ services:
         run: echo "postgres pre_cleanup — archiving WAL files"
         user: root
 
-  # 2. redis — With sys_env override and hook environment
+  # 2. redis — With inherit_env override and hook environment
   redis:
     command:
       [
@@ -120,7 +120,7 @@ services:
         "echo 'Redis starting'; touch /tmp/redis_ready; while true; do sleep 5; done",
       ]
     restart: always
-    sys_env: clear
+    inherit_env: false
     healthcheck:
       run: "test -f /tmp/redis_ready"
       interval: 1s
@@ -166,9 +166,9 @@ services:
     restart: always
     working_dir: /tmp
     environment:
-      - MINIO_ROOT_USER=${{ env.MINIO_USER or "minioadmin" }}$
-      - MINIO_ROOT_PASSWORD=${{ env.MINIO_PASS or "minioadmin" }}$
-      - MINIO_PORT=${{ env.MINIO_PORT or "9000" }}$
+      - MINIO_ROOT_USER=${{ service.env.MINIO_USER or "minioadmin" }}$
+      - MINIO_ROOT_PASSWORD=${{ service.env.MINIO_PASS or "minioadmin" }}$
+      - MINIO_PORT=${{ service.env.MINIO_PORT or "9000" }}$
     healthcheck:
       run: "test -f /tmp/minio_ready"
       interval: 1500ms
@@ -187,7 +187,7 @@ services:
     restart: always
     environment:
       - CONSUL_BIND=0.0.0.0
-      - CONSUL_DC=${{ env.CONSUL_DC and "production" or "" }}$
+      - CONSUL_DC=${{ service.env.CONSUL_DC and "production" or "" }}$
     healthcheck:
       run: "test -f /tmp/consul_ready"
       interval: 2s
@@ -248,9 +248,9 @@ services:
       - SEED_ENV=development
       - SEED_COUNT=100
       - SCHEMA_VERSION=${{ deps["db-migration"].outputs.schema_version or "unknown" }}$
-      - SEED_LABEL=${{ env.SEED_ENV }}$-v${{ env.SCHEMA_VERSION }}$
+      - SEED_LABEL=${{ service.env.SEED_ENV }}$-v${{ service.env.SCHEMA_VERSION }}$
     outputs:
-      seed_summary: "${{ env.SEED_LABEL }}$:${{ env.SEED_COUNT }}$-rows"
+      seed_summary: "${{ service.env.SEED_LABEL }}$:${{ service.env.SEED_COUNT }}$-rows"
 
   # 8. redis-init — run: form, output capture
   redis-init:
@@ -818,7 +818,7 @@ services:
       - user-service:
           condition: service_started
 
-  # 33. data-sync-worker — sys_env:clear override, log retention override
+  # 33. data-sync-worker — inherit_env:false override, log retention override
   data-sync-worker:
     command:
       [
@@ -827,7 +827,7 @@ services:
         'echo ''Data sync worker started''; while true; do echo "[$(date +%T)] Syncing data"; sleep 15; done',
       ]
     restart: always
-    sys_env: clear
+    inherit_env: false
     depends_on:
       - postgres:
           condition: service_healthy
@@ -1167,8 +1167,8 @@ services:
           condition: service_completed_successfully
           timeout: 5m
     environment:
-      - REPORT_DIR=${{ env.REPORT_DIR or "/tmp/reports" }}$
-      - INCIDENT_ID=${{ env.INCIDENT_ID or "unknown" }}$
+      - REPORT_DIR=${{ service.env.REPORT_DIR or "/tmp/reports" }}$
+      - INCIDENT_ID=${{ service.env.INCIDENT_ID or "unknown" }}$
       - EMERGENCY_EXIT_CODE=${{ deps["emergency-shutdown"].exit_code }}$
       - PLATFORM_VERSION=${{ global.platform_version }}$
     hooks:
@@ -1185,7 +1185,7 @@ services:
 
   # 51. profiler — Conditional service, only starts when ENABLE_PROFILING is set
   profiler:
-    if: ${{ env.ENABLE_PROFILING ~= nil }}$
+    if: ${{ service.env.ENABLE_PROFILING ~= nil }}$
     command:
       [
         "sh",

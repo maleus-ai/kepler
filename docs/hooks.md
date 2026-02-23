@@ -91,6 +91,7 @@ hooks:
     environment:                   # Sequence or mapping format
       SETUP_MODE: full
     env_file: .env.hooks
+    inherit_env: false             # Don't inherit service's computed env
 ```
 
 | Option | Type | Description |
@@ -103,6 +104,7 @@ hooks:
 | `working_dir` | `string` | Working directory (overrides service default) |
 | `environment` | `string[]\|object` | Additional environment variables (sequence or mapping format) |
 | `env_file` | `string` | Additional env file to load |
+| `inherit_env` | `bool` | Whether to inherit the service's computed environment. Defaults to `true`. When `false`, the hook starts with an empty base env (only `kepler.env` + hook's own `env_file` + hook's own `environment`). `${{ service.env.* }}$` expressions in hook `environment` still resolve regardless. |
 | `output` | `string` | Output step name. Enables `::output::KEY=VALUE` capture on this step's stdout. See [Outputs](outputs.md) |
 
 ---
@@ -113,7 +115,7 @@ Service hooks inherit from their parent service by default:
 
 - **User**: Hook runs as the service's `user` unless overridden (which includes the config owner default). Use `user: root` to explicitly run as root instead.
 - **Groups**: Hook uses the service's `groups` unless overridden
-- **Environment**: Hook receives the service's environment, plus any additional vars from `environment`/`env_file`
+- **Environment**: Hook receives the service's environment, plus any additional vars from `environment`/`env_file`. Set `inherit_env: false` to start with an empty base environment (only `kepler.env` + hook's own `env_file` + hook's own `environment`).
 - **Working directory**: Hook uses the service's `working_dir` unless overridden
 
 ---

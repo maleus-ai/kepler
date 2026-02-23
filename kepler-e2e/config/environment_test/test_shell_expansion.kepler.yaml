@@ -6,4 +6,4 @@ services:
   shell-expansion-service:
     command: ["sh", "-c", "echo EXPANDED_VAR=$EXPANDED_VAR; sleep 300"]
     environment:
-      - EXPANDED_VAR=${{ env.HOME }}$/test/path
+      - EXPANDED_VAR=${{ service.env.HOME }}$/test/path

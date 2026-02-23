@@ -31,10 +31,10 @@ pub fn process_lua_scripts(
             if let Some(logs_value) = kepler_map.get_mut(Value::String("logs".to_string())) {
                 let ctx = EvalContext {
                     service: Some(crate::lua_eval::ServiceEvalContext {
-                        raw_env: sys_env.clone(),
                         env: sys_env.clone(),
                         ..Default::default()
                     }),
+                    kepler_env: sys_env.clone(),
                     ..Default::default()
                 };
                 super::expand::evaluate_value_tree(logs_value, evaluator, &ctx, config_path, "kepler.logs")?;
