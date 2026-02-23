@@ -375,7 +375,8 @@ fn tier2_config_path(request: &Request) -> Option<&PathBuf> {
         | Request::Logs { config_path, .. }
         | Request::LogsChunk { config_path, .. }
         | Request::LogsCursor { config_path, .. }
-        | Request::Subscribe { config_path, .. } => Some(config_path),
+        | Request::Subscribe { config_path, .. }
+        | Request::Inspect { config_path, .. } => Some(config_path),
         Request::Status { config_path: Some(config_path) } => Some(config_path),
         _ => None,
     }
@@ -1110,6 +1111,89 @@ async fn handle_request(
             }
             Response::ok_with_message("Subscription ended")
         }
+
+        Request::Inspect { config_path } => {
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+
+            let config_hash = compute_config_hash(&config_path);
+
+            // Try to get data from loaded config actor, otherwise fall back to disk
+            let (config, services_status, kepler_env, state_dir) = if let Some(handle) = registry.get(&config_path) {
+                // Tier 2 check already handled above for loaded configs
+                let config = handle.get_config().await;
+                let status = handle.get_service_status(None).await.unwrap_or_default();
+                let env = handle.get_kepler_env().await;
+                let dir = handle.get_state_dir().await;
+                (config, status, Some(env), dir)
+            } else if let Some(dir) = compute_state_dir(&config_path) {
+                // Config not loaded — read from persisted snapshot on disk
+                let persistence = ConfigPersistence::new(dir.clone());
+                let snapshot = persistence.load_expanded_config().ok().flatten();
+
+                // Enforce owner-or-root access when snapshot exists (it contains kepler_env).
+                // No snapshot means no sensitive environment data to protect.
+                if let Some(ref snap) = snapshot {
+                    if peer.uid != 0 {
+                        if let Err(reason) = auth::check_config_access(peer.uid, snap.owner_uid) {
+                            return Response::error(reason);
+                        }
+                    }
+                }
+
+                let config = snapshot.as_ref().map(|s| s.config.clone());
+                let env = snapshot.map(|s| s.kepler_env);
+                let status = read_persisted_status(&dir);
+                (config, status, env, dir)
+            } else {
+                return Response::error("Config not loaded and no state directory found");
+            };
+
+            let state_dir_str = state_dir.to_string_lossy().to_string();
+
+            // Build per-service data
+            let mut services_json = serde_json::Map::new();
+
+            if let Some(ref config) = config {
+                for (name, raw_config) in &config.services {
+                    let service_data = build_inspect_service(
+                        name, Some(raw_config), services_status.get(name), &state_dir,
+                    );
+                    services_json.insert(name.clone(), service_data);
+                }
+            }
+
+            // Include services from status that aren't in config (edge case: config changed on disk)
+            for (name, info) in &services_status {
+                if !services_json.contains_key(name) {
+                    let service_data = build_inspect_service(
+                        name, None, Some(info), &state_dir,
+                    );
+                    services_json.insert(name.clone(), service_data);
+                }
+            }
+
+            let kepler_value = config.as_ref()
+                .and_then(|c| c.kepler.as_ref())
+                .and_then(|k| serde_json::to_value(k).ok())
+                .unwrap_or(serde_json::Value::Null);
+
+            let result = serde_json::json!({
+                "config_path": config_path.to_string_lossy(),
+                "config_hash": config_hash,
+                "state_dir": state_dir_str,
+                "kepler": kepler_value,
+                "environment": kepler_env,
+                "services": services_json,
+            });
+
+            match serde_json::to_string_pretty(&result) {
+                Ok(json) => Response::ok_with_data(ResponseData::Inspect(json)),
+                Err(e) => Response::error(format!("Failed to serialize inspect data: {}", e)),
+            }
+        }
     }
 }
 
@@ -1139,6 +1223,63 @@ fn status_to_phase(state: Option<&ServiceState>, target: ServiceTarget) -> Servi
         }
         Some(ServiceStatus::Unhealthy) => ServicePhase::Failed { message: "unhealthy".to_string() },
     }
+}
+
+/// Maximum length for individual output values in inspect JSON.
+const MAX_OUTPUT_VALUE_LEN: usize = 512;
+
+/// Truncate output map values that exceed MAX_OUTPUT_VALUE_LEN.
+fn truncate_output_map(map: HashMap<String, String>) -> serde_json::Map<String, serde_json::Value> {
+    map.into_iter().map(|(k, v)| {
+        let v = if v.len() > MAX_OUTPUT_VALUE_LEN {
+            format!("{}... (truncated)", &v[..MAX_OUTPUT_VALUE_LEN])
+        } else {
+            v
+        };
+        (k, serde_json::Value::String(v))
+    }).collect()
+}
+
+/// Build the JSON value for a single service in the inspect output.
+fn build_inspect_service(
+    name: &str,
+    raw_config: Option<&kepler_daemon::config::RawServiceConfig>,
+    info: Option<&ServiceInfo>,
+    state_dir: &Path,
+) -> serde_json::Value {
+    let config_value = raw_config
+        .and_then(|c| serde_json::to_value(c).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    let state_value = info
+        .and_then(|i| serde_json::to_value(i).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    // Outputs: read from disk and truncate large values
+    let process_outputs = kepler_daemon::outputs::read_service_outputs(state_dir, name);
+    let hook_outputs = kepler_daemon::outputs::read_all_hook_outputs(state_dir, name);
+    let outputs_path = state_dir.join("outputs").join(name);
+
+    let process_json = truncate_output_map(process_outputs);
+
+    let hooks_json: serde_json::Map<String, serde_json::Value> = hook_outputs.into_iter().map(|(hook_name, steps)| {
+        let steps_json: serde_json::Map<String, serde_json::Value> = steps.into_iter().map(|(step_name, outputs)| {
+            (step_name, serde_json::Value::Object(truncate_output_map(outputs)))
+        }).collect();
+        (hook_name, serde_json::Value::Object(steps_json))
+    }).collect();
+
+    let outputs_value = serde_json::json!({
+        "path": outputs_path.to_string_lossy(),
+        "process": process_json,
+        "hooks": hooks_json,
+    });
+
+    serde_json::json!({
+        "config": config_value,
+        "state": state_value,
+        "outputs": outputs_value,
+    })
 }
 
 /// Compute the sha256 hash for a config path (same algorithm as ConfigActor::create).
@@ -1627,6 +1768,441 @@ mod tests {
         // Different paths produce different hashes
         let other = Path::new("/other/path.yaml");
         assert_ne!(compute_config_hash(path), compute_config_hash(other));
+    }
+
+    // =========================================================================
+    // Inspect helpers tests
+    // =========================================================================
+
+    #[test]
+    fn test_truncate_output_map_short_values() {
+        let map = HashMap::from([
+            ("key1".to_string(), "short".to_string()),
+            ("key2".to_string(), "also short".to_string()),
+        ]);
+        let result = truncate_output_map(map);
+        assert_eq!(result["key1"], serde_json::Value::String("short".to_string()));
+        assert_eq!(result["key2"], serde_json::Value::String("also short".to_string()));
+    }
+
+    #[test]
+    fn test_truncate_output_map_long_values() {
+        let long_value = "x".repeat(600);
+        let map = HashMap::from([
+            ("long".to_string(), long_value),
+            ("short".to_string(), "ok".to_string()),
+        ]);
+        let result = truncate_output_map(map);
+
+        // Short value preserved
+        assert_eq!(result["short"], serde_json::Value::String("ok".to_string()));
+
+        // Long value truncated at 512 chars + suffix
+        let truncated = result["long"].as_str().unwrap();
+        assert!(truncated.ends_with("... (truncated)"));
+        // 512 chars of content + "... (truncated)" suffix
+        assert_eq!(truncated.len(), 512 + "... (truncated)".len());
+    }
+
+    #[test]
+    fn test_truncate_output_map_exact_boundary() {
+        // Exactly 512 chars should NOT be truncated
+        let exact = "x".repeat(512);
+        let map = HashMap::from([("exact".to_string(), exact.clone())]);
+        let result = truncate_output_map(map);
+        assert_eq!(result["exact"], serde_json::Value::String(exact));
+
+        // 513 chars should be truncated
+        let over = "y".repeat(513);
+        let map = HashMap::from([("over".to_string(), over)]);
+        let result = truncate_output_map(map);
+        let truncated = result["over"].as_str().unwrap();
+        assert!(truncated.ends_with("... (truncated)"));
+    }
+
+    #[test]
+    fn test_build_inspect_service_basic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = kepler_daemon::config::RawServiceConfig::default();
+        let info = ServiceInfo {
+            status: "running".to_string(),
+            pid: Some(1234),
+            started_at: Some(1700000000),
+            stopped_at: None,
+            health_check_failures: 0,
+            exit_code: None,
+            signal: None,
+            skip_reason: None,
+            fail_reason: None,
+        };
+
+        let result = build_inspect_service("web", Some(&config), Some(&info), tmp.path());
+
+        // Check structure has all three top-level keys
+        assert!(result.get("config").is_some());
+        assert!(result.get("state").is_some());
+        assert!(result.get("outputs").is_some());
+
+        // State should have correct values
+        let state = result.get("state").unwrap();
+        assert_eq!(state["status"], "running");
+        assert_eq!(state["pid"], 1234);
+
+        // Outputs should have path, process, hooks
+        let outputs = result.get("outputs").unwrap();
+        assert!(outputs.get("path").is_some());
+        assert!(outputs.get("process").is_some());
+        assert!(outputs.get("hooks").is_some());
+    }
+
+    #[test]
+    fn test_build_inspect_service_with_outputs() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Write process outputs
+        let process_outputs = HashMap::from([
+            ("token".to_string(), "abc-123".to_string()),
+            ("port".to_string(), "8080".to_string()),
+        ]);
+        kepler_daemon::outputs::write_process_outputs(tmp.path(), "web", &process_outputs).unwrap();
+
+        // Write hook outputs
+        let hook_outputs = HashMap::from([
+            ("setup_key".to_string(), "setup_val".to_string()),
+        ]);
+        kepler_daemon::outputs::write_hook_step_outputs(
+            tmp.path(), "web", "pre_start", "step1", &hook_outputs
+        ).unwrap();
+
+        let result = build_inspect_service("web", None, None, tmp.path());
+        let outputs = result.get("outputs").unwrap();
+
+        // Process outputs
+        let process = outputs.get("process").unwrap();
+        assert_eq!(process["token"], "abc-123");
+        assert_eq!(process["port"], "8080");
+
+        // Hook outputs
+        let hooks = outputs.get("hooks").unwrap();
+        assert_eq!(hooks["pre_start"]["step1"]["setup_key"], "setup_val");
+    }
+
+    #[test]
+    fn test_build_inspect_service_truncates_output_values() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let long_value = "z".repeat(600);
+        let process_outputs = HashMap::from([
+            ("big".to_string(), long_value),
+        ]);
+        kepler_daemon::outputs::write_process_outputs(tmp.path(), "svc", &process_outputs).unwrap();
+
+        let result = build_inspect_service("svc", None, None, tmp.path());
+        let outputs = result.get("outputs").unwrap();
+        let big_val = outputs["process"]["big"].as_str().unwrap();
+        assert!(big_val.ends_with("... (truncated)"));
+        assert!(big_val.len() < 600);
+    }
+
+    #[test]
+    fn test_build_inspect_service_no_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let info = ServiceInfo {
+            status: "stopped".to_string(),
+            pid: None,
+            started_at: None,
+            stopped_at: Some(1700000100),
+            health_check_failures: 0,
+            exit_code: Some(0),
+            signal: None,
+            skip_reason: None,
+            fail_reason: None,
+        };
+
+        let result = build_inspect_service("orphan", None, Some(&info), tmp.path());
+
+        // Config should be null when not provided
+        assert_eq!(result["config"], serde_json::Value::Null);
+        // State should still be present
+        assert_eq!(result["state"]["status"], "stopped");
+        assert_eq!(result["state"]["exit_code"], 0);
+    }
+
+    #[test]
+    fn test_build_inspect_service_no_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = kepler_daemon::config::RawServiceConfig::default();
+
+        let result = build_inspect_service("new_svc", Some(&config), None, tmp.path());
+
+        // State should be null when not provided
+        assert_eq!(result["state"], serde_json::Value::Null);
+        // Config should still be present (not null)
+        assert_ne!(result["config"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_inspect_from_disk_snapshot() {
+        use kepler_daemon::config::KeplerConfig;
+        use kepler_daemon::persistence::{ConfigPersistence, ExpandedConfigSnapshot};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let persistence = ConfigPersistence::new(state_dir.clone());
+
+        // Create a config with one service
+        let mut services = HashMap::new();
+        services.insert("web".to_string(), kepler_daemon::config::RawServiceConfig::default());
+
+        let config = KeplerConfig {
+            lua: None,
+            kepler: None,
+            services,
+        };
+
+        let kepler_env = HashMap::from([
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("HOME".to_string(), "/home/user".to_string()),
+        ]);
+
+        // Save expanded config snapshot
+        let snapshot = ExpandedConfigSnapshot {
+            config: config.clone(),
+            config_dir: PathBuf::from("/home/user/project"),
+            snapshot_time: 1700000000,
+            kepler_env: kepler_env.clone(),
+            owner_uid: Some(1000),
+            owner_gid: Some(1000),
+            hardening: None,
+            service_envs: HashMap::new(),
+            service_working_dirs: HashMap::new(),
+        };
+        persistence.save_expanded_config(&snapshot).unwrap();
+
+        // Save service state
+        let mut svc_states = HashMap::new();
+        svc_states.insert("web".to_string(), {
+            let mut s = make_persisted_service(PersistedServiceStatus::Stopped);
+            s.exit_code = Some(0);
+            s.stopped_at = Some(1700000100);
+            s
+        });
+        persistence.save_state(&make_state(svc_states)).unwrap();
+
+        // Write some outputs
+        let outputs = HashMap::from([("port".to_string(), "3000".to_string())]);
+        kepler_daemon::outputs::write_process_outputs(&state_dir, "web", &outputs).unwrap();
+
+        // Simulate what the handler does for the disk fallback path
+        let loaded_snapshot = persistence.load_expanded_config().unwrap().unwrap();
+        let loaded_config = loaded_snapshot.config;
+        let loaded_env = loaded_snapshot.kepler_env;
+        let loaded_status = read_persisted_status(&state_dir);
+
+        // Build the inspect JSON
+        let mut services_json = serde_json::Map::new();
+        for (name, raw_config) in &loaded_config.services {
+            let service_data = build_inspect_service(
+                name, Some(raw_config), loaded_status.get(name), &state_dir,
+            );
+            services_json.insert(name.clone(), service_data);
+        }
+
+        // Verify config round-trips correctly
+        assert!(services_json.contains_key("web"));
+        let web = &services_json["web"];
+        assert_ne!(web["config"], serde_json::Value::Null);
+        assert_eq!(web["state"]["status"], "stopped");
+        assert_eq!(web["state"]["exit_code"], 0);
+        assert_eq!(web["outputs"]["process"]["port"], "3000");
+
+        // Verify environment was preserved
+        assert_eq!(loaded_env.get("PATH"), Some(&"/usr/bin".to_string()));
+        assert_eq!(loaded_env.get("HOME"), Some(&"/home/user".to_string()));
+    }
+
+    #[test]
+    fn test_inspect_from_disk_no_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let persistence = ConfigPersistence::new(state_dir.clone());
+
+        // Only save state, no expanded config snapshot
+        let mut svc_states = HashMap::new();
+        svc_states.insert("worker".to_string(), {
+            let mut s = make_persisted_service(PersistedServiceStatus::Exited);
+            s.exit_code = Some(1);
+            s
+        });
+        persistence.save_state(&make_state(svc_states)).unwrap();
+
+        // Load snapshot (should be None)
+        let snapshot = persistence.load_expanded_config().ok().flatten();
+        assert!(snapshot.is_none(), "No snapshot should exist");
+
+        // Status should still be readable from disk
+        let status = read_persisted_status(&state_dir);
+        assert_eq!(status["worker"].status, "exited");
+        assert_eq!(status["worker"].exit_code, Some(1));
+
+        // Build inspect for services found only in status (no config)
+        let service_data = build_inspect_service(
+            "worker", None, status.get("worker"), &state_dir,
+        );
+        assert_eq!(service_data["config"], serde_json::Value::Null);
+        assert_eq!(service_data["state"]["status"], "exited");
+    }
+
+    #[test]
+    fn test_inspect_empty_outputs() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let result = build_inspect_service("svc", None, None, tmp.path());
+        let outputs = result.get("outputs").unwrap();
+
+        // Empty but present
+        assert_eq!(outputs["process"], serde_json::json!({}));
+        assert_eq!(outputs["hooks"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_inspect_tier2_includes_inspect_variant() {
+        // Verify Request::Inspect is covered by tier2_config_path,
+        // which means loaded configs get the owner-or-root check
+        // at the top of handle_request before the handler body runs.
+        let request = Request::Inspect {
+            config_path: PathBuf::from("/some/config.yaml"),
+        };
+        let path = tier2_config_path(&request);
+        assert!(path.is_some(), "Inspect must be a tier2 request");
+        assert_eq!(path.unwrap(), &PathBuf::from("/some/config.yaml"));
+    }
+
+    /// Helper: simulates the disk-fallback permission logic from the Inspect handler.
+    /// Returns Ok(env) if access is allowed, Err(reason) if denied.
+    fn simulate_inspect_disk_access(
+        peer_uid: u32,
+        snapshot: Option<&kepler_daemon::persistence::ExpandedConfigSnapshot>,
+    ) -> std::result::Result<Option<HashMap<String, String>>, String> {
+        if let Some(snap) = snapshot {
+            if peer_uid != 0 {
+                auth::check_config_access(peer_uid, snap.owner_uid)?;
+            }
+            Ok(Some(snap.kepler_env.clone()))
+        } else {
+            // No snapshot — no env to protect, access always allowed
+            Ok(None)
+        }
+    }
+
+    fn make_snapshot(owner_uid: u32, env: HashMap<String, String>) -> kepler_daemon::persistence::ExpandedConfigSnapshot {
+        kepler_daemon::persistence::ExpandedConfigSnapshot {
+            config: kepler_daemon::config::KeplerConfig {
+                lua: None,
+                kepler: None,
+                services: HashMap::new(),
+            },
+            config_dir: PathBuf::from("/tmp"),
+            snapshot_time: 1700000000,
+            kepler_env: env,
+            owner_uid: Some(owner_uid),
+            owner_gid: Some(owner_uid),
+            hardening: None,
+            service_envs: HashMap::new(),
+            service_working_dirs: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_inspect_disk_snapshot_owner_allowed_gets_env() {
+        let env = HashMap::from([
+            ("SECRET_KEY".to_string(), "s3cret".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+        ]);
+        let snapshot = make_snapshot(1000, env.clone());
+
+        // Owner (uid 1000) sees the environment
+        let result = simulate_inspect_disk_access(1000, Some(&snapshot));
+        assert!(result.is_ok());
+        let returned_env = result.unwrap().unwrap();
+        assert_eq!(returned_env.get("SECRET_KEY"), Some(&"s3cret".to_string()));
+        assert_eq!(returned_env.get("PATH"), Some(&"/usr/bin".to_string()));
+    }
+
+    #[test]
+    fn test_inspect_disk_snapshot_root_allowed_gets_env() {
+        let env = HashMap::from([
+            ("SECRET_KEY".to_string(), "s3cret".to_string()),
+        ]);
+        let snapshot = make_snapshot(1000, env.clone());
+
+        // Root (uid 0) always sees the environment
+        let result = simulate_inspect_disk_access(0, Some(&snapshot));
+        assert!(result.is_ok());
+        let returned_env = result.unwrap().unwrap();
+        assert_eq!(returned_env.get("SECRET_KEY"), Some(&"s3cret".to_string()));
+    }
+
+    #[test]
+    fn test_inspect_disk_snapshot_wrong_user_denied() {
+        let env = HashMap::from([
+            ("SECRET_KEY".to_string(), "s3cret".to_string()),
+        ]);
+        let snapshot = make_snapshot(1000, env);
+
+        // Different user (uid 2000) is denied — no env leaked
+        let result = simulate_inspect_disk_access(2000, Some(&snapshot));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Permission denied"));
+    }
+
+    #[test]
+    fn test_inspect_disk_no_snapshot_any_user_allowed_no_env() {
+        // No snapshot → no env to protect → any user can inspect
+        // Returns Ok(None) meaning no environment available
+
+        // Non-root user
+        let result = simulate_inspect_disk_access(1000, None);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none(), "No env when no snapshot");
+
+        // Different non-root user
+        let result = simulate_inspect_disk_access(2000, None);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        // Root
+        let result = simulate_inspect_disk_access(0, None);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_inspect_disk_snapshot_persists_and_enforces_roundtrip() {
+        // End-to-end: save snapshot to disk, load it back, verify access control
+        use kepler_daemon::persistence::ConfigPersistence;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let persistence = ConfigPersistence::new(tmp.path().to_path_buf());
+
+        let env = HashMap::from([("DB_PASS".to_string(), "hunter2".to_string())]);
+        let snapshot = make_snapshot(1000, env);
+        persistence.save_expanded_config(&snapshot).unwrap();
+
+        // Reload from disk
+        let loaded = persistence.load_expanded_config().unwrap().unwrap();
+
+        // Owner allowed
+        let result = simulate_inspect_disk_access(1000, Some(&loaded));
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap().unwrap().get("DB_PASS"),
+            Some(&"hunter2".to_string()),
+        );
+
+        // Wrong user denied
+        let result = simulate_inspect_disk_access(9999, Some(&loaded));
+        assert!(result.is_err());
     }
 }
 

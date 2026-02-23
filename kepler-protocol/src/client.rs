@@ -363,6 +363,14 @@ impl Client {
         })
     }
 
+    /// Inspect config and runtime state
+    pub fn inspect(
+        &self,
+        config_path: PathBuf,
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::Inspect { config_path })
+    }
+
     /// Fire-and-forget subscribe: sends the Subscribe request eagerly and returns
     /// only the progress receiver. The response future is discarded — when the server
     /// returns "Subscription ended", the pending entry is cleaned up and progress_tx

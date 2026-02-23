@@ -244,6 +244,35 @@ Status display examples:
 
 See [Service Lifecycle](service-lifecycle.md) for all status states.
 
+### `kepler inspect`
+
+Inspect config and runtime state as JSON. Requires a running daemon. Works even when the config is not loaded in memory (e.g. `autostart: false`), falling back to persisted state on disk.
+
+```bash
+kepler inspect                   # Inspect the current config
+kepler -f other.yaml inspect     # Inspect a specific config
+kepler inspect | jq .services    # Pipe to jq for filtering
+```
+
+**Output structure:**
+
+| Field | Description |
+|-------|-------------|
+| `config_path` | Absolute path to the config file |
+| `config_hash` | SHA-256 hash used to locate the state directory |
+| `state_dir` | Full path to the state directory (`/var/lib/kepler/configs/<hash>`) |
+| `kepler` | Global kepler configuration (`default_inherit_env`, `logs`, `timeout`, `autostart`) |
+| `environment` | Resolved environment variables passed to services. `null` if config was never started |
+| `services.<name>.config` | Raw parsed service config (static values resolved, dynamic shown as expressions) |
+| `services.<name>.state` | Runtime state: `status`, `pid`, `started_at`, `stopped_at`, `exit_code`, `signal`, etc. |
+| `services.<name>.outputs.path` | Filesystem path to the service outputs directory |
+| `services.<name>.outputs.process` | Process output captures (`::output::KEY=VALUE`) |
+| `services.<name>.outputs.hooks` | Hook step outputs (`hook_name -> step_name -> {key: value}`) |
+
+Individual output values longer than 512 characters are truncated with a `"... (truncated)"` suffix.
+
+When the config has never been started (`autostart: false`, no prior `kepler start`), the `kepler`, `environment`, and `services.<name>.config` fields may be `null`.
+
 ### `kepler logs`
 
 View service logs.
