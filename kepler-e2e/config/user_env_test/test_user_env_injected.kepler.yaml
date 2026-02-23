@@ -1,0 +1,12 @@
+# Service runs as testuser1 — HOME/USER/LOGNAME/SHELL should be auto-injected
+# from /etc/passwd for the target user, not the CLI caller (root).
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  user-env-svc:
+    command: ["sh", "-c", "echo HOME=$HOME; echo USER=$USER; echo LOGNAME=$LOGNAME; echo SHELL=$SHELL; sleep 300"]
+    user: testuser1
+    inherit_env: true
+    restart: no

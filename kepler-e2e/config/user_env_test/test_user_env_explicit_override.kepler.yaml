@@ -1,0 +1,14 @@
+# Service runs as testuser1, but HOME is explicitly overridden.
+# The explicit value should win over the auto-injected one.
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  user-env-svc:
+    command: ["sh", "-c", "echo HOME=$HOME; echo USER=$USER; sleep 300"]
+    user: testuser1
+    inherit_env: true
+    environment:
+      - HOME=/custom/home
+    restart: no
