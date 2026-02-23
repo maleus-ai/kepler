@@ -12,17 +12,18 @@ use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
 use kepler_daemon::cursor::CursorManager;
 use kepler_daemon::errors::DaemonError;
 use kepler_daemon::hardening::HardeningLevel;
+use kepler_daemon::logs::LogReader;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::persistence::ConfigPersistence;
 use kepler_daemon::process::{kill_process_by_pid, parse_signal_name, validate_running_process, ProcessExitEvent};
 use kepler_daemon::state::{ServiceState, ServiceStatus};
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_daemon::Daemon;
-use kepler_protocol::protocol::{ProgressEvent, Request, Response, ResponseData, ServicePhase, ServiceTarget};
+use kepler_protocol::protocol::{LogMode, ProgressEvent, Request, Response, ResponseData, ServiceInfo, ServicePhase, ServiceTarget};
 use kepler_protocol::server::{PeerCredentials, ProgressSender, Server};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -735,7 +736,13 @@ async fn handle_request(
                             Err(_) => Response::ok_with_data(ResponseData::ServiceStatus(HashMap::new())),
                         }
                     }
-                    None => Response::ok_with_data(ResponseData::ServiceStatus(HashMap::new())),
+                    None => {
+                        let services = match compute_state_dir(&path) {
+                            Some(state_dir) => read_persisted_status(&state_dir),
+                            None => HashMap::new(),
+                        };
+                        Response::ok_with_data(ResponseData::ServiceStatus(services))
+                    }
                 }
             }
             None => {
@@ -772,7 +779,19 @@ async fn handle_request(
                     let entries = handle.get_logs_with_mode(service, lines, max_bytes, mode, no_hooks).await;
                     Response::ok_with_data(ResponseData::Logs(entries))
                 }
-                None => Response::ok_with_data(ResponseData::Logs(Vec::new())),
+                None => {
+                    let entries = if let Some(state_dir) = compute_state_dir(&config_path) {
+                        let reader = LogReader::new(state_dir.join("logs"));
+                        match mode {
+                            LogMode::Head => reader.head(lines, service.as_deref(), no_hooks),
+                            LogMode::Tail => reader.tail_bounded(lines, service.as_deref(), max_bytes, no_hooks),
+                            LogMode::All => reader.iter(service.as_deref(), no_hooks).take(lines).collect(),
+                        }.into_iter().map(|l| l.into()).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    Response::ok_with_data(ResponseData::Logs(entries))
+                }
             }
         }
 
@@ -828,7 +847,15 @@ async fn handle_request(
             // Use true pagination - reads efficiently from disk with offset/limit
             let (entries, has_more) = match registry.get(&config_path) {
                 Some(handle) => handle.get_logs_paginated(service, offset, limit, no_hooks).await,
-                None => (Vec::new(), false),
+                None => {
+                    if let Some(state_dir) = compute_state_dir(&config_path) {
+                        let reader = LogReader::new(state_dir.join("logs"));
+                        let (logs, has_more) = reader.get_paginated(service.as_deref(), offset, limit, no_hooks);
+                        (logs.into_iter().map(|l| l.into()).collect(), has_more)
+                    } else {
+                        (Vec::new(), false)
+                    }
+                }
             };
 
             let next_offset = offset + entries.len();
@@ -864,13 +891,16 @@ async fn handle_request(
                 Err(e) => return Response::error(e.to_string()),
             };
 
-            // Get logs directory from config actor
+            // Get logs directory from config actor, or fall back to disk
             let logs_dir = match registry.get(&config_path) {
                 Some(handle) => match handle.get_log_config().await {
                     Some(config) => config.logs_dir,
                     None => return Response::error("Config not loaded"),
                 },
-                None => return Response::error("Config not loaded"),
+                None => match compute_state_dir(&config_path) {
+                    Some(state_dir) => state_dir.join("logs"),
+                    None => return Response::error("Config not loaded"),
+                },
             };
 
             // Create new cursor or use existing one
@@ -1111,6 +1141,53 @@ fn status_to_phase(state: Option<&ServiceState>, target: ServiceTarget) -> Servi
     }
 }
 
+/// Compute the sha256 hash for a config path (same algorithm as ConfigActor::create).
+fn compute_config_hash(config_path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(config_path.to_string_lossy().as_bytes()))
+}
+
+/// Compute the state directory for a config path without needing a loaded config actor.
+/// Uses the same sha256 hash-based path as ConfigActor::create (actor.rs).
+fn compute_state_dir(config_path: &Path) -> Option<PathBuf> {
+    let hash = compute_config_hash(config_path);
+    let state_dir = kepler_daemon::global_state_dir().ok()?.join("configs").join(&hash);
+    if state_dir.exists() { Some(state_dir) } else { None }
+}
+
+/// Read persisted service status from state.json on disk.
+/// Used as a fallback when the config actor is not loaded in the registry.
+///
+/// Active statuses (running, healthy, etc.) are mapped to "stopped" because
+/// when reading from disk without a loaded actor, the process is certainly dead.
+fn read_persisted_status(state_dir: &Path) -> HashMap<String, ServiceInfo> {
+    let persistence = ConfigPersistence::new(state_dir.to_path_buf());
+    match persistence.load_state() {
+        Ok(Some(state)) => state.services.into_iter().map(|(name, ps)| {
+            let status: ServiceStatus = ps.status.into();
+            // Active statuses are stale — the process can't be running without
+            // an actor managing it. Map them to Stopped.
+            let (status, pid) = if status.is_active() {
+                (ServiceStatus::Stopped, None)
+            } else {
+                (status, ps.pid)
+            };
+            (name, ServiceInfo {
+                status: status.as_str().to_string(),
+                pid,
+                started_at: ps.started_at,
+                stopped_at: ps.stopped_at,
+                health_check_failures: ps.health_check_failures,
+                exit_code: ps.exit_code,
+                signal: ps.signal,
+                skip_reason: ps.skip_reason,
+                fail_reason: ps.fail_reason,
+            })
+        }).collect(),
+        _ => HashMap::new(),
+    }
+}
+
 /// Discover and restore existing configs from persisted snapshots.
 ///
 /// This is called at daemon startup to restore configs that have persisted
@@ -1158,12 +1235,11 @@ async fn discover_existing_configs(
         // Create persistence instance for this config
         let persistence = ConfigPersistence::new(state_dir.clone());
 
-        // Check if we have an expanded config (means this was previously started)
+        // Check if we have an expanded config (means autostart was enabled)
         if !persistence.has_expanded_config() {
-            debug!(
-                "Skipping {:?}: no expanded config snapshot",
-                state_dir.file_name()
-            );
+            // No snapshot — autostart was disabled. Kill any orphaned processes
+            // from state.json but do NOT load the config actor or respawn.
+            kill_orphaned_processes_from_state(&persistence, &state_dir).await;
             continue;
         }
 
@@ -1321,5 +1397,236 @@ async fn kill_orphaned_processes_and_get_respawn_list(
     }
 
     services_to_respawn
+}
+
+/// Kill orphaned processes from a state directory that has no expanded config snapshot.
+///
+/// This handles configs where autostart was disabled: we still need to clean up
+/// any processes that were running when the daemon was killed, but we don't load
+/// the config actor or respawn anything.
+async fn kill_orphaned_processes_from_state(persistence: &ConfigPersistence, state_dir: &Path) {
+    let state = match persistence.load_state() {
+        Ok(Some(state)) => state,
+        Ok(None) => return,
+        Err(e) => {
+            warn!("Failed to load state from {:?}: {}", state_dir.file_name().unwrap_or_default(), e);
+            return;
+        }
+    };
+
+    for (service_name, ps) in &state.services {
+        let status: ServiceStatus = ps.status.into();
+        if !status.is_active() {
+            continue;
+        }
+
+        if let Some(pid) = ps.pid {
+            // Require started_at for PID validation — without it we can't
+            // distinguish the original process from a recycled PID.
+            if ps.started_at.is_none() {
+                warn!(
+                    "Skipping orphan kill for {} (PID {}): no started_at recorded",
+                    service_name, pid
+                );
+                continue;
+            }
+            let is_alive = validate_running_process(pid, ps.started_at);
+            if is_alive {
+                info!(
+                    "Killing orphaned process {} (PID {}) from {:?}",
+                    service_name, pid, state_dir.file_name().unwrap_or_default()
+                );
+                kill_process_by_pid(pid).await;
+            }
+        }
+    }
+
+    // Update state.json to reflect that active services are now stopped
+    let mut updated_state = state;
+    let mut any_changed = false;
+    for (_, ps) in &mut updated_state.services {
+        let status: ServiceStatus = ps.status.into();
+        if status.is_active() {
+            ps.status = ServiceStatus::Stopped.into();
+            ps.pid = None;
+            any_changed = true;
+        }
+    }
+    if any_changed {
+        if let Err(e) = persistence.save_state(&updated_state) {
+            warn!("Failed to update state.json after killing orphans: {}", e);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kepler_daemon::persistence::ConfigPersistence;
+    use kepler_daemon::state::{PersistedConfigState, PersistedServiceState, PersistedServiceStatus};
+    use std::collections::HashMap;
+
+    /// Helper to create a PersistedServiceState with sensible defaults.
+    fn make_persisted_service(status: PersistedServiceStatus) -> PersistedServiceState {
+        PersistedServiceState {
+            status,
+            pid: None,
+            started_at: None,
+            stopped_at: None,
+            exit_code: None,
+            signal: None,
+            health_check_failures: 0,
+            restart_count: 0,
+            initialized: true,
+            was_healthy: false,
+            skip_reason: None,
+            fail_reason: None,
+        }
+    }
+
+    fn make_state(services: HashMap<String, PersistedServiceState>) -> PersistedConfigState {
+        PersistedConfigState {
+            services,
+            config_initialized: true,
+            snapshot_time: 1000,
+        }
+    }
+
+    #[test]
+    fn test_read_persisted_status_maps_active_to_stopped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let persistence = ConfigPersistence::new(tmp.path().to_path_buf());
+
+        let mut services = HashMap::new();
+        services.insert("running_svc".to_string(), {
+            let mut s = make_persisted_service(PersistedServiceStatus::Running);
+            s.pid = Some(12345);
+            s.started_at = Some(999);
+            s
+        });
+        services.insert("healthy_svc".to_string(), {
+            let mut s = make_persisted_service(PersistedServiceStatus::Healthy);
+            s.pid = Some(12346);
+            s
+        });
+        services.insert("starting_svc".to_string(), {
+            let mut s = make_persisted_service(PersistedServiceStatus::Starting);
+            s.pid = Some(12347);
+            s
+        });
+        services.insert("waiting_svc".to_string(), make_persisted_service(PersistedServiceStatus::Waiting));
+        services.insert("stopping_svc".to_string(), make_persisted_service(PersistedServiceStatus::Stopping));
+        services.insert("unhealthy_svc".to_string(), {
+            let mut s = make_persisted_service(PersistedServiceStatus::Unhealthy);
+            s.pid = Some(12348);
+            s
+        });
+
+        persistence.save_state(&make_state(services)).unwrap();
+
+        let result = read_persisted_status(tmp.path());
+
+        // All active statuses should be mapped to "stopped" with pid: None
+        for name in ["running_svc", "healthy_svc", "starting_svc", "waiting_svc", "stopping_svc", "unhealthy_svc"] {
+            let info = result.get(name).unwrap_or_else(|| panic!("missing {}", name));
+            assert_eq!(info.status, "stopped", "{} should be stopped, got {}", name, info.status);
+            assert_eq!(info.pid, None, "{} should have pid: None", name);
+        }
+    }
+
+    #[test]
+    fn test_read_persisted_status_preserves_terminal_statuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let persistence = ConfigPersistence::new(tmp.path().to_path_buf());
+
+        let mut services = HashMap::new();
+        services.insert("stopped_svc".to_string(), {
+            let mut s = make_persisted_service(PersistedServiceStatus::Stopped);
+            s.stopped_at = Some(500);
+            s
+        });
+        services.insert("failed_svc".to_string(), {
+            let mut s = make_persisted_service(PersistedServiceStatus::Failed);
+            s.fail_reason = Some("spawn error".to_string());
+            s
+        });
+        services.insert("exited_svc".to_string(), {
+            let mut s = make_persisted_service(PersistedServiceStatus::Exited);
+            s.exit_code = Some(42);
+            s.stopped_at = Some(600);
+            s
+        });
+        services.insert("killed_svc".to_string(), {
+            let mut s = make_persisted_service(PersistedServiceStatus::Killed);
+            s.signal = Some(9);
+            s.stopped_at = Some(700);
+            s
+        });
+        services.insert("skipped_svc".to_string(), {
+            let mut s = make_persisted_service(PersistedServiceStatus::Skipped);
+            s.skip_reason = Some("condition false".to_string());
+            s
+        });
+
+        persistence.save_state(&make_state(services)).unwrap();
+
+        let result = read_persisted_status(tmp.path());
+
+        let stopped = &result["stopped_svc"];
+        assert_eq!(stopped.status, "stopped");
+        assert_eq!(stopped.stopped_at, Some(500));
+
+        let failed = &result["failed_svc"];
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.fail_reason.as_deref(), Some("spawn error"));
+
+        let exited = &result["exited_svc"];
+        assert_eq!(exited.status, "exited");
+        assert_eq!(exited.exit_code, Some(42));
+        assert_eq!(exited.stopped_at, Some(600));
+
+        let killed = &result["killed_svc"];
+        assert_eq!(killed.status, "killed");
+        assert_eq!(killed.signal, Some(9));
+        assert_eq!(killed.stopped_at, Some(700));
+
+        let skipped = &result["skipped_svc"];
+        assert_eq!(skipped.status, "skipped");
+        assert_eq!(skipped.skip_reason.as_deref(), Some("condition false"));
+    }
+
+    #[test]
+    fn test_read_persisted_status_empty_on_missing_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No state.json written — directory is empty
+        let result = read_persisted_status(tmp.path());
+        assert!(result.is_empty(), "Should return empty HashMap when state.json is missing");
+    }
+
+    #[test]
+    fn test_read_persisted_status_empty_on_corrupted_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Write invalid JSON to state.json
+        fs::write(tmp.path().join("state.json"), "not valid json {{{").unwrap();
+        let result = read_persisted_status(tmp.path());
+        assert!(result.is_empty(), "Should return empty HashMap on corrupted state.json");
+    }
+
+    #[test]
+    fn test_compute_config_hash_matches_expected() {
+        use sha2::{Digest, Sha256};
+
+        let path = Path::new("/home/user/project/kepler.yaml");
+        let expected = hex::encode(Sha256::digest(path.to_string_lossy().as_bytes()));
+        let actual = compute_config_hash(path);
+        assert_eq!(actual, expected);
+
+        // Verify determinism
+        assert_eq!(compute_config_hash(path), compute_config_hash(path));
+
+        // Different paths produce different hashes
+        let other = Path::new("/other/path.yaml");
+        assert_ne!(compute_config_hash(path), compute_config_hash(other));
+    }
 }
 
