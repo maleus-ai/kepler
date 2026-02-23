@@ -1,0 +1,9 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  alpha:
+    command: ["sh", "-c", "echo ALPHA_LOG_MARKER; sleep 300"]
+  beta:
+    command: ["sh", "-c", "echo BETA_LOG_MARKER; sleep 300"]

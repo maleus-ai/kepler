@@ -470,14 +470,21 @@ async fn test_resource_limits_applied() {
     .unwrap();
 
     // Wait for the limit file to be written by the child process
+    // Note: check for non-empty content, not just file existence, because
+    // shell redirection creates the file before ulimit writes to it.
     let mut attempts = 0;
-    while !limit_file.exists() && attempts < 50 {
+    let mut contents = String::new();
+    while attempts < 50 {
+        if let Ok(s) = std::fs::read_to_string(&limit_file) {
+            if !s.trim().is_empty() {
+                contents = s;
+                break;
+            }
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
         attempts += 1;
     }
-
-    let contents = std::fs::read_to_string(&limit_file)
-        .expect("Service should have written its fd limit to file");
+    assert!(!contents.trim().is_empty(), "Service should have written its fd limit to file");
     let reported_limit: u64 = contents.trim().parse()
         .expect("ulimit -n should output a number");
     assert_eq!(
