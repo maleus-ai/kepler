@@ -1,0 +1,11 @@
+# No user: field — service runs as the daemon user.
+# HOME/USER should come from the CLI caller's environment (inherited).
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  no-user-svc:
+    command: ["sh", "-c", "echo HOME=$HOME; echo USER=$USER; sleep 300"]
+    inherit_env: true
+    restart: no

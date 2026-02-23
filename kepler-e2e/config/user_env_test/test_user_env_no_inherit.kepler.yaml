@@ -1,0 +1,12 @@
+# Service runs as testuser1 with inherit_env: false.
+# Even without inheriting CLI env, user vars should still be injected.
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  user-env-svc:
+    command: ["sh", "-c", "echo HOME=$HOME; echo USER=$USER; echo LOGNAME=$LOGNAME; echo SHELL=$SHELL; sleep 300"]
+    user: testuser1
+    inherit_env: false
+    restart: no

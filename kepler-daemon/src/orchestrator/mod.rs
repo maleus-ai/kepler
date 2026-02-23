@@ -548,7 +548,7 @@ impl ServiceOrchestrator {
             resolved.inherit_env,
             config.global_default_inherit_env(),
         );
-        let computed_env = if !inherit {
+        let mut computed_env = if !inherit {
             // Only env_file + environment entries (no inherited kepler_env)
             let mut env = svc_ctx.env_file.clone();
             crate::env::insert_env_entries(&mut env, &resolved.environment);
@@ -556,6 +556,12 @@ impl ServiceOrchestrator {
         } else {
             svc_ctx.env.clone()
         };
+
+        // Inject user-specific env vars (HOME, USER, LOGNAME, SHELL) at lowest priority
+        #[cfg(unix)]
+        if let Some(ref user_spec) = resolved.user {
+            inject_user_env(&mut computed_env, user_spec, &svc_ctx.env_file, &resolved.environment);
+        }
 
         // Resolve working_dir
         let working_dir = resolved
@@ -791,13 +797,19 @@ impl ServiceOrchestrator {
             resolved.inherit_env,
             config.global_default_inherit_env(),
         );
-        let computed_env = if !inherit {
+        let mut computed_env = if !inherit {
             let mut env = svc_ctx.env_file.clone();
             crate::env::insert_env_entries(&mut env, &resolved.environment);
             env
         } else {
             svc_ctx.env.clone()
         };
+
+        // Inject user-specific env vars (HOME, USER, LOGNAME, SHELL) at lowest priority
+        #[cfg(unix)]
+        if let Some(ref user_spec) = resolved.user {
+            inject_user_env(&mut computed_env, user_spec, &svc_ctx.env_file, &resolved.environment);
+        }
 
         let working_dir = resolved
             .working_dir
@@ -2522,6 +2534,39 @@ impl ServiceOrchestrator {
 
         // Store task handles in ConfigActor for cleanup tracking
         handle.store_event_handler_tasks(handler_handle, forwarder_handles).await;
+    }
+}
+
+/// Inject user-specific environment variables (`HOME`, `USER`, `LOGNAME`, `SHELL`)
+/// from `/etc/passwd` into `computed_env`, but only for keys not already explicitly
+/// set via `env_file` or `environment:`.
+#[cfg(unix)]
+fn inject_user_env(
+    computed_env: &mut HashMap<String, String>,
+    user_spec: &str,
+    env_file_vars: &HashMap<String, String>,
+    environment: &[String],
+) {
+    match crate::user::resolve_user_env(user_spec) {
+        Ok(user_env) => {
+            let explicit_keys: HashSet<String> = env_file_vars
+                .keys()
+                .cloned()
+                .chain(
+                    environment
+                        .iter()
+                        .filter_map(|e| e.split_once('=').map(|(k, _)| k.to_string())),
+                )
+                .collect();
+            for (key, value) in user_env {
+                if !explicit_keys.contains(&key) {
+                    computed_env.insert(key, value);
+                }
+            }
+        }
+        Err(e) => {
+            debug!("Could not resolve user env for '{}': {}", user_spec, e);
+        }
     }
 }
 
