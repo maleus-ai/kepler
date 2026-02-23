@@ -1010,7 +1010,29 @@ impl ServiceOrchestrator {
 
         let handle = match self.registry.get(&config_path.to_path_buf()) {
             Some(h) => h,
-            None => return Ok("Config not loaded".to_string()),
+            None => {
+                if clean {
+                    // Config not loaded (e.g. daemon was restarted), but --clean was
+                    // requested — still remove the state directory if it exists.
+                    use sha2::{Digest, Sha256};
+                    let config_hash = hex::encode(Sha256::digest(
+                        config_path.to_string_lossy().as_bytes(),
+                    ));
+                    if let Ok(global_dir) = crate::global_state_dir() {
+                        let state_dir = global_dir.join("configs").join(&config_hash);
+                        self.cursor_manager.invalidate_config_cursors(config_path);
+                        if state_dir.exists() {
+                            if let Err(e) = std::fs::remove_dir_all(&state_dir) {
+                                warn!("Failed to remove state directory {:?}: {}", state_dir, e);
+                            } else {
+                                info!("Removed state directory: {:?}", state_dir);
+                            }
+                        }
+                    }
+                    return Ok("Cleaned up (no services were running)".to_string());
+                }
+                return Ok("Config not loaded".to_string());
+            }
         };
 
         // Get services to stop
