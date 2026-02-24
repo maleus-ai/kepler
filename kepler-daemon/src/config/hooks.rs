@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::ConfigValue;
 use super::EnvironmentEntries;
+use super::InjectUserEnv;
 use super::resources::ResourceLimits;
 
 /// Service-specific hooks
@@ -57,6 +58,9 @@ pub struct HookCommon {
     /// Resource limits for the hook process
     #[serde(default)]
     pub limits: ConfigValue<Option<ResourceLimits>>,
+    /// Controls injection of user-specific env vars (HOME/USER/LOGNAME/SHELL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inject_user_env: Option<InjectUserEnv>,
 }
 
 /// Hook command - either a script or a command array.

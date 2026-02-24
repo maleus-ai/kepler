@@ -8,6 +8,7 @@ How Kepler handles environment variables, including inheritance, expansion, and 
 - [Kepler Environment Declaration](#kepler-environment-declaration)
 - [Environment Inheritance](#environment-inheritance)
 - [Environment Sources](#environment-sources)
+- [User Environment Injection](#user-environment-injection)
 - [Three-Stage Expansion](#three-stage-expansion)
 - [Passing Values to Commands](#passing-values-to-commands)
 - [Security Considerations](#security-considerations)
@@ -116,7 +117,8 @@ Services receive their process environment from these sources (highest to lowest
 
 1. **`environment`** — Explicit variables in the service config (sequence or mapping format)
 2. **`env_file`** — Variables loaded from the specified `.env` file
-3. **Kepler environment** (`kepler.env`) — If `inherit_env: true`, all variables from `kepler.env` are inherited. This is either the full CLI environment (when `autostart: false`) or the declared subset (when `autostart` has `environment`).
+3. **User environment** — If a `user:` is specified, HOME/USER/LOGNAME/SHELL are auto-injected from `/etc/passwd`. See [User Environment Injection](#user-environment-injection)
+4. **Kepler environment** (`kepler.env`) — If `inherit_env: true`, all variables from `kepler.env` are inherited. This is either the full CLI environment (when `autostart: false`) or the declared subset (when `autostart` has `environment`).
 
 Higher-priority sources override lower-priority ones when keys conflict.
 
@@ -279,6 +281,138 @@ This re-captures all environment variables from the current shell and replaces t
 The alternative is to unload the config entirely with `kepler stop --clean`, which drops the in-memory environment and forces a fresh capture on the next load.
 
 `--refresh-env` and `-e` can be combined: the CLI environment is refreshed first, then `-e` overrides are applied on top.
+
+---
+
+## User Environment Injection
+
+When a service, hook, or healthcheck specifies a `user:`, Kepler automatically injects user-specific environment variables resolved from `/etc/passwd`:
+
+| Variable | Source |
+|----------|--------|
+| `HOME` | User's home directory |
+| `USER` | Username |
+| `LOGNAME` | Username (same as USER) |
+| `SHELL` | User's login shell |
+
+### Why?
+
+Without injection, a service running as `user: appuser` would inherit the **CLI caller's** HOME, USER, and SHELL (typically root's). This causes subtle issues: applications that rely on `$HOME` for config paths, cache dirs, or dotfiles would look in the wrong location. User env injection ensures the process environment matches the identity it actually runs as.
+
+### The `inject_user_env` Option
+
+The `inject_user_env` option controls **when** user environment variables are injected in the precedence chain. It accepts three values:
+
+| Value | Description |
+|-------|-------------|
+| `before` (default) | Inject as defaults — `env_file` and `environment` can override them |
+| `after` | Inject last — overrides everything including explicit `environment` values |
+| `none` | Disable injection entirely — no user env vars are added |
+
+When `inject_user_env` is not specified, it defaults to `before`.
+
+### Precedence with `inject_user_env: before` (default)
+
+```
+kepler.env (inherit_env: true) → user env → env_file → environment
+```
+
+User env vars act as sensible defaults: they fill in HOME/USER/LOGNAME/SHELL so the process has a correct identity, but explicit `environment` or `env_file` values take priority.
+
+```yaml
+services:
+  app:
+    command: ["./app"]
+    user: appuser
+    # inject_user_env: before  (this is the default)
+    environment:
+      - HOME=/custom/home  # This wins over appuser's /home/appuser
+```
+
+### Precedence with `inject_user_env: after`
+
+```
+kepler.env (inherit_env: true) → env_file → environment → user env
+```
+
+User env vars are injected **last**, unconditionally overriding all other sources. Use this when you need to guarantee that HOME/USER/LOGNAME/SHELL always match the target user, regardless of what `environment` or `env_file` specify.
+
+```yaml
+services:
+  app:
+    command: ["./app"]
+    user: appuser
+    inject_user_env: after
+    environment:
+      - HOME=/custom/home  # Overridden — HOME will be /home/appuser
+```
+
+### Disabling injection with `inject_user_env: none`
+
+```yaml
+services:
+  app:
+    command: ["./app"]
+    user: appuser
+    inject_user_env: none
+    environment:
+      - HOME=/custom/home  # Used as-is, no injection
+```
+
+With `none`, no user env vars are injected. The process only sees what comes from `kepler.env`, `env_file`, and `environment`. Use this for full manual control.
+
+### Hooks and Healthchecks
+
+The `inject_user_env` option is also available on hooks and healthchecks. Each resolves the effective user independently:
+
+- **Hooks**: effective user = hook `user` > service `user` > config owner
+- **Healthchecks**: effective user = healthcheck `user` > service `user` > config owner
+
+This means a healthcheck running as a different user than its service will get **that user's** env vars injected, not the service user's:
+
+```yaml
+services:
+  app:
+    command: ["./app"]
+    user: appuser                     # Service runs as appuser
+    healthcheck:
+      run: "curl -f http://localhost:3000/health"
+      user: healthchecker             # Healthcheck runs as healthchecker
+      # USER=healthchecker, HOME=/home/healthchecker (not appuser's)
+    hooks:
+      pre_start:
+        run: ./setup.sh
+        user: root                    # Hook runs as root
+        inject_user_env: none         # Don't inject root's env
+```
+
+### Interaction with `inherit_env`
+
+User env injection is independent of `inherit_env`. Even with `inherit_env: false` (which excludes `kepler.env` from the process environment), user env vars are still injected as long as `inject_user_env` is not `none`:
+
+```yaml
+services:
+  isolated-app:
+    command: ["./app"]
+    user: appuser
+    inherit_env: false          # No kepler.env in process env
+    # USER=appuser, HOME=/home/appuser still injected (default: before)
+    environment:
+      - PATH=/usr/bin:/bin
+```
+
+### Lua Expression Access
+
+User env vars injected with `before` are available in Lua expressions via `service.env.*`:
+
+```yaml
+services:
+  app:
+    command: ["./app"]
+    user: appuser
+    environment:
+      - CONFIG_DIR=${{ service.env.HOME }}$/.config/app  # HOME from /etc/passwd
+```
 
 ---
 

@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 use super::ConfigValue;
+use super::InjectUserEnv;
 use super::duration::{deserialize_duration, serialize_duration};
 
 /// Health check configuration
@@ -26,6 +27,9 @@ pub struct HealthCheck {
     pub user: ConfigValue<Option<String>>,
     #[serde(default)]
     pub groups: ConfigValue<Vec<ConfigValue<String>>>,
+    /// Controls injection of user-specific env vars (HOME/USER/LOGNAME/SHELL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inject_user_env: Option<InjectUserEnv>,
 }
 
 impl HealthCheck {

@@ -1,0 +1,16 @@
+# Service runs as testuser1 with inject_user_env: after.
+# Even though HOME is explicitly set via environment:, inject_user_env: after
+# forces it to match testuser1's /etc/passwd entry.
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  user-env-svc:
+    command: ["sh", "-c", "echo HOME=$HOME; echo USER=$USER; echo LOGNAME=$LOGNAME; echo SHELL=$SHELL; sleep 300"]
+    user: testuser1
+    inherit_env: true
+    inject_user_env: after
+    environment:
+      - HOME=/custom/home
+    restart: no

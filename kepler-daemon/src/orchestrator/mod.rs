@@ -467,6 +467,26 @@ impl ServiceOrchestrator {
         let env_file_vars = self.load_service_env_file(service_name, &ctx.service_config, &config_dir, handle).await;
 
         let mut full_env = kepler_env.clone();
+
+        // Pre-inject user env values so they're available for Lua expressions.
+        // Inserted between kepler_env and env_file — env_file overrides them.
+        // Skipped when inject_user_env is explicitly set to `none`.
+        #[cfg(unix)]
+        {
+            use crate::config::InjectUserEnv;
+            let inject_mode = ctx.service_config.inject_user_env;
+            if inject_mode != Some(InjectUserEnv::Disabled) {
+                let pre_user = ctx.service_config.user.as_static().and_then(|v| v.clone());
+                if let Some(ref user_spec) = pre_user {
+                    if let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
+                        for (key, value) in user_env {
+                            full_env.insert(key, value);
+                        }
+                    }
+                }
+            }
+        }
+
         full_env.extend(env_file_vars.clone());
 
         let state = handle.get_service_state(service_name).await;
@@ -557,10 +577,22 @@ impl ServiceOrchestrator {
             svc_ctx.env.clone()
         };
 
-        // Inject user-specific env vars (HOME, USER, LOGNAME, SHELL) at lowest priority
+        // Inject user-specific env vars (HOME, USER, LOGNAME, SHELL) based on inject_user_env mode
         #[cfg(unix)]
-        if let Some(ref user_spec) = resolved.user {
-            inject_user_env(&mut computed_env, user_spec, &svc_ctx.env_file, &resolved.environment);
+        {
+            use crate::config::InjectUserEnv;
+            let inject_mode = resolved.inject_user_env.unwrap_or(InjectUserEnv::Before);
+            if let Some(ref user_spec) = resolved.user {
+                match inject_mode {
+                    InjectUserEnv::Before => {
+                        inject_user_env(&mut computed_env, user_spec, &svc_ctx.env_file, &resolved.environment);
+                    }
+                    InjectUserEnv::After => {
+                        force_inject_user_env(&mut computed_env, user_spec);
+                    }
+                    InjectUserEnv::Disabled => {}
+                }
+            }
         }
 
         // Resolve working_dir
@@ -734,6 +766,25 @@ impl ServiceOrchestrator {
         let env_file_vars = self.load_service_env_file(service_name, &ctx.service_config, &config_dir, handle).await;
 
         let mut full_env = kepler_env.clone();
+
+        // Pre-inject user env values so they're available for Lua expressions.
+        // Inserted between kepler_env and env_file — env_file overrides them.
+        #[cfg(unix)]
+        {
+            use crate::config::InjectUserEnv;
+            let inject_mode = ctx.service_config.inject_user_env;
+            if inject_mode != Some(InjectUserEnv::Disabled) {
+                let pre_user = ctx.service_config.user.as_static().and_then(|v| v.clone());
+                if let Some(ref user_spec) = pre_user {
+                    if let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
+                        for (key, value) in user_env {
+                            full_env.insert(key, value);
+                        }
+                    }
+                }
+            }
+        }
+
         full_env.extend(env_file_vars.clone());
 
         // Get current service state for restart_count
@@ -805,10 +856,22 @@ impl ServiceOrchestrator {
             svc_ctx.env.clone()
         };
 
-        // Inject user-specific env vars (HOME, USER, LOGNAME, SHELL) at lowest priority
+        // Inject user-specific env vars based on inject_user_env mode
         #[cfg(unix)]
-        if let Some(ref user_spec) = resolved.user {
-            inject_user_env(&mut computed_env, user_spec, &svc_ctx.env_file, &resolved.environment);
+        {
+            use crate::config::InjectUserEnv;
+            let inject_mode = resolved.inject_user_env.unwrap_or(InjectUserEnv::Before);
+            if let Some(ref user_spec) = resolved.user {
+                match inject_mode {
+                    InjectUserEnv::Before => {
+                        inject_user_env(&mut computed_env, user_spec, &svc_ctx.env_file, &resolved.environment);
+                    }
+                    InjectUserEnv::After => {
+                        force_inject_user_env(&mut computed_env, user_spec);
+                    }
+                    InjectUserEnv::Disabled => {}
+                }
+            }
         }
 
         let working_dir = resolved
@@ -2562,6 +2625,26 @@ fn inject_user_env(
                 if !explicit_keys.contains(&key) {
                     computed_env.insert(key, value);
                 }
+            }
+        }
+        Err(e) => {
+            debug!("Could not resolve user env for '{}': {}", user_spec, e);
+        }
+    }
+}
+
+/// Force-inject user-specific environment variables, overriding ALL existing values.
+/// Used when `inject_user_env: after` to ensure HOME/USER/LOGNAME/SHELL
+/// always match the target user regardless of explicit config.
+#[cfg(unix)]
+fn force_inject_user_env(
+    computed_env: &mut HashMap<String, String>,
+    user_spec: &str,
+) {
+    match crate::user::resolve_user_env(user_spec) {
+        Ok(user_env) => {
+            for (key, value) in user_env {
+                computed_env.insert(key, value);
             }
         }
         Err(e) => {

@@ -1,0 +1,22 @@
+# Service runs as testuser1, but healthcheck runs as testuser2.
+# No inject_user_env set (default = before).
+# The healthcheck should inject testuser2's env (not testuser1's).
+# The healthcheck asserts USER == testuser2 → passes only if the healthcheck
+# user's env is injected, not the service user's.
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  user-env-svc:
+    command: ["sh", "-c", "sleep 300"]
+    user: testuser1
+    inherit_env: true
+    restart: no
+    healthcheck:
+      run: "test \"$USER\" = testuser2"
+      interval: 2s
+      timeout: 5s
+      retries: 1
+      start_period: 0s
+      user: testuser2
