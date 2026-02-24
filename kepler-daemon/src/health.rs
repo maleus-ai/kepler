@@ -122,10 +122,34 @@ async fn health_check_loop(
             }
         }
 
+        let mut health_env = ctx.env.clone();
+
+        // Inject user env based on inject_user_env mode (default: Before).
+        // Healthchecks have no env_file/environment of their own, so Before
+        // and After both inject the effective user's env vars into health_env.
+        // Only Disabled skips injection entirely.
+        #[cfg(unix)]
+        {
+            use crate::config::InjectUserEnv;
+            let inject_mode = config.inject_user_env.unwrap_or(InjectUserEnv::Before);
+            match inject_mode {
+                InjectUserEnv::Before | InjectUserEnv::After => {
+                    if let Some(ref user_spec) = user {
+                        if let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
+                            for (key, value) in user_env {
+                                health_env.insert(key, value);
+                            }
+                        }
+                    }
+                }
+                InjectUserEnv::Disabled => {}
+            }
+        }
+
         let passed = run_health_check(
             &cmd,
             config.timeout,
-            &ctx.env,
+            &health_env,
             &ctx.working_dir,
             user.as_deref(),
             &groups,

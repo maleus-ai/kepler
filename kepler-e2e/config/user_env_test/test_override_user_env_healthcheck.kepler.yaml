@@ -1,0 +1,26 @@
+# Service with a healthcheck that has inject_user_env: after.
+# The service explicitly sets HOME, but the healthcheck's inject_user_env: after
+# forces HOME to match testuser1's /etc/passwd entry.
+# The healthcheck asserts that USER == testuser1 (from /etc/passwd, not from
+# the service's explicit environment). If inject_user_env: after works, the check
+# passes → service becomes healthy.
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  user-env-svc:
+    command: ["sh", "-c", "sleep 300"]
+    user: testuser1
+    inherit_env: true
+    environment:
+      - HOME=/custom/home
+      - USER=custom_user
+    restart: no
+    healthcheck:
+      run: "test \"$USER\" = testuser1"
+      interval: 2s
+      timeout: 5s
+      retries: 1
+      start_period: 0s
+      inject_user_env: after

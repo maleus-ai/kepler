@@ -1,0 +1,23 @@
+# Service runs as testuser1 with explicit USER=custom_user in environment.
+# Healthcheck runs as testuser1 with NO inject_user_env set (default = before).
+# Default injection should inject testuser1's env into the healthcheck,
+# overriding the service's explicit USER=custom_user.
+# The healthcheck asserts USER == testuser1 → passes only if injection works.
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  user-env-svc:
+    command: ["sh", "-c", "sleep 300"]
+    user: testuser1
+    inherit_env: true
+    environment:
+      - USER=custom_user
+    restart: no
+    healthcheck:
+      run: "test \"$USER\" = testuser1"
+      interval: 2s
+      timeout: 5s
+      retries: 1
+      start_period: 0s

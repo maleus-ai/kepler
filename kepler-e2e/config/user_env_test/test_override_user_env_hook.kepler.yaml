@@ -1,0 +1,19 @@
+# Service with a pre_start hook that has inject_user_env: after.
+# The hook explicitly sets HOME, but inject_user_env: after forces it to
+# match the effective user's /etc/passwd entry.
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  user-env-svc:
+    command: ["sh", "-c", "sleep 300"]
+    user: testuser1
+    inherit_env: true
+    restart: no
+    hooks:
+      pre_start:
+        run: "echo HOME=$HOME; echo USER=$USER; echo LOGNAME=$LOGNAME; echo SHELL=$SHELL"
+        inject_user_env: after
+        environment:
+          - HOME=/custom/hook/home

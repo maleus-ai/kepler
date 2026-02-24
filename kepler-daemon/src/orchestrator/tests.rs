@@ -660,3 +660,63 @@ fn test_inject_user_env_nonexistent_user_is_noop() {
     assert_eq!(computed_env.get("HOME").unwrap(), "/original");
     assert_eq!(computed_env.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// force_inject_user_env — unconditionally overwrites all keys
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn test_force_inject_user_env_overwrites_all_keys() {
+    let nix_user = current_resolved_user();
+    let user_spec = nix_user.username.clone().unwrap();
+
+    let mut computed_env = HashMap::new();
+    computed_env.insert("HOME".to_string(), "/custom/home".to_string());
+    computed_env.insert("USER".to_string(), "custom_user".to_string());
+    computed_env.insert("LOGNAME".to_string(), "custom_logname".to_string());
+    computed_env.insert("SHELL".to_string(), "/bin/custom".to_string());
+
+    force_inject_user_env(&mut computed_env, &user_spec);
+
+    // All keys should be overwritten with the target user's values
+    assert_eq!(computed_env.get("HOME").unwrap(), &nix_user.home.as_ref().unwrap().to_string_lossy().to_string());
+    assert_eq!(computed_env.get("USER").unwrap(), nix_user.username.as_ref().unwrap());
+    assert_eq!(computed_env.get("LOGNAME").unwrap(), nix_user.username.as_ref().unwrap());
+    assert_eq!(computed_env.get("SHELL").unwrap(), &nix_user.shell.as_ref().unwrap().to_string_lossy().to_string());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_force_inject_user_env_after_explicit_env_still_overrides() {
+    let nix_user = current_resolved_user();
+    let user_spec = nix_user.username.clone().unwrap();
+
+    // Simulate the full chain: inject_user_env first (respects explicit), then force_inject
+    let mut computed_env = HashMap::new();
+    computed_env.insert("HOME".to_string(), "/explicit/home".to_string());
+
+    let env_file_vars = HashMap::new();
+    let environment = vec!["HOME=/explicit/home".to_string()];
+
+    inject_user_env(&mut computed_env, &user_spec, &env_file_vars, &environment);
+    // HOME should still be /explicit/home after inject_user_env
+    assert_eq!(computed_env.get("HOME").unwrap(), "/explicit/home");
+
+    // Now force_inject should override it
+    force_inject_user_env(&mut computed_env, &user_spec);
+    assert_eq!(computed_env.get("HOME").unwrap(), &nix_user.home.as_ref().unwrap().to_string_lossy().to_string());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_force_inject_user_env_nonexistent_user_is_noop() {
+    let mut computed_env = HashMap::new();
+    computed_env.insert("HOME".to_string(), "/original".to_string());
+
+    // Should silently fail (debug log) and not modify computed_env
+    force_inject_user_env(&mut computed_env, "nonexistent_user_99999");
+
+    assert_eq!(computed_env.get("HOME").unwrap(), "/original");
+    assert_eq!(computed_env.len(), 1);
+}

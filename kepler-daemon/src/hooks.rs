@@ -197,6 +197,22 @@ async fn run_hook_step(
             }
         }
 
+        // Inject user env based on inject_user_env mode
+        #[cfg(unix)]
+        {
+            use crate::config::InjectUserEnv;
+            let inject_mode = hook.common().inject_user_env;
+            if inject_mode == Some(InjectUserEnv::After) {
+                if let Some(ref user_spec) = spec.user {
+                    if let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
+                        for (key, value) in user_env {
+                            spec.environment.insert(key, value);
+                        }
+                    }
+                }
+            }
+        }
+
         debug!(
             "Running hook: {} {:?}",
             &spec.program_and_args[0],
@@ -305,15 +321,40 @@ pub async fn run_service_hook(
                 status: state.as_ref().map(|s| s.status.as_str().to_string()),
                 hooks: hooks_ctx,
             }),
-            hook: Some(HookEvalContext {
-                name: hook_type.as_str().to_string(),
-                env_file: HashMap::new(),
-                env: if hook.common().inherit_env == Some(false) {
+            hook: Some({
+                let mut hook_env = if hook.common().inherit_env == Some(false) {
                     HashMap::new()
                 } else {
                     params.env.clone()
-                },
-                had_failure: Some(had_failure),
+                };
+
+                // Base injection: inject user env from effective user (hook user or service user).
+                // These values are available for Lua and overridden by hook's env_file/environment.
+                // Skipped when inject_user_env is explicitly disabled.
+                #[cfg(unix)]
+                {
+                    use crate::config::InjectUserEnv;
+                    let inject_mode = hook.common().inject_user_env;
+                    if inject_mode != Some(InjectUserEnv::Disabled) {
+                        let pre_user = hook.common().user.as_static()
+                            .and_then(|v| v.clone())
+                            .or_else(|| params.service_user.map(|s| s.to_string()));
+                        if let Some(ref user_spec) = pre_user {
+                            if let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
+                                for (key, value) in user_env {
+                                    hook_env.insert(key, value);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HookEvalContext {
+                    name: hook_type.as_str().to_string(),
+                    env_file: HashMap::new(),
+                    env: hook_env,
+                    had_failure: Some(had_failure),
+                }
             }),
             deps: params.deps.clone(),
             owner: params.owner_uid.map(|uid| OwnerEvalContext {
