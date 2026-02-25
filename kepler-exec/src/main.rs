@@ -138,7 +138,7 @@ fn reject_if_setuid() {
 /// Supported formats:
 /// - `"name"` — lookup user by name, get uid/gid from passwd
 /// - `"name:group"` — lookup user by name, resolve group separately
-/// - `"uid"` — numeric uid, gid=uid, reverse-lookup for username
+/// - `"uid"` — numeric uid, gid from passwd (falls back to uid if no entry)
 /// - `"uid:gid"` — numeric uid and gid, reverse-lookup for username
 #[cfg(unix)]
 fn resolve_user(spec: &str) -> (u32, u32, Option<String>) {
@@ -150,12 +150,11 @@ fn resolve_user(spec: &str) -> (u32, u32, Option<String>) {
         let gid = resolve_group(right);
         (uid, gid, username)
     } else if let Ok(uid) = spec.parse::<u32>() {
-        // Numeric uid — reverse-lookup for username (for initgroups)
-        let username = User::from_uid(nix::unistd::Uid::from_raw(uid))
-            .ok()
-            .flatten()
-            .map(|u| u.name);
-        (uid, uid, username)
+        // Numeric uid — resolve real gid from passwd, fall back to uid if no entry
+        match User::from_uid(nix::unistd::Uid::from_raw(uid)).ok().flatten() {
+            Some(u) => (uid, u.gid.as_raw(), Some(u.name)),
+            None => (uid, uid, None),
+        }
     } else {
         // Username — lookup by name
         let user = User::from_name(spec).unwrap_or_else(|e| {

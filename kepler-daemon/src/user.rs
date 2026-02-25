@@ -32,7 +32,7 @@ fn lookup_user_by_uid(uid: u32) -> Option<User> {
 ///
 /// Supported formats:
 /// - `"username"` - looks up user by name
-/// - `"1000"` - numeric uid (gid defaults to same value)
+/// - `"1000"` - numeric uid (gid from passwd, falls back to uid if no entry)
 /// - `"username:group"` - user by name with group override
 /// - `"1000:1000"` - explicit uid:gid
 pub fn resolve_user(user: &str) -> Result<ResolvedUser> {
@@ -42,13 +42,18 @@ pub fn resolve_user(user: &str) -> Result<ResolvedUser> {
         let gid = resolve_group(right)?;
         Ok(ResolvedUser { uid, gid, username, home, shell })
     } else if let Ok(uid) = user.parse::<u32>() {
-        // Numeric uid - use same for gid, try reverse-lookup for username
+        // Numeric uid - resolve real gid from passwd, fall back to uid if no entry
         let nix_user = lookup_user_by_uid(uid);
-        let (username, home, shell) = match nix_user {
-            Some(u) => (Some(u.name), Some(u.dir), Some(u.shell)),
-            None => (None, None, None),
-        };
-        Ok(ResolvedUser { uid, gid: uid, username, home, shell })
+        match nix_user {
+            Some(u) => Ok(ResolvedUser {
+                uid,
+                gid: u.gid.as_raw(),
+                username: Some(u.name),
+                home: Some(u.dir),
+                shell: Some(u.shell),
+            }),
+            None => Ok(ResolvedUser { uid, gid: uid, username: None, home: None, shell: None }),
+        }
     } else {
         // Username - lookup via nix
         let (uid, gid, home, shell) = lookup_user_by_name(user)?;
