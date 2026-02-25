@@ -6,10 +6,31 @@ fn root_home() -> &'static str {
 }
 
 #[test]
-fn test_resolve_numeric_uid() {
-    let resolved = resolve_user("1000").unwrap();
-    assert_eq!(resolved.uid, 1000);
-    assert_eq!(resolved.gid, 1000);
+fn test_resolve_numeric_uid_no_passwd_entry() {
+    // Very high UID unlikely to exist — gid falls back to uid
+    let resolved = resolve_user("99999").unwrap();
+    assert_eq!(resolved.uid, 99999);
+    assert_eq!(resolved.gid, 99999);
+    assert_eq!(resolved.username, None);
+}
+
+#[test]
+fn test_resolve_numeric_uid_with_passwd_entry() {
+    // UID 0 (root) always exists — gid should come from passwd, not uid
+    let resolved = resolve_user("0").unwrap();
+    assert_eq!(resolved.uid, 0);
+    assert_eq!(resolved.gid, 0);
+    assert_eq!(resolved.username, Some("root".to_string()));
+}
+
+#[test]
+fn test_resolve_numeric_uid_uses_real_gid() {
+    // Resolve current user by numeric uid — gid must match passwd entry
+    let nix_user = current_user();
+    let uid_str = nix_user.uid.as_raw().to_string();
+    let resolved = resolve_user(&uid_str).unwrap();
+    assert_eq!(resolved.uid, nix_user.uid.as_raw());
+    assert_eq!(resolved.gid, nix_user.gid.as_raw());
 }
 
 #[test]
