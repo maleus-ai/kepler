@@ -20,6 +20,51 @@ pub fn setuid(uid: u32) -> std::io::Result<()> {
     }
 }
 
+/// Prevent the process and its children from gaining new privileges through
+/// setuid/setgid binaries (e.g. `sudo`, `su`). This is a one-way flag:
+/// once enabled it cannot be unset.
+///
+/// Platform strategies:
+/// - Linux: `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)`
+/// - FreeBSD: `procctl(P_PID, 0, PROC_NO_NEW_PRIVS_CTL, &val)`
+/// - Other unix: no-op (returns `Ok(())`)
+#[cfg(target_os = "linux")]
+pub fn set_no_new_privileges() -> std::io::Result<()> {
+    let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "freebsd")]
+pub fn set_no_new_privileges() -> std::io::Result<()> {
+    // FreeBSD equivalent of PR_SET_NO_NEW_PRIVS, available since FreeBSD 11.0.
+    // procctl(P_PID, 0, PROC_NO_NEW_PRIVS_CTL, &val) where val = PROC_NO_NEW_PRIVS_ENABLE.
+    const PROC_NO_NEW_PRIVS_CTL: libc::c_int = 19;
+    const PROC_NO_NEW_PRIVS_ENABLE: libc::c_int = 1;
+    let val: libc::c_int = PROC_NO_NEW_PRIVS_ENABLE;
+    let ret = unsafe {
+        libc::procctl(
+            libc::P_PID,
+            0, // 0 = current process
+            PROC_NO_NEW_PRIVS_CTL,
+            &val as *const libc::c_int as *mut libc::c_void,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "freebsd")))]
+pub fn set_no_new_privileges() -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Close all file descriptors above stderr (fd > 2).
 ///
 /// Platform strategies:

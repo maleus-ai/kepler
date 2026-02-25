@@ -140,6 +140,11 @@ async fn health_check_loop(
             }
         }
 
+        let service_no_new_privileges = resolved.and_then(|r| r.no_new_privileges);
+        let no_new_privileges = config.no_new_privileges
+            .or(service_no_new_privileges)
+            .unwrap_or(true);
+
         let passed = run_health_check(
             &cmd,
             config.timeout,
@@ -147,6 +152,7 @@ async fn health_check_loop(
             &ctx.working_dir,
             user.as_deref(),
             &groups,
+            no_new_privileges,
         ).await;
 
         // Update state based on result
@@ -314,6 +320,7 @@ async fn run_status_change_hook(
             owner_user: handle.owner_user(),
             kepler_gid,
             kepler_env_denied,
+            service_no_new_privileges: resolved.no_new_privileges,
         };
 
         // Hooks are always available from resolved config (inner fields may still
@@ -351,18 +358,20 @@ async fn run_health_check(
     working_dir: &Path,
     user: Option<&str>,
     groups: &[String],
+    no_new_privileges: bool,
 ) -> bool {
     if test.is_empty() {
         return true;
     }
 
-    let spec = CommandSpec::new(
+    let mut spec = CommandSpec::new(
         test.to_vec(),
         working_dir.to_path_buf(),
         env.clone(),
         user.map(|s| s.to_string()),
         groups.to_vec(),
     );
+    spec.no_new_privileges = no_new_privileges;
 
     let result = timeout(check_timeout, async {
         match spawn_blocking(spec, BlockingMode::Silent).await {

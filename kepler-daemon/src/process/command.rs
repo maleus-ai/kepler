@@ -23,6 +23,8 @@ pub struct CommandSpec {
     /// Whether to clear the environment before applying environment vars
     /// If false, inherits the daemon's environment
     pub clear_env: bool,
+    /// Whether to set PR_SET_NO_NEW_PRIVS on the spawned process
+    pub no_new_privileges: bool,
 }
 
 impl CommandSpec {
@@ -42,6 +44,7 @@ impl CommandSpec {
             groups,
             limits: None,
             clear_env: true, // Secure default
+            no_new_privileges: true, // Secure default
         }
     }
 
@@ -62,6 +65,7 @@ impl CommandSpec {
             groups,
             limits,
             clear_env: true, // Secure default
+            no_new_privileges: true, // Secure default
         }
     }
 
@@ -74,6 +78,7 @@ impl CommandSpec {
         groups: Vec<String>,
         limits: Option<ResourceLimits>,
         clear_env: bool,
+        no_new_privileges: bool,
     ) -> Self {
         Self {
             program_and_args,
@@ -83,6 +88,7 @@ impl CommandSpec {
             groups,
             limits,
             clear_env,
+            no_new_privileges,
         }
     }
 

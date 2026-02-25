@@ -60,6 +60,9 @@ pub struct HookCommon {
     /// Controls injection of user-specific env vars (HOME/USER/LOGNAME/SHELL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_identity: Option<bool>,
+    /// When true, sets PR_SET_NO_NEW_PRIVS on the hook process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_new_privileges: Option<bool>,
 }
 
 /// Hook command - either a script or a command array.

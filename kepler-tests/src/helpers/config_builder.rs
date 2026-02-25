@@ -320,6 +320,7 @@ impl TestServiceBuilder {
             output: self.output,
             outputs: self.outputs,
             user_identity: None,
+            no_new_privileges: None,
         }
     }
 }
@@ -451,6 +452,7 @@ impl TestHealthCheckBuilder {
             user,
             groups,
             user_identity: None,
+            no_new_privileges: None,
         }
     }
 }

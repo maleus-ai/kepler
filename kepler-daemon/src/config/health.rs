@@ -29,6 +29,9 @@ pub struct HealthCheck {
     /// Controls injection of user-specific env vars (HOME/USER/LOGNAME/SHELL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_identity: Option<bool>,
+    /// When true, sets PR_SET_NO_NEW_PRIVS on the health check process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_new_privileges: Option<bool>,
 }
 
 impl HealthCheck {

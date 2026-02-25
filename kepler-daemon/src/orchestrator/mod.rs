@@ -2171,6 +2171,7 @@ impl ServiceOrchestrator {
             owner_user: handle.and_then(|h| h.owner_user()),
             kepler_gid: self.kepler_gid,
             kepler_env_denied,
+            service_no_new_privileges: resolved.no_new_privileges,
         };
 
         // Read prior hook outputs from disk and set output_max_size
@@ -2332,6 +2333,7 @@ impl ServiceOrchestrator {
         #[cfg(not(unix))]
         let groups = resolved.groups.clone();
 
+        let no_new_privileges = resolved.no_new_privileges.unwrap_or(true);
         let spec = crate::process::CommandSpec::with_all_options(
             resolved.command.clone(),
             ctx.working_dir.clone(),
@@ -2340,6 +2342,7 @@ impl ServiceOrchestrator {
             groups,
             resolved.limits.clone(),
             clear_env,
+            no_new_privileges,
         );
 
         // Resolve store settings

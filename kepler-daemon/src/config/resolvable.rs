@@ -237,6 +237,7 @@ impl<'a> ResolvableCommand<'a> {
             groups,
             limits,
             clear_env,
+            true, // no_new_privileges: secure default, callers override after resolve
         ))
     }
 }
