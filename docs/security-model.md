@@ -37,6 +37,7 @@ CLI access to the daemon is controlled via the `kepler` group:
 - The install script creates the `kepler` group if it doesn't exist
 - Users must be members of the `kepler` group to communicate with the daemon
 - Root users always have access regardless of group membership
+- All kepler group members (and root) can perform all operations -- there are no per-config ownership restrictions
 
 ### Adding Users
 
