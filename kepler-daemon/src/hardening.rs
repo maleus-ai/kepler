@@ -10,7 +10,7 @@ use std::str::FromStr;
 ///
 /// | Level    | Privilege restriction                                          | Kepler group stripping |
 /// |----------|---------------------------------------------------------------|----------------------|
-/// | `none`   | No restrictions (current behavior)                            | No stripping         |
+/// | `none`   | No restrictions                                               | No stripping         |
 /// | `no-root`| Non-root config owners cannot run as root/daemon              | Stripped             |
 /// | `strict` | Non-root config owners can only run as themselves             | Stripped             |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
