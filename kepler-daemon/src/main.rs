@@ -6,7 +6,6 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-use kepler_daemon::auth;
 use kepler_daemon::config_actor::context::ConfigEvent;
 use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
 use kepler_daemon::cursor::CursorManager;
@@ -364,24 +363,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Extract config path from a request if it's a Tier 2 (owner-restricted) request.
-/// Returns Some(path) for Tier 2 requests, None for Tier 1/3 or filter-tier requests.
-fn tier2_config_path(request: &Request) -> Option<&PathBuf> {
-    match request {
-        Request::Stop { config_path, .. }
-        | Request::Restart { config_path, .. }
-        | Request::Recreate { config_path, .. }
-        | Request::UnloadConfig { config_path }
-        | Request::Logs { config_path, .. }
-        | Request::LogsChunk { config_path, .. }
-        | Request::LogsCursor { config_path, .. }
-        | Request::Subscribe { config_path, .. }
-        | Request::Inspect { config_path, .. } => Some(config_path),
-        Request::Status { config_path: Some(config_path) } => Some(config_path),
-        _ => None,
-    }
-}
-
 async fn handle_request(
     request: Request,
     orchestrator: Arc<ServiceOrchestrator>,
@@ -391,21 +372,6 @@ async fn handle_request(
     progress: ProgressSender,
     peer: PeerCredentials,
 ) -> Response {
-    // Tier 3: root-only operations
-    if matches!(request, Request::Shutdown | Request::Prune { .. }) && peer.uid != 0 {
-        return Response::error("Permission denied: only root can perform this operation");
-    }
-
-    // Tier 2: owner-restricted operations
-    if let Some(path) = tier2_config_path(&request)
-        && peer.uid != 0
-        && let Ok(canonical) = canonicalize_config_path(path.clone())
-        && let Some(handle) = registry.get(&canonical)
-        && let Err(reason) = auth::check_config_access(peer.uid, handle.owner_uid())
-    {
-        return Response::error(reason);
-    }
-
     match request {
         Request::Ping => Response::ok_with_message("pong".to_string()),
 
@@ -747,8 +713,7 @@ async fn handle_request(
                 }
             }
             None => {
-                // Get status from all configs (filtered by ownership for non-root)
-                let handles = auth::filter_owned(peer.uid, registry.all_handles());
+                let handles = registry.all_handles();
                 let configs = futures::future::join_all(handles.iter().map(|h| async {
                     let services = h.get_service_status(None).await.unwrap_or_default();
                     kepler_protocol::protocol::ConfigStatus {
@@ -797,8 +762,7 @@ async fn handle_request(
         }
 
         Request::ListConfigs => {
-            // Filter by ownership for non-root
-            let handles = auth::filter_owned(peer.uid, registry.all_handles());
+            let handles = registry.all_handles();
             let configs = futures::future::join_all(handles.iter().map(|h| async {
                 let config = h.get_config().await;
                 let services = h.get_service_status(None).await.unwrap_or_default();
@@ -1122,7 +1086,6 @@ async fn handle_request(
 
             // Try to get data from loaded config actor, otherwise fall back to disk
             let (config, services_status, kepler_env, state_dir) = if let Some(handle) = registry.get(&config_path) {
-                // Tier 2 check already handled above for loaded configs
                 let config = handle.get_config().await;
                 let status = handle.get_service_status(None).await.unwrap_or_default();
                 let env = handle.get_kepler_env().await;
@@ -1132,16 +1095,6 @@ async fn handle_request(
                 // Config not loaded — read from persisted snapshot on disk
                 let persistence = ConfigPersistence::new(dir.clone());
                 let snapshot = persistence.load_expanded_config().ok().flatten();
-
-                // Enforce owner-or-root access when snapshot exists (it contains kepler_env).
-                // No snapshot means no sensitive environment data to protect.
-                if let Some(ref snap) = snapshot {
-                    if peer.uid != 0 {
-                        if let Err(reason) = auth::check_config_access(peer.uid, snap.owner_uid) {
-                            return Response::error(reason);
-                        }
-                    }
-                }
 
                 let config = snapshot.as_ref().map(|s| s.config.clone());
                 let env = snapshot.map(|s| s.kepler_env);
@@ -2065,144 +2018,5 @@ mod tests {
         assert_eq!(outputs["hooks"], serde_json::json!({}));
     }
 
-    #[test]
-    fn test_inspect_tier2_includes_inspect_variant() {
-        // Verify Request::Inspect is covered by tier2_config_path,
-        // which means loaded configs get the owner-or-root check
-        // at the top of handle_request before the handler body runs.
-        let request = Request::Inspect {
-            config_path: PathBuf::from("/some/config.yaml"),
-        };
-        let path = tier2_config_path(&request);
-        assert!(path.is_some(), "Inspect must be a tier2 request");
-        assert_eq!(path.unwrap(), &PathBuf::from("/some/config.yaml"));
-    }
-
-    /// Helper: simulates the disk-fallback permission logic from the Inspect handler.
-    /// Returns Ok(env) if access is allowed, Err(reason) if denied.
-    fn simulate_inspect_disk_access(
-        peer_uid: u32,
-        snapshot: Option<&kepler_daemon::persistence::ExpandedConfigSnapshot>,
-    ) -> std::result::Result<Option<HashMap<String, String>>, String> {
-        if let Some(snap) = snapshot {
-            if peer_uid != 0 {
-                auth::check_config_access(peer_uid, snap.owner_uid)?;
-            }
-            Ok(Some(snap.kepler_env.clone()))
-        } else {
-            // No snapshot — no env to protect, access always allowed
-            Ok(None)
-        }
-    }
-
-    fn make_snapshot(owner_uid: u32, env: HashMap<String, String>) -> kepler_daemon::persistence::ExpandedConfigSnapshot {
-        kepler_daemon::persistence::ExpandedConfigSnapshot {
-            config: kepler_daemon::config::KeplerConfig {
-                lua: None,
-                kepler: None,
-                services: HashMap::new(),
-            },
-            config_dir: PathBuf::from("/tmp"),
-            snapshot_time: 1700000000,
-            kepler_env: env,
-            owner_uid: Some(owner_uid),
-            owner_gid: Some(owner_uid),
-            hardening: None,
-            service_envs: HashMap::new(),
-            service_working_dirs: HashMap::new(),
-        }
-    }
-
-    #[test]
-    fn test_inspect_disk_snapshot_owner_allowed_gets_env() {
-        let env = HashMap::from([
-            ("SECRET_KEY".to_string(), "s3cret".to_string()),
-            ("PATH".to_string(), "/usr/bin".to_string()),
-        ]);
-        let snapshot = make_snapshot(1000, env.clone());
-
-        // Owner (uid 1000) sees the environment
-        let result = simulate_inspect_disk_access(1000, Some(&snapshot));
-        assert!(result.is_ok());
-        let returned_env = result.unwrap().unwrap();
-        assert_eq!(returned_env.get("SECRET_KEY"), Some(&"s3cret".to_string()));
-        assert_eq!(returned_env.get("PATH"), Some(&"/usr/bin".to_string()));
-    }
-
-    #[test]
-    fn test_inspect_disk_snapshot_root_allowed_gets_env() {
-        let env = HashMap::from([
-            ("SECRET_KEY".to_string(), "s3cret".to_string()),
-        ]);
-        let snapshot = make_snapshot(1000, env.clone());
-
-        // Root (uid 0) always sees the environment
-        let result = simulate_inspect_disk_access(0, Some(&snapshot));
-        assert!(result.is_ok());
-        let returned_env = result.unwrap().unwrap();
-        assert_eq!(returned_env.get("SECRET_KEY"), Some(&"s3cret".to_string()));
-    }
-
-    #[test]
-    fn test_inspect_disk_snapshot_wrong_user_denied() {
-        let env = HashMap::from([
-            ("SECRET_KEY".to_string(), "s3cret".to_string()),
-        ]);
-        let snapshot = make_snapshot(1000, env);
-
-        // Different user (uid 2000) is denied — no env leaked
-        let result = simulate_inspect_disk_access(2000, Some(&snapshot));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Permission denied"));
-    }
-
-    #[test]
-    fn test_inspect_disk_no_snapshot_any_user_allowed_no_env() {
-        // No snapshot → no env to protect → any user can inspect
-        // Returns Ok(None) meaning no environment available
-
-        // Non-root user
-        let result = simulate_inspect_disk_access(1000, None);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none(), "No env when no snapshot");
-
-        // Different non-root user
-        let result = simulate_inspect_disk_access(2000, None);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
-
-        // Root
-        let result = simulate_inspect_disk_access(0, None);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
-    }
-
-    #[test]
-    fn test_inspect_disk_snapshot_persists_and_enforces_roundtrip() {
-        // End-to-end: save snapshot to disk, load it back, verify access control
-        use kepler_daemon::persistence::ConfigPersistence;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let persistence = ConfigPersistence::new(tmp.path().to_path_buf());
-
-        let env = HashMap::from([("DB_PASS".to_string(), "hunter2".to_string())]);
-        let snapshot = make_snapshot(1000, env);
-        persistence.save_expanded_config(&snapshot).unwrap();
-
-        // Reload from disk
-        let loaded = persistence.load_expanded_config().unwrap().unwrap();
-
-        // Owner allowed
-        let result = simulate_inspect_disk_access(1000, Some(&loaded));
-        assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap().unwrap().get("DB_PASS"),
-            Some(&"hunter2".to_string()),
-        );
-
-        // Wrong user denied
-        let result = simulate_inspect_disk_access(9999, Some(&loaded));
-        assert!(result.is_err());
-    }
 }
 

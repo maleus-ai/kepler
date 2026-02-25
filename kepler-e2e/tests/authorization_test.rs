@@ -1,9 +1,7 @@
 //! E2E authorization tests for per-request access control.
 //!
-//! Tests the three-tier authorization model:
-//! - Tier 3 (root-only): Shutdown, Prune
-//! - Tier 2 (owner): Stop, Restart, Logs, Status(specific)
-//! - Tier 2-filter: Status(all), ListConfigs
+//! Authorization model: any kepler group member can perform all operations.
+//! No ownership checks, no root-only tier.
 
 use kepler_e2e::{E2eHarness, E2eResult};
 use std::time::Duration;
@@ -11,51 +9,36 @@ use std::time::Duration;
 const TEST_MODULE: &str = "authorization_test";
 
 // =========================================================================
-// Tier 3: root-only operations
+// Any kepler group member can perform operations (no root-only tier)
 // =========================================================================
 
-/// Non-root user cannot shut down the daemon
+/// Non-root user can shut down the daemon
 #[tokio::test]
-async fn test_non_root_cannot_shutdown() -> E2eResult<()> {
+async fn test_non_root_can_shutdown() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     harness.start_daemon().await?;
 
     let output = harness.run_cli_as_user("testuser1", &["daemon", "stop"]).await?;
-    assert!(!output.success(), "Non-root shutdown should fail");
-    assert!(
-        output.stderr.contains("Permission denied") || output.stdout.contains("Permission denied"),
-        "Should contain 'Permission denied', got stdout: {}, stderr: {}",
-        output.stdout, output.stderr
-    );
+    output.assert_success();
 
-    // Daemon should still be running
-    let status = harness.run_cli(&["daemon", "status"]).await?;
-    status.assert_success();
-
-    harness.stop_daemon().await?;
     Ok(())
 }
 
-/// Non-root user cannot prune
+/// Non-root user can prune
 #[tokio::test]
-async fn test_non_root_cannot_prune() -> E2eResult<()> {
+async fn test_non_root_can_prune() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     harness.start_daemon().await?;
 
     let output = harness.run_cli_as_user("testuser1", &["prune"]).await?;
-    assert!(!output.success(), "Non-root prune should fail");
-    assert!(
-        output.stderr.contains("Permission denied") || output.stdout.contains("Permission denied"),
-        "Should contain 'Permission denied', got stdout: {}, stderr: {}",
-        output.stdout, output.stderr
-    );
+    output.assert_success();
 
     harness.stop_daemon().await?;
     Ok(())
 }
 
 // =========================================================================
-// Tier 2: owner-restricted write operations
+// Any kepler group member can perform write operations on any config
 // =========================================================================
 
 /// Root can stop any config
@@ -102,9 +85,9 @@ async fn test_owner_can_stop_own_config() -> E2eResult<()> {
     Ok(())
 }
 
-/// Non-owner cannot stop someone else's config
+/// Any kepler group member can stop any config
 #[tokio::test]
-async fn test_non_owner_cannot_stop_config() -> E2eResult<()> {
+async fn test_any_user_can_stop_config() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_config_a")?;
 
@@ -116,17 +99,9 @@ async fn test_non_owner_cannot_stop_config() -> E2eResult<()> {
 
     harness.wait_for_service_status(&config_path, "auth-svc-a", "running", Duration::from_secs(10)).await?;
 
-    // testuser2 cannot stop testuser1's config
+    // testuser2 can stop testuser1's config
     let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "stop"]).await?;
-    assert!(!output.success(), "Non-owner stop should fail");
-    assert!(
-        output.stderr.contains("Permission denied") || output.stdout.contains("Permission denied"),
-        "Should contain 'Permission denied', got stdout: {}, stderr: {}",
-        output.stdout, output.stderr
-    );
-
-    // Service should still be running
-    harness.wait_for_service_status(&config_path, "auth-svc-a", "running", Duration::from_secs(5)).await?;
+    output.assert_success();
 
     harness.stop_daemon().await?;
     Ok(())
@@ -154,9 +129,9 @@ async fn test_owner_can_restart_own_config() -> E2eResult<()> {
     Ok(())
 }
 
-/// Non-owner cannot restart someone else's config
+/// Any kepler group member can restart any config
 #[tokio::test]
-async fn test_non_owner_cannot_restart_config() -> E2eResult<()> {
+async fn test_any_user_can_restart_config() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_config_a")?;
 
@@ -168,21 +143,16 @@ async fn test_non_owner_cannot_restart_config() -> E2eResult<()> {
 
     harness.wait_for_service_status(&config_path, "auth-svc-a", "running", Duration::from_secs(10)).await?;
 
-    // testuser2 cannot restart testuser1's config
-    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "restart"]).await?;
-    assert!(!output.success(), "Non-owner restart should fail");
-    assert!(
-        output.stderr.contains("Permission denied") || output.stdout.contains("Permission denied"),
-        "Should contain 'Permission denied', got stdout: {}, stderr: {}",
-        output.stdout, output.stderr
-    );
+    // testuser2 can restart testuser1's config
+    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "restart", "--wait"]).await?;
+    output.assert_success();
 
     harness.stop_daemon().await?;
     Ok(())
 }
 
 // =========================================================================
-// Tier 2: owner-restricted read operations
+// Any kepler group member can perform read operations on any config
 // =========================================================================
 
 /// Owner can read logs of their own config
@@ -210,9 +180,9 @@ async fn test_owner_can_read_logs() -> E2eResult<()> {
     Ok(())
 }
 
-/// Non-owner cannot read logs of someone else's config
+/// Any kepler group member can read logs of any config
 #[tokio::test]
-async fn test_non_owner_cannot_read_logs() -> E2eResult<()> {
+async fn test_any_user_can_read_logs() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_config_a")?;
 
@@ -224,14 +194,12 @@ async fn test_non_owner_cannot_read_logs() -> E2eResult<()> {
 
     harness.wait_for_service_status(&config_path, "auth-svc-a", "running", Duration::from_secs(10)).await?;
 
-    // testuser2 cannot read testuser1's logs
+    // Wait for log output
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // testuser2 can read testuser1's logs
     let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "logs", "--tail", "10"]).await?;
-    assert!(!output.success(), "Non-owner logs should fail");
-    assert!(
-        output.stderr.contains("Permission denied") || output.stdout.contains("Permission denied"),
-        "Should contain 'Permission denied', got stdout: {}, stderr: {}",
-        output.stdout, output.stderr
-    );
+    output.assert_success();
 
     harness.stop_daemon().await?;
     Ok(())
@@ -260,9 +228,9 @@ async fn test_owner_can_view_status() -> E2eResult<()> {
     Ok(())
 }
 
-/// Non-owner cannot view status of someone else's config
+/// Any kepler group member can view status of any config
 #[tokio::test]
-async fn test_non_owner_cannot_view_status() -> E2eResult<()> {
+async fn test_any_user_can_view_status() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_config_a")?;
 
@@ -274,26 +242,22 @@ async fn test_non_owner_cannot_view_status() -> E2eResult<()> {
 
     harness.wait_for_service_status(&config_path, "auth-svc-a", "running", Duration::from_secs(10)).await?;
 
-    // testuser2 cannot view testuser1's status
+    // testuser2 can view testuser1's status
     let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "ps"]).await?;
-    assert!(!output.success(), "Non-owner status should fail");
-    assert!(
-        output.stderr.contains("Permission denied") || output.stdout.contains("Permission denied"),
-        "Should contain 'Permission denied', got stdout: {}, stderr: {}",
-        output.stdout, output.stderr
-    );
+    output.assert_success();
+    assert!(output.stdout_contains("auth-svc-a"), "Should see service from other user");
 
     harness.stop_daemon().await?;
     Ok(())
 }
 
 // =========================================================================
-// Tier 2-filter: listing operations filtered by ownership
+// Listing operations show all configs to all kepler group members
 // =========================================================================
 
-/// List configs shows only owned configs (non-root)
+/// List configs shows all configs to any kepler group member
 #[tokio::test]
-async fn test_list_configs_filtered_by_owner() -> E2eResult<()> {
+async fn test_list_configs_shows_all() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_a = harness.load_config(TEST_MODULE, "test_config_a")?;
     let config_b = harness.load_config(TEST_MODULE, "test_config_b")?;
@@ -311,8 +275,7 @@ async fn test_list_configs_filtered_by_owner() -> E2eResult<()> {
     harness.wait_for_service_status(&config_a, "auth-svc-a", "running", Duration::from_secs(10)).await?;
     harness.wait_for_service_status(&config_b, "auth-svc-b", "running", Duration::from_secs(10)).await?;
 
-    // testuser1 lists configs — should only see config_a
-    // `daemon status` uses ListConfigs which is filtered by ownership
+    // testuser1 lists configs — should see both
     let output = harness.run_cli_as_user("testuser1", &["daemon", "status"]).await?;
     output.assert_success();
     assert!(
@@ -321,12 +284,12 @@ async fn test_list_configs_filtered_by_owner() -> E2eResult<()> {
         output.stdout
     );
     assert!(
-        !output.stdout_contains("test_config_b"),
-        "testuser1 should NOT see config_b. stdout: {}",
+        output.stdout_contains("test_config_b"),
+        "testuser1 should see config_b. stdout: {}",
         output.stdout
     );
 
-    // Root lists configs — should see both
+    // Root lists configs — should also see both
     let output = harness.run_cli(&["daemon", "status"]).await?;
     output.assert_success();
     assert!(
@@ -339,9 +302,9 @@ async fn test_list_configs_filtered_by_owner() -> E2eResult<()> {
     Ok(())
 }
 
-/// Status (all configs) filtered by ownership
+/// Status (all configs) shows all services to any kepler group member
 #[tokio::test]
-async fn test_status_all_filtered_by_owner() -> E2eResult<()> {
+async fn test_status_all_shows_all() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_a = harness.load_config(TEST_MODULE, "test_config_a")?;
     let config_b = harness.load_config(TEST_MODULE, "test_config_b")?;
@@ -359,8 +322,7 @@ async fn test_status_all_filtered_by_owner() -> E2eResult<()> {
     harness.wait_for_service_status(&config_a, "auth-svc-a", "running", Duration::from_secs(10)).await?;
     harness.wait_for_service_status(&config_b, "auth-svc-b", "running", Duration::from_secs(10)).await?;
 
-    // testuser1 views all-config status — should only see their services
-    // `ps --all` uses Status(None) which is filtered by ownership
+    // testuser1 views all-config status — should see all services
     let output = harness.run_cli_as_user("testuser1", &["ps", "--all"]).await?;
     output.assert_success();
     assert!(
@@ -369,8 +331,8 @@ async fn test_status_all_filtered_by_owner() -> E2eResult<()> {
         output.stdout
     );
     assert!(
-        !output.stdout_contains("auth-svc-b"),
-        "testuser1 should NOT see auth-svc-b. stdout: {}",
+        output.stdout_contains("auth-svc-b"),
+        "testuser1 should see auth-svc-b. stdout: {}",
         output.stdout
     );
 
