@@ -174,15 +174,11 @@ async fn test_hook_inherits_service_user() {
 
     harness.start_service("test").await.unwrap();
 
-    // Wait for the hook to complete and write the marker
-    assert!(
-        marker.wait_for_marker("hook_uid", Duration::from_secs(5)).await,
-        "Hook should have written UID marker"
-    );
-
-    // Verify the hook ran as the service user
-    let hook_uid: u32 = std::fs::read_to_string(&uid_marker_path)
-        .unwrap()
+    // Wait for the hook to complete and write the marker (with content)
+    let hook_uid: u32 = marker
+        .wait_for_marker_content("hook_uid", Duration::from_secs(5))
+        .await
+        .expect("Hook should have written UID marker")
         .trim()
         .parse()
         .unwrap();
@@ -251,15 +247,11 @@ async fn test_hook_user_override() {
 
     harness.start_service("test").await.unwrap();
 
-    // Wait for the hook to complete and write the marker
-    assert!(
-        marker.wait_for_marker("hook_uid_override", Duration::from_secs(5)).await,
-        "Hook should have written UID marker"
-    );
-
-    // Verify the hook ran as the overridden user, not the service user
-    let hook_uid: u32 = std::fs::read_to_string(&uid_marker_path)
-        .unwrap()
+    // Wait for the hook to complete and write the marker (with content)
+    let hook_uid: u32 = marker
+        .wait_for_marker_content("hook_uid_override", Duration::from_secs(5))
+        .await
+        .expect("Hook should have written UID marker")
         .trim()
         .parse()
         .unwrap();
@@ -1473,13 +1465,10 @@ async fn test_default_user_service_hook_inherits() {
 
     harness.start_service("hooked").await.unwrap();
 
-    assert!(
-        marker.wait_for_marker("hook_default_uid", Duration::from_secs(5)).await,
-        "Hook should have written UID marker"
-    );
-
-    let hook_uid: u32 = std::fs::read_to_string(&uid_marker_path)
-        .unwrap()
+    let hook_uid: u32 = marker
+        .wait_for_marker_content("hook_default_uid", Duration::from_secs(5))
+        .await
+        .expect("Hook should have written UID marker")
         .trim()
         .parse()
         .unwrap();
@@ -1537,13 +1526,10 @@ async fn test_default_user_hook_explicit_override() {
 
     harness.start_service("hook-override").await.unwrap();
 
-    assert!(
-        marker.wait_for_marker("hook_override_uid", Duration::from_secs(5)).await,
-        "Hook should have written UID marker"
-    );
-
-    let hook_uid: u32 = std::fs::read_to_string(&uid_marker_path)
-        .unwrap()
+    let hook_uid: u32 = marker
+        .wait_for_marker_content("hook_override_uid", Duration::from_secs(5))
+        .await
+        .expect("Hook should have written UID marker")
         .trim()
         .parse()
         .unwrap();

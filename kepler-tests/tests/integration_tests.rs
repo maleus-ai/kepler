@@ -674,14 +674,11 @@ services:
 
     harness.start_service("test").await.unwrap();
 
-    // Wait for the marker file to appear (proves the shell script executed)
-    let found = marker
-        .wait_for_marker("run_output", Duration::from_secs(5))
-        .await;
-    assert!(found, "run field should execute shell script and create marker file");
-
-    // Verify the content
-    let content = marker.read_marker("run_output").expect("marker file should have content");
+    // Wait for the marker file to appear with content (proves the shell script executed)
+    let content = marker
+        .wait_for_marker_content("run_output", Duration::from_secs(5))
+        .await
+        .expect("run field should execute shell script and create marker file");
     assert_eq!(content.trim(), "hello");
 
     harness.stop_service("test").await.unwrap();

@@ -252,9 +252,19 @@ fn drop_privileges(user_spec: Option<&str>, explicit_groups: Option<Vec<u32>>) {
     // Set supplementary groups
     match explicit_groups {
         Some(gids) => {
-            // Explicit lockdown: use exactly these groups
-            if let Err(e) = kepler_unix::groups::setgroups(&gids) {
-                eprintln!("kepler-exec: setgroups({:?}) failed: {}", gids, e);
+            // Explicit lockdown: use exactly these groups, truncated to OS limit
+            let max = kepler_unix::groups::ngroups_max();
+            let effective = if gids.len() > max {
+                eprintln!(
+                    "kepler-exec: truncating supplementary groups from {} to {} (NGROUPS_MAX)",
+                    gids.len(), max
+                );
+                &gids[..max]
+            } else {
+                &gids[..]
+            };
+            if let Err(e) = kepler_unix::groups::setgroups(effective) {
+                eprintln!("kepler-exec: setgroups({:?}) failed: {}", effective, e);
                 process::exit(127);
             }
         }

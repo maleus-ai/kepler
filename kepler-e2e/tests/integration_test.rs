@@ -69,8 +69,8 @@ async fn test_deps_with_healthcheck() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "dependent-service", "running", Duration::from_secs(15))
         .await?;
 
-    // Check logs to verify both started in correct order
-    harness.wait_for_logs(&config_path, Duration::from_secs(5)).await?;
+    // Wait for dependent service marker (it starts after healthy-dependency)
+    harness.wait_for_log_content(&config_path, "DEPENDENT_SVC_STARTED", Duration::from_secs(10)).await?;
     let logs = harness.get_logs(&config_path, None, 100).await?;
 
     // Both should have started

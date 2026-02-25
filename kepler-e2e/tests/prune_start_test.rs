@@ -32,17 +32,8 @@ async fn test_prune_then_start_logs_work() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "logger-service", "running", Duration::from_secs(10))
         .await?;
 
-    // Wait for logs to appear
-    harness.wait_for_logs(&config_path, Duration::from_secs(5)).await?;
-
-    // Verify logs contain our marker
-    let logs = harness.get_logs(&config_path, None, 100).await?;
-    assert!(
-        logs.stdout_contains("FIRST_RUN_MARKER"),
-        "First run should have logs. stdout: {}\nstderr: {}",
-        logs.stdout,
-        logs.stderr
-    );
+    // Wait for logs to contain our marker
+    harness.wait_for_log_content(&config_path, "FIRST_RUN_MARKER", Duration::from_secs(10)).await?;
 
     println!("=== First run: Logs verified ===");
 
@@ -92,18 +83,9 @@ async fn test_prune_then_start_logs_work() -> E2eResult<()> {
         .wait_for_service_status(&second_config, "logger-service", "running", Duration::from_secs(10))
         .await?;
 
-    // Wait for logs to appear - THIS IS THE CRITICAL TEST
+    // Wait for logs to contain the second run marker - THIS IS THE CRITICAL TEST
     // The bug was that logs wouldn't work after prune
-    harness.wait_for_logs(&second_config, Duration::from_secs(5)).await?;
-
-    // Verify we can get logs and they contain the second run marker
-    let logs = harness.get_logs(&second_config, None, 100).await?;
-    assert!(
-        logs.stdout_contains("SECOND_RUN_MARKER"),
-        "CRITICAL BUG: Logs should work after prune + start! stdout: {}\nstderr: {}",
-        logs.stdout,
-        logs.stderr
-    );
+    harness.wait_for_log_content(&second_config, "SECOND_RUN_MARKER", Duration::from_secs(10)).await?;
 
     println!("=== Second run: Logs verified (BUG FIX WORKS!) ===");
 
@@ -142,18 +124,8 @@ async fn test_multiple_prune_start_cycles() -> E2eResult<()> {
             .wait_for_service_status(&config_path, "cyclic-logger", "running", Duration::from_secs(10))
             .await?;
 
-        // Wait for logs
-        harness.wait_for_logs(&config_path, Duration::from_secs(5)).await?;
-
-        // Verify logs
-        let logs = harness.get_logs(&config_path, None, 100).await?;
-        assert!(
-            logs.stdout_contains(&marker),
-            "Cycle {}: Should have logs with marker. stdout: {}\nstderr: {}",
-            cycle,
-            logs.stdout,
-            logs.stderr
-        );
+        // Wait for logs to contain the cycle marker
+        harness.wait_for_log_content(&config_path, &marker, Duration::from_secs(10)).await?;
 
         println!("Cycle {}: Logs verified", cycle);
 
@@ -233,9 +205,9 @@ async fn test_logs_isolated_between_configs() -> E2eResult<()> {
         .wait_for_service_status(&config_path_b, "service-b", "running", Duration::from_secs(10))
         .await?;
 
-    // Wait for logs
-    harness.wait_for_logs(&config_path_a, Duration::from_secs(5)).await?;
-    harness.wait_for_logs(&config_path_b, Duration::from_secs(5)).await?;
+    // Wait for each config's marker to appear
+    harness.wait_for_log_content(&config_path_a, "CONFIG_A_MARKER", Duration::from_secs(10)).await?;
+    harness.wait_for_log_content(&config_path_b, "CONFIG_B_MARKER", Duration::from_secs(10)).await?;
 
     // Get logs for each config
     let logs_a = harness.get_logs(&config_path_a, None, 100).await?;

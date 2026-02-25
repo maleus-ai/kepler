@@ -63,8 +63,8 @@ async fn test_configs_isolated_logs() -> E2eResult<()> {
         .wait_for_service_status(&config_b, "isolated-b", "running", Duration::from_secs(10))
         .await?;
 
-    harness.wait_for_logs(&config_a, Duration::from_secs(5)).await?;
-    harness.wait_for_logs(&config_b, Duration::from_secs(5)).await?;
+    harness.wait_for_log_content(&config_a, "ISOLATED_LOG_A", Duration::from_secs(10)).await?;
+    harness.wait_for_log_content(&config_b, "ISOLATED_LOG_B", Duration::from_secs(10)).await?;
 
     // Get logs for each config
     let logs_a = harness.get_logs(&config_a, None, 100).await?;

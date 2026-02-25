@@ -40,21 +40,8 @@ async fn test_simple_dependency() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "service-b", "running", Duration::from_secs(10))
         .await?;
 
-    // Check logs to verify both started
-    harness.wait_for_logs(&config_path, Duration::from_secs(5)).await?;
-    let logs = harness.get_logs(&config_path, None, 100).await?;
-
-    // Both markers should be present
-    assert!(
-        logs.stdout_contains("SERVICE_A_STARTED"),
-        "Service A should have logged its start marker. stdout: {}",
-        logs.stdout
-    );
-    assert!(
-        logs.stdout_contains("SERVICE_B_STARTED"),
-        "Service B should have logged its start marker. stdout: {}",
-        logs.stdout
-    );
+    // Wait for both markers to appear in logs (B depends on A, so B starts last)
+    harness.wait_for_log_content(&config_path, "SERVICE_B_STARTED", Duration::from_secs(10)).await?;
 
     // Use timestamps for reliable ordering (log positions can be racy)
     let logs_with_ts = harness.get_logs_with_timestamps(&config_path, None, 100).await?;
@@ -92,13 +79,8 @@ async fn test_chain_dependency() -> E2eResult<()> {
             .await?;
     }
 
-    // Check logs - all should have started
-    harness.wait_for_logs(&config_path, Duration::from_secs(5)).await?;
-    let logs = harness.get_logs(&config_path, None, 100).await?;
-
-    assert!(logs.stdout_contains("CHAIN_A_STARTED"), "Chain A should have started");
-    assert!(logs.stdout_contains("CHAIN_B_STARTED"), "Chain B should have started");
-    assert!(logs.stdout_contains("CHAIN_C_STARTED"), "Chain C should have started");
+    // Wait for last marker in chain (C depends on B depends on A)
+    harness.wait_for_log_content(&config_path, "CHAIN_C_STARTED", Duration::from_secs(10)).await?;
 
     // Use timestamps for reliable ordering (log positions can be racy)
     let logs_with_ts = harness.get_logs_with_timestamps(&config_path, None, 100).await?;
@@ -138,14 +120,8 @@ async fn test_diamond_dependency() -> E2eResult<()> {
             .await?;
     }
 
-    // Check logs - all should have started
-    harness.wait_for_logs(&config_path, Duration::from_secs(5)).await?;
-    let logs = harness.get_logs(&config_path, None, 100).await?;
-
-    assert!(logs.stdout_contains("DIAMOND_A_STARTED"), "Diamond A should have started");
-    assert!(logs.stdout_contains("DIAMOND_B_STARTED"), "Diamond B should have started");
-    assert!(logs.stdout_contains("DIAMOND_C_STARTED"), "Diamond C should have started");
-    assert!(logs.stdout_contains("DIAMOND_D_STARTED"), "Diamond D should have started");
+    // Wait for last marker in diamond (D depends on B and C, which depend on A)
+    harness.wait_for_log_content(&config_path, "DIAMOND_D_STARTED", Duration::from_secs(10)).await?;
 
     // Use timestamps for reliable ordering (log positions can be racy)
     let logs_with_ts = harness.get_logs_with_timestamps(&config_path, None, 100).await?;
@@ -192,10 +168,8 @@ async fn test_stop_with_dependencies() -> E2eResult<()> {
     }
 
     // Verify both started (check logs before stop - logs are cleared on stop)
-    harness.wait_for_logs(&config_path, Duration::from_secs(5)).await?;
-    let logs = harness.get_logs(&config_path, None, 100).await?;
-    assert!(logs.stdout_contains("STOP_ORDER_A_STARTED"), "A should have started");
-    assert!(logs.stdout_contains("STOP_ORDER_B_STARTED"), "B should have started");
+    // B depends on A, so B starts last
+    harness.wait_for_log_content(&config_path, "STOP_ORDER_B_STARTED", Duration::from_secs(10)).await?;
 
     // Stop services
     let output = harness.stop_services(&config_path).await?;
@@ -308,8 +282,10 @@ async fn test_depends_on_completed_successfully() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "app", "running", Duration::from_secs(10))
         .await?;
 
-    // Check logs
-    harness.wait_for_logs(&config_path, Duration::from_secs(5)).await?;
+    // Wait for app's stdout to be captured in the log system before reading
+    harness
+        .wait_for_log_content(&config_path, "APP_STARTED", Duration::from_secs(5))
+        .await?;
     let logs_with_ts = harness.get_logs_with_timestamps(&config_path, None, 100).await?;
 
     // Both should have logged
@@ -371,8 +347,10 @@ async fn test_restart_propagation() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "backend", "running", Duration::from_secs(10))
         .await?;
 
-    // Get initial logs to capture start markers
-    harness.wait_for_logs(&config_path, Duration::from_secs(2)).await?;
+    // Wait for backend's stdout to be captured before reading logs
+    harness
+        .wait_for_log_content(&config_path, "BACKEND_STARTED", Duration::from_secs(5))
+        .await?;
     let initial_logs = harness.get_logs(&config_path, None, 100).await?;
 
     // Count initial start markers
@@ -401,18 +379,20 @@ async fn test_restart_propagation() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "backend", "running", Duration::from_secs(10))
         .await?;
 
-    // Get logs and check that backend started again
-    harness.wait_for_logs(&config_path, Duration::from_secs(2)).await?;
-    let final_logs = harness.get_logs(&config_path, None, 200).await?;
-
-    // Backend should have started twice now (initial + restart propagation)
-    let final_backend_starts = final_logs.stdout.matches("BACKEND_STARTED").count();
-    assert!(
-        final_backend_starts >= 2,
-        "Backend should have restarted due to restart propagation. Expected >= 2 starts, got {}. stdout: {}",
-        final_backend_starts,
-        final_logs.stdout
-    );
+    // Wait for the second BACKEND_STARTED to appear in logs (restart propagation)
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let _final_logs = loop {
+        let logs = harness.get_logs(&config_path, None, 200).await?;
+        if logs.stdout.matches("BACKEND_STARTED").count() >= 2 {
+            break logs;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Backend should have restarted due to restart propagation. stdout: {}",
+            logs.stdout
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
 
     harness.stop_daemon().await?;
 

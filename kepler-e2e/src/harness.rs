@@ -83,8 +83,10 @@ pub struct E2eHarness {
     daemon_bin: PathBuf,
     /// Running daemon process (if any)
     daemon_process: Option<Child>,
-    /// Background tasks draining daemon stdout/stderr to prevent pipe deadlocks
+    /// Background tasks draining daemon stdout to prevent pipe deadlocks
     _drain_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Path to the daemon log file (persists outside TempDir for post-failure inspection)
+    daemon_log_path: Option<PathBuf>,
 }
 
 impl E2eHarness {
@@ -100,6 +102,7 @@ impl E2eHarness {
             daemon_bin,
             daemon_process: None,
             _drain_tasks: Vec::new(),
+            daemon_log_path: None,
         })
     }
 
@@ -176,31 +179,62 @@ impl E2eHarness {
             return Ok(()); // Already running
         }
 
+        let log_path = self.create_daemon_log_file()?;
+
+        let log_file = std::fs::File::create(&log_path)?;
+
         let mut child = Command::new(&self.daemon_bin)
             .env("KEPLER_DAEMON_PATH", self.temp_dir.path())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
 
-        // Drain stdout/stderr in background to prevent pipe buffer deadlocks.
-        // Without this, the daemon blocks once the pipe buffer fills (~64KB on Linux).
+        // Pipe both stdout and stderr to the same persistent log file.
+        // Uses a shared file handle protected by a mutex so both tasks
+        // can write concurrently without interleaving mid-write.
+        let shared_file = std::sync::Arc::new(std::sync::Mutex::new(log_file));
+
         if let Some(stdout) = child.stdout.take() {
+            let file = shared_file.clone();
             self._drain_tasks.push(tokio::spawn(async move {
+                use std::io::Write;
                 use tokio::io::AsyncReadExt;
                 let mut stdout = stdout;
                 let mut buf = [0u8; 4096];
-                while stdout.read(&mut buf).await.unwrap_or(0) > 0 {}
-            }));
-        }
-        if let Some(stderr) = child.stderr.take() {
-            self._drain_tasks.push(tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut stderr = stderr;
-                let mut buf = [0u8; 4096];
-                while stderr.read(&mut buf).await.unwrap_or(0) > 0 {}
+                loop {
+                    match stdout.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if let Ok(mut f) = file.lock() {
+                                let _ = f.write_all(&buf[..n]);
+                            }
+                        }
+                    }
+                }
             }));
         }
 
+        if let Some(stderr) = child.stderr.take() {
+            let file = shared_file.clone();
+            self._drain_tasks.push(tokio::spawn(async move {
+                use std::io::Write;
+                use tokio::io::AsyncReadExt;
+                let mut stderr = stderr;
+                let mut buf = [0u8; 4096];
+                loop {
+                    match stderr.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if let Ok(mut f) = file.lock() {
+                                let _ = f.write_all(&buf[..n]);
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+
+        self.daemon_log_path = Some(log_path);
         self.daemon_process = Some(child);
 
         // Wait for the socket to appear
@@ -241,29 +275,58 @@ impl E2eHarness {
             }
         }
 
+        let log_path = self.create_daemon_log_file()?;
+        let log_file = std::fs::File::create(&log_path)?;
+
         let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
 
-        // Drain stdout/stderr in background (same as start_daemon)
+        // Pipe both stdout and stderr to the same persistent log file.
+        let shared_file = std::sync::Arc::new(std::sync::Mutex::new(log_file));
+
         if let Some(stdout) = child.stdout.take() {
+            let file = shared_file.clone();
             self._drain_tasks.push(tokio::spawn(async move {
+                use std::io::Write;
                 use tokio::io::AsyncReadExt;
                 let mut stdout = stdout;
                 let mut buf = [0u8; 4096];
-                while stdout.read(&mut buf).await.unwrap_or(0) > 0 {}
-            }));
-        }
-        if let Some(stderr) = child.stderr.take() {
-            self._drain_tasks.push(tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut stderr = stderr;
-                let mut buf = [0u8; 4096];
-                while stderr.read(&mut buf).await.unwrap_or(0) > 0 {}
+                loop {
+                    match stdout.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if let Ok(mut f) = file.lock() {
+                                let _ = f.write_all(&buf[..n]);
+                            }
+                        }
+                    }
+                }
             }));
         }
 
+        if let Some(stderr) = child.stderr.take() {
+            let file = shared_file.clone();
+            self._drain_tasks.push(tokio::spawn(async move {
+                use std::io::Write;
+                use tokio::io::AsyncReadExt;
+                let mut stderr = stderr;
+                let mut buf = [0u8; 4096];
+                loop {
+                    match stderr.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if let Ok(mut f) = file.lock() {
+                                let _ = f.write_all(&buf[..n]);
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+
+        self.daemon_log_path = Some(log_path);
         self.daemon_process = Some(child);
 
         // Wait for the socket to appear
@@ -1014,6 +1077,51 @@ impl E2eHarness {
         self.create_named_config(&format!("{}.kepler.yaml", config_name), &content)
     }
 
+    /// Read the daemon log file contents.
+    /// Returns an empty string if no daemon has been started or the file cannot be read.
+    pub fn daemon_logs(&self) -> String {
+        self.daemon_log_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default()
+    }
+
+    /// Get the path to the daemon log file (if a daemon was started).
+    pub fn daemon_log_path(&self) -> Option<&Path> {
+        self.daemon_log_path.as_deref()
+    }
+
+    /// Create a persistent log file for the daemon outside TempDir so it
+    /// survives cleanup and can be inspected after test failure.
+    fn create_daemon_log_file(&self) -> E2eResult<PathBuf> {
+        let log_dir = self.daemon_log_dir()?;
+        std::fs::create_dir_all(&log_dir)?;
+
+        // Use the TempDir's directory name as a unique per-test identifier
+        let test_id = self
+            .temp_dir
+            .path()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let log_path = log_dir.join(format!("{}.log", test_id));
+        Ok(log_path)
+    }
+
+    /// Resolve the persistent daemon log directory: `<workspace>/target/test-daemon-logs/`
+    fn daemon_log_dir(&self) -> E2eResult<PathBuf> {
+        let base = if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+            PathBuf::from(manifest_dir)
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            PathBuf::from(".")
+        };
+        Ok(base.join("target").join("test-daemon-logs"))
+    }
+
     /// Load a config and replace placeholders with values.
     ///
     /// # Arguments
@@ -1117,6 +1225,20 @@ fn get_config_dir() -> PathBuf {
 
 impl Drop for E2eHarness {
     fn drop(&mut self) {
+        // Dump daemon logs to stderr. cargo test captures per-test output
+        // and only displays it when a test fails, so this is zero-noise on success.
+        if let Some(path) = self.daemon_log_path.as_ref() {
+            if let Ok(logs) = std::fs::read_to_string(path) {
+                if !logs.is_empty() {
+                    eprintln!(
+                        "\n=== DAEMON LOGS ({}) ===\n{}\n=== END DAEMON LOGS ===",
+                        path.display(),
+                        logs
+                    );
+                }
+            }
+        }
+
         // Try to stop the daemon if running
         if let Some(mut child) = self.daemon_process.take() {
             let _ = child.start_kill();

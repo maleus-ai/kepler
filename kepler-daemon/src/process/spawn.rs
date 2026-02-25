@@ -114,6 +114,8 @@ pub struct OutputCaptureConfig {
 pub enum BlockingMode {
     /// Wait for completion silently
     Silent,
+    /// Wait for completion, capturing combined stdout+stderr
+    CaptureOutput,
     /// Wait for completion with logging to tracing and disk (for hooks)
     WithLogging {
         log_config: Option<LogWriterConfig>,
@@ -133,6 +135,8 @@ pub struct BlockingResult {
     pub exit_code: Option<i32>,
     /// Captured `KEY=VALUE` lines from `::output::` markers (if output capture was enabled)
     pub captured_output: Option<Vec<String>>,
+    /// Combined stdout+stderr (only set with `BlockingMode::CaptureOutput`)
+    pub combined_output: Option<String>,
 }
 
 /// Result of spawning a detached command
@@ -186,8 +190,18 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
             for g in &spec.groups {
                 crate::user::resolve_group(g)?;
             }
+            let max = kepler_unix::groups::ngroups_max();
+            let groups = if spec.groups.len() > max {
+                warn!(
+                    "Truncating supplementary groups from {} to {} (NGROUPS_MAX on this platform)",
+                    spec.groups.len(), max
+                );
+                &spec.groups[..max]
+            } else {
+                &spec.groups
+            };
             wrapper_args.push("--groups".to_string());
-            wrapper_args.push(spec.groups.join(","));
+            wrapper_args.push(groups.join(","));
         }
 
         // Resolve resource limits to numeric values
@@ -279,6 +293,26 @@ fn spawn_drain_task(
             let mut lines = reader.lines();
             while let Ok(Some(_)) = lines.next_line().await {}
         }
+    })
+}
+
+/// Spawn a task that collects all output from a stream into a String.
+fn spawn_collect_task(
+    stream: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
+) -> JoinHandle<String> {
+    tokio::spawn(async move {
+        let mut buf = String::new();
+        if let Some(stream) = stream {
+            let reader = BufReader::new(stream);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(&line);
+            }
+        }
+        buf
     })
 }
 
@@ -391,6 +425,36 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
             Ok(BlockingResult {
                 exit_code: status.code(),
                 captured_output: None,
+                combined_output: None,
+            })
+        }
+        BlockingMode::CaptureOutput => {
+            let stdout_handle = spawn_collect_task(child.stdout.take());
+            let stderr_handle = spawn_collect_task(child.stderr.take());
+
+            let status = child.wait().await.map_err(|e| DaemonError::ProcessSpawn {
+                service: program.clone(),
+                source: e,
+            })?;
+
+            let stdout_text = stdout_handle.await.unwrap_or_default();
+            let stderr_text = stderr_handle.await.unwrap_or_default();
+
+            let mut combined = String::new();
+            if !stdout_text.is_empty() {
+                combined.push_str(&stdout_text);
+            }
+            if !stderr_text.is_empty() {
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&stderr_text);
+            }
+
+            Ok(BlockingResult {
+                exit_code: status.code(),
+                captured_output: None,
+                combined_output: if combined.is_empty() { None } else { Some(combined) },
             })
         }
         BlockingMode::WithLogging {
@@ -431,6 +495,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
             Ok(BlockingResult {
                 exit_code: status.code(),
                 captured_output,
+                combined_output: None,
             })
         }
     }
