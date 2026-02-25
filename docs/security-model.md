@@ -120,11 +120,11 @@ The `--hardening` flag controls how strictly the daemon enforces privilege bound
 
 | Level | Privilege restriction | Kepler group stripping |
 |-------|----------------------|----------------------|
-| `none` (default) | No restrictions (current behavior) | No stripping |
-| `no-root` | Non-root config owners cannot run as root (uid 0) | Kepler group stripped from spawned processes |
+| `none` | No restrictions | No stripping |
+| `no-root` (CLI default) | Non-root config owners cannot run as root (uid 0) | Kepler group stripped from spawned processes |
 | `strict` | Non-root config owners can only run as themselves (own uid:gid) | Kepler group stripped from spawned processes |
 
-Root-owned configs (owner uid 0 or legacy configs with no owner) are unrestricted at all levels.
+**Privilege escalation checks** are skipped for root-owned configs (owner uid 0 or legacy configs with no owner) -- root can use any `user:` field regardless of hardening level. **Kepler group stripping** still applies to all configs when hardening is `no-root` or `strict`, including root-owned configs. This means spawned processes lose the ability to connect to the daemon socket even when the config was loaded by root.
 
 ### Usage
 
@@ -142,11 +142,13 @@ KEPLER_HARDENING=no-root kepler-daemon
 
 The CLI flag takes precedence over the environment variable.
 
-**Per-config** (raises hardening for a specific config):
+**Per-config** (the CLI defaults to `no-root`):
 
 ```bash
-kepler start --hardening strict     # Baked into config snapshot
-kepler recreate --hardening no-root # Re-bake with new level
+kepler start                        # Defaults to --hardening no-root
+kepler start --hardening strict     # Raise to strict for this config
+kepler start --hardening none       # Opt out of hardening for this config
+kepler recreate --hardening strict  # Re-bake with new level
 ```
 
 ### Effective Hardening
@@ -173,16 +175,18 @@ The per-config hardening level is baked into the config snapshot at load time. I
 
 ### Privilege Escalation Prevention
 
-Without hardening, a non-root user in the `kepler` group can specify `user: root` or `user: "0"` in their config to run processes as root. With hardening enabled:
+By default (`no-root`), non-root users in the `kepler` group cannot run services as root. To opt out, pass `--hardening none` explicitly.
 
-- **`no-root`**: The daemon rejects any service, hook, or health check that would resolve to uid 0 for non-root config owners.
+- **`no-root`** (default): The daemon rejects any service, hook, or health check that would resolve to uid 0 for non-root config owners.
 - **`strict`**: The daemon only allows processes to run as the config owner's own uid.
 
 The check is performed after all `${{ }}$` and `!lua` expressions are resolved, so dynamic user specs are also covered.
 
 ### Kepler Group Stripping
 
-When hardening is `no-root` or `strict`, spawned processes have the `kepler` group removed from their supplementary groups. This prevents a spawned process from connecting to the daemon socket and creating new escalating configs.
+When hardening is `no-root` or `strict`, spawned processes have the `kepler` group removed from their supplementary groups. This prevents a spawned process from connecting to the daemon socket and creating new escalating configs. Since the CLI defaults to `no-root`, kepler group stripping is active by default.
+
+Unlike privilege escalation checks, kepler group stripping applies to **all** configs regardless of owner -- including root-owned configs. This ensures spawned processes cannot connect back to the daemon socket to load new configs, even when the parent config was loaded by root.
 
 Instead of using `initgroups()` (which loads all supplementary groups including `kepler`), the daemon computes an explicit group list excluding the kepler GID and uses `setgroups()`.
 
@@ -209,13 +213,13 @@ services:
     groups: ${{ groups_without_kepler() }}$
 ```
 
-This gives you explicit group control per-service without enabling `--hardening`, which also enforces privilege escalation checks.
+This gives you explicit group control per-service. With the default `no-root` hardening, kepler group stripping is already active, but this Lua approach gives finer-grained control when using `--hardening none`.
 
 ### Examples
 
-#### The problem: nested privilege escalation
+#### Nested privilege escalation (blocked by default)
 
-A user `alice` in the `kepler` group can create a config that orchestrates another kepler config. Without hardening, this opens a privilege escalation path:
+A user `alice` in the `kepler` group creates a config that orchestrates another kepler config:
 
 ```yaml
 # escalation.kepler.yaml — loaded by alice
@@ -238,56 +242,29 @@ services:
     user: root
 ```
 
-Without hardening, this works: `svc1` runs as `alice`, and since `alice` is in the `kepler` group, the spawned process inherits that group membership via `initgroups`. It can connect to the daemon socket, load `inner.kepler.yaml`, and run `whoami` as root:
+With the default `no-root` hardening, this is blocked by two independent defenses:
+
+1. **Kepler group stripping** — `svc1`'s spawned process has the `kepler` group removed from its supplementary groups, so it cannot connect to the daemon socket at all:
 
 ```bash
 alice$ kepler -f escalation.kepler.yaml start
-[out: svc1] | root
+[err: svc1] | Permission denied: cannot connect to daemon socket
 ```
 
-Alice just ran an arbitrary command as root through a chain of configs.
-
-#### The fix: per-config hardening
-
-The fix is to pass `--hardening no-root` when loading the inner config:
-
-```yaml
-# hardening.kepler.yaml — same structure, but hardened
-services:
-  svc1:
-    run: kepler -f inner.kepler.yaml start --hardening no-root
-    user: alice
-    hooks:
-      post_stop:
-        - run: kepler -f inner.kepler.yaml stop --clean
-      post_exit:
-        - run: kepler -f inner.kepler.yaml stop --clean
-```
-
-Now the inner config is loaded with `no-root` hardening baked in. Since `alice` is a non-root config owner, `user: root` in `inner.kepler.yaml` is rejected:
+2. **Privilege check** — Even if the inner config were loaded separately (e.g. via a separate CLI invocation), `user: root` is rejected for non-root config owners:
 
 ```bash
-alice$ kepler -f hardening.kepler.yaml start
+alice$ kepler -f inner.kepler.yaml start
 # Error: Privilege escalation denied for service 'svc1': user 'root'
 #   resolves to uid 0 (root), but config owner is uid 1000
 #   (hardening level: no-root)
 ```
 
-Alternatively, applying hardening to the outer config itself blocks the chain even earlier — the kepler group is stripped from `svc1`'s spawned process, so it cannot connect to the daemon socket at all:
+With `--hardening none`, both defenses are disabled and the escalation would succeed. This is why `none` should only be used when the security implications are understood.
 
-```bash
-alice$ kepler -f escalation.kepler.yaml start --hardening no-root
-[err: svc1] | Permission denied: cannot connect to daemon socket
-```
+#### `no-root`: block root escalation only (default)
 
-This is the double-defense that hardening provides:
-
-1. **Kepler group stripping** — The spawned process loses socket access, so it cannot load new configs through the daemon.
-2. **Privilege check** — Even if the inner config were loaded separately, `user: root` is rejected for non-root config owners.
-
-#### `no-root`: block root escalation only
-
-`no-root` is the recommended baseline for shared systems. It prevents non-root users from running as root but allows running as other unprivileged users:
+`no-root` is the default. It prevents non-root users from running as root but allows running as other unprivileged users:
 
 ```yaml
 services:
@@ -305,7 +282,7 @@ services:
 ```
 
 ```bash
-alice$ kepler start --hardening no-root
+alice$ kepler start
 # Error: Privilege escalation denied for service 'setup': user 'root'
 #   resolves to uid 0 (root), but config owner is uid 1000
 #   (hardening level: no-root)
@@ -336,28 +313,30 @@ alice$ kepler start --hardening strict
 #   (uid 33) is not the config owner uid 1000 (hardening level: strict)
 ```
 
-#### Root-owned configs are unrestricted
+#### Root-owned configs: escalation unrestricted, group stripping still applies
 
-Configs loaded by root (uid 0) are unrestricted at all hardening levels:
+Configs loaded by root (uid 0) skip privilege escalation checks at all hardening levels -- root can use any `user:` field:
 
 ```bash
 # Root can always use any user, regardless of hardening
 sudo kepler start --hardening strict    # All user: fields are allowed
 ```
 
+However, kepler group stripping still applies to spawned processes when hardening is `no-root` or `strict`. This means processes spawned by root-owned configs cannot connect back to the daemon socket to load new configs.
+
 #### Per-config hardening for mixed trust
 
 Per-config hardening allows different trust levels for different configs on the same daemon:
 
 ```bash
-# Daemon started with no-root baseline
-sudo kepler-daemon --hardening no-root
-
-# Trusted config — daemon floor applies (no-root)
+# Trusted config — CLI default applies (no-root)
 alice$ kepler -f trusted.kepler.yaml start
 
 # Untrusted config — raise to strict for this config only
 alice$ kepler -f untrusted.kepler.yaml start --hardening strict
+
+# Fully trusted config — opt out of hardening
+alice$ kepler -f dev.kepler.yaml start --hardening none
 ```
 
 The trusted config can run as any non-root user, while the untrusted config is locked to alice's own uid only.
@@ -427,7 +406,7 @@ Services can run as specific users/groups:
 
 When a non-root CLI user loads a config, services without an explicit `user:` field default to the CLI user's UID:GID. This is baked into the config snapshot at load time, so it persists across daemon restarts. Root CLI users see no change -- services without `user:` still run as root.
 
-This prevents non-root `kepler` group members from accidentally running services as root. To explicitly run as root, set `user: root` or `user: "0"`.
+This prevents non-root `kepler` group members from accidentally running services as root. To explicitly run as root, set `user: root` or `user: "0"` (requires `--hardening none` for non-root config owners, since the default `no-root` hardening blocks this).
 
 Hooks inherit the service's user by default, with per-hook override capability.
 
