@@ -120,7 +120,8 @@ async fn test_user_env_injected_without_inherit() -> E2eResult<()> {
     Ok(())
 }
 
-/// Explicit `environment: [HOME=/custom/home]` should override the auto-injected value.
+/// With `user_identity` enabled (default), explicit `environment: [HOME=/custom/home]`
+/// is overridden by the target user's /etc/passwd entry.
 #[tokio::test]
 async fn test_user_env_explicit_override() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -141,17 +142,19 @@ async fn test_user_env_explicit_override() -> E2eResult<()> {
 
     let stdout = &logs.stdout;
 
-    // HOME was explicitly set — should keep the explicit value
+    // HOME was explicitly set, but user_identity (default true) forces it
+    // to match testuser1's /etc/passwd entry
+    let home = extract_env_value(stdout, "HOME").expect("HOME not found in output");
     assert!(
-        stdout.contains("HOME=/custom/home"),
-        "Explicit HOME should override injected value. stdout: {}",
-        stdout
+        home.contains("testuser1"),
+        "user_identity should override explicit HOME. Got HOME={}. stdout: {}",
+        home, stdout
     );
 
-    // USER was NOT explicitly set — should be injected from passwd
+    // USER should be injected from passwd
     assert!(
         stdout.contains("USER=testuser1"),
-        "USER should be auto-injected when not explicitly set. stdout: {}",
+        "USER should be auto-injected. stdout: {}",
         stdout
     );
 
@@ -159,7 +162,7 @@ async fn test_user_env_explicit_override() -> E2eResult<()> {
     Ok(())
 }
 
-/// With `inject_user_env: after` and explicit `environment: [HOME=/custom/home]`,
+/// With `user_identity` enabled (default) and explicit `environment: [HOME=/custom/home]`,
 /// HOME should be overridden to match testuser1's /etc/passwd entry.
 #[tokio::test]
 async fn test_override_user_env_service() -> E2eResult<()> {
@@ -181,29 +184,29 @@ async fn test_override_user_env_service() -> E2eResult<()> {
 
     let stdout = &logs.stdout;
 
-    // HOME was explicitly set to /custom/home, but inject_user_env: after
-    // should force it to match testuser1's passwd entry
+    // HOME was explicitly set to /custom/home, but user_identity (default)
+    // forces it to match testuser1's passwd entry
     let home = extract_env_value(stdout, "HOME").expect("HOME not found in output");
     assert!(
         home.contains("testuser1"),
-        "inject_user_env: after should override explicit HOME. Got HOME={}. stdout: {}",
+        "user_identity should override explicit HOME. Got HOME={}. stdout: {}",
         home, stdout
     );
 
     // USER/LOGNAME/SHELL should all match testuser1
     assert!(
         stdout.contains("USER=testuser1"),
-        "USER should be testuser1 with inject_user_env: after. stdout: {}",
+        "USER should be testuser1. stdout: {}",
         stdout
     );
     assert!(
         stdout.contains("LOGNAME=testuser1"),
-        "LOGNAME should be testuser1 with inject_user_env: after. stdout: {}",
+        "LOGNAME should be testuser1. stdout: {}",
         stdout
     );
     assert!(
         extract_env_value(stdout, "SHELL").is_some_and(|s| !s.is_empty()),
-        "SHELL should be set with inject_user_env: after. stdout: {}",
+        "SHELL should be set. stdout: {}",
         stdout
     );
 
@@ -211,7 +214,7 @@ async fn test_override_user_env_service() -> E2eResult<()> {
     Ok(())
 }
 
-/// Hook with `inject_user_env: after` should see target user's env
+/// Hook with `user_identity` enabled (default) should see target user's env
 /// even when the hook explicitly sets HOME.
 #[tokio::test]
 async fn test_override_user_env_hook() -> E2eResult<()> {
@@ -234,12 +237,12 @@ async fn test_override_user_env_hook() -> E2eResult<()> {
 
     let stdout = &logs.stdout;
 
-    // HOME was explicitly set in the hook, but inject_user_env: after forces it
+    // HOME was explicitly set in the hook, but user_identity (default) forces it
     let home = extract_env_value(stdout, "HOME");
     if let Some(home) = home {
         assert!(
             home.contains("testuser1"),
-            "Hook inject_user_env: after should override explicit HOME. Got HOME={}. stdout: {}",
+            "Hook user_identity should override explicit HOME. Got HOME={}. stdout: {}",
             home, stdout
         );
     }
@@ -247,7 +250,7 @@ async fn test_override_user_env_hook() -> E2eResult<()> {
     // USER should be testuser1
     assert!(
         stdout.contains("USER=testuser1"),
-        "Hook USER should be testuser1 with inject_user_env: after. stdout: {}",
+        "Hook USER should be testuser1. stdout: {}",
         stdout
     );
 
@@ -255,9 +258,9 @@ async fn test_override_user_env_hook() -> E2eResult<()> {
     Ok(())
 }
 
-/// Healthcheck with `inject_user_env: after` should see target user's env
+/// Healthcheck with `user_identity` enabled (default) should see target user's env
 /// even when the service explicitly sets USER=custom_user.
-/// The healthcheck runs `test "$USER" = testuser1` — if inject_user_env: after
+/// The healthcheck runs `test "$USER" = testuser1` — if user_identity
 /// correctly forces USER from /etc/passwd, the check passes → healthy.
 #[tokio::test]
 async fn test_override_user_env_healthcheck() -> E2eResult<()> {
@@ -269,7 +272,7 @@ async fn test_override_user_env_healthcheck() -> E2eResult<()> {
     let output = harness.start_services(&config_path).await?;
     output.assert_success();
 
-    // If inject_user_env: after works, the healthcheck assertion succeeds → healthy
+    // If user_identity works, the healthcheck assertion succeeds → healthy
     harness
         .wait_for_service_status(&config_path, "user-env-svc", "healthy", Duration::from_secs(15))
         .await?;
@@ -278,8 +281,8 @@ async fn test_override_user_env_healthcheck() -> E2eResult<()> {
     Ok(())
 }
 
-/// Healthcheck with default inject_user_env (None → Before) should inject
-/// the effective user's env, overriding the service's explicit USER=custom_user.
+/// Healthcheck with default user_identity (true) should inject the effective
+/// user's env, overriding the service's explicit USER=custom_user.
 #[tokio::test]
 async fn test_healthcheck_default_inject() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -290,7 +293,7 @@ async fn test_healthcheck_default_inject() -> E2eResult<()> {
     let output = harness.start_services(&config_path).await?;
     output.assert_success();
 
-    // Default inject_user_env (= before) should inject testuser1's env into
+    // Default user_identity (= true) should inject testuser1's env into
     // the healthcheck, overriding the service's USER=custom_user.
     // The healthcheck asserts USER == testuser1 → healthy if injection works.
     harness
@@ -301,7 +304,7 @@ async fn test_healthcheck_default_inject() -> E2eResult<()> {
     Ok(())
 }
 
-/// Healthcheck with `inject_user_env: none` should NOT inject user env.
+/// Healthcheck with `user_identity: false` should NOT inject user env.
 /// The healthcheck should see the service's explicit USER=custom_user.
 #[tokio::test]
 async fn test_healthcheck_disabled_inject() -> E2eResult<()> {
@@ -313,7 +316,7 @@ async fn test_healthcheck_disabled_inject() -> E2eResult<()> {
     let output = harness.start_services(&config_path).await?;
     output.assert_success();
 
-    // inject_user_env: none means no injection → healthcheck sees USER=custom_user
+    // user_identity: false means no injection → healthcheck sees USER=custom_user
     // from the service's computed_env. The healthcheck asserts USER == custom_user → healthy.
     harness
         .wait_for_service_status(&config_path, "user-env-svc", "healthy", Duration::from_secs(15))
@@ -346,7 +349,7 @@ async fn test_healthcheck_different_user() -> E2eResult<()> {
     Ok(())
 }
 
-/// Hook with `inject_user_env: none` should not get user env injected
+/// Hook with `user_identity: false` should not get user env injected
 /// at the hook level. It still inherits the service's computed_env.
 #[tokio::test]
 async fn test_hook_disabled_inject() -> E2eResult<()> {
@@ -363,7 +366,7 @@ async fn test_hook_disabled_inject() -> E2eResult<()> {
         .await?;
 
     // Hook inherits service computed_env (which has testuser1's values from
-    // service-level injection). inject_user_env: none on the hook prevents
+    // service-level injection). user_identity: false on the hook prevents
     // hook-level re-injection, but the service values are still inherited.
     let logs = harness
         .wait_for_log_content(&config_path, "USER=", Duration::from_secs(5))

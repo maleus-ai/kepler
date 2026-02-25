@@ -1,9 +1,9 @@
-# Service with a healthcheck that has inject_user_env: after.
-# The service explicitly sets HOME, but the healthcheck's inject_user_env: after
+# Service with a healthcheck that has user_identity enabled (default).
+# The service explicitly sets HOME, but the healthcheck's user_identity
 # forces HOME to match testuser1's /etc/passwd entry.
 # The healthcheck asserts that USER == testuser1 (from /etc/passwd, not from
-# the service's explicit environment). If inject_user_env: after works, the check
-# passes → service becomes healthy.
+# the service's explicit environment). If user_identity works, the check
+# passes -> service becomes healthy.
 kepler:
   logs:
     buffer_size: 0
@@ -23,4 +23,3 @@ services:
       timeout: 5s
       retries: 1
       start_period: 0s
-      inject_user_env: after

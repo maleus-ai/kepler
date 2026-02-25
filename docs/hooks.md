@@ -92,7 +92,7 @@ hooks:
       SETUP_MODE: full
     env_file: .env.hooks
     inherit_env: false             # Don't inherit service's computed env
-    inject_user_env: after         # Force admin's HOME/USER/LOGNAME/SHELL
+    # user_identity defaults to true — admin's HOME/USER/LOGNAME/SHELL are force-injected
 ```
 
 | Option | Type | Description |
@@ -106,7 +106,7 @@ hooks:
 | `environment` | `string[]\|object` | Additional environment variables (sequence or mapping format) |
 | `env_file` | `string` | Additional env file to load |
 | `inherit_env` | `bool` | Whether to inherit the service's computed environment. Defaults to `true`. When `false`, the hook starts with an empty base env (only `kepler.env` + hook's own `env_file` + hook's own `environment`). `${{ service.env.* }}$` expressions in hook `environment` still resolve regardless. |
-| `inject_user_env` | `string` | Controls injection of user-specific env vars (HOME, USER, LOGNAME, SHELL). Values: `before` (default, inject as defaults), `after` (override everything), `none` (disable). Uses the hook's effective user (hook `user` > service `user`). See [User Environment Injection](environment-variables.md#user-environment-injection) |
+| `user_identity` | `bool` | Controls injection of user-specific env vars (HOME, USER, LOGNAME, SHELL). Default: `true` (force-inject from target user). Set to `false` to disable. Uses the hook's effective user (hook `user` > service `user`). See [User Environment Injection](environment-variables.md#user-environment-injection) |
 | `output` | `string` | Output step name. Enables `::output::KEY=VALUE` capture on this step's stdout. See [Outputs](outputs.md) |
 
 ---

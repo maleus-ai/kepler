@@ -1,7 +1,8 @@
 # Service runs as testuser1 with explicit USER=custom_user in environment.
-# Healthcheck has inject_user_env: none — injection is disabled.
+# Service has user_identity: false so the explicit USER=custom_user is preserved.
+# Healthcheck also has user_identity: false — injection is disabled at both levels.
 # The healthcheck should see USER=custom_user from the service's computed_env.
-# The healthcheck asserts USER == custom_user → passes only if injection is skipped.
+# The healthcheck asserts USER == custom_user -> passes only if injection is skipped.
 kepler:
   logs:
     buffer_size: 0
@@ -11,6 +12,7 @@ services:
     command: ["sh", "-c", "sleep 300"]
     user: testuser1
     inherit_env: true
+    user_identity: false
     environment:
       - USER=custom_user
     restart: no
@@ -20,4 +22,4 @@ services:
       timeout: 5s
       retries: 1
       start_period: 0s
-      inject_user_env: none
+      user_identity: false

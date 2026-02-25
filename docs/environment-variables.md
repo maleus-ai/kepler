@@ -299,71 +299,52 @@ When a service, hook, or healthcheck specifies a `user:`, Kepler automatically i
 
 Without injection, a service running as `user: appuser` would inherit the **CLI caller's** HOME, USER, and SHELL (typically root's). This causes subtle issues: applications that rely on `$HOME` for config paths, cache dirs, or dotfiles would look in the wrong location. User env injection ensures the process environment matches the identity it actually runs as.
 
-### The `inject_user_env` Option
+### The `user_identity` Option
 
-The `inject_user_env` option controls **when** user environment variables are injected in the precedence chain. It accepts three values:
+The `user_identity` option controls whether user environment variables are injected. It's a boolean:
 
 | Value | Description |
 |-------|-------------|
-| `before` (default) | Inject as defaults — `env_file` and `environment` can override them |
-| `after` | Inject last — overrides everything including explicit `environment` values |
-| `none` | Disable injection entirely — no user env vars are added |
+| `true` (default) | Force-inject identity vars — overrides everything including explicit `environment` values |
+| `false` | Disable injection entirely — no user env vars are added |
 
-When `inject_user_env` is not specified, it defaults to `before`.
+When `user_identity` is not specified, it defaults to `true`.
 
-### Precedence with `inject_user_env: before` (default)
+### Precedence with `user_identity: true` (default)
 
 ```
-kepler.env (inherit_env: true) → user env → env_file → environment
+kepler.env (inherit_env: true) → env_file → environment → user identity
 ```
 
-User env vars act as sensible defaults: they fill in HOME/USER/LOGNAME/SHELL so the process has a correct identity, but explicit `environment` or `env_file` values take priority.
+User identity vars are injected **last**, unconditionally overriding all other sources. This guarantees that HOME/USER/LOGNAME/SHELL always match the target user, regardless of what `environment` or `env_file` specify.
 
 ```yaml
 services:
   app:
     command: ["./app"]
     user: appuser
-    # inject_user_env: before  (this is the default)
-    environment:
-      - HOME=/custom/home  # This wins over appuser's /home/appuser
-```
-
-### Precedence with `inject_user_env: after`
-
-```
-kepler.env (inherit_env: true) → env_file → environment → user env
-```
-
-User env vars are injected **last**, unconditionally overriding all other sources. Use this when you need to guarantee that HOME/USER/LOGNAME/SHELL always match the target user, regardless of what `environment` or `env_file` specify.
-
-```yaml
-services:
-  app:
-    command: ["./app"]
-    user: appuser
-    inject_user_env: after
+    # user_identity: true  (this is the default)
     environment:
       - HOME=/custom/home  # Overridden — HOME will be /home/appuser
 ```
 
-### Disabling injection with `inject_user_env: none`
+### Disabling injection with `user_identity: false`
 
 ```yaml
 services:
   app:
     command: ["./app"]
     user: appuser
-    inject_user_env: none
+    user_identity: false
     environment:
       - HOME=/custom/home  # Used as-is, no injection
 ```
 
-With `none`, no user env vars are injected. The process only sees what comes from `kepler.env`, `env_file`, and `environment`. Use this for full manual control.
+With `user_identity: false`, no user env vars are injected. The process only sees what comes from `kepler.env`, `env_file`, and `environment`. Use this for full manual control.
 
 ### Hooks and Healthchecks
 
-The `inject_user_env` option is also available on hooks and healthchecks. Each resolves the effective user independently:
+The `user_identity` option is also available on hooks and healthchecks. Each resolves the effective user independently:
 
 - **Hooks**: effective user = hook `user` > service `user` > config owner
 - **Healthchecks**: effective user = healthcheck `user` > service `user` > config owner
@@ -383,12 +364,12 @@ services:
       pre_start:
         run: ./setup.sh
         user: root                    # Hook runs as root
-        inject_user_env: none         # Don't inject root's env
+        user_identity: false          # Don't inject root's env
 ```
 
 ### Interaction with `inherit_env`
 
-User env injection is independent of `inherit_env`. Even with `inherit_env: false` (which excludes `kepler.env` from the process environment), user env vars are still injected as long as `inject_user_env` is not `none`:
+User env injection is independent of `inherit_env`. Even with `inherit_env: false` (which excludes `kepler.env` from the process environment), user env vars are still injected as long as `user_identity` is not `false`:
 
 ```yaml
 services:
@@ -396,14 +377,14 @@ services:
     command: ["./app"]
     user: appuser
     inherit_env: false          # No kepler.env in process env
-    # USER=appuser, HOME=/home/appuser still injected (default: before)
+    # USER=appuser, HOME=/home/appuser still injected (default: true)
     environment:
       - PATH=/usr/bin:/bin
 ```
 
 ### Lua Expression Access
 
-User env vars injected with `before` are available in Lua expressions via `service.env.*`:
+User env vars are available in Lua expressions via `service.env.*`:
 
 ```yaml
 services:

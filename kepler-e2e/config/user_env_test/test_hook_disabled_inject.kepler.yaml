@@ -1,8 +1,8 @@
-# Service runs as testuser1. Hook has inject_user_env: none.
+# Service runs as testuser1. Hook has user_identity: false.
 # With injection disabled, the hook should NOT get testuser1's env vars
 # injected — USER should come from the inherited service env (which has
 # testuser1's injected values from the service level).
-# This test verifies inject_user_env: none on a hook prevents hook-level injection.
+# This test verifies user_identity: false on a hook prevents hook-level injection.
 # We verify by checking that the hook sees the service's environment as-is.
 kepler:
   logs:
@@ -17,4 +17,4 @@ services:
     hooks:
       pre_start:
         run: "echo USER=$USER; echo HOME=$HOME"
-        inject_user_env: none
+        user_identity: false
