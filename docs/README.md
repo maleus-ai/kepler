@@ -31,7 +31,8 @@ For a quick overview of the project, see the [main README](../README.md).
 ## Security & Operations
 
 - **[Security Model](security-model.md)** -- Root requirement, kepler group, socket auth
-- **[Privilege Dropping](privilege-dropping.md)** -- User/group, resource limits
+- **[Privilege Dropping](privilege-dropping.md)** -- User/group, resource limits, no new privileges
+- **[Platform Compatibility](platform-compatibility.md)** -- OS-specific feature support matrix
 
 ## Internals
 

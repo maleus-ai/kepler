@@ -275,4 +275,5 @@ The `recreate` command:
 - [Log Management](log-management.md) -- Log storage and streaming
 - [File Watching](file-watching.md) -- Auto-restart on changes
 - [Privilege Dropping](privilege-dropping.md) -- User/group and limits
+- [Platform Compatibility](platform-compatibility.md) -- OS-specific feature support matrix
 - [Outputs](outputs.md) -- Output capture and cross-service output passing

@@ -306,4 +306,5 @@ healthcheck:
 - [Service Lifecycle](service-lifecycle.md) -- Status states including Healthy/Unhealthy
 - [Dependencies](dependencies.md) -- `service_healthy` and `service_unhealthy` conditions
 - [Hooks](hooks.md) -- Health check hooks
+- [Platform Compatibility](platform-compatibility.md) -- OS-specific feature support matrix
 - [Configuration](configuration.md) -- Full config reference

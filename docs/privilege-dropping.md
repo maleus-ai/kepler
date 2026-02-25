@@ -327,5 +327,6 @@ services:
 ## See Also
 
 - [Security Model](security-model.md) -- Root requirement and access control
+- [Platform Compatibility](platform-compatibility.md) -- OS-specific feature support matrix
 - [Hooks](hooks.md) -- Hook user inheritance
 - [Configuration](configuration.md) -- Full config reference

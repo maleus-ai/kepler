@@ -406,4 +406,5 @@ services:
 - [Health Checks](health-checks.md) -- Health check hooks
 - [Environment Variables](environment-variables.md) -- Hook environment inheritance
 - [Privilege Dropping](privilege-dropping.md) -- Hook user overrides
+- [Platform Compatibility](platform-compatibility.md) -- OS-specific feature support matrix
 - [Outputs](outputs.md) -- Hook step outputs, process outputs, and cross-service output passing
