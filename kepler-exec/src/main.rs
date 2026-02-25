@@ -88,9 +88,18 @@ fn main() {
 
     // Prevent privilege escalation via setuid/setgid binaries (must be after setuid)
     if no_new_privileges {
-        if let Err(e) = kepler_unix::process::set_no_new_privileges() {
-            eprintln!("kepler-exec: set_no_new_privileges failed: {}", e);
-            process::exit(127);
+        match kepler_unix::process::set_no_new_privileges() {
+            Ok(true) => {} // Applied successfully
+            Ok(false) => {
+                eprintln!(
+                    "kepler-exec: warning: no_new_privileges is not supported on this platform; \
+                     setuid/setgid binaries can still escalate privileges"
+                );
+            }
+            Err(e) => {
+                eprintln!("kepler-exec: set_no_new_privileges failed: {}", e);
+                process::exit(127);
+            }
         }
     }
 
@@ -332,11 +341,16 @@ fn apply_rlimits(rlimit_as: Option<u64>, rlimit_cpu: Option<u64>, rlimit_nofile:
         }
     }
 
-    if let Some(secs) = rlimit_cpu
-        && let Err(e) = setrlimit(Resource::RLIMIT_CPU, secs, secs)
-    {
-        eprintln!("kepler-exec: setrlimit(RLIMIT_CPU, {}) failed: {}", secs, e);
-        process::exit(127);
+    if let Some(secs) = rlimit_cpu {
+        #[cfg(target_os = "macos")]
+        eprintln!(
+            "kepler-exec: warning: RLIMIT_CPU enforcement is unreliable on macOS; \
+             do not rely on cpu_time as a hard security boundary"
+        );
+        if let Err(e) = setrlimit(Resource::RLIMIT_CPU, secs, secs) {
+            eprintln!("kepler-exec: setrlimit(RLIMIT_CPU, {}) failed: {}", secs, e);
+            process::exit(127);
+        }
     }
 
     if let Some(fds) = rlimit_nofile
