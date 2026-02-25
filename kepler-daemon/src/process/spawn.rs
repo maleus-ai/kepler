@@ -156,7 +156,7 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
     }
 
     let program = &spec.program_and_args[0];
-    let needs_wrapper = spec.user.is_some() || spec.limits.is_some();
+    let needs_wrapper = spec.user.is_some() || spec.limits.is_some() || spec.no_new_privileges;
 
     let mut cmd;
     #[cfg(unix)]
@@ -208,6 +208,10 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
                 wrapper_args.push("--rlimit-nofile".to_string());
                 wrapper_args.push(max_fds.to_string());
             }
+        }
+
+        if spec.no_new_privileges {
+            wrapper_args.push("--no-new-privileges".to_string());
         }
 
         wrapper_args.push("--".to_string());

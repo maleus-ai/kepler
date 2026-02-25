@@ -41,6 +41,7 @@ services:
 | `user` | `string` | service user | User to run the health check as. Overrides the service's `user`. See [Privilege Dropping](privilege-dropping.md) |
 | `groups` | `string[]` | service groups | Supplementary groups lockdown. Overrides the service's `groups`. See [Privilege Dropping](privilege-dropping.md) |
 | `user_identity` | `bool` | `true` | Controls injection of user-specific env vars (HOME, USER, LOGNAME, SHELL). When `true` (default), identity vars are force-injected from the effective user. Set to `false` to disable. Uses the healthcheck's effective user (healthcheck `user` > service `user`). See [User Environment Injection](environment-variables.md#user-environment-injection) |
+| `no_new_privileges` | `bool` | service setting | Prevents privilege escalation via setuid/setgid binaries. Inherits from the service's `no_new_privileges` (default: `true`). See [Privilege Dropping](privilege-dropping.md#no-new-privileges) |
 
 Either `command` or `run` is required (but not both).
 

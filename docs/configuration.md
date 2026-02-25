@@ -177,6 +177,7 @@ See [Log Management](log-management.md) for full details.
 | `groups` | `string[]` | `[]` | Supplementary groups lockdown (Unix). Supports `${{ }}$`. See [Privilege Dropping](privilege-dropping.md) |
 | `logs` | `object` | - | Log configuration. Supports `${{ }}$` and `!lua`. See [Log Management](log-management.md) |
 | `limits` | `object` | - | Resource limits. See [Privilege Dropping](privilege-dropping.md) |
+| `no_new_privileges` | `bool` | `true` | When `true`, sets `PR_SET_NO_NEW_PRIVS` on the spawned process to prevent privilege escalation via setuid/setgid binaries (e.g. `sudo`, `su`). Inherited by hooks and healthchecks. See [Privilege Dropping](privilege-dropping.md#no-new-privileges) |
 | `output` | `bool` | `false` | Enable `::output::KEY=VALUE` capture from process stdout. Requires `restart: no`. See [Outputs](outputs.md) |
 | `outputs` | `object` | - | Named output declarations (expressions referencing hook/dep outputs). Requires `restart: no`. See [Outputs](outputs.md) |
 

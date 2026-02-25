@@ -11,6 +11,7 @@ Kepler can run services and hooks as specific users/groups with resource limits.
 - [Hook Inheritance](#hook-inheritance)
 - [Health Check Inheritance](#health-check-inheritance)
 - [Resource Limits](#resource-limits)
+- [No New Privileges](#no-new-privileges)
 - [Examples](#examples)
 
 ---
@@ -112,8 +113,9 @@ Kepler uses the `kepler-exec` helper binary to drop privileges:
 2. `kepler-exec` resolves the user specification and sets supplementary groups (`initgroups` or `setgroups`)
 3. `kepler-exec` calls `setgid()` to set the primary group
 4. `kepler-exec` calls `setuid()` to set the target user
-5. `kepler-exec` applies resource limits (if configured)
-6. `kepler-exec` executes the service command
+5. `kepler-exec` sets `PR_SET_NO_NEW_PRIVS` (if `no_new_privileges` is enabled)
+6. `kepler-exec` applies resource limits (if configured)
+7. `kepler-exec` executes the service command
 
 This ensures the service process never runs as root, even momentarily after spawn.
 
@@ -222,6 +224,56 @@ services:
 Accepted suffixes: `K`, `KB`, `M`, `MB`, `G`, `GB`
 
 Examples: `"256M"`, `"1G"`, `"2048K"`
+
+---
+
+## No New Privileges
+
+The `no_new_privileges` option sets the `PR_SET_NO_NEW_PRIVS` bit on the spawned process. Once set, the process and its children cannot gain new privileges through setuid/setgid binaries (e.g. `sudo`, `su`). This is a one-way flag — once enabled it cannot be unset.
+
+This option defaults to `true`, providing a secure default that prevents privilege escalation with zero performance cost. Set to `false` only if the service legitimately needs to use setuid binaries.
+
+```yaml
+services:
+  backend:
+    command: ["./server"]
+    user: appuser
+    no_new_privileges: true      # Default — prevents sudo/su escalation
+
+  legacy-service:
+    command: ["./legacy"]
+    user: appuser
+    no_new_privileges: false     # Allow setuid binaries (e.g. needs sudo internally)
+```
+
+### Inheritance
+
+Hooks and health checks inherit `no_new_privileges` from their parent service by default. Each can override it individually:
+
+```yaml
+services:
+  backend:
+    command: ["./server"]
+    user: appuser
+    no_new_privileges: true       # Service and its hooks/healthchecks use this
+    hooks:
+      pre_start:
+        run: sudo ./setup.sh
+        no_new_privileges: false  # Override: this hook needs sudo
+    healthcheck:
+      run: "curl -f http://localhost:3000/health"
+      no_new_privileges: true     # Explicit (same as inherited default)
+```
+
+Inheritance chain: **hook/healthcheck setting** > **service setting** > `true` (default).
+
+### Platform Support
+
+| Platform | Implementation |
+|----------|---------------|
+| Linux | `prctl(PR_SET_NO_NEW_PRIVS)` (kernel 3.5+) |
+| FreeBSD | `procctl(PROC_NO_NEW_PRIVS_CTL)` (FreeBSD 11.0+) |
+| macOS, other Unix | No-op (no equivalent syscall) |
 
 ---
 

@@ -462,6 +462,10 @@ pub struct RawServiceConfig {
     /// Set to `false` to disable injection entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_identity: Option<bool>,
+    /// When true, sets PR_SET_NO_NEW_PRIVS on the spawned process to prevent
+    /// privilege escalation via setuid/setgid binaries. Defaults to true at runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_new_privileges: Option<bool>,
 }
 
 impl Default for RawServiceConfig {
@@ -485,6 +489,7 @@ impl Default for RawServiceConfig {
             output: ConfigValue::default(),
             outputs: ConfigValue::default(),
             user_identity: None,
+            no_new_privileges: None,
         }
     }
 }
@@ -910,6 +915,9 @@ pub struct ServiceConfig {
     /// Controls injection of user-specific env vars (HOME/USER/LOGNAME/SHELL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_identity: Option<bool>,
+    /// When true, sets PR_SET_NO_NEW_PRIVS on the spawned process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_new_privileges: Option<bool>,
 }
 
 // ============================================================================
@@ -1335,6 +1343,7 @@ impl KeplerConfig {
             output,
             outputs,
             user_identity: raw.user_identity,
+            no_new_privileges: raw.no_new_privileges,
         })
     }
 

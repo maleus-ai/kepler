@@ -342,6 +342,7 @@ impl TestDaemonHarness {
             owner_user: None,
             kepler_gid: None,
             kepler_env_denied: false,
+            service_no_new_privileges: None,
         };
 
         if should_mark_initialized {
@@ -372,6 +373,7 @@ impl TestDaemonHarness {
             resolved.groups.clone(),
             resolved.limits.clone(),
             true,
+            resolved.no_new_privileges.unwrap_or(true),
         );
         let spawn_params = SpawnServiceParams {
             service_name,
@@ -529,6 +531,7 @@ impl TestDaemonHarness {
             owner_user: None,
             kepler_gid: None,
             kepler_env_denied: false,
+            service_no_new_privileges: None,
         };
 
         run_service_hook(
@@ -591,6 +594,7 @@ impl TestDaemonHarness {
             owner_user: None,
             kepler_gid: None,
             kepler_env_denied: false,
+            service_no_new_privileges: None,
         };
 
         run_service_hook(
@@ -702,6 +706,7 @@ impl TestDaemonHarness {
                     owner_user: None,
                     kepler_gid: None,
                     kepler_env_denied: false,
+                    service_no_new_privileges: None,
                 };
 
                 let _ = run_service_hook(
@@ -753,6 +758,7 @@ impl TestDaemonHarness {
                     resolved.groups.clone(),
                     resolved.limits.clone(),
                     true,
+                    resolved.no_new_privileges.unwrap_or(true),
                 );
                 let spawn_params = SpawnServiceParams {
                     service_name: &event.service_name,
@@ -849,6 +855,7 @@ impl TestDaemonHarness {
                     owner_user: None,
                     kepler_gid: None,
                     kepler_env_denied: false,
+                    service_no_new_privileges: None,
                 };
 
                 let _ = run_service_hook(
@@ -935,6 +942,7 @@ impl TestDaemonHarness {
                         resolved.groups.clone(),
                         resolved.limits.clone(),
                         true,
+                        resolved.no_new_privileges.unwrap_or(true),
                     );
                     let spawn_params = SpawnServiceParams {
                         service_name: &event.service_name,

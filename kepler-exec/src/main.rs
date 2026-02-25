@@ -20,6 +20,7 @@ fn main() {
     let mut rlimit_as: Option<u64> = None;
     let mut rlimit_cpu: Option<u64> = None;
     let mut rlimit_nofile: Option<u64> = None;
+    let mut no_new_privileges = false;
 
     let mut i = 0;
     let mut cmd_start = None;
@@ -45,6 +46,9 @@ fn main() {
             "--rlimit-nofile" => {
                 i += 1;
                 rlimit_nofile = Some(parse_u64_arg(&args, i, "--rlimit-nofile"));
+            }
+            "--no-new-privileges" => {
+                no_new_privileges = true;
             }
             "--" => {
                 cmd_start = Some(i + 1);
@@ -81,6 +85,14 @@ fn main() {
 
     // Drop privileges: handle supplementary groups, then setgid, then setuid
     drop_privileges(user_spec.as_deref(), explicit_groups);
+
+    // Prevent privilege escalation via setuid/setgid binaries (must be after setuid)
+    if no_new_privileges {
+        if let Err(e) = kepler_unix::process::set_no_new_privileges() {
+            eprintln!("kepler-exec: set_no_new_privileges failed: {}", e);
+            process::exit(127);
+        }
+    }
 
     // Close inherited file descriptors above stderr before exec
     kepler_unix::process::close_inherited_fds();

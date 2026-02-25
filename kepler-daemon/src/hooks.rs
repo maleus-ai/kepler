@@ -63,6 +63,8 @@ pub struct ServiceHookParams<'a> {
     pub kepler_gid: Option<u32>,
     /// When true, `kepler.env` access raises a Lua error (autostart: true without environment)
     pub kepler_env_denied: bool,
+    /// Service-level no_new_privileges setting (inherited by hooks if not overridden)
+    pub service_no_new_privileges: Option<bool>,
 }
 
 /// Types of service hooks
@@ -196,6 +198,11 @@ async fn run_hook_step(
                 }
             }
         }
+
+        // Apply no_new_privileges: hook > service > default (true)
+        spec.no_new_privileges = hook.common().no_new_privileges
+            .or(params.service_no_new_privileges)
+            .unwrap_or(true);
 
         // Inject user identity env vars (HOME, USER, LOGNAME, SHELL)
         #[cfg(unix)]

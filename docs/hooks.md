@@ -107,6 +107,7 @@ hooks:
 | `env_file` | `string` | Additional env file to load |
 | `inherit_env` | `bool` | Whether to inherit the service's computed environment. Defaults to `true`. When `false`, the hook starts with an empty base env (only `kepler.env` + hook's own `env_file` + hook's own `environment`). `${{ service.env.* }}$` expressions in hook `environment` still resolve regardless. |
 | `user_identity` | `bool` | Controls injection of user-specific env vars (HOME, USER, LOGNAME, SHELL). Default: `true` (force-inject from target user). Set to `false` to disable. Uses the hook's effective user (hook `user` > service `user`). See [User Environment Injection](environment-variables.md#user-environment-injection) |
+| `no_new_privileges` | `bool` | Prevents privilege escalation via setuid/setgid binaries. Inherits from the service's `no_new_privileges` (default: `true`). See [Privilege Dropping](privilege-dropping.md#no-new-privileges) |
 | `output` | `string` | Output step name. Enables `::output::KEY=VALUE` capture on this step's stdout. See [Outputs](outputs.md) |
 
 ---
