@@ -1,5 +1,5 @@
-# Service with a pre_start hook that has inject_user_env: after.
-# The hook explicitly sets HOME, but inject_user_env: after forces it to
+# Service with a pre_start hook that has user_identity enabled (default).
+# The hook explicitly sets HOME, but user_identity forces it to
 # match the effective user's /etc/passwd entry.
 kepler:
   logs:
@@ -14,6 +14,5 @@ services:
     hooks:
       pre_start:
         run: "echo HOME=$HOME; echo USER=$USER; echo LOGNAME=$LOGNAME; echo SHELL=$SHELL"
-        inject_user_env: after
         environment:
           - HOME=/custom/hook/home

@@ -1,8 +1,8 @@
 # Service runs as testuser1 with explicit USER=custom_user in environment.
-# Healthcheck runs as testuser1 with NO inject_user_env set (default = before).
+# Healthcheck runs as testuser1 with NO user_identity set (default = true).
 # Default injection should inject testuser1's env into the healthcheck,
 # overriding the service's explicit USER=custom_user.
-# The healthcheck asserts USER == testuser1 → passes only if injection works.
+# The healthcheck asserts USER == testuser1 -> passes only if injection works.
 kepler:
   logs:
     buffer_size: 0

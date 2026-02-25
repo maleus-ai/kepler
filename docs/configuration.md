@@ -169,7 +169,7 @@ See [Log Management](log-management.md) for full details.
 | `environment` | `string[]\|object` | `[]` | Environment variables. Accepts a sequence of `KEY=value` strings or a mapping of `KEY: value` pairs. Supports `${{ }}$` (sequential) and `!lua`. See [Environment Variables](environment-variables.md) |
 | `env_file` | `string` | - | Path to `.env` file. Supports `${{ }}$` (`kepler.env` only). |
 | `inherit_env` | `bool` | global | Whether to inherit `kepler.env` into the service's process environment. Inherits from `kepler.default_inherit_env` if not set |
-| `inject_user_env` | `string` | `before` | Controls injection of user-specific env vars (HOME, USER, LOGNAME, SHELL) from `/etc/passwd`. Values: `before` (inject as defaults), `after` (override everything), `none` (disable). See [User Environment Injection](environment-variables.md#user-environment-injection) |
+| `user_identity` | `bool` | `true` | Controls injection of user-specific env vars (HOME, USER, LOGNAME, SHELL) from `/etc/passwd`. When `true` (default), identity vars are always force-injected from the target user. Set to `false` to disable injection. See [User Environment Injection](environment-variables.md#user-environment-injection) |
 | `restart` | `string\|object` | `no` | Restart policy. See [Restart Configuration](#restart-configuration) |
 | `healthcheck` | `object` | - | Health check config. Supports `${{ }}$` and `!lua`. See [Health Checks](health-checks.md) |
 | `hooks` | `object` | - | Service-specific hooks. Supports `${{ }}$` and `!lua`. See [Hooks](hooks.md) |

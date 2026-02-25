@@ -35,25 +35,6 @@ pub use restart::{RestartConfig, RestartPolicy};
 
 use serde::Deserialize;
 
-// ============================================================================
-// InjectUserEnv — controls when user env (HOME/USER/LOGNAME/SHELL) is injected
-// ============================================================================
-
-/// Controls how user-specific environment variables (HOME, USER, LOGNAME, SHELL)
-/// from `/etc/passwd` are injected into the process environment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum InjectUserEnv {
-    /// Inject as base defaults before `env_file`/`environment`.
-    /// Explicit values in `env_file`/`environment` take priority.
-    #[serde(rename = "before")]
-    Before,
-    /// Inject after everything, overriding `env_file`/`environment` values.
-    #[serde(rename = "after")]
-    After,
-    /// Do not inject user env vars at all.
-    #[serde(rename = "none")]
-    Disabled,
-}
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -477,11 +458,10 @@ pub struct RawServiceConfig {
     #[serde(default, skip_serializing_if = "ConfigValue::is_static_none")]
     pub outputs: ConfigValue<Option<HashMap<String, ConfigValue<String>>>>,
     /// Controls injection of user-specific env vars (HOME/USER/LOGNAME/SHELL).
-    /// `before` (default): inject as defaults, explicit values win.
-    /// `after`: inject at end, overriding everything.
-    /// `none`: no injection.
+    /// When `user:` is set, identity vars are always force-injected by default.
+    /// Set to `false` to disable injection entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inject_user_env: Option<InjectUserEnv>,
+    pub user_identity: Option<bool>,
 }
 
 impl Default for RawServiceConfig {
@@ -504,7 +484,7 @@ impl Default for RawServiceConfig {
             limits: ConfigValue::default(),
             output: ConfigValue::default(),
             outputs: ConfigValue::default(),
-            inject_user_env: None,
+            user_identity: None,
         }
     }
 }
@@ -929,7 +909,7 @@ pub struct ServiceConfig {
     pub outputs: Option<HashMap<String, String>>,
     /// Controls injection of user-specific env vars (HOME/USER/LOGNAME/SHELL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inject_user_env: Option<InjectUserEnv>,
+    pub user_identity: Option<bool>,
 }
 
 // ============================================================================
@@ -1354,7 +1334,7 @@ impl KeplerConfig {
             limits,
             output,
             outputs,
-            inject_user_env: raw.inject_user_env,
+            user_identity: raw.user_identity,
         })
     }
 

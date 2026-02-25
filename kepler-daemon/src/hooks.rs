@@ -197,12 +197,10 @@ async fn run_hook_step(
             }
         }
 
-        // Inject user env based on inject_user_env mode
+        // Inject user identity env vars (HOME, USER, LOGNAME, SHELL)
         #[cfg(unix)]
         {
-            use crate::config::InjectUserEnv;
-            let inject_mode = hook.common().inject_user_env;
-            if inject_mode == Some(InjectUserEnv::After) {
+            if hook.common().user_identity.unwrap_or(true) {
                 if let Some(ref user_spec) = spec.user {
                     if let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
                         for (key, value) in user_env {
@@ -330,12 +328,10 @@ pub async fn run_service_hook(
 
                 // Base injection: inject user env from effective user (hook user or service user).
                 // These values are available for Lua and overridden by hook's env_file/environment.
-                // Skipped when inject_user_env is explicitly disabled.
+                // Skipped when user_identity is explicitly set to false.
                 #[cfg(unix)]
                 {
-                    use crate::config::InjectUserEnv;
-                    let inject_mode = hook.common().inject_user_env;
-                    if inject_mode != Some(InjectUserEnv::Disabled) {
+                    if hook.common().user_identity != Some(false) {
                         let pre_user = hook.common().user.as_static()
                             .and_then(|v| v.clone())
                             .or_else(|| params.service_user.map(|s| s.to_string()));

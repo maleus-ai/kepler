@@ -319,7 +319,7 @@ impl TestServiceBuilder {
             condition: None,
             output: self.output,
             outputs: self.outputs,
-            inject_user_env: None,
+            user_identity: None,
         }
     }
 }
@@ -450,7 +450,7 @@ impl TestHealthCheckBuilder {
             start_period: self.start_period,
             user,
             groups,
-            inject_user_env: None,
+            user_identity: None,
         }
     }
 }

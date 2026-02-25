@@ -40,7 +40,7 @@ services:
 | `start_period` | `duration` | `0s` | Grace period before health checks begin |
 | `user` | `string` | service user | User to run the health check as. Overrides the service's `user`. See [Privilege Dropping](privilege-dropping.md) |
 | `groups` | `string[]` | service groups | Supplementary groups lockdown. Overrides the service's `groups`. See [Privilege Dropping](privilege-dropping.md) |
-| `inject_user_env` | `string` | `before` | Controls injection of user-specific env vars (HOME, USER, LOGNAME, SHELL). Values: `before` (default, inject effective user's env), `after` (same effect as `before` for healthchecks), `none` (disable). Uses the healthcheck's effective user (healthcheck `user` > service `user`). See [User Environment Injection](environment-variables.md#user-environment-injection) |
+| `user_identity` | `bool` | `true` | Controls injection of user-specific env vars (HOME, USER, LOGNAME, SHELL). When `true` (default), identity vars are force-injected from the effective user. Set to `false` to disable. Uses the healthcheck's effective user (healthcheck `user` > service `user`). See [User Environment Injection](environment-variables.md#user-environment-injection) |
 
 Either `command` or `run` is required (but not both).
 

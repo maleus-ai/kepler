@@ -1,5 +1,5 @@
 # Service runs as testuser1, but healthcheck runs as testuser2.
-# No inject_user_env set (default = before).
+# No user_identity set (default = true).
 # The healthcheck should inject testuser2's env (not testuser1's).
 # The healthcheck asserts USER == testuser2 → passes only if the healthcheck
 # user's env is injected, not the service user's.
