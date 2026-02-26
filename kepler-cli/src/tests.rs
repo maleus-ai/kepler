@@ -414,6 +414,7 @@ fn make_info(status: &str) -> ServiceInfo {
         health_check_failures: 0,
         exit_code: None,
         signal: None,
+        initialized: false,
         skip_reason: None,
         fail_reason: None,
     }

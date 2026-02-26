@@ -1009,6 +1009,7 @@ fn test_service_info_serialization_with_exit_code() {
         health_check_failures: 0,
         exit_code: Some(42),
         signal: None,
+        initialized: false,
         skip_reason: None,
         fail_reason: None,
     };
@@ -1029,6 +1030,7 @@ fn test_service_info_serialization_none_exit_code_roundtrips() {
         health_check_failures: 0,
         exit_code: None,
         signal: None,
+        initialized: false,
         skip_reason: None,
         fail_reason: None,
     };
@@ -1114,6 +1116,7 @@ fn test_service_info_serialization_new_fields_roundtrip() {
         health_check_failures: 0,
         exit_code: None,
         signal: Some(9),
+        initialized: false,
         skip_reason: None,
         fail_reason: None,
     };

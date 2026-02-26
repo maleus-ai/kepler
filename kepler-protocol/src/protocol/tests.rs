@@ -245,6 +245,7 @@ fn roundtrip_server_message_service_status() {
         health_check_failures: 0,
         exit_code: None,
         signal: None,
+        initialized: false,
         skip_reason: None,
         fail_reason: None,
     });
@@ -256,6 +257,7 @@ fn roundtrip_server_message_service_status() {
         health_check_failures: 0,
         exit_code: Some(0),
         signal: None,
+        initialized: false,
         skip_reason: None,
         fail_reason: None,
     });
@@ -267,6 +269,7 @@ fn roundtrip_server_message_service_status() {
         health_check_failures: 0,
         exit_code: None,
         signal: Some(9),
+        initialized: false,
         skip_reason: None,
         fail_reason: None,
     });

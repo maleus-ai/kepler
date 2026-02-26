@@ -389,6 +389,9 @@ pub struct ServiceInfo {
     /// Signal that killed the process (e.g., 9 for SIGKILL)
     #[serde(default)]
     pub signal: Option<i32>,
+    /// Whether the service has completed its first start
+    #[serde(default)]
+    pub initialized: bool,
     /// Reason for being skipped (when status is "skipped")
     #[serde(default)]
     pub skip_reason: Option<String>,

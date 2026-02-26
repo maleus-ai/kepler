@@ -130,6 +130,7 @@ impl From<&ServiceState> for ServiceInfo {
             health_check_failures: state.health_check_failures,
             exit_code: state.exit_code,
             signal: state.signal,
+            initialized: state.initialized,
             skip_reason: state.skip_reason.clone(),
             fail_reason: state.fail_reason.clone(),
         }
