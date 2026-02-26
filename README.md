@@ -22,7 +22,7 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash
 
 # Install a specific version
-curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash -s v0.1.0
+curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash -s v0.11.0
 ```
 
 Or build from source (requires Rust 1.85+):
@@ -33,11 +33,11 @@ cd kepler
 ./install.sh
 ```
 
-| Binary | Description |
-|--------|-------------|
-| `kepler` | CLI client (users in the `kepler` group) |
-| `kepler-daemon` | Daemon process (runs as root) |
-| `kepler-exec` | Privilege-dropping wrapper (internal) |
+| Binary          | Description                              |
+| --------------- | ---------------------------------------- |
+| `kepler`        | CLI client (users in the `kepler` group) |
+| `kepler-daemon` | Daemon process (runs as root)            |
+| `kepler-exec`   | Privilege-dropping wrapper (internal)    |
 
 See [Getting Started](docs/getting-started.md) for full install options, post-install setup, and systemd integration.
 
@@ -115,11 +115,11 @@ For a ready-to-run example, see [`example.kepler.yaml`](examples/example.kepler.
 
 ## Project Structure
 
-| Crate | Description |
-|-------|-------------|
-| [`kepler-daemon`](kepler-daemon/) | Main daemon -- actor-based service orchestration |
-| [`kepler-cli`](kepler-cli/) | CLI client -- clap-based command interface |
-| [`kepler-protocol`](kepler-protocol/) | Shared IPC protocol -- multiplexed connections |
-| [`kepler-exec`](kepler-exec/) | Privilege-dropping wrapper -- setuid/setgid/rlimits |
-| [`kepler-tests`](kepler-tests/) | Integration test helpers -- TestDaemonHarness |
-| [`kepler-e2e`](kepler-e2e/) | E2E test suite -- real binary testing |
+| Crate                                 | Description                                         |
+| ------------------------------------- | --------------------------------------------------- |
+| [`kepler-daemon`](kepler-daemon/)     | Main daemon -- actor-based service orchestration    |
+| [`kepler-cli`](kepler-cli/)           | CLI client -- clap-based command interface          |
+| [`kepler-protocol`](kepler-protocol/) | Shared IPC protocol -- multiplexed connections      |
+| [`kepler-exec`](kepler-exec/)         | Privilege-dropping wrapper -- setuid/setgid/rlimits |
+| [`kepler-tests`](kepler-tests/)       | Integration test helpers -- TestDaemonHarness       |
+| [`kepler-e2e`](kepler-e2e/)           | E2E test suite -- real binary testing               |
