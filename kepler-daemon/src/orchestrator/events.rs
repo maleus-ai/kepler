@@ -78,14 +78,13 @@ impl ServiceEventHandler {
                 }
 
             // Handle unhealthy → restart (on-unhealthy policy)
-            if let ServiceEvent::Unhealthy = event {
-                if let Err(e) = self.handle_unhealthy_restart(service_name).await {
+            if let ServiceEvent::Unhealthy = event
+                && let Err(e) = self.handle_unhealthy_restart(service_name).await {
                     error!(
                         "Failed to handle unhealthy restart for {}: {}",
                         service_name, e
                     );
                 }
-            }
         }
 
         info!("ServiceEventHandler stopped for {:?}", self.config_path);

@@ -65,6 +65,10 @@ pub struct ServiceHookParams<'a> {
     pub kepler_env_denied: bool,
     /// Service-level no_new_privileges setting (inherited by hooks if not overridden)
     pub service_no_new_privileges: Option<bool>,
+    /// Bearer token for the service (if permissions are configured).
+    /// Injected into the hook environment as KEPLER_TOKEN so hooks can
+    /// authenticate to the daemon with the service's scoped permissions.
+    pub service_token: Option<String>,
 }
 
 /// Types of service hooks
@@ -175,28 +179,22 @@ async fn run_hook_step(
                 spec.user.as_deref(),
                 params.owner_uid,
                 &context,
-            ).map_err(|e| DaemonError::Config(e))?;
+            ).map_err(DaemonError::Config)?;
         }
 
         if spec.groups.is_empty() {
             spec.groups = params.service_groups.to_vec();
         }
 
-        // Strip kepler group from supplementary groups when hardening is enabled
+        // Compute effective groups, stripping kepler GID
         #[cfg(unix)]
-        if params.hardening >= HardeningLevel::NoRoot
-            && spec.groups.is_empty()
-            && spec.user.is_some()
         {
-            if let Some(kepler_gid) = params.kepler_gid {
-                let user_spec = spec.user.as_deref().unwrap();
-                match crate::user::compute_groups_excluding(user_spec, kepler_gid) {
-                    Ok(g) => spec.groups = g,
-                    Err(e) => {
-                        debug!("Failed to compute groups for hook {}.{}: {}", service_name, hook_name, e);
-                    }
-                }
-            }
+            spec.groups = crate::user::effective_groups(
+                &spec.groups,
+                spec.user.as_deref(),
+                params.kepler_gid,
+                &format!("hook '{}.{}'", service_name, hook_name),
+            );
         }
 
         // Apply no_new_privileges: hook > service > default (true)
@@ -207,15 +205,18 @@ async fn run_hook_step(
         // Inject user identity env vars (HOME, USER, LOGNAME, SHELL)
         #[cfg(unix)]
         {
-            if hook.common().user_identity.unwrap_or(true) {
-                if let Some(ref user_spec) = spec.user {
-                    if let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
-                        for (key, value) in user_env {
-                            spec.environment.insert(key, value);
-                        }
+            if hook.common().user_identity.unwrap_or(true)
+                && let Some(ref user_spec) = spec.user
+                && let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
+                    for (key, value) in user_env {
+                        spec.environment.insert(key, value);
                     }
                 }
-            }
+        }
+
+        // Inject service token so hooks can authenticate to the daemon
+        if let Some(ref token) = params.service_token {
+            spec.environment.insert("KEPLER_TOKEN".to_string(), token.clone());
         }
 
         debug!(
@@ -342,13 +343,12 @@ pub async fn run_service_hook(
                         let pre_user = hook.common().user.as_static()
                             .and_then(|v| v.clone())
                             .or_else(|| params.service_user.map(|s| s.to_string()));
-                        if let Some(ref user_spec) = pre_user {
-                            if let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
+                        if let Some(ref user_spec) = pre_user
+                            && let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
                                 for (key, value) in user_env {
                                     hook_env.insert(key, value);
                                 }
                             }
-                        }
                     }
                 }
 

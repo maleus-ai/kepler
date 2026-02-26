@@ -73,3 +73,39 @@ fn test_clear_snapshot() {
     assert!(!persistence.has_expanded_config());
     assert!(!persistence.state_path().exists());
 }
+
+#[test]
+fn test_permission_ceiling_round_trip() {
+    let yaml = r#"
+config:
+  services: {}
+config_dir: /tmp
+snapshot_time: 1700000000
+kepler_env: {}
+permission_ceiling:
+  - service:start
+  - config:status
+"#;
+    let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(
+        snapshot.permission_ceiling,
+        Some(vec!["service:start".to_string(), "config:status".to_string()])
+    );
+
+    let reserialized = serde_yaml::to_string(&snapshot).unwrap();
+    let reloaded: ExpandedConfigSnapshot = serde_yaml::from_str(&reserialized).unwrap();
+    assert_eq!(reloaded.permission_ceiling, snapshot.permission_ceiling);
+}
+
+#[test]
+fn test_permission_ceiling_absent_defaults_to_none() {
+    let yaml = r#"
+config:
+  services: {}
+config_dir: /tmp
+snapshot_time: 1700000000
+kepler_env: {}
+"#;
+    let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(snapshot.permission_ceiling, None);
+}

@@ -8,17 +8,22 @@ use std::str::FromStr;
 
 /// Hardening level for the daemon.
 ///
-/// | Level    | Privilege restriction                                          | Kepler group stripping |
-/// |----------|---------------------------------------------------------------|----------------------|
-/// | `none`   | No restrictions                                               | No stripping         |
-/// | `no-root`| Non-root config owners cannot run as root/daemon              | Stripped             |
-/// | `strict` | Non-root config owners can only run as themselves             | Stripped             |
+/// Variants have explicit `#[repr(u8)]` discriminants so that `PartialOrd`/`Ord`
+/// ordering is guaranteed to match the security level (higher = more restrictive).
+///
+/// | Level (u8) | Privilege restriction                                       |
+/// |------------|-------------------------------------------------------------|
+/// | `none` (0) | No restrictions                                             |
+/// | `no-root` (1) | Non-root config owners cannot run as root/daemon        |
+/// | `strict` (2) | Non-root config owners can only run as themselves         |
+// SAFETY: Variant order is security-critical. Do not reorder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[repr(u8)]
 pub enum HardeningLevel {
     #[default]
-    None,
-    NoRoot,
-    Strict,
+    None = 0,
+    NoRoot = 1,
+    Strict = 2,
 }
 
 impl FromStr for HardeningLevel {

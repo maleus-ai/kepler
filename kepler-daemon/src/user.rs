@@ -62,6 +62,7 @@ pub fn resolve_user(user: &str) -> Result<ResolvedUser> {
 }
 
 /// Resolve the user part of a "user:group" spec to (uid, Option<username>, Option<home>, Option<shell>).
+#[allow(clippy::type_complexity)]
 fn resolve_user_part(spec: &str, full_spec: &str) -> Result<(u32, Option<String>, Option<PathBuf>, Option<PathBuf>)> {
     if let Ok(uid) = spec.parse::<u32>() {
         let nix_user = lookup_user_by_uid(uid);
@@ -128,6 +129,30 @@ pub fn resolve_user_env(user_spec: &str) -> Result<HashMap<String, String>> {
     Ok(env)
 }
 
+/// Strip the kepler group GID from a groups list, logging a warning if stripped.
+///
+/// Used to prevent spawned processes (services, hooks, healthchecks) from
+/// inheriting kepler group membership, which would give them daemon socket access.
+pub fn strip_kepler_group(groups: &mut Vec<String>, kepler_gid: u32, context: &str) {
+    let kgid_str = kepler_gid.to_string();
+    let before = groups.len();
+    groups.retain(|g| {
+        if g == &kgid_str {
+            return false;
+        }
+        if let Ok(resolved) = resolve_group(g) {
+            return resolved != kepler_gid;
+        }
+        true
+    });
+    if groups.len() < before {
+        tracing::warn!(
+            "Stripped kepler group from {}: spawned processes cannot inherit kepler group membership (see security-model.md#kepler-group-stripping)",
+            context
+        );
+    }
+}
+
 /// Compute supplementary groups for a user, excluding a specific GID.
 ///
 /// Resolves the user spec, gets all supplementary groups via `getgrouplist`,
@@ -164,6 +189,46 @@ pub fn compute_groups_excluding(user_spec: &str, exclude_gid: u32) -> Result<Vec
         .filter(|&gid| gid != exclude_gid)
         .map(|gid| gid.to_string())
         .collect())
+}
+
+/// Compute effective supplementary groups for a spawned process, ensuring the
+/// kepler group is always stripped.
+///
+/// If `groups` is empty and `user` is set, computes supplementary groups from
+/// the user's passwd/group entries (excluding kepler GID). Otherwise uses
+/// the provided `groups` and strips kepler GID from the final list.
+///
+/// This consolidates the group computation + kepler-stripping pattern used by
+/// services, hooks, and health checks.
+pub fn effective_groups(
+    groups: &[String],
+    user: Option<&str>,
+    kepler_gid: Option<u32>,
+    context: &str,
+) -> Vec<String> {
+    let mut result = if groups.is_empty() && user.is_some() {
+        if let Some(kgid) = kepler_gid {
+            let user_spec = user.unwrap();
+            match compute_groups_excluding(user_spec, kgid) {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::debug!("Failed to compute groups for {}: {}", context, e);
+                    groups.to_vec()
+                }
+            }
+        } else {
+            groups.to_vec()
+        }
+    } else {
+        groups.to_vec()
+    };
+
+    // Always strip kepler group from final list
+    if let Some(kgid) = kepler_gid {
+        strip_kepler_group(&mut result, kgid, context);
+    }
+
+    result
 }
 
 #[cfg(test)]

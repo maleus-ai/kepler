@@ -2,9 +2,11 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
 
+pub mod acl;
 pub mod allocator;
 pub mod auth;
 pub mod config;
+
 pub mod config_actor;
 pub mod config_registry;
 pub mod cursor;
@@ -20,9 +22,11 @@ pub mod logs;
 pub mod lua_eval;
 pub mod orchestrator;
 pub mod outputs;
+pub mod permissions;
 pub mod persistence;
 pub mod process;
 pub mod state;
+pub mod token_store;
 #[cfg(unix)]
 pub mod user;
 pub mod watcher;

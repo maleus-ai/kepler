@@ -1227,17 +1227,15 @@ impl Drop for E2eHarness {
     fn drop(&mut self) {
         // Dump daemon logs to stderr. cargo test captures per-test output
         // and only displays it when a test fails, so this is zero-noise on success.
-        if let Some(path) = self.daemon_log_path.as_ref() {
-            if let Ok(logs) = std::fs::read_to_string(path) {
-                if !logs.is_empty() {
-                    eprintln!(
-                        "\n=== DAEMON LOGS ({}) ===\n{}\n=== END DAEMON LOGS ===",
-                        path.display(),
-                        logs
-                    );
-                }
+        if let Some(path) = self.daemon_log_path.as_ref()
+            && let Ok(logs) = std::fs::read_to_string(path)
+            && !logs.is_empty() {
+                eprintln!(
+                    "\n=== DAEMON LOGS ({}) ===\n{}\n=== END DAEMON LOGS ===",
+                    path.display(),
+                    logs
+                );
             }
-        }
 
         // Try to stop the daemon if running
         if let Some(mut child) = self.daemon_process.take() {

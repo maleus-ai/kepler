@@ -105,21 +105,15 @@ async fn health_check_loop(
             groups = service_groups.to_vec();
         }
 
-        // Strip kepler group from supplementary groups when hardening is enabled
+        // Compute effective groups, stripping kepler GID
         #[cfg(unix)]
-        if hardening >= HardeningLevel::NoRoot
-            && groups.is_empty()
-            && user.is_some()
         {
-            if let Some(kgid) = kepler_gid {
-                let user_spec = user.as_deref().unwrap();
-                match crate::user::compute_groups_excluding(user_spec, kgid) {
-                    Ok(g) => groups = g,
-                    Err(e) => {
-                        debug!("Failed to compute groups for healthcheck {}: {}", service_name, e);
-                    }
-                }
-            }
+            groups = crate::user::effective_groups(
+                &groups,
+                user.as_deref(),
+                kepler_gid,
+                &format!("healthcheck '{}'", service_name),
+            );
         }
 
         let mut health_env = ctx.env.clone();
@@ -129,15 +123,19 @@ async fn health_check_loop(
         // always overrides existing values. Only disabled when user_identity is false.
         #[cfg(unix)]
         {
-            if config.user_identity.unwrap_or(true) {
-                if let Some(ref user_spec) = user {
-                    if let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
-                        for (key, value) in user_env {
-                            health_env.insert(key, value);
-                        }
+            if config.user_identity.unwrap_or(true)
+                && let Some(ref user_spec) = user
+                && let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
+                    for (key, value) in user_env {
+                        health_env.insert(key, value);
                     }
                 }
-            }
+        }
+
+        // Inject KEPLER_TOKEN if the service has permissions configured
+        let service_token = handle.get_service_token_hex(&service_name).await;
+        if let Some(ref token_hex) = service_token {
+            health_env.insert("KEPLER_TOKEN".to_string(), token_hex.clone());
         }
 
         let service_no_new_privileges = resolved.and_then(|r| r.no_new_privileges);
@@ -297,6 +295,9 @@ async fn run_status_change_hook(
         // Get kepler_env for hook context
         let kepler_env = handle.get_kepler_env().await;
 
+        // Fetch service token for hook authentication
+        let service_token = handle.get_service_token_hex(service_name).await;
+
         let kepler_env_denied = config.as_ref().map(|c| c.is_kepler_env_denied()).unwrap_or(false);
         let hook_params = ServiceHookParams {
             working_dir: &ctx.working_dir,
@@ -321,6 +322,7 @@ async fn run_status_change_hook(
             kepler_gid,
             kepler_env_denied,
             service_no_new_privileges: resolved.no_new_privileges,
+            service_token,
         };
 
         // Hooks are always available from resolved config (inner fields may still

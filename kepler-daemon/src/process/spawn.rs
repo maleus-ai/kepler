@@ -501,7 +501,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
     }
 }
 
-/// Spawn a detached command, returning the Child and output tasks for monitoring
+/// Spawn a detached command, returning the Child and output tasks for monitoring.
 pub async fn spawn_detached(
     spec: CommandSpec,
     log_config: LogWriterConfig,
@@ -512,9 +512,11 @@ pub async fn spawn_detached(
 ) -> Result<DetachedResult> {
     let (mut cmd, program) = build_command(&spec)?;
 
-    let mut child = cmd.spawn().map_err(|e| DaemonError::ProcessSpawn {
-        service: program.clone(),
-        source: e,
+    let mut child = cmd.spawn().map_err(|e| {
+        DaemonError::ProcessSpawn {
+            service: program.clone(),
+            source: e,
+        }
     })?;
 
     let pid = child.id();

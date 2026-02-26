@@ -9,8 +9,9 @@ use kepler_daemon::hooks::{run_service_hook, ServiceHookParams, ServiceHookType}
 use kepler_daemon::logs::{BufferedLogWriter, LogReader, LogStream, LogWriterConfig, LogLine};
 use kepler_daemon::process::{spawn_service, stop_service, CommandSpec, ProcessExitEvent, SpawnServiceParams};
 use kepler_daemon::state::ServiceStatus;
+use kepler_daemon::token_store::{SharedTokenStore, TokenStore, TokenContext, ServiceTokenGuard};
 use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Notify};
@@ -52,6 +53,8 @@ pub struct TestDaemonHarness {
     tracked_pids: Arc<Mutex<Vec<u32>>>,
     /// Daemon-level hardening (simulates --hardening flag on daemon startup)
     daemon_hardening: HardeningLevel,
+    /// Token store for service permission tokens
+    token_store: SharedTokenStore,
 }
 
 impl TestDaemonHarness {
@@ -148,7 +151,7 @@ impl TestDaemonHarness {
         unsafe {
             std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
         }
-        ConfigActor::create(config_path.to_path_buf(), Some(std::env::vars().collect()), config_owner, config_hardening)
+        ConfigActor::create(config_path.to_path_buf(), Some(std::env::vars().collect()), config_owner, config_hardening, None)
             .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
@@ -172,6 +175,7 @@ impl TestDaemonHarness {
             restart_rx: Some(restart_rx),
             tracked_pids: Arc::new(Mutex::new(Vec::new())),
             daemon_hardening,
+            token_store: Arc::new(TokenStore::new()),
         })
     }
 
@@ -297,6 +301,9 @@ impl TestDaemonHarness {
             ).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         }
 
+        // Strip KEPLER_TOKEN from computed_env (stale caller token)
+        computed_env.remove("KEPLER_TOKEN");
+
         // Store resolved config + computed state in the actor
         let svc_env_file = eval_ctx.service.as_ref().unwrap().env_file.clone();
         self.handle.store_resolved_config(
@@ -316,6 +323,32 @@ impl TestDaemonHarness {
         let should_mark_initialized = !self.handle
             .is_service_initialized(service_name)
             .await;
+
+        // Create token guard before pre_start hooks so hooks can use the token.
+        let service_token = if let Some(permissions) = &resolved.permissions {
+            let allow_set: HashSet<String> = permissions.allow.iter().cloned().collect();
+            let expanded = kepler_daemon::permissions::expand_scopes(&allow_set)
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("invalid permission scopes: {}", e).into()
+                })?;
+            let token_ctx = TokenContext {
+                allow: expanded,
+                max_hardening: HardeningLevel::None,
+                service: service_name.to_string(),
+                config_path: self.config_path.clone(),
+            };
+            let guard = ServiceTokenGuard::new(self.token_store.clone(), token_ctx)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("failed to generate auth token: {}", e).into()
+                })?;
+            let hex = guard.token_hex()
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            self.handle.store_token_guard(service_name, guard).await;
+            Some(hex)
+        } else {
+            None
+        };
 
         let (hooks, _lua_code) = resolve_hooks_for_execution(
             &self.handle, service_name, ServiceHookType::PreStart, &resolved, &computed_env,
@@ -343,6 +376,7 @@ impl TestDaemonHarness {
             kepler_gid: None,
             kepler_env_denied: false,
             service_no_new_privileges: None,
+            service_token: service_token.clone(),
         };
 
         if should_mark_initialized {
@@ -365,16 +399,22 @@ impl TestDaemonHarness {
 
         // Spawn the process
         let (store_stdout, store_stderr) = resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
-        let spec = CommandSpec::with_all_options(
+        let mut spec = CommandSpec::with_all_options(
             resolved.command.clone(),
-            working_dir,
-            computed_env,
+            working_dir.clone(),
+            computed_env.clone(),
             resolved.user.clone(),
             resolved.groups.clone(),
             resolved.limits.clone(),
             true,
             resolved.no_new_privileges.unwrap_or(true),
         );
+
+        // Inject KEPLER_TOKEN into the process environment
+        spec.environment.remove("KEPLER_TOKEN");
+        if let Some(ref token_hex) = service_token {
+            spec.environment.insert("KEPLER_TOKEN".to_string(), token_hex.clone());
+        }
 
         // Set up a log flush notifier so we can wait for capture tasks to
         // process initial output (e.g. kepler-exec warnings) before returning.
@@ -412,6 +452,17 @@ impl TestDaemonHarness {
         let _ = self.handle
             .set_service_status(service_name, ServiceStatus::Running)
             .await;
+
+        // Run post_start hook
+        run_service_hook(
+            &hooks,
+            ServiceHookType::PostStart,
+            service_name,
+            &hook_params,
+            &None,
+            Some(&self.handle),
+        )
+        .await?;
 
         // Wait for capture tasks to flush any initial output (e.g. kepler-exec
         // stderr warnings on macOS). The notify fires when BufferedLogWriter
@@ -515,6 +566,9 @@ impl TestDaemonHarness {
 
         let resolved = ctx.resolved_config.as_ref().ok_or("Service not resolved")?;
 
+        // Get service token for hooks
+        let service_token = self.handle.get_service_token_hex(service_name).await;
+
         // Run on_stop hook
         let (hooks, _lua_code) = resolve_hooks_for_execution(
             &self.handle, service_name, ServiceHookType::PreStop, resolved, &ctx.env,
@@ -550,6 +604,7 @@ impl TestDaemonHarness {
             kepler_gid: None,
             kepler_env_denied: false,
             service_no_new_privileges: None,
+            service_token: service_token.clone(),
         };
 
         run_service_hook(
@@ -565,6 +620,22 @@ impl TestDaemonHarness {
         // Stop the service with the specified signal
         stop_service(service_name, self.handle.clone(), Some(signal)).await?;
 
+        // Run post_stop hook (token is still valid)
+        run_service_hook(
+            &hooks,
+            ServiceHookType::PostStop,
+            service_name,
+            &hook_params,
+            &None,
+            Some(&self.handle),
+        )
+        .await?;
+
+        // Revoke the token guard AFTER post_stop hooks
+        if let Some(guard) = self.handle.take_token_guard(service_name).await {
+            guard.revoke().await;
+        }
+
         Ok(())
     }
 
@@ -577,6 +648,9 @@ impl TestDaemonHarness {
             .ok_or("Service not found")?;
 
         let resolved = ctx.resolved_config.as_ref().ok_or("Service not resolved")?;
+
+        // Get service token for hooks (token is still valid until after post_stop)
+        let service_token = self.handle.get_service_token_hex(service_name).await;
 
         // Run on_stop hook
         let (hooks, _lua_code) = resolve_hooks_for_execution(
@@ -613,6 +687,7 @@ impl TestDaemonHarness {
             kepler_gid: None,
             kepler_env_denied: false,
             service_no_new_privileges: None,
+            service_token: service_token.clone(),
         };
 
         run_service_hook(
@@ -627,6 +702,22 @@ impl TestDaemonHarness {
 
         // Stop the service
         stop_service(service_name, self.handle.clone(), None).await?;
+
+        // Run post_stop hook (token is still valid)
+        run_service_hook(
+            &hooks,
+            ServiceHookType::PostStop,
+            service_name,
+            &hook_params,
+            &None,
+            Some(&self.handle),
+        )
+        .await?;
+
+        // Revoke the token guard AFTER post_stop hooks
+        if let Some(guard) = self.handle.take_token_guard(service_name).await {
+            guard.revoke().await;
+        }
 
         Ok(())
     }
@@ -726,6 +817,7 @@ impl TestDaemonHarness {
                     kepler_gid: None,
                     kepler_env_denied: false,
                     service_no_new_privileges: None,
+            service_token: None,
                 };
 
                 let _ = run_service_hook(
@@ -875,6 +967,7 @@ impl TestDaemonHarness {
                     kepler_gid: None,
                     kepler_env_denied: false,
                     service_no_new_privileges: None,
+            service_token: None,
                 };
 
                 let _ = run_service_hook(
@@ -972,7 +1065,7 @@ impl TestDaemonHarness {
                         store_stdout,
                         store_stderr,
                         output_capture: None,
-                    };
+                        };
                     if let Ok(process_handle) = spawn_service(spawn_params).await {
                         handle
                             .store_process_handle(&event.service_name, process_handle)

@@ -8,7 +8,7 @@ use super::ConfigValue;
 ///
 /// Flags can be combined with pipe syntax: `"on-failure|on-unhealthy"`.
 /// Named aliases: `no` (0), `on-failure`, `on-success`, `on-unhealthy`, `always` (all flags).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RestartPolicy(u8);
 
 impl RestartPolicy {
@@ -70,7 +70,7 @@ impl RestartPolicy {
     }
 
     /// Serialize to a string representation.
-    fn to_string_repr(&self) -> String {
+    fn to_string_repr(self) -> String {
         if self.is_no() {
             return "no".to_string();
         }
@@ -90,10 +90,6 @@ impl RestartPolicy {
         }
         parts.join("|")
     }
-}
-
-impl Default for RestartPolicy {
-    fn default() -> Self { Self(0) }
 }
 
 impl serde::Serialize for RestartPolicy {

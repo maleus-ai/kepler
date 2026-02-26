@@ -54,6 +54,9 @@ pub struct ConfigActor {
 
     // Process and task handles (moved from DaemonState)
     processes: HashMap<String, ProcessHandle>,
+    /// RAII token guards for services with `permissions`.
+    /// Created before pre_start hooks, revoked after post_exit/post_stop hooks.
+    token_guards: HashMap<String, crate::token_store::ServiceTokenGuard>,
     watchers: HashMap<String, FileWatcherHandle>,
     health_checks: HashMap<String, JoinHandle<()>>,
 
@@ -76,6 +79,8 @@ pub struct ConfigActor {
     owner_gid: Option<u32>,
     /// Per-config hardening level (baked at load time)
     hardening: Option<HardeningLevel>,
+    /// Permission ceiling inherited from the caller's token (if token-started)
+    permission_ceiling: Option<std::collections::HashSet<&'static str>>,
 
     /// Subscriber registry for config events (used by Subscribe handler)
     subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ConfigEvent>>>>,
@@ -128,6 +133,7 @@ impl ConfigActor {
         sys_env: Option<HashMap<String, String>>,
         config_owner: Option<(u32, u32)>,
         hardening: Option<HardeningLevel>,
+        permission_ceiling: Option<std::collections::HashSet<&'static str>>,
     ) -> Result<(ConfigActorHandle, Self)> {
         // Canonicalize path first
         let canonical_path = std::fs::canonicalize(&config_path).map_err(|e| {
@@ -166,8 +172,24 @@ impl ConfigActor {
         // Save source path for discovery on daemon restart
         let _ = persistence.save_source_path(&canonical_path);
 
+        // Persist owner_uid early so that even if config parsing fails below,
+        // the owner can still run stop --clean on the broken config.
+        if let Some((uid, _)) = config_owner {
+            let mut early_state = persistence.load_state()
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| crate::state::PersistedConfigState {
+                    services: HashMap::new(),
+                    config_initialized: false,
+                    snapshot_time: chrono::Utc::now().timestamp(),
+                    owner_uid: None,
+                });
+            early_state.owner_uid = Some(uid);
+            let _ = persistence.save_state(&early_state);
+        }
+
         // Check if we have an existing expanded config snapshot
-        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_kepler_env, owner_uid, owner_gid, resolved_hardening, evaluator) =
+        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_kepler_env, owner_uid, owner_gid, resolved_hardening, evaluator, permission_ceiling) =
             if let Ok(Some(snapshot)) = persistence.load_expanded_config() {
                 info!(
                     "Restoring config from snapshot (taken at {})",
@@ -222,6 +244,8 @@ impl ConfigActor {
                 let restored_hardening = snapshot.hardening
                     .as_deref()
                     .and_then(|s| s.parse::<HardeningLevel>().ok());
+                let restored_permission_ceiling: Option<std::collections::HashSet<&'static str>> = snapshot.permission_ceiling
+                    .map(|v| v.into_iter().filter_map(|s| crate::permissions::intern_scope(&s)).collect());
 
                 let config = snapshot.config;
 
@@ -229,11 +253,10 @@ impl ConfigActor {
                 let evaluator = LuaEvaluator::new().map_err(|e| DaemonError::Internal(
                     format!("Failed to create Lua evaluator: {}", e),
                 ))?;
-                if let Some(ref code) = config.lua {
-                    if let Err(e) = evaluator.load_inline(code) {
+                if let Some(ref code) = config.lua
+                    && let Err(e) = evaluator.load_inline(code) {
                         warn!("Failed to load lua: block from snapshot (runtime Lua evals may fail): {}", e);
                     }
-                }
 
                 (
                     config,
@@ -247,18 +270,25 @@ impl ConfigActor {
                     owner_gid,
                     restored_hardening,
                     Some(evaluator),
+                    restored_permission_ceiling,
                 )
             } else {
                 // No snapshot - parse fresh from source
                 info!("Loading config fresh from source (no snapshot)");
 
-                let cli_env = match sys_env {
+                let mut cli_env = match sys_env {
                     Some(env) => env,
                     None => {
                         warn!("No sys_env provided and no snapshot exists; using empty environment");
                         HashMap::new()
                     }
                 };
+                // Defense-in-depth: strip KEPLER_TOKEN from the CLI environment so it
+                // is not baked into the config snapshot. The authoritative strip point
+                // is in the orchestrator's resolve_service_env_and_config (computed_env)
+                // and spawn_service (spec.environment), which cover both fresh loads
+                // and snapshot restores.
+                cli_env.remove("KEPLER_TOKEN");
 
                 // Read original file contents
                 let contents = std::fs::read(&canonical_path).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", canonical_path.display(), e)))?;
@@ -374,6 +404,7 @@ impl ConfigActor {
                     config_owner.map(|(_, gid)| gid),
                     hardening,
                     Some(evaluator),
+                    permission_ceiling,
                 )
             };
 
@@ -394,7 +425,14 @@ impl ConfigActor {
                 .ok().flatten().map(|u| u.name)
         );
 
-        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), dep_watchers.clone(), owner_uid, owner_gid, resolved_hardening, owner_user);
+        // Resolve ACL from config (if kepler.acl is present)
+        let resolved_acl = config.kepler.as_ref()
+            .and_then(|k| k.acl.as_ref())
+            .map(crate::acl::ResolvedAcl::from_config)
+            .transpose()
+            .map_err(|e| DaemonError::Config(format!("ACL resolution failed: {}", e)))?;
+
+        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), dep_watchers.clone(), owner_uid, owner_gid, resolved_hardening, owner_user, resolved_acl, permission_ceiling.clone());
 
         let actor = ConfigActor {
             config_path: canonical_path,
@@ -406,6 +444,7 @@ impl ConfigActor {
             initialized,
             resolved_configs: HashMap::new(),
             processes: HashMap::new(),
+            token_guards: HashMap::new(),
             watchers: HashMap::new(),
             health_checks: HashMap::new(),
             event_senders: HashMap::new(),
@@ -417,6 +456,7 @@ impl ConfigActor {
             owner_uid,
             owner_gid,
             hardening: resolved_hardening,
+            permission_ceiling,
             subscribers,
             dep_watchers,
             evaluator,
@@ -489,8 +529,8 @@ impl ConfigActor {
                                 return;
                             }
                         };
-                        if let Some(ref code) = config_lua {
-                            if let Err(err) = e.load_inline(code) {
+                        if let Some(ref code) = config_lua
+                            && let Err(err) = e.load_inline(code) {
                                 tracing::error!("Failed to load Lua code: {}", err);
                                 while let Ok(req) = rx.try_recv() {
                                     let _ = req.reply.send(Err(DaemonError::Internal(
@@ -499,7 +539,6 @@ impl ConfigActor {
                                 }
                                 return;
                             }
-                        }
                         e
                     }
                 };
@@ -874,6 +913,30 @@ impl ConfigActor {
                 let _ = reply.send(tasks);
             }
 
+            // === Token Guard Commands ===
+            ConfigCommand::StoreTokenGuard {
+                service_name,
+                guard,
+            } => {
+                self.token_guards.insert(service_name, guard);
+            }
+            ConfigCommand::TakeTokenGuard {
+                service_name,
+                reply,
+            } => {
+                let guard = self.token_guards.remove(&service_name);
+                let _ = reply.send(guard);
+            }
+            ConfigCommand::GetServiceTokenHex {
+                service_name,
+                reply,
+            } => {
+                let hex = self.token_guards.get(&service_name)
+                    .map(|g| g.token_hex().ok())
+                    .flatten();
+                let _ = reply.send(hex);
+            }
+
             // === Task Handle Commands ===
             ConfigCommand::StoreTaskHandle {
                 service_name,
@@ -1053,6 +1116,7 @@ impl ConfigActor {
                         owner_uid: self.owner_uid,
                         owner_gid: self.owner_gid,
                         hardening: self.hardening.map(|h| h.to_string()),
+                        permission_ceiling: self.permission_ceiling.as_ref().map(|s| s.iter().map(|s| s.to_string()).collect()),
                     };
                     if let Err(e) = self.persistence.save_expanded_config(&snapshot) {
                         warn!("Failed to re-save snapshot after MergeKeplerEnv: {}", e);
@@ -1098,6 +1162,7 @@ impl ConfigActor {
             owner_uid: self.owner_uid,
             owner_gid: self.owner_gid,
             hardening: self.hardening.map(|h| h.to_string()),
+            permission_ceiling: self.permission_ceiling.as_ref().map(|s| s.iter().map(|s| s.to_string()).collect()),
         };
 
         // Save the snapshot
@@ -1122,6 +1187,7 @@ impl ConfigActor {
             services,
             config_initialized: self.initialized,
             snapshot_time: chrono::Utc::now().timestamp(),
+            owner_uid: self.owner_uid,
         };
 
         self.persistence.save_state(&state)

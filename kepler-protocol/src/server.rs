@@ -19,14 +19,6 @@ use crate::{
     },
 };
 
-/// Resolve the GID of the "kepler" group.
-fn resolve_kepler_group_gid() -> std::result::Result<u32, ServerError> {
-    nix::unistd::Group::from_name("kepler")
-        .map_err(|e| ServerError::GroupResolution(format!("failed to look up kepler group: {}", e)))?
-        .map(|g| g.gid.as_raw())
-        .ok_or_else(|| ServerError::GroupResolution("kepler group does not exist".into()))
-}
-
 pub type Result<T> = std::result::Result<T, ServerError>;
 pub type ShutdownTx = mpsc::Sender<()>;
 
@@ -34,6 +26,9 @@ pub use kepler_unix::credentials::PeerCredentials;
 
 /// Bounded channel capacity for the per-connection writer task.
 const WRITER_CHANNEL_CAPACITY: usize = 256;
+
+/// Default maximum number of concurrent connections.
+const DEFAULT_MAX_CONNECTIONS: usize = 1024;
 
 /// Sender for progress events from a request handler back to the client.
 ///
@@ -122,6 +117,7 @@ where
     shutdown_tx: mpsc::Sender<()>,
     shutdown_rx: mpsc::Receiver<()>,
     on_disconnect: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    connection_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 // Re-export Request so the handler signature compiles
@@ -140,6 +136,7 @@ where
             shutdown_tx,
             shutdown_rx,
             on_disconnect: None,
+            connection_semaphore: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONNECTIONS)),
         })
     }
 
@@ -182,29 +179,19 @@ where
             source: e,
         })?;
 
-        // Set socket permissions to owner+group (0o660) for kepler group access
+        // Set socket permissions to world-accessible (0o666).
+        // Auth is handled at the protocol level: kepler group members get access scoped
+        // by ownership and ACL, spawned processes are identified by PID, others are rejected.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(
                 &self.socket_path,
-                std::fs::Permissions::from_mode(0o660),
+                std::fs::Permissions::from_mode(0o666),
             )
             .map_err(|e| ServerError::SocketPermissions {
                 socket_path: self.socket_path.clone(),
                 source: e,
-            })?;
-
-            // chown socket to root:kepler
-            let kepler_gid = resolve_kepler_group_gid()?;
-            nix::unistd::chown(
-                &self.socket_path,
-                Some(nix::unistd::Uid::from_raw(0)),
-                Some(nix::unistd::Gid::from_raw(kepler_gid)),
-            )
-            .map_err(|e| ServerError::SocketOwnership {
-                socket_path: self.socket_path.clone(),
-                source: e.into(),
             })?;
         }
 
@@ -213,6 +200,13 @@ where
                 result = listener.accept() => {
                     match result {
                         Ok((stream,_)) => {
+                            let permit = match self.connection_semaphore.clone().acquire_owned().await {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    error!("Connection semaphore closed");
+                                    break;
+                                }
+                            };
                             let shutdown_tx = self.shutdown_tx.clone();
                             let handler = Arc::clone(&self.handler);
                             let on_disconnect = self.on_disconnect.clone();
@@ -222,6 +216,7 @@ where
                                 if let Err(e) = handle_client(handler, stream, shutdown_tx, connection_id, on_disconnect).await {
                                     debug!("Client handler error: {}", e);
                                 }
+                                drop(permit);
                             });
                         },
                         Err(e) => {
@@ -253,38 +248,22 @@ where
 {
     debug!("Client connected (connection_id={})", connection_id);
 
-    // Verify peer credentials and capture uid/gid for the handler
+    // Extract peer credentials (uid/gid/pid) for the handler.
+    // Auth decisions (kepler group check, PID-based token lookup) are made by the
+    // daemon's auth gate, not here.
     let peer_credentials;
     #[cfg(unix)]
     {
         let cred = stream.peer_cred().map_err(ServerError::PeerCredentials)?;
-
-        // Root always allowed, otherwise check kepler group membership
-        if cred.uid() == 0 {
-            debug!("Peer credentials verified: root (UID 0)");
-        } else {
-            let kepler_gid = resolve_kepler_group_gid()?;
-            let in_group = cred.gid() == kepler_gid
-                || kepler_unix::groups::uid_has_gid(cred.uid(), kepler_gid);
-
-            if !in_group {
-                debug!(
-                    "Unauthorized connection attempt: UID {} not in kepler group (GID {})",
-                    cred.uid(),
-                    kepler_gid
-                );
-                return Err(ServerError::Unauthorized {
-                    client_uid: cred.uid(),
-                    kepler_gid,
-                });
-            }
-            debug!("Peer credentials verified: UID {} in kepler group", cred.uid());
-        }
+        let pid = cred.pid().map(|p| p as u32);
+        debug!("Peer credentials: UID {}, GID {}, PID {:?}", cred.uid(), cred.gid(), pid);
 
         peer_credentials = PeerCredentials {
             uid: cred.uid(),
             gid: cred.gid(),
+            pid,
             connection_id,
+            token: None,
         };
     }
 
@@ -372,13 +351,16 @@ where
         let request = envelope.request;
         debug!("Received request id={}: {:?}", request_id, request);
 
-        // Spawn handler task
+        // Spawn handler task — inject per-request bearer token into peer credentials
         let handler = Arc::clone(&handler);
         let shutdown_tx = shutdown_tx.clone();
         let write_tx = write_tx.clone();
+        let request_token = envelope.token;
         tokio::spawn(async move {
+            let mut peer = peer_credentials;
+            peer.token = request_token;
             let progress_sender = ProgressSender::new(write_tx.clone(), request_id);
-            let response = handler(request, shutdown_tx, progress_sender, peer_credentials).await;
+            let response = handler(request, shutdown_tx, progress_sender, peer).await;
             let msg = ServerMessage::Response {
                 id: request_id,
                 response,

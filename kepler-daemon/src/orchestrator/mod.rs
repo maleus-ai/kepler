@@ -48,6 +48,7 @@ use crate::state::ServiceStatus;
 use crate::watcher::{spawn_file_watcher, FileChangeEvent};
 use kepler_protocol::protocol::PrunedConfigInfo;
 use kepler_protocol::server::ProgressSender;
+use crate::token_store::{SharedTokenStore, TokenContext};
 
 /// Context for post-startup work, bundling all parameters into a single struct.
 struct StartupContext<'a> {
@@ -75,6 +76,7 @@ pub struct ServiceOrchestrator {
     cursor_manager: Arc<CursorManager>,
     hardening: HardeningLevel,
     kepler_gid: Option<u32>,
+    token_store: SharedTokenStore,
 }
 
 impl ServiceOrchestrator {
@@ -86,6 +88,7 @@ impl ServiceOrchestrator {
         cursor_manager: Arc<CursorManager>,
         hardening: HardeningLevel,
         kepler_gid: Option<u32>,
+        token_store: SharedTokenStore,
     ) -> Self {
         Self {
             registry,
@@ -94,6 +97,7 @@ impl ServiceOrchestrator {
             cursor_manager,
             hardening,
             kepler_gid,
+            token_store,
         }
     }
 
@@ -129,6 +133,7 @@ impl ServiceOrchestrator {
     ///
     /// Runs the full pipeline synchronously and responds when complete.
     /// The CLI decides whether to await the response or fire-and-forget.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_services(
         &self,
         config_path: &Path,
@@ -139,6 +144,7 @@ impl ServiceOrchestrator {
         no_deps: bool,
         override_envs: Option<HashMap<String, String>>,
         hardening: Option<HardeningLevel>,
+        permission_ceiling: Option<HashSet<&'static str>>,
     ) -> Result<String, OrchestratorError> {
         if let Some(fd_count) = crate::fd_count::count_open_fds() {
             debug!("FD count at start_services entry: {}", fd_count);
@@ -147,7 +153,7 @@ impl ServiceOrchestrator {
         // Get or create the config actor
         let handle = self
             .registry
-            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening)
+            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening, permission_ceiling)
             .await?;
 
         // Merge override envs into stored kepler_env if provided
@@ -373,13 +379,12 @@ impl ServiceOrchestrator {
             Err(e) => {
                 // Write error to service stderr log so it's visible via `kepler logs`.
                 // Skip for hook errors — they already wrote to stderr in run_service_hook.
-                if !matches!(e, OrchestratorError::HookFailed(_)) {
-                    if let Some(mut log_config) = handle.get_log_config().await {
+                if !matches!(e, OrchestratorError::HookFailed(_))
+                    && let Some(mut log_config) = handle.get_log_config().await {
                         log_config.log_notify = Some(self.cursor_manager.get_log_notify(handle.config_path()));
                         let mut writer = BufferedLogWriter::from_config(&log_config, service_name, LogStream::Stderr);
                         writer.write(&e.to_string());
                     }
-                }
                 if let Err(err) = handle.set_service_status_with_reason(
                     service_name, ServiceStatus::Failed, None, Some(e.to_string()),
                 ).await {
@@ -475,13 +480,12 @@ impl ServiceOrchestrator {
         {
             if ctx.service_config.user_identity != Some(false) {
                 let pre_user = ctx.service_config.user.as_static().and_then(|v| v.clone());
-                if let Some(ref user_spec) = pre_user {
-                    if let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
+                if let Some(ref user_spec) = pre_user
+                    && let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
                         for (key, value) in user_env {
                             full_env.insert(key, value);
                         }
                     }
-                }
             }
         }
 
@@ -575,14 +579,17 @@ impl ServiceOrchestrator {
             svc_ctx.env.clone()
         };
 
+        // Strip KEPLER_TOKEN so hooks/healthchecks don't inherit a stale caller token.
+        // spawn_service() will inject a fresh token for services with `permissions`.
+        computed_env.remove("KEPLER_TOKEN");
+
         // Inject user-specific env vars (HOME, USER, LOGNAME, SHELL)
         #[cfg(unix)]
         {
-            if resolved.user_identity.unwrap_or(true) {
-                if let Some(ref user_spec) = resolved.user {
+            if resolved.user_identity.unwrap_or(true)
+                && let Some(ref user_spec) = resolved.user {
                     inject_user_identity(&mut computed_env, user_spec);
                 }
-            }
         }
 
         // Resolve working_dir
@@ -633,9 +640,17 @@ impl ServiceOrchestrator {
         // Emit Start event
         handle.emit_event(service_name, ServiceEvent::Start).await;
 
+        // Create token guard before pre_start hooks so hooks can use the token.
+        // The guard is stored in the config actor and revoked after post_exit/post_stop.
+        self.create_service_token_guard(handle, service_name, &resolved).await?;
+
         // Run pre_start hook
-        self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, progress, Some(handle))
-            .await?;
+        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, progress, Some(handle))
+            .await
+        {
+            self.revoke_service_token_guard(handle, service_name).await;
+            return Err(e);
+        }
 
         // Apply on_start log retention
         self.apply_retention(handle, service_name, &ctx, LifecycleEvent::Start)
@@ -649,6 +664,8 @@ impl ServiceOrchestrator {
                 service_name,
                 state.map(|s| s.status)
             );
+            // Startup cancelled — revoke the token guard
+            self.revoke_service_token_guard(handle, service_name).await;
             return Ok(());
         }
 
@@ -767,13 +784,12 @@ impl ServiceOrchestrator {
         {
             if ctx.service_config.user_identity != Some(false) {
                 let pre_user = ctx.service_config.user.as_static().and_then(|v| v.clone());
-                if let Some(ref user_spec) = pre_user {
-                    if let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
+                if let Some(ref user_spec) = pre_user
+                    && let Ok(user_env) = crate::user::resolve_user_env(user_spec) {
                         for (key, value) in user_env {
                             full_env.insert(key, value);
                         }
                     }
-                }
             }
         }
 
@@ -848,14 +864,17 @@ impl ServiceOrchestrator {
             svc_ctx.env.clone()
         };
 
+        // Strip KEPLER_TOKEN so hooks/healthchecks don't inherit a stale caller token.
+        // spawn_service() will inject a fresh token for services with `permissions`.
+        computed_env.remove("KEPLER_TOKEN");
+
         // Inject user-specific env vars (HOME, USER, LOGNAME, SHELL)
         #[cfg(unix)]
         {
-            if resolved.user_identity.unwrap_or(true) {
-                if let Some(ref user_spec) = resolved.user {
+            if resolved.user_identity.unwrap_or(true)
+                && let Some(ref user_spec) = resolved.user {
                     inject_user_identity(&mut computed_env, user_spec);
                 }
-            }
         }
 
         let working_dir = resolved
@@ -1166,6 +1185,9 @@ impl ServiceOrchestrator {
                         warn!("Hook post_stop failed for {}: {}", service_name, e);
                     }
 
+                // Revoke token guard after post_stop hook
+                self.revoke_service_token_guard(&handle, service_name).await;
+
                 stopped.push(service_name.clone());
                 pass_stopped = true;
             }
@@ -1288,6 +1310,9 @@ impl ServiceOrchestrator {
                     }
                 }
             };
+
+            // Revoke all tokens for this config before unloading
+            self.token_store.revoke_for_config(config_path).await;
 
             // Drop all cursors holding file handles into this config's log directory
             self.cursor_manager.invalidate_config_cursors(config_path);
@@ -1453,6 +1478,8 @@ impl ServiceOrchestrator {
                 warn!("Hook post_stop failed for {}: {}", service_name, e);
             }
 
+            // Revoke old token guard after post_stop hook
+            self.revoke_service_token_guard(&handle, service_name).await;
         }
 
         // Small delay between stop and start phases
@@ -1474,9 +1501,18 @@ impl ServiceOrchestrator {
             // Emit Start event (restart includes a start)
             handle.emit_event(service_name, ServiceEvent::Start).await;
 
+            // Create token guard before pre_start hooks
+            if let Some(resolved) = ctx.resolved_config.as_ref() {
+                if let Err(e) = self.create_service_token_guard(&handle, service_name, resolved).await {
+                    error!("Failed to create token guard for {}, skipping restart: {}", service_name, e);
+                    continue;
+                }
+            }
+
             // Run pre_start hook
             if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, &None, Some(&handle)).await {
                 warn!("Hook pre_start failed for {}: {}", service_name, e);
+                self.revoke_service_token_guard(&handle, service_name).await;
                 continue;
             }
 
@@ -1546,6 +1582,7 @@ impl ServiceOrchestrator {
         config_owner: Option<(u32, u32)>,
         progress: Option<ProgressSender>,
         hardening: Option<HardeningLevel>,
+        permission_ceiling: Option<HashSet<&'static str>>,
     ) -> Result<String, OrchestratorError> {
         info!("Recreating config for {:?}", config_path);
 
@@ -1561,6 +1598,9 @@ impl ServiceOrchestrator {
                 warn!("Failed to clear snapshot: {}", e);
             }
 
+            // Revoke all tokens for this config before unloading
+            self.token_store.revoke_for_config(config_path).await;
+
             // Unload the config actor completely
             self.registry.unload(&config_path.to_path_buf()).await;
         }
@@ -1568,7 +1608,7 @@ impl ServiceOrchestrator {
         // Re-load config with new sys_env (re-reads source, re-expands env vars)
         let handle = self
             .registry
-            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening)
+            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening, permission_ceiling)
             .await?;
 
         // Persist the rebaked config snapshot
@@ -1577,7 +1617,7 @@ impl ServiceOrchestrator {
         }
 
         // Start all services
-        self.start_services(config_path, &[], sys_env, config_owner, progress, false, None, hardening).await?;
+        self.start_services(config_path, &[], sys_env, config_owner, progress, false, None, hardening, None).await?;
 
         Ok(String::new())
     }
@@ -1663,6 +1703,9 @@ impl ServiceOrchestrator {
             warn!("Hook post_stop failed for {}: {}", service_name, e);
         }
 
+        // Revoke old token guard after post_stop hook
+        self.revoke_service_token_guard(&handle, service_name).await;
+
         // Small delay between stop and start
         tokio::time::sleep(RESTART_DELAY).await;
 
@@ -1672,9 +1715,18 @@ impl ServiceOrchestrator {
         // Emit Start event (restart includes a start)
         handle.emit_event(service_name, ServiceEvent::Start).await;
 
+        // Create new token guard before pre_start hooks
+        if let Some(resolved) = ctx.resolved_config.as_ref() {
+            self.create_service_token_guard(&handle, service_name, resolved).await?;
+        }
+
         // Run pre_start hook (runs on every start, including restarts)
-        self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, &None, Some(&handle))
-            .await?;
+        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, &None, Some(&handle))
+            .await
+        {
+            self.revoke_service_token_guard(&handle, service_name).await;
+            return Err(e);
+        }
 
         // Apply on_start log retention
         self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Start)
@@ -1747,13 +1799,16 @@ impl ServiceOrchestrator {
             warn!("Failed to record process exit for {}: {}", service_name, e);
         }
 
-        // Run post_exit hook
+        // Run post_exit hook (token still valid — revoked below)
         if let Err(e) = self
             .run_service_hook(&ctx, service_name, ServiceHookType::PostExit, &None, Some(&handle))
             .await
         {
             warn!("Hook post_exit failed for {}: {}", service_name, e);
         }
+
+        // Revoke token guard AFTER post_exit hook so hooks can use the token
+        self.revoke_service_token_guard(&handle, service_name).await;
 
         // Apply on_success/on_failure log retention
         // (on_exit is sugar: get_on_success/get_on_failure fall back to on_exit)
@@ -1833,8 +1888,8 @@ impl ServiceOrchestrator {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
             let restart_policy = ctx.resolved_config.as_ref()
-                .map(|c| c.restart.policy().clone())
-                .unwrap_or_else(|| ctx.service_config.restart.as_static().cloned().unwrap_or_default().policy().clone());
+                .map(|c| *c.restart.policy())
+                .unwrap_or_else(|| *ctx.service_config.restart.as_static().cloned().unwrap_or_default().policy());
             info!(
                 "Restarting service {} (policy: {:?})",
                 service_name,
@@ -1844,6 +1899,17 @@ impl ServiceOrchestrator {
             // Suppress file watcher before hooks run so that hook file modifications
             // don't queue spurious restart events.
             handle.suppress_file_watcher(service_name).await;
+
+            // Create new token guard before pre_restart/pre_start hooks
+            if let Some(resolved) = ctx.resolved_config.as_ref() {
+                if let Err(e) = self.create_service_token_guard(&handle, service_name, resolved).await {
+                    error!("Failed to create token guard for {}, aborting restart: {}", service_name, e);
+                    let _ = handle
+                        .set_service_status(service_name, ServiceStatus::Failed)
+                        .await;
+                    return Ok(());
+                }
+            }
 
             // Run pre_restart hook
             if let Err(e) = self
@@ -2021,17 +2087,15 @@ impl ServiceOrchestrator {
     pub async fn handle_file_change(&self, event: FileChangeEvent) {
         // Check if the service is still active before restarting.
         // A file change event may have been enqueued before the service was stopped.
-        if let Some(handle) = self.registry.get(&event.config_path) {
-            if let Some(state) = handle.get_service_state(&event.service_name).await {
-                if !state.status.is_active() {
-                    debug!(
-                        "Ignoring file change for {} (status: {})",
-                        event.service_name, state.status
-                    );
-                    return;
-                }
+        if let Some(handle) = self.registry.get(&event.config_path)
+            && let Some(state) = handle.get_service_state(&event.service_name).await
+            && !state.status.is_active() {
+                debug!(
+                    "Ignoring file change for {} (status: {})",
+                    event.service_name, state.status
+                );
+                return;
             }
-        }
 
         info!(
             "File change detected for {}, restarting. Matched files: {:?}",
@@ -2157,6 +2221,13 @@ impl ServiceOrchestrator {
             HashMap::new()
         };
 
+        // Fetch service token from stored guard (if any)
+        let service_token = if let Some(h) = handle {
+            h.get_service_token_hex(service_name).await
+        } else {
+            None
+        };
+
         let kepler_env_denied = config.as_ref().map(|c| c.is_kepler_env_denied()).unwrap_or(false);
         let mut hook_params = ServiceHookParams {
             working_dir: &ctx.working_dir,
@@ -2181,6 +2252,7 @@ impl ServiceOrchestrator {
             kepler_gid: self.kepler_gid,
             kepler_env_denied,
             service_no_new_privileges: resolved.no_new_privileges,
+            service_token,
         };
 
         // Read prior hook outputs from disk and set output_max_size
@@ -2297,6 +2369,77 @@ impl ServiceOrchestrator {
         }
     }
 
+    /// Create a token guard for a service with `permissions`.
+    ///
+    /// Generates a bearer token, registers it in the token store, and stores the
+    /// RAII guard in the config actor. Returns Ok(()) even if the service has no
+    /// permissions (no guard is created in that case).
+    ///
+    /// Call this BEFORE pre_start hooks so hooks can access the token.
+    /// The guard is revoked AFTER post_exit/post_stop hooks via `take_token_guard().revoke()`.
+    async fn create_service_token_guard(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        resolved: &crate::config::ServiceConfig,
+    ) -> Result<(), OrchestratorError> {
+        if let Some(permissions) = &resolved.permissions {
+            let allow_set: HashSet<String> = permissions.allow.iter().cloned().collect();
+            let expanded = crate::permissions::expand_scopes(&allow_set)
+                .map_err(|e| OrchestratorError::SpawnFailed(
+                    format!("invalid permission scopes: {}", e),
+                ))?;
+
+            // Apply permission ceiling: child cannot exceed caller's capabilities
+            let effective_allow = match handle.permission_ceiling() {
+                Some(ceiling) => expanded.intersection(ceiling).copied().collect(),
+                None => expanded,
+            };
+
+            // Determine max_hardening from permissions.hardening or effective config hardening
+            let max_hardening = match permissions.hardening.as_deref() {
+                Some(s) => s.parse::<HardeningLevel>().map_err(|e| {
+                    OrchestratorError::SpawnFailed(
+                        format!("invalid permissions.hardening value: {}", e),
+                    )
+                })?,
+                None => self.effective_hardening(handle),
+            };
+
+            let token_ctx = TokenContext {
+                allow: effective_allow,
+                max_hardening,
+                service: service_name.to_string(),
+                config_path: handle.config_path().to_path_buf(),
+            };
+
+            let guard = crate::token_store::ServiceTokenGuard::new(
+                self.token_store.clone(),
+                token_ctx,
+            )
+            .await
+            .map_err(|e| OrchestratorError::SpawnFailed(
+                format!("failed to generate auth token: {}", e),
+            ))?;
+
+            handle.store_token_guard(service_name, guard).await;
+        }
+        Ok(())
+    }
+
+    /// Revoke and remove the token guard for a service (if any).
+    ///
+    /// Call this AFTER post_exit/post_stop hooks so hooks can still use the token.
+    async fn revoke_service_token_guard(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+    ) {
+        if let Some(guard) = handle.take_token_guard(service_name).await {
+            guard.revoke().await;
+        }
+    }
+
     /// Spawn a service process
     async fn spawn_service(
         &self,
@@ -2332,32 +2475,20 @@ impl ServiceOrchestrator {
         );
         let clear_env = !inherit;
 
-        // Compute groups, stripping kepler GID when hardening is enabled
+        // Compute effective groups, stripping kepler GID to prevent spawned
+        // processes from inheriting daemon socket access via group membership.
         #[cfg(unix)]
-        let groups = if self.effective_hardening(handle) >= HardeningLevel::NoRoot
-            && resolved.groups.is_empty()
-            && resolved.user.is_some()
-        {
-            if let Some(kepler_gid) = self.kepler_gid {
-                let user_spec = resolved.user.as_deref().unwrap();
-                match crate::user::compute_groups_excluding(user_spec, kepler_gid) {
-                    Ok(g) => g,
-                    Err(e) => {
-                        warn!("Failed to compute groups for {}: {}, using empty groups", service_name, e);
-                        resolved.groups.clone()
-                    }
-                }
-            } else {
-                resolved.groups.clone()
-            }
-        } else {
-            resolved.groups.clone()
-        };
+        let groups = crate::user::effective_groups(
+            &resolved.groups,
+            resolved.user.as_deref(),
+            self.kepler_gid,
+            &format!("service '{}'", service_name),
+        );
         #[cfg(not(unix))]
         let groups = resolved.groups.clone();
 
         let no_new_privileges = resolved.no_new_privileges.unwrap_or(true);
-        let spec = crate::process::CommandSpec::with_all_options(
+        let mut spec = crate::process::CommandSpec::with_all_options(
             resolved.command.clone(),
             ctx.working_dir.clone(),
             ctx.env.clone(),
@@ -2367,6 +2498,16 @@ impl ServiceOrchestrator {
             clear_env,
             no_new_privileges,
         );
+
+        // Defensive: ensure no stale KEPLER_TOKEN reaches the process.
+        // The guard-managed token (if any) is injected below.
+        spec.environment.remove("KEPLER_TOKEN");
+
+        // Inject the token from the stored guard (created by create_service_token_guard
+        // before pre_start hooks). The guard handles registration and RAII revocation.
+        if let Some(token_hex) = handle.get_service_token_hex(service_name).await {
+            spec.environment.insert("KEPLER_TOKEN".to_string(), token_hex);
+        }
 
         // Resolve store settings
         let service_logs = resolved.logs.as_ref();
@@ -2386,9 +2527,15 @@ impl ServiceOrchestrator {
             output_capture,
         };
 
-        let process_handle = spawn_service(spawn_params)
-            .await
-            .map_err(|e| OrchestratorError::SpawnFailed(e.to_string()))?;
+        let process_handle = match spawn_service(spawn_params).await {
+            Ok(ph) => ph,
+            Err(e) => {
+                // Spawn failed — revoke the token guard (RAII Drop would also handle
+                // this, but explicit revocation is cleaner and avoids the warning).
+                self.revoke_service_token_guard(handle, service_name).await;
+                return Err(OrchestratorError::SpawnFailed(e.to_string()));
+            }
+        };
 
         // Store process handle
         handle.store_process_handle(service_name, process_handle).await;
@@ -2540,10 +2687,11 @@ impl ServiceOrchestrator {
                 continue;
             }
 
-            // Unload from registry BEFORE deleting state directory
+            // Revoke tokens and unload from registry BEFORE deleting state directory
             // Use the ORIGINAL source path which matches the registry key
             if !is_orphaned
                 && let Ok(canonical) = PathBuf::from(&original_path).canonicalize() {
+                    self.token_store.revoke_for_config(&canonical).await;
                     self.registry.unload(&canonical).await;
                 }
 

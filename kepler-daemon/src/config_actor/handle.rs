@@ -42,10 +42,16 @@ pub struct ConfigActorHandle {
     hardening: Option<HardeningLevel>,
     /// Resolved username for owner_uid (reverse-lookup from passwd)
     owner_user: Option<String>,
+    /// Resolved ACL (if `kepler.acl` section is present)
+    acl: Option<crate::acl::ResolvedAcl>,
+    /// Permission ceiling inherited from the caller's token (if token-started).
+    /// When set, child tokens cannot exceed these scopes.
+    permission_ceiling: Option<std::collections::HashSet<&'static str>>,
 }
 
 impl ConfigActorHandle {
     /// Create a new handle (called by ConfigActor::create)
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         config_path: PathBuf,
         config_hash: String,
@@ -56,6 +62,8 @@ impl ConfigActorHandle {
         owner_gid: Option<u32>,
         hardening: Option<HardeningLevel>,
         owner_user: Option<String>,
+        acl: Option<crate::acl::ResolvedAcl>,
+        permission_ceiling: Option<std::collections::HashSet<&'static str>>,
     ) -> Self {
         Self {
             config_path,
@@ -67,6 +75,8 @@ impl ConfigActorHandle {
             owner_gid,
             hardening,
             owner_user,
+            acl,
+            permission_ceiling,
         }
     }
 
@@ -98,6 +108,16 @@ impl ConfigActorHandle {
     /// Get the resolved username for the config owner (if available)
     pub fn owner_user(&self) -> Option<&str> {
         self.owner_user.as_deref()
+    }
+
+    /// Get the resolved ACL for this config (if present)
+    pub fn acl(&self) -> Option<&crate::acl::ResolvedAcl> {
+        self.acl.as_ref()
+    }
+
+    /// Get the permission ceiling (if this config was started by a token)
+    pub fn permission_ceiling(&self) -> Option<&std::collections::HashSet<&'static str>> {
+        self.permission_ceiling.as_ref()
     }
 
     /// Subscribe to config events (status changes, Ready, Quiescent).
@@ -799,6 +819,57 @@ impl ConfigActorHandle {
             .is_err()
         {
             warn!("Config actor closed, cannot send RemoveProcessHandle");
+        }
+        reply_rx.await.ok().flatten()
+    }
+
+    // === Token Guard Methods ===
+
+    /// Store a token guard for a service (created before pre_start hooks).
+    pub async fn store_token_guard(&self, service_name: &str, guard: crate::token_store::ServiceTokenGuard) {
+        if self
+            .tx
+            .send(ConfigCommand::StoreTokenGuard {
+                service_name: service_name.to_string(),
+                guard,
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send StoreTokenGuard");
+        }
+    }
+
+    /// Take the token guard for a service (for explicit revocation after hooks complete).
+    pub async fn take_token_guard(&self, service_name: &str) -> Option<crate::token_store::ServiceTokenGuard> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ConfigCommand::TakeTokenGuard {
+                service_name: service_name.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send TakeTokenGuard");
+        }
+        reply_rx.await.ok().flatten()
+    }
+
+    /// Get the token hex for a service (if a guard is stored).
+    pub async fn get_service_token_hex(&self, service_name: &str) -> Option<String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ConfigCommand::GetServiceTokenHex {
+                service_name: service_name.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetServiceTokenHex");
         }
         reply_rx.await.ok().flatten()
     }
