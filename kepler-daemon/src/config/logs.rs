@@ -67,6 +67,25 @@ pub struct LogRetentionConfig {
     pub on_restart: Option<LogRetention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_exit: Option<LogRetention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_success: Option<LogRetention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<LogRetention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_skipped: Option<LogRetention>,
+}
+
+impl LogRetentionConfig {
+    /// Validate mutual exclusivity: `on_exit` cannot be used alongside `on_success` or `on_failure`.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.on_exit.is_some() && self.on_success.is_some() {
+            return Err("'on_exit' and 'on_success' are mutually exclusive in log retention config".to_string());
+        }
+        if self.on_exit.is_some() && self.on_failure.is_some() {
+            return Err("'on_exit' and 'on_failure' are mutually exclusive in log retention config".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Log configuration
@@ -109,6 +128,23 @@ impl LogConfig {
     /// Get on_exit retention from nested retention config
     pub fn get_on_exit(&self) -> Option<LogRetention> {
         self.retention.as_ref().and_then(|r| r.on_exit)
+    }
+
+    /// Get on_success retention from nested retention config.
+    /// Falls back to `on_exit` (which is sugar for setting both on_success and on_failure).
+    pub fn get_on_success(&self) -> Option<LogRetention> {
+        self.retention.as_ref().and_then(|r| r.on_success.or(r.on_exit))
+    }
+
+    /// Get on_failure retention from nested retention config.
+    /// Falls back to `on_exit` (which is sugar for setting both on_success and on_failure).
+    pub fn get_on_failure(&self) -> Option<LogRetention> {
+        self.retention.as_ref().and_then(|r| r.on_failure.or(r.on_exit))
+    }
+
+    /// Get on_skipped retention from nested retention config
+    pub fn get_on_skipped(&self) -> Option<LogRetention> {
+        self.retention.as_ref().and_then(|r| r.on_skipped)
     }
 
     /// Parse max_size into bytes. Returns None if max_size is not specified (unbounded).
