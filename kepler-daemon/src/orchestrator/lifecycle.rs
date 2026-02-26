@@ -13,4 +13,10 @@ pub enum LifecycleEvent {
     Restart,
     /// Process exit - post_exit hook, on_exit retention + auto-restart logic
     Exit,
+    /// Process exited with code 0 - on_success retention
+    ExitSuccess,
+    /// Process exited with non-zero code (or signal) - on_failure retention
+    ExitFailure,
+    /// Service skipped due to `if:` condition - on_skipped retention
+    Skipped,
 }

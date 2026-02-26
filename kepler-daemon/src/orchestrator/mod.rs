@@ -617,6 +617,9 @@ impl ServiceOrchestrator {
             ).await {
                 warn!("Failed to set {} to Skipped: {}", service_name, err);
             }
+            // Apply on_skipped log retention
+            self.apply_retention(handle, service_name, &ctx, LifecycleEvent::Skipped)
+                .await;
             return Ok(());
         }
 
@@ -1752,8 +1755,14 @@ impl ServiceOrchestrator {
             warn!("Hook post_exit failed for {}: {}", service_name, e);
         }
 
-        // Apply on_exit log retention
-        self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Exit)
+        // Apply on_success/on_failure log retention
+        // (on_exit is sugar: get_on_success/get_on_failure fall back to on_exit)
+        let exit_event = if exit_code == Some(0) {
+            LifecycleEvent::ExitSuccess
+        } else {
+            LifecycleEvent::ExitFailure
+        };
+        self.apply_retention(&handle, service_name, &ctx, exit_event)
             .await;
 
         // Guard against stale exit events.
@@ -2257,10 +2266,24 @@ impl ServiceOrchestrator {
                 |l| l.get_on_restart(),
                 LogRetention::Retain,
             ),
-            LifecycleEvent::Exit => resolve_log_retention(
+            // on_exit is sugar for on_success + on_failure; resolved via their getters
+            LifecycleEvent::Exit => return,
+            LifecycleEvent::ExitSuccess => resolve_log_retention(
                 service_logs,
                 ctx.global_log_config.as_ref(),
-                |l| l.get_on_exit(),
+                |l| l.get_on_success(),
+                LogRetention::Retain,
+            ),
+            LifecycleEvent::ExitFailure => resolve_log_retention(
+                service_logs,
+                ctx.global_log_config.as_ref(),
+                |l| l.get_on_failure(),
+                LogRetention::Retain,
+            ),
+            LifecycleEvent::Skipped => resolve_log_retention(
+                service_logs,
+                ctx.global_log_config.as_ref(),
+                |l| l.get_on_skipped(),
                 LogRetention::Retain,
             ),
             LifecycleEvent::Init => return, // No retention for init

@@ -1421,6 +1421,15 @@ impl KeplerConfig {
                     ));
                 }
 
+            // Validate log retention mutual exclusivity
+            if let Some(log_config) = raw.logs.as_static() {
+                if let Some(retention) = log_config.as_ref().and_then(|l| l.retention.as_ref()) {
+                    if let Err(msg) = retention.validate() {
+                        errors.push(format!("Service '{}': {}", name, msg));
+                    }
+                }
+            }
+
             // Validate healthcheck command/run
             if let Some(hc) = raw.healthcheck.as_static().and_then(|h| h.as_ref()) {
                 if hc.has_command() && hc.has_run() {
@@ -1431,6 +1440,15 @@ impl KeplerConfig {
                     errors.push(format!(
                         "Service '{}': healthcheck requires either 'command' or 'run'", name
                     ));
+                }
+            }
+        }
+
+        // Validate global log retention mutual exclusivity
+        if let Some(global_logs) = self.global_logs() {
+            if let Some(retention) = global_logs.retention.as_ref() {
+                if let Err(msg) = retention.validate() {
+                    errors.push(format!("Global logs: {}", msg));
                 }
             }
         }

@@ -162,13 +162,17 @@ async fn test_service_log_config_overrides_global() {
 async fn test_all_log_retention_events() {
     let temp_dir = TempDir::new().unwrap();
 
+    // Use on_success/on_failure instead of on_exit to avoid mutual exclusivity error
     let log_config = LogConfig {
         store: None,
         retention: Some(LogRetentionConfig {
             on_stop: Some(LogRetention::Retain),
             on_start: Some(LogRetention::Clear),
             on_restart: Some(LogRetention::Retain),
-            on_exit: Some(LogRetention::Retain),
+            on_success: Some(LogRetention::Clear),
+            on_failure: Some(LogRetention::Retain),
+            on_skipped: Some(LogRetention::Clear),
+            ..Default::default()
         }),
         max_size: ConfigValue::default(),
         buffer_size: ConfigValue::default(),
@@ -198,7 +202,10 @@ async fn test_all_log_retention_events() {
     assert_eq!(service_logs.get_on_stop(), Some(LogRetention::Retain));
     assert_eq!(service_logs.get_on_start(), Some(LogRetention::Clear));
     assert_eq!(service_logs.get_on_restart(), Some(LogRetention::Retain));
-    assert_eq!(service_logs.get_on_exit(), Some(LogRetention::Retain));
+    assert_eq!(service_logs.get_on_exit(), None);
+    assert_eq!(service_logs.get_on_success(), Some(LogRetention::Clear));
+    assert_eq!(service_logs.get_on_failure(), Some(LogRetention::Retain));
+    assert_eq!(service_logs.get_on_skipped(), Some(LogRetention::Clear));
 }
 
 /// Log buffer operations work correctly
@@ -500,12 +507,18 @@ services:
     assert_eq!(global_logs.get_on_start(), Some(LogRetention::Clear));
     assert_eq!(global_logs.get_on_restart(), Some(LogRetention::Retain));
     assert_eq!(global_logs.get_on_exit(), Some(LogRetention::Retain));
+    // on_exit is sugar: get_on_success/get_on_failure fall back to on_exit
+    assert_eq!(global_logs.get_on_success(), Some(LogRetention::Retain));
+    assert_eq!(global_logs.get_on_failure(), Some(LogRetention::Retain));
 
     // Check service config overrides
     let svc = deser_svc(&config.services["test"]);
     let service_logs = svc.logs.as_ref().unwrap();
     assert_eq!(service_logs.get_on_stop(), Some(LogRetention::Clear));
     assert_eq!(service_logs.get_on_exit(), Some(LogRetention::Clear));
+    // on_exit sugar resolves through get_on_success/get_on_failure
+    assert_eq!(service_logs.get_on_success(), Some(LogRetention::Clear));
+    assert_eq!(service_logs.get_on_failure(), Some(LogRetention::Clear));
 }
 
 /// Default LogConfig fields are None (unset)
@@ -518,6 +531,9 @@ fn test_default_log_config_is_none() {
     assert_eq!(log_config.get_on_start(), None);
     assert_eq!(log_config.get_on_restart(), None);
     assert_eq!(log_config.get_on_exit(), None);
+    assert_eq!(log_config.get_on_success(), None);
+    assert_eq!(log_config.get_on_failure(), None);
+    assert_eq!(log_config.get_on_skipped(), None);
     assert!(log_config.retention.is_none());
 }
 
@@ -635,4 +651,563 @@ fn test_new_default_values() {
     // on_stop defaults to clear
     let retention = resolve_log_retention(None, None, |l| l.get_on_stop(), LogRetention::Clear);
     assert_eq!(retention, LogRetention::Clear);
+
+    // on_success defaults to retain
+    let retention = resolve_log_retention(None, None, |l| l.get_on_success(), LogRetention::Retain);
+    assert_eq!(retention, LogRetention::Retain);
+
+    // on_failure defaults to retain
+    let retention = resolve_log_retention(None, None, |l| l.get_on_failure(), LogRetention::Retain);
+    assert_eq!(retention, LogRetention::Retain);
+
+    // on_skipped defaults to retain
+    let retention = resolve_log_retention(None, None, |l| l.get_on_skipped(), LogRetention::Retain);
+    assert_eq!(retention, LogRetention::Retain);
+}
+
+/// Test on_success and on_failure YAML parsing
+#[test]
+fn test_on_success_on_failure_yaml_parsing() {
+    use kepler_daemon::config::KeplerConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  logs:
+    retention:
+      on_success: clear
+      on_failure: retain
+
+services:
+  test:
+    command: ["sleep", "3600"]
+    logs:
+      retention:
+        on_success: retain
+        on_failure: clear
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    // Check global config
+    let global_logs = config.global_logs().unwrap();
+    assert_eq!(global_logs.get_on_success(), Some(LogRetention::Clear));
+    assert_eq!(global_logs.get_on_failure(), Some(LogRetention::Retain));
+
+    // Check service config overrides
+    let svc = deser_svc(&config.services["test"]);
+    let service_logs = svc.logs.as_ref().unwrap();
+    assert_eq!(service_logs.get_on_success(), Some(LogRetention::Retain));
+    assert_eq!(service_logs.get_on_failure(), Some(LogRetention::Clear));
+}
+
+/// Test on_skipped YAML parsing
+#[test]
+fn test_on_skipped_yaml_parsing() {
+    use kepler_daemon::config::KeplerConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  logs:
+    retention:
+      on_skipped: clear
+
+services:
+  test:
+    command: ["sleep", "3600"]
+    logs:
+      retention:
+        on_skipped: retain
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    let global_logs = config.global_logs().unwrap();
+    assert_eq!(global_logs.get_on_skipped(), Some(LogRetention::Clear));
+
+    let svc = deser_svc(&config.services["test"]);
+    let service_logs = svc.logs.as_ref().unwrap();
+    assert_eq!(service_logs.get_on_skipped(), Some(LogRetention::Retain));
+}
+
+/// Test on_exit is mutually exclusive with on_success
+#[test]
+fn test_on_exit_mutually_exclusive_with_on_success() {
+    use kepler_daemon::config::KeplerConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    command: ["sleep", "3600"]
+    logs:
+      retention:
+        on_exit: clear
+        on_success: retain
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let result = KeplerConfig::load_without_sys_env(&config_path);
+    assert!(result.is_err(), "Should fail when on_exit and on_success are both set");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("on_exit"), "Error should mention on_exit: {}", err);
+    assert!(err.contains("on_success"), "Error should mention on_success: {}", err);
+}
+
+/// Test on_exit is mutually exclusive with on_failure
+#[test]
+fn test_on_exit_mutually_exclusive_with_on_failure() {
+    use kepler_daemon::config::KeplerConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+services:
+  test:
+    command: ["sleep", "3600"]
+    logs:
+      retention:
+        on_exit: clear
+        on_failure: retain
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let result = KeplerConfig::load_without_sys_env(&config_path);
+    assert!(result.is_err(), "Should fail when on_exit and on_failure are both set");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("on_exit"), "Error should mention on_exit: {}", err);
+    assert!(err.contains("on_failure"), "Error should mention on_failure: {}", err);
+}
+
+/// Test resolve_log_retention works correctly for the new getters
+#[test]
+fn test_resolve_log_retention_new_events() {
+    use kepler_daemon::config::resolve_log_retention;
+
+    // on_success: service overrides global
+    let global_logs = LogConfig {
+        retention: Some(LogRetentionConfig {
+            on_success: Some(LogRetention::Clear),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let service_logs = LogConfig {
+        retention: Some(LogRetentionConfig {
+            on_success: Some(LogRetention::Retain),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let retention = resolve_log_retention(
+        Some(&service_logs),
+        Some(&global_logs),
+        |l| l.get_on_success(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Retain, "Service on_success should override global");
+
+    // on_failure: global used when service not set
+    let global_logs = LogConfig {
+        retention: Some(LogRetentionConfig {
+            on_failure: Some(LogRetention::Clear),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let retention = resolve_log_retention(
+        None,
+        Some(&global_logs),
+        |l| l.get_on_failure(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Clear, "Should use global on_failure when service not set");
+
+    // on_skipped: falls through to default
+    let retention = resolve_log_retention(
+        None,
+        None,
+        |l| l.get_on_skipped(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Retain, "on_skipped should default to Retain");
+}
+
+/// Test default values for on_success, on_failure, on_skipped fields
+#[test]
+fn test_default_values_new_fields() {
+    let retention_config = LogRetentionConfig::default();
+
+    assert_eq!(retention_config.on_success, None);
+    assert_eq!(retention_config.on_failure, None);
+    assert_eq!(retention_config.on_skipped, None);
+}
+
+/// Test that on_exit alone (without on_success/on_failure) is valid
+#[test]
+fn test_on_exit_alone_is_valid() {
+    let retention_config = LogRetentionConfig {
+        on_exit: Some(LogRetention::Clear),
+        ..Default::default()
+    };
+    assert!(retention_config.validate().is_ok());
+}
+
+/// Test that on_success/on_failure alone (without on_exit) is valid
+#[test]
+fn test_on_success_on_failure_alone_is_valid() {
+    let retention_config = LogRetentionConfig {
+        on_success: Some(LogRetention::Clear),
+        on_failure: Some(LogRetention::Retain),
+        ..Default::default()
+    };
+    assert!(retention_config.validate().is_ok());
+}
+
+/// Test global-level mutual exclusivity: on_exit + on_success
+#[test]
+fn test_global_on_exit_mutually_exclusive_with_on_success() {
+    use kepler_daemon::config::KeplerConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  logs:
+    retention:
+      on_exit: clear
+      on_success: retain
+
+services:
+  test:
+    command: ["sleep", "3600"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let result = KeplerConfig::load_without_sys_env(&config_path);
+    assert!(result.is_err(), "Should fail when global on_exit and on_success are both set");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("on_exit"), "Error should mention on_exit: {}", err);
+    assert!(err.contains("on_success"), "Error should mention on_success: {}", err);
+}
+
+/// Test global-level mutual exclusivity: on_exit + on_failure
+#[test]
+fn test_global_on_exit_mutually_exclusive_with_on_failure() {
+    use kepler_daemon::config::KeplerConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  logs:
+    retention:
+      on_exit: clear
+      on_failure: retain
+
+services:
+  test:
+    command: ["sleep", "3600"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let result = KeplerConfig::load_without_sys_env(&config_path);
+    assert!(result.is_err(), "Should fail when global on_exit and on_failure are both set");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("on_exit"), "Error should mention on_exit: {}", err);
+    assert!(err.contains("on_failure"), "Error should mention on_failure: {}", err);
+}
+
+/// Cross-level: on_exit at global + on_success at service is valid
+/// (mutual exclusivity only applies within the same retention block)
+#[test]
+fn test_cross_level_on_exit_global_on_success_service_is_valid() {
+    use kepler_daemon::config::KeplerConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  logs:
+    retention:
+      on_exit: clear
+
+services:
+  test:
+    command: ["sleep", "3600"]
+    logs:
+      retention:
+        on_success: retain
+        on_failure: clear
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path);
+    assert!(config.is_ok(), "Cross-level on_exit (global) + on_success (service) should be valid");
+}
+
+/// Cross-level: on_success at global + on_exit at service is valid
+#[test]
+fn test_cross_level_on_success_global_on_exit_service_is_valid() {
+    use kepler_daemon::config::KeplerConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  logs:
+    retention:
+      on_success: clear
+      on_failure: retain
+
+services:
+  test:
+    command: ["sleep", "3600"]
+    logs:
+      retention:
+        on_exit: clear
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path);
+    assert!(config.is_ok(), "Cross-level on_success (global) + on_exit (service) should be valid");
+}
+
+/// on_success/on_failure/on_skipped work at global level
+#[test]
+fn test_new_fields_at_global_level_yaml_parsing() {
+    use kepler_daemon::config::KeplerConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  logs:
+    retention:
+      on_success: clear
+      on_failure: retain
+      on_skipped: clear
+
+services:
+  test:
+    command: ["sleep", "3600"]
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    let global_logs = config.global_logs().unwrap();
+    assert_eq!(global_logs.get_on_success(), Some(LogRetention::Clear));
+    assert_eq!(global_logs.get_on_failure(), Some(LogRetention::Retain));
+    assert_eq!(global_logs.get_on_skipped(), Some(LogRetention::Clear));
+}
+
+/// on_success/on_failure/on_skipped at service level override global
+#[test]
+fn test_new_fields_service_overrides_global() {
+    use kepler_daemon::config::KeplerConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+
+    let yaml = r#"
+kepler:
+  logs:
+    retention:
+      on_success: clear
+      on_failure: retain
+      on_skipped: clear
+
+services:
+  test:
+    command: ["sleep", "3600"]
+    logs:
+      retention:
+        on_success: retain
+        on_failure: clear
+        on_skipped: retain
+"#;
+
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+
+    // Global
+    let global_logs = config.global_logs().unwrap();
+    assert_eq!(global_logs.get_on_success(), Some(LogRetention::Clear));
+    assert_eq!(global_logs.get_on_failure(), Some(LogRetention::Retain));
+    assert_eq!(global_logs.get_on_skipped(), Some(LogRetention::Clear));
+
+    // Service overrides
+    let svc = deser_svc(&config.services["test"]);
+    let service_logs = svc.logs.as_ref().unwrap();
+    assert_eq!(service_logs.get_on_success(), Some(LogRetention::Retain));
+    assert_eq!(service_logs.get_on_failure(), Some(LogRetention::Clear));
+    assert_eq!(service_logs.get_on_skipped(), Some(LogRetention::Retain));
+}
+
+/// resolve_log_retention falls back from service to global for new fields
+#[test]
+fn test_resolve_new_fields_fallback_to_global() {
+    use kepler_daemon::config::resolve_log_retention;
+
+    // Service has no on_success set, global does → should fall back to global
+    let global_logs = LogConfig {
+        retention: Some(LogRetentionConfig {
+            on_success: Some(LogRetention::Clear),
+            on_failure: Some(LogRetention::Retain),
+            on_skipped: Some(LogRetention::Clear),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let service_logs = LogConfig {
+        retention: Some(LogRetentionConfig {
+            on_stop: Some(LogRetention::Retain), // other field set, but not on_success/on_failure/on_skipped
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let retention = resolve_log_retention(
+        Some(&service_logs),
+        Some(&global_logs),
+        |l| l.get_on_success(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Clear, "on_success should fall back to global");
+
+    let retention = resolve_log_retention(
+        Some(&service_logs),
+        Some(&global_logs),
+        |l| l.get_on_failure(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Retain, "on_failure should fall back to global");
+
+    let retention = resolve_log_retention(
+        Some(&service_logs),
+        Some(&global_logs),
+        |l| l.get_on_skipped(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Clear, "on_skipped should fall back to global");
+}
+
+/// on_exit is sugar: get_on_success and get_on_failure resolve through it
+#[test]
+fn test_on_exit_is_sugar_for_on_success_and_on_failure() {
+    let log_config = LogConfig {
+        retention: Some(LogRetentionConfig {
+            on_exit: Some(LogRetention::Clear),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // on_exit raw value
+    assert_eq!(log_config.get_on_exit(), Some(LogRetention::Clear));
+    // get_on_success / get_on_failure fall back to on_exit
+    assert_eq!(log_config.get_on_success(), Some(LogRetention::Clear));
+    assert_eq!(log_config.get_on_failure(), Some(LogRetention::Clear));
+    // on_skipped is independent — not affected by on_exit
+    assert_eq!(log_config.get_on_skipped(), None);
+}
+
+/// Cross-level resolve: global on_exit expands to on_success/on_failure,
+/// service on_success overrides only the success path
+#[test]
+fn test_cross_level_on_exit_global_resolved_by_service_on_success() {
+    use kepler_daemon::config::resolve_log_retention;
+
+    // Global: on_exit: clear (sugar for on_success: clear + on_failure: clear)
+    let global_logs = LogConfig {
+        retention: Some(LogRetentionConfig {
+            on_exit: Some(LogRetention::Clear),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    // Service: on_success: retain (overrides only the success path)
+    let service_logs = LogConfig {
+        retention: Some(LogRetentionConfig {
+            on_success: Some(LogRetention::Retain),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // ExitSuccess: service on_success=retain wins
+    let retention = resolve_log_retention(
+        Some(&service_logs),
+        Some(&global_logs),
+        |l| l.get_on_success(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Retain, "Service on_success should override global on_exit for success");
+
+    // ExitFailure: service has no on_failure/on_exit → falls back to global on_exit sugar → clear
+    let retention = resolve_log_retention(
+        Some(&service_logs),
+        Some(&global_logs),
+        |l| l.get_on_failure(),
+        LogRetention::Retain,
+    );
+    assert_eq!(retention, LogRetention::Clear, "Global on_exit should apply as on_failure fallback");
+}
+
+/// Cross-level resolve: global on_success/on_failure, service on_exit expands correctly
+#[test]
+fn test_cross_level_service_on_exit_overrides_global_on_success_on_failure() {
+    use kepler_daemon::config::resolve_log_retention;
+
+    // Global: on_success: clear, on_failure: clear
+    let global_logs = LogConfig {
+        retention: Some(LogRetentionConfig {
+            on_success: Some(LogRetention::Clear),
+            on_failure: Some(LogRetention::Clear),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    // Service: on_exit: retain (sugar for on_success: retain + on_failure: retain)
+    let service_logs = LogConfig {
+        retention: Some(LogRetentionConfig {
+            on_exit: Some(LogRetention::Retain),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Service on_exit expands → get_on_success returns retain
+    let retention = resolve_log_retention(
+        Some(&service_logs),
+        Some(&global_logs),
+        |l| l.get_on_success(),
+        LogRetention::Clear,
+    );
+    assert_eq!(retention, LogRetention::Retain, "Service on_exit sugar should override global on_success");
+
+    // Service on_exit expands → get_on_failure returns retain
+    let retention = resolve_log_retention(
+        Some(&service_logs),
+        Some(&global_logs),
+        |l| l.get_on_failure(),
+        LogRetention::Clear,
+    );
+    assert_eq!(retention, LogRetention::Retain, "Service on_exit sugar should override global on_failure");
 }
