@@ -1274,6 +1274,7 @@ fn read_persisted_status(state_dir: &Path) -> HashMap<String, ServiceInfo> {
                 health_check_failures: ps.health_check_failures,
                 exit_code: ps.exit_code,
                 signal: ps.signal,
+                initialized: ps.initialized,
                 skip_reason: ps.skip_reason,
                 fail_reason: ps.fail_reason,
             })
@@ -1785,6 +1786,7 @@ mod tests {
             health_check_failures: 0,
             exit_code: None,
             signal: None,
+            initialized: true,
             skip_reason: None,
             fail_reason: None,
         };
@@ -1868,6 +1870,7 @@ mod tests {
             health_check_failures: 0,
             exit_code: Some(0),
             signal: None,
+            initialized: false,
             skip_reason: None,
             fail_reason: None,
         };
