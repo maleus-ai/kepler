@@ -38,7 +38,7 @@ services:
     command: ["./server"]
     hooks:
       pre_start:
-        - if: ${{ not hook.initialized }}$
+        - if: ${{ not service.initialized }}$
           run: npm install
         - run: echo "Backend starting"
       post_exit:
@@ -49,7 +49,7 @@ services:
         run: ./alert-team.sh "Backend health check failed"
 ```
 
-> **Tip:** Use `if: ${{ not hook.initialized }}$` on a `pre_start` step to run a command only on the first start (equivalent to an init hook).
+> **Tip:** Use `if: ${{ not service.initialized }}$` on a `pre_start` step to run a command only on the first start (equivalent to an init hook).
 
 ---
 
@@ -344,7 +344,7 @@ services:
         condition: service_completed_successfully
     hooks:
       pre_start:
-        - if: ${{ not hook.initialized }}$
+        - if: ${{ not service.initialized }}$
           run: npm install
         - run: npm run migrate
 ```

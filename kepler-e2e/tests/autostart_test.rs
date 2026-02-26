@@ -655,3 +655,89 @@ async fn test_autostart_disabled_logs_head_mode_after_restart() -> E2eResult<()>
     harness.stop_daemon().await?;
     Ok(())
 }
+
+/// After daemon restart with autostart:false, `kepler start` should preserve
+/// service.initialized from the previous run. The init hook (guarded by
+/// `if: ${{ not service.initialized }}$`) must NOT re-fire on the second start.
+#[tokio::test]
+async fn test_autostart_disabled_preserves_initialized_across_restart() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    harness.start_daemon().await?;
+
+    // Create a marker file for tracking hook executions
+    let marker_file = harness
+        .temp_dir()
+        .path()
+        .join("markers")
+        .join("init_persist_marker.txt");
+    std::fs::create_dir_all(marker_file.parent().unwrap())?;
+
+    // Load config (no autostart) with marker file path substituted
+    let config_path = harness.load_config_with_replacements(
+        TEST_MODULE,
+        "test_autostart_disabled_preserves_initialized",
+        &[("MARKER_FILE", marker_file.to_str().unwrap())],
+    )?;
+
+    // First run: start services, init hook should fire
+    harness.start_services(&config_path).await?.assert_success();
+    harness
+        .wait_for_service_status(
+            &config_path,
+            "init-service",
+            "running",
+            Duration::from_secs(10),
+        )
+        .await?;
+    harness
+        .wait_for_file_content(&marker_file, "STARTED", Duration::from_secs(5))
+        .await?;
+
+    // Verify ON_INIT fired exactly once
+    let content = std::fs::read_to_string(&marker_file).unwrap_or_default();
+    let init_count = content.matches("ON_INIT").count();
+    assert_eq!(
+        init_count, 1,
+        "Init hook should fire once on first start. Content: {}",
+        content
+    );
+
+    // Kill daemon abruptly (simulates systemctl stop / crash)
+    harness.kill_daemon().await?;
+
+    // Restart daemon — config is discovered on disk but NOT loaded (autostart: false)
+    harness.start_daemon().await?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Start services again — config is loaded fresh from source
+    harness.start_services(&config_path).await?.assert_success();
+    harness
+        .wait_for_service_status(
+            &config_path,
+            "init-service",
+            "running",
+            Duration::from_secs(10),
+        )
+        .await?;
+
+    // Wait for the second STARTED marker to confirm service actually re-ran
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let content = std::fs::read_to_string(&marker_file).unwrap_or_default();
+    let started_count = content.matches("STARTED").count();
+    assert_eq!(
+        started_count, 2,
+        "Service should have started twice. Content: {}",
+        content
+    );
+
+    // ON_INIT should still be 1 — initialized flag should have persisted from state.json
+    let init_count = content.matches("ON_INIT").count();
+    assert_eq!(
+        init_count, 1,
+        "Init hook should NOT re-fire after daemon restart (service.initialized should persist). Content: {}",
+        content
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}

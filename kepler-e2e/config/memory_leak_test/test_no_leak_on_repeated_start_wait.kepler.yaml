@@ -66,7 +66,7 @@ services:
         on_exit: retain
     hooks:
       pre_start:
-        - if: ${{ not hook.initialized }}$
+        - if: ${{ not service.initialized }}$
           run: echo "postgres first_start"
         - command: ["sh", "-c", "echo postgres pre_start"]
       post_start:
@@ -163,7 +163,7 @@ services:
       start_period: 1s
     hooks:
       pre_start:
-        - if: ${{ not hook.initialized }}$
+        - if: ${{ not service.initialized }}$
           run: echo "auth first_start"
         - run: echo "auth pre_start"
       post_start:
