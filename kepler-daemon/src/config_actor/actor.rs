@@ -327,26 +327,46 @@ impl ConfigActor {
                     let _ = persistence.copy_env_files(&config.services, &config_dir);
                 }
 
+                // Load persisted state if available — even without a snapshot (autostart
+                // disabled), permanent flags like `service.initialized` must survive
+                // daemon restarts so that `${{ not service.initialized }}$` hooks don't
+                // re-fire on every `kepler start`.
+                let persisted_state = persistence.load_state().ok().flatten();
+
                 // Initialize service states with empty computed_env and working_dir.
                 // These are built lazily at service start time via ${{}}$ expansion.
+                // Only restore permanent flags (initialized) from persisted state —
+                // runtime state (status, pid, etc.) is not restored since the config
+                // is being loaded fresh without autostart.
                 let services = config
                     .services
                     .keys()
                     .map(|name| {
+                        let initialized = persisted_state
+                            .as_ref()
+                            .and_then(|ps| ps.services.get(name))
+                            .map(|ss| ss.initialized)
+                            .unwrap_or(false);
                         let state = ServiceState {
                             computed_env: HashMap::new(),
                             working_dir: config_dir.clone(),
+                            initialized,
                             ..Default::default()
                         };
                         (name.clone(), state)
                     })
                     .collect();
 
+                let config_initialized = persisted_state
+                    .as_ref()
+                    .map(|ps| ps.config_initialized)
+                    .unwrap_or(false);
+
                 (
                     config,
                     config_dir,
                     services,
-                    false, // not initialized
+                    config_initialized,
                     false, // snapshot not yet taken
                     false, // not restored from snapshot
                     resolved_kepler_env,

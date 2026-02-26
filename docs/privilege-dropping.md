@@ -316,7 +316,7 @@ services:
     user: appuser
     hooks:
       pre_start:
-        - if: ${{ not hook.initialized }}$
+        - if: ${{ not service.initialized }}$
           run: ./create-dirs.sh
           user: root           # Setup requires root
         - run: ./warmup.sh    # Runs as appuser (inherited)

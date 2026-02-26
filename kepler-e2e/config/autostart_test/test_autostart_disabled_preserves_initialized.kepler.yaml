@@ -1,4 +1,9 @@
-# Test that recreate runs pre_start hooks with if condition (because state is cleared)
+# Test that service.initialized persists across daemon restart when autostart is false.
+# After daemon restart + kepler start, the init hook should NOT re-fire.
+kepler:
+  logs:
+    buffer_size: 0
+
 services:
   init-service:
     command: ["sh", "-c", "echo STARTED >> MARKER_FILE && sleep 3600"]

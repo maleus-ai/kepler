@@ -86,7 +86,7 @@ services:
       retries: 3
     hooks:
       pre_start:
-        - if: ${{ not hook.initialized }}$
+        - if: ${{ not service.initialized }}$
           run: npm install
         - command: ["echo", "Backend starting"]
       pre_restart:
