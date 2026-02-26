@@ -30,7 +30,7 @@ async fn test_default_clears_logs_on_stop() {
 
     harness.start_service("default_clear_test").await.unwrap();
 
-    // Clear any existing logs first (logs persist on disk across test runs)
+// Clear any existing logs first (logs persist on disk across test runs)
     let logs = harness.logs().await.unwrap();
     logs.clear();
 
@@ -78,7 +78,7 @@ async fn test_retain_logs_on_stop() {
 
     harness.start_service("retain_test").await.unwrap();
 
-    // Clear any existing logs first
+// Clear any existing logs first
     let logs = harness.logs().await.unwrap();
     logs.clear();
 
@@ -216,7 +216,7 @@ async fn test_log_buffer_operations() {
 
     harness.start_service("buffer_ops_test").await.unwrap();
 
-    let logs = harness.logs().await.unwrap();
+let logs = harness.logs().await.unwrap();
 
     // Clear any existing logs first (logs persist on disk across test runs)
     logs.clear();
@@ -262,7 +262,7 @@ async fn test_log_stream_types() {
 
     harness.start_service("stream_types_test").await.unwrap();
 
-    let logs = harness.logs().await.unwrap();
+let logs = harness.logs().await.unwrap();
 
     // Clear any existing logs first
     logs.clear();
@@ -298,7 +298,7 @@ async fn test_multiple_services_logs() {
     harness.start_service("multi_svc1").await.unwrap();
     harness.start_service("multi_svc2").await.unwrap();
 
-    let logs = harness.logs().await.unwrap();
+let logs = harness.logs().await.unwrap();
 
     // Clear all logs after starting services (hooks may have added logs)
     logs.clear();
@@ -345,7 +345,7 @@ async fn test_clear_service_prefix() {
 
     harness.start_service("prefix_svc").await.unwrap();
 
-    let logs = harness.logs().await.unwrap();
+let logs = harness.logs().await.unwrap();
 
     // Clear any existing logs first
     logs.clear();
@@ -391,7 +391,7 @@ async fn test_log_entries_since() {
 
     harness.start_service("entries_since_test").await.unwrap();
 
-    let logs = harness.logs().await.unwrap();
+let logs = harness.logs().await.unwrap();
 
     // Clear any existing logs first (this resets sequence to 0)
     logs.clear();
@@ -439,7 +439,7 @@ async fn test_clear_all_logs() {
     harness.start_service("clearall_svc1").await.unwrap();
     harness.start_service("clearall_svc2").await.unwrap();
 
-    let logs = harness.logs().await.unwrap();
+let logs = harness.logs().await.unwrap();
 
     // Clear any existing logs first (from hooks during startup)
     logs.clear();

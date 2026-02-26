@@ -374,10 +374,23 @@ async fn run_health_check(
     spec.no_new_privileges = no_new_privileges;
 
     let result = timeout(check_timeout, async {
-        match spawn_blocking(spec, BlockingMode::Silent).await {
-            Ok(result) => result.exit_code == Some(0),
+        match spawn_blocking(spec, BlockingMode::CaptureOutput).await {
+            Ok(result) => {
+                let passed = result.exit_code == Some(0);
+                if !passed {
+                    warn!(
+                        "Health check exited with code {:?}{}",
+                        result.exit_code,
+                        match &result.combined_output {
+                            Some(output) => format!(", output: {}", output),
+                            None => String::new(),
+                        }
+                    );
+                }
+                passed
+            }
             Err(e) => {
-                debug!("Health check command failed to execute: {}", e);
+                warn!("Health check command failed to execute: {}", e);
                 false
             }
         }
@@ -387,7 +400,7 @@ async fn run_health_check(
     match result {
         Ok(passed) => passed,
         Err(_) => {
-            debug!("Health check timed out");
+            warn!("Health check timed out");
             false
         }
     }

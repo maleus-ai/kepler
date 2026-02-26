@@ -29,6 +29,12 @@ async fn test_restart_wait_completes() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "web", "running", Duration::from_secs(10))
         .await?;
 
+    // Wait for the first start's log line to be captured before restarting,
+    // otherwise the process may be killed before stdout is flushed.
+    harness
+        .wait_for_log_content(&config_path, "WEB_STARTED", Duration::from_secs(5))
+        .await?;
+
     // Restart with --wait — should complete and return
     let output = harness.restart_services(&config_path).await?;
     output.assert_success();
@@ -101,6 +107,15 @@ async fn test_restart_multi_service_with_deps() -> E2eResult<()> {
         .await?;
     harness
         .wait_for_service_status(&config_path, "web", "running", Duration::from_secs(15))
+        .await?;
+
+    // Wait for the first start's log lines to be captured before restarting,
+    // otherwise the processes may be killed before stdout is flushed.
+    harness
+        .wait_for_log_content(&config_path, "DB_STARTED", Duration::from_secs(5))
+        .await?;
+    harness
+        .wait_for_log_content(&config_path, "WEB_STARTED", Duration::from_secs(5))
         .await?;
 
     // Restart all — stop order: web then db, start order: db then web

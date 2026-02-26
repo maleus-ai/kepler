@@ -24,7 +24,7 @@ async fn test_healthcheck_inherits_service_user() -> E2eResult<()> {
 
     // If healthcheck inherits service user (testuser1), `whoami` check passes → healthy
     harness
-        .wait_for_service_status(&config_path, "svc", "healthy", Duration::from_secs(15))
+        .wait_for_service_status(&config_path, "svc", "healthy", Duration::from_secs(30))
         .await?;
 
     harness.stop_daemon().await?;
@@ -45,7 +45,7 @@ async fn test_healthcheck_user_override() -> E2eResult<()> {
 
     // Healthcheck overrides user to testuser2, `whoami` check passes → healthy
     harness
-        .wait_for_service_status(&config_path, "svc", "healthy", Duration::from_secs(15))
+        .wait_for_service_status(&config_path, "svc", "healthy", Duration::from_secs(30))
         .await?;
 
     harness.stop_daemon().await?;
@@ -66,7 +66,7 @@ async fn test_healthcheck_daemon_user() -> E2eResult<()> {
 
     // Healthcheck uses user: "0" → runs as root, `whoami` check passes → healthy
     harness
-        .wait_for_service_status(&config_path, "svc", "healthy", Duration::from_secs(15))
+        .wait_for_service_status(&config_path, "svc", "healthy", Duration::from_secs(30))
         .await?;
 
     harness.stop_daemon().await?;

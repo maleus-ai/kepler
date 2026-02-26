@@ -13,7 +13,7 @@ use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 /// Mutex to synchronize environment variable setting and ConfigActor creation.
 /// This ensures that parallel tests don't interfere with each other's env vars.
@@ -375,10 +375,19 @@ impl TestDaemonHarness {
             true,
             resolved.no_new_privileges.unwrap_or(true),
         );
+
+        // Set up a log flush notifier so we can wait for capture tasks to
+        // process initial output (e.g. kepler-exec warnings) before returning.
+        // This mirrors the real daemon's behaviour where `kepler start` waits
+        // for quiescence and log flushing before the CLI returns.
+        let flush_notify = Arc::new(Notify::new());
+        let mut log_config = ctx.log_config.clone();
+        log_config.log_notify = Some(flush_notify.clone());
+
         let spawn_params = SpawnServiceParams {
             service_name,
             spec,
-            log_config: ctx.log_config.clone(),
+            log_config,
             handle: self.handle.clone(),
             exit_tx: self.exit_tx.clone(),
             store_stdout,
@@ -403,6 +412,15 @@ impl TestDaemonHarness {
         let _ = self.handle
             .set_service_status(service_name, ServiceStatus::Running)
             .await;
+
+        // Wait for capture tasks to flush any initial output (e.g. kepler-exec
+        // stderr warnings on macOS). The notify fires when BufferedLogWriter
+        // flushes data. If the process produces no output, the timeout ensures
+        // we don't block forever.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            flush_notify.notified(),
+        ).await;
 
         // Start file watcher if configured
         if !resolved.restart.watch_patterns().is_empty() {
@@ -647,6 +665,7 @@ impl TestDaemonHarness {
     pub async fn logs(&self) -> Option<TestLogHelper> {
         self.handle.get_log_config().await.map(TestLogHelper::new)
     }
+
 
     /// Spawn a file change handler that restarts services on file changes
     /// Must be called after taking restart_rx with take_restart_rx()

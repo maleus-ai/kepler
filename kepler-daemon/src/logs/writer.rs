@@ -87,7 +87,7 @@ impl BufferedLogWriter {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        Self {
+        let mut writer = Self {
             log_file,
             file: None,
             buffer: Vec::with_capacity(buffer_size),
@@ -98,7 +98,13 @@ impl BufferedLogWriter {
             service_name: service_name.to_string(),
             stream,
             log_notify: None,
-        }
+        };
+        // Open the file eagerly so the fd is held from creation.
+        // If the file is deleted externally (e.g. log clearing) while the
+        // writer is alive, writes go to the unlinked inode instead of
+        // re-creating the file.
+        writer.file = writer.open_log_file();
+        writer
     }
 
     /// Create from a LogWriterConfig

@@ -69,6 +69,14 @@ pub fn uid_has_gid(uid: u32, target_gid: u32) -> bool {
     }
 }
 
+/// Query the OS limit on supplementary groups (NGROUPS_MAX).
+/// Falls back to 65536 if the sysconf call fails.
+#[cfg(unix)]
+pub fn ngroups_max() -> usize {
+    let val = unsafe { libc::sysconf(libc::_SC_NGROUPS_MAX) };
+    if val < 0 { 65536 } else { val as usize }
+}
+
 /// Set the supplementary group list for the current process.
 #[cfg(unix)]
 pub fn setgroups(gids: &[u32]) -> std::io::Result<()> {
