@@ -3,7 +3,7 @@
 use kepler_daemon::config::{
     AutostartConfig, ConfigValue, DependsOn, EnvironmentEntries, HealthCheck, HookCommand,
     HookCommon, KeplerConfig, KeplerGlobalConfig, LogConfig, RawServiceConfig, ResourceLimits,
-    RestartConfig, RestartPolicy, ServiceConfig, ServiceHooks,
+    RestartConfig, RestartPolicy, ServiceConfig, ServiceHooks, ServicePermissions,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -72,6 +72,7 @@ impl TestConfigBuilder {
             timeout: None,
             output_max_size: None,
             autostart: self.autostart.clone(),
+            acl: None,
         })
     }
 
@@ -139,6 +140,7 @@ pub struct TestServiceBuilder {
     groups: Vec<String>,
     output: Option<bool>,
     outputs: Option<HashMap<String, String>>,
+    permissions: Option<ServicePermissions>,
 }
 
 impl TestServiceBuilder {
@@ -160,6 +162,7 @@ impl TestServiceBuilder {
             groups: Vec::new(),
             output: None,
             outputs: None,
+            permissions: None,
         }
     }
 
@@ -296,6 +299,15 @@ impl TestServiceBuilder {
         self
     }
 
+    /// Set permissions (capability scopes) for the service
+    pub fn with_permissions(mut self, allow: Vec<&str>) -> Self {
+        self.permissions = Some(ServicePermissions {
+            allow: allow.into_iter().map(|s| s.to_string()).collect(),
+            hardening: None,
+        });
+        self
+    }
+
     pub fn build(self) -> ServiceConfig {
         let depends_on = if let Some(extended) = self.depends_on_extended {
             extended
@@ -321,6 +333,7 @@ impl TestServiceBuilder {
             outputs: self.outputs,
             user_identity: None,
             no_new_privileges: None,
+            permissions: self.permissions,
         }
     }
 }

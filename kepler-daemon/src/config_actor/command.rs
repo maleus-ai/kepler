@@ -207,6 +207,20 @@ pub enum ConfigCommand {
         reply: oneshot::Sender<OutputTasks>,
     },
 
+    // === Token Guard Commands ===
+    StoreTokenGuard {
+        service_name: String,
+        guard: crate::token_store::ServiceTokenGuard,
+    },
+    TakeTokenGuard {
+        service_name: String,
+        reply: oneshot::Sender<Option<crate::token_store::ServiceTokenGuard>>,
+    },
+    GetServiceTokenHex {
+        service_name: String,
+        reply: oneshot::Sender<Option<String>>,
+    },
+
     // === Task Handle Commands ===
     StoreTaskHandle {
         service_name: String,

@@ -1,0 +1,11 @@
+kepler:
+  logs:
+    buffer_size: 0
+  acl:
+    users:
+      testuser2:
+        allow: [config:status, service:logs]
+
+services:
+  acl-svc:
+    command: ["sh", "-c", "echo ACL_SVC_RUNNING; sleep 300"]

@@ -35,6 +35,8 @@ pub struct Client {
     writer_tx: mpsc::Sender<Vec<u8>>,
     pending: Arc<DashMap<u64, PendingRequest>>,
     next_id: Arc<AtomicU64>,
+    /// Bearer token from `KEPLER_TOKEN` env var (hex-decoded).
+    process_token: Option<[u8; 32]>,
     _reader_handle: JoinHandle<()>,
     _writer_handle: JoinHandle<()>,
 }
@@ -122,10 +124,24 @@ impl Client {
             }
         });
 
+        // Read KEPLER_TOKEN env var and hex-decode to [u8; 32]
+        let process_token = std::env::var("KEPLER_TOKEN")
+            .ok()
+            .and_then(|s| {
+                let bytes = hex::decode(&s).ok()?;
+                if bytes.len() != 32 {
+                    return None;
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Some(arr)
+            });
+
         Ok(Self {
             writer_tx,
             pending,
             next_id: Arc::new(AtomicU64::new(1)),
+            process_token,
             _reader_handle: reader_handle,
             _writer_handle: writer_handle,
         })
@@ -167,7 +183,7 @@ impl Client {
             progress_tx: Some(progress_tx),
         });
 
-        let envelope = RequestEnvelope { id, request };
+        let envelope = RequestEnvelope { id, request, token: self.process_token };
         let bytes = encode_envelope(&envelope)?;
 
         let writer_tx = self.writer_tx.clone();
@@ -263,14 +279,6 @@ impl Client {
         &self,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::ListConfigs)
-    }
-
-    /// Unload a config
-    pub fn unload_config(
-        &self,
-        config_path: PathBuf,
-    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
-        self.send_request(Request::UnloadConfig { config_path })
     }
 
     /// Get logs for a config
@@ -393,6 +401,7 @@ impl Client {
         let envelope = RequestEnvelope {
             id,
             request: Request::Subscribe { config_path, services },
+            token: self.process_token,
         };
         let bytes = encode_envelope(&envelope)?;
         self.writer_tx

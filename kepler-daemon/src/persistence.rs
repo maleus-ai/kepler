@@ -43,6 +43,9 @@ pub struct ExpandedConfigSnapshot {
     /// Per-config hardening level (baked at load time)
     #[serde(default)]
     pub hardening: Option<String>,
+    /// Permission ceiling inherited from the caller's token (if token-started).
+    #[serde(default)]
+    pub permission_ceiling: Option<Vec<String>>,
 
     // Backward-compat fields from old snapshots (ignored, kept for deserialization)
     #[serde(default, skip_serializing)]

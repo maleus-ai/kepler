@@ -70,6 +70,7 @@ impl CommandSpec {
     }
 
     /// Create a new CommandSpec with all options including clear_env
+    #[allow(clippy::too_many_arguments)]
     pub fn with_all_options(
         program_and_args: Vec<String>,
         working_dir: PathBuf,

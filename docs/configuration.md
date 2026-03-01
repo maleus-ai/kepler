@@ -39,6 +39,13 @@ kepler:
   logs:
     buffer_size: 16384   # 16KB buffer for better write throughput
     max_size: "50MB"     # Truncate logs when they exceed this size
+  acl:                   # Restrict non-owner `kepler` group members
+    users:
+      alice:
+        allow: [service, config:status]
+    groups:
+      ops-team:
+        allow: [config:status]
 
 services:
   database:
@@ -147,6 +154,7 @@ Settings under the `kepler:` namespace apply to all services unless overridden.
 | `logs` | `object` | - | Global log settings. See [Log Management](log-management.md) |
 | `autostart` | `bool\|object` | `false` | Enable automatic service restart on daemon restart. Accepts `true` (no declared env), `false`, or `{ environment: [...] }`. See [Environment Variables](environment-variables.md#kepler-environment-declaration) |
 | `output_max_size` | `string` | `1mb` | Max output capture size per step/process (e.g., `"2mb"`, `"512kb"`). See [Outputs](outputs.md) |
+| `acl` | `object` | - | Per-config ACL restricting non-owner `kepler` group members. See [Security Model](security-model.md#per-config-acl) |
 
 ### Global Log Settings
 
@@ -180,6 +188,7 @@ See [Log Management](log-management.md) for full details.
 | `no_new_privileges` | `bool` | `true` | When `true`, sets `PR_SET_NO_NEW_PRIVS` on the spawned process to prevent privilege escalation via setuid/setgid binaries (e.g. `sudo`, `su`). Inherited by hooks and healthchecks. See [Privilege Dropping](privilege-dropping.md#no-new-privileges) |
 | `output` | `bool` | `false` | Enable `::output::KEY=VALUE` capture from process stdout. Requires `restart: no`. See [Outputs](outputs.md) |
 | `outputs` | `object` | - | Named output declarations (expressions referencing hook/dep outputs). Requires `restart: no`. See [Outputs](outputs.md) |
+| `permissions` | `string[]\|object` | - | Token-based permissions for the spawned process. When present, the daemon generates a CSPRNG bearer token, registers it with the granted scopes, and passes it via `KEPLER_TOKEN` env var. Accepts a list shorthand (`permissions: ["scope1", "scope2"]`) or object form (`permissions: { allow: [...], hardening: "strict" }`) where `allow` is required. Alias: `security` (backward compat). See [Security Model](security-model.md#service-permissions-token-based) |
 
 ### User Format
 
@@ -275,5 +284,6 @@ The `recreate` command:
 - [Log Management](log-management.md) -- Log storage and streaming
 - [File Watching](file-watching.md) -- Auto-restart on changes
 - [Privilege Dropping](privilege-dropping.md) -- User/group and limits
+- [Security Model](security-model.md) -- ACL, service permissions, hardening
 - [Platform Compatibility](platform-compatibility.md) -- OS-specific feature support matrix
 - [Outputs](outputs.md) -- Output capture and cross-service output passing

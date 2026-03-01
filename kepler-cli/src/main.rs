@@ -125,7 +125,7 @@ async fn run() -> Result<()> {
         .canonicalize()
         .map_err(|_| CliError::ConfigNotFound(config_path.clone()))?;
 
-    // Collect system environment once for commands that need it
+    // Collect system environment once for commands that need it.
     let sys_env: HashMap<String, String> = std::env::vars().collect();
 
     /// Build override_envs from `-e` flags and `--refresh-env`.

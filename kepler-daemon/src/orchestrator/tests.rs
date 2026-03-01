@@ -37,7 +37,7 @@ async fn setup_handle(temp_dir: &Path) -> (ConfigActorHandle, KeplerConfig) {
     unsafe { std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir) };
 
     let (handle, actor) =
-        ConfigActor::create(config_path, Some(std::env::vars().collect()), None, None).unwrap();
+        ConfigActor::create(config_path, Some(std::env::vars().collect()), None, None, None).unwrap();
     tokio::spawn(actor.run());
 
     (handle, config)
@@ -56,14 +56,15 @@ async fn setup_orchestrator(temp_dir: &Path) -> (ServiceOrchestrator, ConfigActo
     let (exit_tx, _) = mpsc::channel(32);
     let (restart_tx, _) = mpsc::channel(32);
     let cursor_manager = Arc::new(crate::cursor::CursorManager::new(60));
+    let token_store = Arc::new(crate::token_store::TokenStore::new());
     let orch = ServiceOrchestrator::new(
-        registry, exit_tx, restart_tx, cursor_manager, HardeningLevel::None, None,
+        registry, exit_tx, restart_tx, cursor_manager, HardeningLevel::None, None, token_store,
     );
 
     // Pre-register the config so start_services uses the same actor
     let handle = orch
         .registry()
-        .get_or_create(config_path.clone(), Some(std::env::vars().collect()), None, None)
+        .get_or_create(config_path.clone(), Some(std::env::vars().collect()), None, None, None)
         .await
         .unwrap();
 
@@ -76,7 +77,8 @@ fn create_orchestrator() -> ServiceOrchestrator {
     let (exit_tx, _) = mpsc::channel(32);
     let (restart_tx, _) = mpsc::channel(32);
     let cursor_manager = Arc::new(crate::cursor::CursorManager::new(60));
-    ServiceOrchestrator::new(registry, exit_tx, restart_tx, cursor_manager, HardeningLevel::None, None)
+    let token_store = Arc::new(crate::token_store::TokenStore::new());
+    ServiceOrchestrator::new(registry, exit_tx, restart_tx, cursor_manager, HardeningLevel::None, None, token_store)
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +315,7 @@ async fn test_start_services_restarts_exited_service() {
     handle.set_service_status("svc1", ServiceStatus::Exited).await.unwrap();
 
     let result = orch
-        .start_services(&config_path, &[], None, None, None, false, None, None)
+        .start_services(&config_path, &[], None, None, None, false, None, None, None)
         .await;
     match &result {
         Ok(msg) => assert!(!msg.contains("All services already running"), "Exited service should be restarted, got: {msg}"),
@@ -332,7 +334,7 @@ async fn test_start_services_restarts_failed_service() {
     handle.set_service_status("svc1", ServiceStatus::Failed).await.unwrap();
 
     let result = orch
-        .start_services(&config_path, &[], None, None, None, false, None, None)
+        .start_services(&config_path, &[], None, None, None, false, None, None, None)
         .await;
     match &result {
         Ok(msg) => assert!(!msg.contains("All services already running"), "Failed service should be restarted, got: {msg}"),
@@ -351,7 +353,7 @@ async fn test_start_services_restarts_killed_service() {
     handle.set_service_status("svc1", ServiceStatus::Killed).await.unwrap();
 
     let result = orch
-        .start_services(&config_path, &[], None, None, None, false, None, None)
+        .start_services(&config_path, &[], None, None, None, false, None, None, None)
         .await;
     match &result {
         Ok(msg) => assert!(!msg.contains("All services already running"), "Killed service should be restarted, got: {msg}"),
@@ -369,7 +371,7 @@ async fn test_start_services_restarts_stopped_service() {
 
     // Default status is Stopped
     let result = orch
-        .start_services(&config_path, &[], None, None, None, false, None, None)
+        .start_services(&config_path, &[], None, None, None, false, None, None, None)
         .await;
     match &result {
         Ok(msg) => assert!(!msg.contains("All services already running"), "Stopped service should be restarted, got: {msg}"),
@@ -390,7 +392,7 @@ async fn test_start_services_reevaluates_skipped_service() {
     // Skipped services should be re-evaluated (their `if:` condition may now
     // succeed), so start_services should NOT return early.
     let result = orch
-        .start_services(&config_path, &[], None, None, None, false, None, None)
+        .start_services(&config_path, &[], None, None, None, false, None, None, None)
         .await;
     match &result {
         Ok(msg) => assert!(!msg.contains("All services already running"), "Skipped service should be re-evaluated, got: {msg}"),
@@ -413,7 +415,7 @@ async fn test_start_specific_exited_service() {
     handle.set_service_status("svc1", ServiceStatus::Exited).await.unwrap();
 
     let result = orch
-        .start_services(&config_path, &["svc1".to_string()], None, None, None, false, None, None)
+        .start_services(&config_path, &["svc1".to_string()], None, None, None, false, None, None, None)
         .await;
     match &result {
         Ok(msg) => assert!(!msg.contains("All services already running"), "Explicit start of exited service should restart, got: {msg}"),
@@ -432,7 +434,7 @@ async fn test_start_specific_failed_service() {
     handle.set_service_status("svc1", ServiceStatus::Failed).await.unwrap();
 
     let result = orch
-        .start_services(&config_path, &["svc1".to_string()], None, None, None, false, None, None)
+        .start_services(&config_path, &["svc1".to_string()], None, None, None, false, None, None, None)
         .await;
     match &result {
         Ok(msg) => assert!(!msg.contains("All services already running"), "Explicit start of failed service should restart, got: {msg}"),
@@ -451,7 +453,7 @@ async fn test_start_specific_killed_service() {
     handle.set_service_status("svc1", ServiceStatus::Killed).await.unwrap();
 
     let result = orch
-        .start_services(&config_path, &["svc1".to_string()], None, None, None, false, None, None)
+        .start_services(&config_path, &["svc1".to_string()], None, None, None, false, None, None, None)
         .await;
     match &result {
         Ok(msg) => assert!(!msg.contains("All services already running"), "Explicit start of killed service should restart, got: {msg}"),
@@ -468,7 +470,7 @@ async fn test_start_specific_stopped_service() {
     };
 
     let result = orch
-        .start_services(&config_path, &["svc1".to_string()], None, None, None, false, None, None)
+        .start_services(&config_path, &["svc1".to_string()], None, None, None, false, None, None, None)
         .await;
     match &result {
         Ok(msg) => assert!(!msg.contains("All services already running"), "Explicit start of stopped service should restart, got: {msg}"),
@@ -489,7 +491,7 @@ async fn test_start_specific_skipped_service() {
     // When explicitly naming a skipped service, the `if:` condition is bypassed
     // (skip_if_condition = true), so the service should start regardless.
     let result = orch
-        .start_services(&config_path, &["svc1".to_string()], None, None, None, false, None, None)
+        .start_services(&config_path, &["svc1".to_string()], None, None, None, false, None, None, None)
         .await;
     match &result {
         Ok(msg) => assert!(!msg.contains("All services already running"), "Explicit start of skipped service should restart, got: {msg}"),

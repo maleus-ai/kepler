@@ -17,9 +17,11 @@ use kepler_daemon::persistence::ConfigPersistence;
 use kepler_daemon::process::{kill_process_by_pid, parse_signal_name, validate_running_process, ProcessExitEvent};
 use kepler_daemon::state::{ServiceState, ServiceStatus};
 use kepler_daemon::watcher::FileChangeEvent;
+use kepler_daemon::token_store::{SharedTokenStore, TokenStore};
 use kepler_daemon::Daemon;
 use kepler_protocol::protocol::{LogMode, ProgressEvent, Request, Response, ResponseData, ServiceInfo, ServicePhase, ServiceTarget};
 use kepler_protocol::server::{PeerCredentials, ProgressSender, Server};
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,6 +29,19 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+/// Cached ACL data for unloaded configs.
+///
+/// When a config is not loaded in the registry (e.g. `autostart: false` after
+/// daemon restart), we cache the parsed ACL and owner UID to avoid re-reading
+/// and re-parsing the config file from disk on every request.
+#[derive(Clone)]
+struct UnloadedAclEntry {
+    owner_uid: Option<u32>,
+    acl: Option<kepler_daemon::acl::ResolvedAcl>,
+}
+
+type UnloadedAclCache = Arc<DashMap<PathBuf, UnloadedAclEntry>>;
 
 /// Resolve the GID of the "kepler" group.
 #[cfg(unix)]
@@ -89,6 +104,304 @@ fn parse_hardening_level() -> HardeningLevel {
         },
         None => HardeningLevel::default(),
     }
+}
+
+/// Unified per-config ACL gate.
+///
+/// Applies to all auth types:
+/// - **Root** (without token): always allowed (prevents softlock)
+/// - **Group**: owner bypass → ACL check
+/// - **Token**: effective = token.allow ∩ ACL scopes, then check required scopes
+///   - Root (uid 0) has implicit `*` ACL
+///   - Owner has implicit `*` ACL
+///   - Otherwise: look up ACL rules for uid/gid
+/// Unified ACL gate for all auth types in the authorization pipeline.
+///
+/// - **Root**: Always bypasses — returns `Ok(())` unconditionally.
+/// - **Group**: Config owner has full access. Other group members are checked
+///   against the per-config ACL rules; denied if no ACL section or no matching rules.
+/// - **Token**: Computes `effective = token.allow ∩ ACL(uid, gid)`, where root and
+///   config owner have implicit `ACL = *`. The intersection ensures neither the token
+///   scopes nor the ACL can escalate beyond the other.
+///
+/// Returns `Err("permission denied")` with a generic message on failure
+/// (detailed information is logged server-side only to prevent information leakage).
+fn check_config_acl(
+    auth_ctx: &kepler_daemon::auth::AuthContext,
+    handle: &kepler_daemon::config_actor::ConfigActorHandle,
+    request: &Request,
+) -> std::result::Result<(), String> {
+    match auth_ctx {
+        kepler_daemon::auth::AuthContext::Root { .. } => Ok(()),
+        kepler_daemon::auth::AuthContext::Group { uid, gid } => {
+            let uid = *uid;
+            let gid = *gid;
+            // Config owner has full access
+            if Some(uid) == handle.owner_uid() {
+                return Ok(());
+            }
+            // No ACL → deny all scoped operations for non-owners
+            let acl = match handle.acl() {
+                Some(acl) => acl,
+                None => {
+                    let required = kepler_daemon::permissions::required_scopes(request);
+                    if required.is_empty() && !matches!(request, Request::Subscribe { .. }) {
+                        return Ok(());
+                    }
+                    warn!("ACL denied: UID {} attempted operation requiring scopes {:?} but is not config owner", uid, required);
+                    return Err("permission denied".to_string());
+                }
+            };
+            acl.check_access(uid, gid, request)
+        }
+        kepler_daemon::auth::AuthContext::Token { uid, gid, ctx } => {
+            // Compute effective scopes = token.allow ∩ ACL scopes
+            let acl_scopes = if *uid == 0 {
+                // Root has implicit * ACL — effective = token.allow
+                None // None means "use token.allow directly"
+            } else if Some(*uid) == handle.owner_uid() {
+                // Owner has implicit * ACL — effective = token.allow
+                None
+            } else {
+                // Look up ACL
+                match handle.acl() {
+                    None => {
+                        // No ACL and not owner/root → denied
+                        warn!("ACL denied: token bearer UID {} has no ACL access to this config", uid);
+                        return Err("permission denied".to_string());
+                    }
+                    Some(acl) => {
+                        match acl.collect_scopes(*uid, *gid) {
+                            Err(e) => {
+                                warn!("ACL denied: supplementary group lookup failed for token bearer UID {}: {}", uid, e);
+                                return Err("permission denied".to_string());
+                            }
+                            Ok(None) => {
+                                warn!("ACL denied: no ACL rules match token bearer UID {}", uid);
+                                return Err("permission denied".to_string());
+                            }
+                            Ok(Some(scopes)) => Some(scopes),
+                        }
+                    }
+                }
+            };
+
+            // Compute effective scopes: token.allow ∩ ACL (or just token.allow if ACL is implicit *)
+            let effective_allow: std::collections::HashSet<&'static str>;
+            let effective = match acl_scopes {
+                None => &ctx.allow,
+                Some(ref acl) => {
+                    effective_allow = ctx.allow.intersection(acl).copied().collect();
+                    &effective_allow
+                }
+            };
+
+            kepler_daemon::permissions::check_scopes(effective, request)
+                .map_err(|e| format!("permission denied: {}", e))
+        }
+    }
+}
+
+/// Check if the caller can read a config (for global query filtering).
+///
+/// Root and config owners always see everything.
+/// Group members need `config:status` access via ACL.
+/// Token bearers: check token.allow ∩ ACL for `config:status`.
+fn can_read_config(
+    auth_ctx: &kepler_daemon::auth::AuthContext,
+    handle: &kepler_daemon::config_actor::ConfigActorHandle,
+) -> bool {
+    match auth_ctx {
+        kepler_daemon::auth::AuthContext::Root { .. } => true,
+        kepler_daemon::auth::AuthContext::Group { uid, gid } => {
+            if Some(*uid) == handle.owner_uid() {
+                return true;
+            }
+            match handle.acl() {
+                None => false,
+                Some(acl) => acl.has_read_access(*uid, *gid),
+            }
+        }
+        kepler_daemon::auth::AuthContext::Token { uid, gid, ctx } => {
+            // Root always has implicit * ACL
+            if *uid == 0 { return ctx.allow.contains("config:status"); }
+            if Some(*uid) == handle.owner_uid() { return ctx.allow.contains("config:status"); }
+            if !ctx.allow.contains("config:status") { return false; }
+            match handle.acl() {
+                None => false,
+                Some(acl) => acl.has_read_access(*uid, *gid),
+            }
+        }
+    }
+}
+
+/// Load or retrieve cached ACL data for an unloaded config.
+///
+/// Populates the cache on first access by reading state.json and config.yaml
+/// from the state directory.
+fn get_unloaded_acl_entry(
+    state_dir: &Path,
+    cache: &UnloadedAclCache,
+) -> std::result::Result<UnloadedAclEntry, String> {
+    let key = state_dir.to_path_buf();
+    if let Some(entry) = cache.get(&key) {
+        return Ok(entry.clone());
+    }
+
+    let persistence = ConfigPersistence::new(state_dir.to_path_buf());
+    let owner_uid = persistence.load_state()
+        .ok()
+        .flatten()
+        .and_then(|s| s.owner_uid);
+
+    let config_path = state_dir.join("config.yaml");
+    let acl = if config_path.exists() {
+        match kepler_daemon::config::KeplerConfig::load_without_sys_env(&config_path) {
+            Ok(config) => {
+                config.kepler
+                    .and_then(|k| k.acl)
+                    .map(|acl_config| kepler_daemon::acl::ResolvedAcl::from_config(&acl_config))
+                    .transpose()?
+            }
+            Err(e) => {
+                warn!("Failed to parse config for ACL check, treating as no ACL: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let entry = UnloadedAclEntry { owner_uid, acl };
+    cache.insert(key, entry.clone());
+    Ok(entry)
+}
+
+/// Check ACL for an unloaded config using cached state.
+///
+/// When a config is not in the registry (e.g. autostart: false after restart),
+/// we read owner_uid from state.json and ACL from the copied config.yaml,
+/// caching the result to avoid repeated disk reads.
+fn check_unloaded_config_acl(
+    auth_ctx: &kepler_daemon::auth::AuthContext,
+    state_dir: &Path,
+    request: &Request,
+    cache: &UnloadedAclCache,
+) -> std::result::Result<(), String> {
+    let entry = get_unloaded_acl_entry(state_dir, cache)?;
+    let owner_uid = entry.owner_uid;
+
+    match auth_ctx {
+        kepler_daemon::auth::AuthContext::Root { .. } => Ok(()),
+        kepler_daemon::auth::AuthContext::Group { uid, gid } => {
+            // Config owner has full access
+            if let Some(owner) = owner_uid
+                && *uid == owner {
+                    return Ok(());
+                }
+
+            match &entry.acl {
+                Some(resolved_acl) => resolved_acl.check_access(*uid, *gid, request),
+                None => {
+                    let required = kepler_daemon::permissions::required_scopes(request);
+                    if required.is_empty() && !matches!(request, Request::Subscribe { .. }) {
+                        return Ok(());
+                    }
+                    warn!("ACL denied: UID {} attempted operation requiring scopes {:?} but is not config owner", uid, required);
+                    Err("permission denied".to_string())
+                }
+            }
+        }
+        kepler_daemon::auth::AuthContext::Token { uid, gid, ctx } => {
+            // Root has implicit * ACL
+            if *uid == 0 {
+                return kepler_daemon::permissions::check_scopes(&ctx.allow, request)
+                    .map_err(|e| format!("permission denied: {}", e));
+            }
+            // Owner has implicit * ACL
+            if let Some(owner) = owner_uid
+                && *uid == owner {
+                    return kepler_daemon::permissions::check_scopes(&ctx.allow, request)
+                        .map_err(|e| format!("permission denied: {}", e));
+                }
+
+            let acl_scopes = match &entry.acl {
+                None => {
+                    warn!("ACL denied: token bearer UID {} has no ACL access to unloaded config", uid);
+                    return Err("permission denied".to_string());
+                }
+                Some(resolved_acl) => {
+                    match resolved_acl.collect_scopes(*uid, *gid) {
+                        Err(e) => {
+                            warn!("ACL denied: supplementary group lookup failed for token bearer UID {} on unloaded config: {}", uid, e);
+                            return Err("permission denied".to_string());
+                        }
+                        Ok(None) => {
+                            warn!("ACL denied: no ACL rules match token bearer UID {} on unloaded config", uid);
+                            return Err("permission denied".to_string());
+                        }
+                        Ok(Some(scopes)) => scopes,
+                    }
+                }
+            };
+
+            let effective: std::collections::HashSet<&'static str> = ctx.allow.intersection(&acl_scopes).copied().collect();
+            kepler_daemon::permissions::check_scopes(&effective, request)
+                .map_err(|_| "permission denied".to_string())
+        }
+    }
+}
+
+/// Check if a user has filesystem read access to a config file.
+///
+/// Uses file metadata (mode, owner, group) and the user's supplementary groups
+/// to verify read permission. This prevents non-owner users from referencing
+/// arbitrary config paths that they couldn't read directly.
+#[cfg(unix)]
+fn check_filesystem_read_access(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = fs::symlink_metadata(path).map_err(|e| {
+        format!("Cannot access config file '{}': {}", path.display(), e)
+    })?;
+
+    let file_mode = meta.mode();
+    let file_uid = meta.uid();
+    let file_gid = meta.gid();
+
+    // Owner check
+    if uid == file_uid {
+        if file_mode & 0o400 != 0 {
+            return Ok(());
+        }
+        return Err(format!(
+            "Permission denied: owner lacks read access to '{}'",
+            path.display()
+        ));
+    }
+
+    // Group check (primary + supplementary)
+    let all_gids = kepler_daemon::acl::get_all_gids(uid, gid)
+        .map_err(|e| format!("Failed to check filesystem access for '{}': {}", path.display(), e))?;
+    if all_gids.contains(&file_gid) {
+        if file_mode & 0o040 != 0 {
+            return Ok(());
+        }
+        return Err(format!(
+            "Permission denied: group lacks read access to '{}'",
+            path.display()
+        ));
+    }
+
+    // Other check
+    if file_mode & 0o004 != 0 {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Permission denied: no read access to config file '{}'",
+        path.display()
+    ))
 }
 
 /// Canonicalize a config path, returning an error if the path doesn't exist
@@ -247,6 +560,9 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(10);
     let cursor_manager = Arc::new(CursorManager::new(cursor_ttl_seconds));
 
+    // Create token-based permission store
+    let token_store: SharedTokenStore = Arc::new(TokenStore::new());
+
     // Create ServiceOrchestrator (needs cursor_manager to invalidate cursors on stop --clean)
     #[cfg(unix)]
     let kepler_gid_for_orchestrator = Some(kepler_gid);
@@ -259,6 +575,7 @@ async fn main() -> anyhow::Result<()> {
         cursor_manager.clone(),
         hardening,
         kepler_gid_for_orchestrator,
+        token_store.clone(),
     ));
 
     // Spawn cursor cleanup task (runs every 5 seconds)
@@ -275,13 +592,26 @@ async fn main() -> anyhow::Result<()> {
     let handler_orchestrator = orchestrator.clone();
     let handler_registry = registry.clone();
     let handler_cursor_manager = cursor_manager.clone();
+    let handler_token_store = token_store.clone();
+    let unloaded_acl_cache: UnloadedAclCache = Arc::new(DashMap::new());
+    let handler_unloaded_acl_cache = unloaded_acl_cache.clone();
+    #[cfg(unix)]
+    let handler_kepler_gid = kepler_gid;
 
     // Create the async request handler
     let handler = move |request: Request, shutdown_tx: mpsc::Sender<()>, progress: ProgressSender, peer: PeerCredentials| {
         let orchestrator = handler_orchestrator.clone();
         let registry = handler_registry.clone();
         let cursor_manager = handler_cursor_manager.clone();
-        async move { handle_request(request, orchestrator, registry, cursor_manager, shutdown_tx, progress, peer).await }
+        let token_store = handler_token_store.clone();
+        let unloaded_acl_cache = handler_unloaded_acl_cache.clone();
+        async move {
+            handle_request(
+                request, orchestrator, registry, cursor_manager,
+                shutdown_tx, progress, peer, token_store,
+                handler_kepler_gid, unloaded_acl_cache,
+            ).await
+        }
     };
 
     // Create server with on_disconnect callback to clean up cursors
@@ -363,19 +693,133 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Extract config_path from a request by reference.
+///
+/// Returns `Some` for requests that target a specific config, `None` for
+/// global or config-independent operations.
+fn extract_config_path(request: &Request) -> Option<&PathBuf> {
+    match request {
+        Request::Start { config_path, .. }
+        | Request::Stop { config_path, .. }
+        | Request::Restart { config_path, .. }
+        | Request::Recreate { config_path, .. }
+        | Request::Logs { config_path, .. }
+        | Request::LogsChunk { config_path, .. }
+        | Request::LogsCursor { config_path, .. }
+        | Request::Subscribe { config_path, .. } => Some(config_path),
+        Request::Inspect { config_path } => Some(config_path),
+        Request::Status { config_path } => config_path.as_ref(),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
-    request: Request,
+    mut request: Request,
     orchestrator: Arc<ServiceOrchestrator>,
     registry: SharedConfigRegistry,
     cursor_manager: Arc<CursorManager>,
     shutdown_tx: mpsc::Sender<()>,
     progress: ProgressSender,
     peer: PeerCredentials,
+    token_store: SharedTokenStore,
+    kepler_gid: u32,
+    unloaded_acl_cache: UnloadedAclCache,
 ) -> Response {
+    // Auth gate: resolve authentication context
+    let auth_ctx = match kepler_daemon::auth::resolve_auth(
+        peer.token,
+        peer.uid,
+        peer.gid,
+        kepler_gid,
+        &token_store,
+    ).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            warn!("Authentication failed for UID {}: {}", peer.uid, e);
+            return Response::error(format!("Authentication failed: {}", e));
+        }
+    };
+
+    // For token-based auth, check hardening floor (scope check is now in unified ACL gate)
+    if let kepler_daemon::auth::AuthContext::Token { ref ctx, .. } = auth_ctx {
+        let requested_hardening = match &request {
+            Request::Start { hardening, .. } => hardening.as_deref(),
+            Request::Recreate { hardening, .. } => hardening.as_deref(),
+            _ => None,
+        };
+        match kepler_daemon::auth::check_hardening_floor(ctx, requested_hardening) {
+            Ok(effective_level) => {
+                if let Some(level) = effective_level {
+                    let level_str = level.to_string();
+                    match &mut request {
+                        Request::Start { hardening, .. } => *hardening = Some(level_str),
+                        Request::Recreate { hardening, .. } => *hardening = Some(level_str),
+                        _ => {}
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Hardening floor denied for {}: {}", request.variant_name(), e);
+                return Response::error(e);
+            }
+        }
+    }
+
+    // Filesystem permission check: non-root users must have read access
+    // to the config file they're referencing. This prevents users from operating
+    // on config files they couldn't read directly.
+    #[cfg(unix)]
+    match &auth_ctx {
+        kepler_daemon::auth::AuthContext::Group { uid, gid }
+        | kepler_daemon::auth::AuthContext::Token { uid, gid, .. } => {
+            if let Some(raw_path) = extract_config_path(&request)
+                && let Err(e) = check_filesystem_read_access(raw_path, *uid, *gid) {
+                    warn!("Filesystem access denied for UID {} on '{}': {}", uid, raw_path.display(), e);
+                    return Response::error(e);
+                }
+        }
+        kepler_daemon::auth::AuthContext::Root { .. } => {
+            // Root can always read — skip filesystem check
+        }
+    }
+
+    // Per-config ACL gate: check before match destructures request fields.
+    // Extract config_path from request by reference, look up handle, enforce ACL.
+    {
+        if let Some(raw_path) = extract_config_path(&request) {
+            match std::fs::canonicalize(raw_path) {
+                Ok(canonical) => {
+                    if let Some(handle) = registry.get(&canonical) {
+                        if let Err(e) = check_config_acl(&auth_ctx, &handle, &request) {
+                            warn!("ACL denied for UID {} on {}: {}", auth_ctx.uid(), request.variant_name(), e);
+                            return Response::error(e);
+                        }
+                    } else if let Some(state_dir) = compute_state_dir(&canonical)
+                        && let Err(e) = check_unloaded_config_acl(&auth_ctx, &state_dir, &request, &unloaded_acl_cache) {
+                            warn!("ACL denied for UID {} on unloaded {}: {}", auth_ctx.uid(), request.variant_name(), e);
+                            return Response::error(e);
+                        }
+                }
+                Err(e) => {
+                    warn!("Failed to resolve config path '{}': {}", raw_path.display(), e);
+                    return Response::error(format!("Config path not found or inaccessible: '{}'", raw_path.display()));
+                }
+            }
+        }
+    }
+
     match request {
         Request::Ping => Response::ok_with_message("pong".to_string()),
 
         Request::Shutdown => {
+            // Daemon-level ops are root-only
+            if !matches!(auth_ctx, kepler_daemon::auth::AuthContext::Root { .. }) {
+                warn!("Non-root user (UID {}) attempted daemon shutdown", auth_ctx.uid());
+                return Response::error(
+                    "Permission denied: only root can shut down the daemon".to_string()
+                );
+            }
             info!("Shutdown requested");
 
             // Signal shutdown — just exit. State is already persisted with
@@ -401,8 +845,17 @@ async fn handle_request(
                 Some(Err(e)) => return Response::error(e),
                 None => None,
             };
+            // Compute permission ceiling from auth context
+            let permission_ceiling = match &auth_ctx {
+                kepler_daemon::auth::AuthContext::Token { ctx, .. } => Some(ctx.allow.clone()),
+                _ => None,
+            };
+            // Invalidate cached ACL — the config is being loaded into the registry
+            if let Some(state_dir) = compute_state_dir(&config_path) {
+                unloaded_acl_cache.remove(&state_dir);
+            }
             match orchestrator
-                .start_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps, override_envs, hardening_level)
+                .start_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps, override_envs, hardening_level, permission_ceiling)
                 .await
             {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -535,8 +988,11 @@ async fn handle_request(
                 task.abort();
             }
 
-            // If clean, send Cleaning → Cleaned for each service
+            // If clean, invalidate cached ACL and send Cleaning → Cleaned for each service
             if clean {
+                if let Some(state_dir) = compute_state_dir(&config_path) {
+                    unloaded_acl_cache.remove(&state_dir);
+                }
                 for svc in &clean_services {
                     progress.send(ProgressEvent {
                         service: svc.clone(),
@@ -679,8 +1135,17 @@ async fn handle_request(
                 None => None,
             };
 
+            // Compute permission ceiling from auth context
+            let permission_ceiling = match &auth_ctx {
+                kepler_daemon::auth::AuthContext::Token { ctx, .. } => Some(ctx.allow.clone()),
+                _ => None,
+            };
+            // Invalidate cached ACL — the config is being recreated
+            if let Some(state_dir) = compute_state_dir(&config_path) {
+                unloaded_acl_cache.remove(&state_dir);
+            }
             match orchestrator
-                .recreate_services(&config_path, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), hardening_level)
+                .recreate_services(&config_path, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), hardening_level, permission_ceiling)
                 .await
             {
                 Ok(msg) if msg.is_empty() => Response::Ok { message: None, data: None },
@@ -714,7 +1179,11 @@ async fn handle_request(
             }
             None => {
                 let handles = registry.all_handles();
-                let configs = futures::future::join_all(handles.iter().map(|h| async {
+                // Filter by ACL read access
+                let visible_handles: Vec<_> = handles.iter()
+                    .filter(|h| can_read_config(&auth_ctx, h))
+                    .collect();
+                let configs = futures::future::join_all(visible_handles.iter().map(|h| async {
                     let services = h.get_service_status(None).await.unwrap_or_default();
                     kepler_protocol::protocol::ConfigStatus {
                         config_path: h.config_path().to_string_lossy().to_string(),
@@ -763,6 +1232,11 @@ async fn handle_request(
 
         Request::ListConfigs => {
             let handles = registry.all_handles();
+            // Filter by ACL read access
+            let handles: Vec<_> = handles.iter()
+                .filter(|h| can_read_config(&auth_ctx, h))
+                .cloned()
+                .collect();
             let configs = futures::future::join_all(handles.iter().map(|h| async {
                 let config = h.get_config().await;
                 let services = h.get_service_status(None).await.unwrap_or_default();
@@ -778,21 +1252,6 @@ async fn handle_request(
                 }
             })).await;
             Response::ok_with_data(ResponseData::ConfigList(configs))
-        }
-
-        Request::UnloadConfig { config_path } => {
-            let config_path = match canonicalize_config_path(config_path) {
-                Ok(p) => p,
-                Err(e) => return Response::error(e.to_string()),
-            };
-            // Stop all services first
-            if let Err(e) = orchestrator.stop_services(&config_path, None, false, None).await {
-                return Response::error(format!("Failed to stop services: {}", e));
-            }
-
-            // Unload config (shutdown actor)
-            registry.unload(&config_path).await;
-            Response::ok_with_message(format!("Unloaded config: {}", config_path.display()))
         }
 
         Request::LogsChunk {
@@ -834,8 +1293,21 @@ async fn handle_request(
         }
 
         Request::Prune { force, dry_run } => {
+            // Daemon-level ops are root-only
+            if !matches!(auth_ctx, kepler_daemon::auth::AuthContext::Root { .. }) {
+                warn!("Non-root user (UID {}) attempted prune", auth_ctx.uid());
+                return Response::error(
+                    "Permission denied: only root can prune configs".to_string()
+                );
+            }
             match orchestrator.prune_all(force, dry_run).await {
-                Ok(results) => Response::ok_with_data(ResponseData::PrunedConfigs(results)),
+                Ok(results) => {
+                    if !dry_run {
+                        // Invalidate all cached ACLs — pruned state dirs are gone
+                        unloaded_acl_cache.clear();
+                    }
+                    Response::ok_with_data(ResponseData::PrunedConfigs(results))
+                }
                 Err(e) => Response::error(e.to_string()),
             }
         }
@@ -1364,7 +1836,7 @@ async fn discover_existing_configs(
 
         // Load the config (will restore from snapshot)
         info!("Restoring config from {:?}", source_path);
-        match registry.get_or_create(source_path.clone(), None, None, None).await {
+        match registry.get_or_create(source_path.clone(), None, None, None, None).await {
             Ok(handle) => {
                 restored += 1;
 
@@ -1539,7 +2011,7 @@ async fn kill_orphaned_processes_from_state(persistence: &ConfigPersistence, sta
     // Update state.json to reflect that active services are now stopped
     let mut updated_state = state;
     let mut any_changed = false;
-    for (_, ps) in &mut updated_state.services {
+    for ps in updated_state.services.values_mut() {
         let status: ServiceStatus = ps.status.into();
         if status.is_active() {
             ps.status = ServiceStatus::Stopped.into();
@@ -1547,11 +2019,10 @@ async fn kill_orphaned_processes_from_state(persistence: &ConfigPersistence, sta
             any_changed = true;
         }
     }
-    if any_changed {
-        if let Err(e) = persistence.save_state(&updated_state) {
+    if any_changed
+        && let Err(e) = persistence.save_state(&updated_state) {
             warn!("Failed to update state.json after killing orphans: {}", e);
         }
-    }
 }
 
 #[cfg(test)]
@@ -1584,6 +2055,7 @@ mod tests {
             services,
             config_initialized: true,
             snapshot_time: 1000,
+            owner_uid: None,
         }
     }
 
@@ -1932,6 +2404,7 @@ mod tests {
             hardening: None,
             service_envs: HashMap::new(),
             service_working_dirs: HashMap::new(),
+            permission_ceiling: None,
         };
         persistence.save_expanded_config(&snapshot).unwrap();
 
@@ -2021,5 +2494,598 @@ mod tests {
         assert_eq!(outputs["hooks"], serde_json::json!({}));
     }
 
+    // =========================================================================
+    // check_unloaded_config_acl tests
+    // =========================================================================
+
+    fn new_acl_cache() -> UnloadedAclCache {
+        Arc::new(DashMap::new())
+    }
+
+    /// Helper to save a state.json with a given owner_uid.
+    fn save_state_with_owner(state_dir: &Path, owner_uid: Option<u32>) {
+        let persistence = ConfigPersistence::new(state_dir.to_path_buf());
+        let state = PersistedConfigState {
+            services: HashMap::new(),
+            config_initialized: true,
+            snapshot_time: 1000,
+            owner_uid,
+        };
+        persistence.save_state(&state).unwrap();
+    }
+
+    /// Helper to write a raw config.yaml with optional ACL (simulates the config copy).
+    fn save_raw_config_with_acl(state_dir: &Path, acl: Option<kepler_daemon::config::AclConfig>) {
+        use kepler_daemon::config::{KeplerConfig, KeplerGlobalConfig};
+
+        let kepler = Some(KeplerGlobalConfig {
+            default_inherit_env: None,
+            logs: None,
+            timeout: None,
+            output_max_size: None,
+            autostart: Default::default(),
+            acl,
+        });
+        let config = KeplerConfig {
+            lua: None,
+            kepler,
+            services: HashMap::new(),
+        };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        std::fs::write(state_dir.join("config.yaml"), yaml).unwrap();
+    }
+
+    #[test]
+    fn test_check_unloaded_config_acl_owner_bypass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        save_raw_config_with_acl(state_dir, None);
+
+        let auth = kepler_daemon::auth::AuthContext::Group { uid: 1000, gid: 1000 };
+        let req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+    }
+
+    #[test]
+    fn test_check_unloaded_config_acl_non_owner_no_acl_denied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        save_raw_config_with_acl(state_dir, None);
+
+        let auth = kepler_daemon::auth::AuthContext::Group { uid: 2000, gid: 2000 };
+        let req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+    }
+
+    #[test]
+    fn test_check_unloaded_config_acl_non_owner_with_acl_allowed() {
+        use kepler_daemon::config::{AclConfig, AclRule};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+
+        let acl = AclConfig {
+            users: HashMap::from([(
+                "2000".to_string(),
+                AclRule { allow: vec!["config:status".to_string()] },
+            )]),
+            groups: HashMap::new(),
+        };
+        save_raw_config_with_acl(state_dir, Some(acl));
+
+        let auth = kepler_daemon::auth::AuthContext::Group { uid: 2000, gid: 2000 };
+        let req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+    }
+
+    #[test]
+    fn test_check_unloaded_config_acl_non_owner_with_acl_denied() {
+        use kepler_daemon::config::{AclConfig, AclRule};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+
+        // ACL grants only config:status, but user needs service:start
+        let acl = AclConfig {
+            users: HashMap::from([(
+                "2000".to_string(),
+                AclRule { allow: vec!["config:status".to_string()] },
+            )]),
+            groups: HashMap::new(),
+        };
+        save_raw_config_with_acl(state_dir, Some(acl));
+
+        let auth = kepler_daemon::auth::AuthContext::Group { uid: 2000, gid: 2000 };
+        let req = Request::Start {
+            config_path: "/test".into(),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+        };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+    }
+
+    #[test]
+    fn test_check_unloaded_config_acl_root_bypass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        // No config.yaml needed — root bypasses before config is read
+
+        let auth = kepler_daemon::auth::AuthContext::Root { uid: 0, gid: 0 };
+        let req = Request::Start {
+            config_path: "/test".into(),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+        };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+    }
+
+    #[test]
+    fn test_check_unloaded_config_acl_missing_config_yaml_denies_non_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        // No config.yaml — should deny for non-owner (no ACL available)
+
+        let auth = kepler_daemon::auth::AuthContext::Group { uid: 2000, gid: 2000 };
+        let req = Request::Status { config_path: Some("/test".into()) };
+        let result = check_unloaded_config_acl(&auth, state_dir, &req, &cache);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Token ∩ ACL intersection tests (Issue #4)
+    // =========================================================================
+
+    /// Helper to create a Token AuthContext with the given scopes.
+    fn make_token_auth(uid: u32, gid: u32, scopes: &[&str]) -> kepler_daemon::auth::AuthContext {
+        use kepler_daemon::token_store::TokenContext;
+        use kepler_daemon::hardening::HardeningLevel;
+        let allow: std::collections::HashSet<String> = scopes.iter().map(|s| s.to_string()).collect();
+        let expanded = kepler_daemon::permissions::expand_scopes(&allow).unwrap();
+        kepler_daemon::auth::AuthContext::Token {
+            uid,
+            gid,
+            ctx: std::sync::Arc::new(TokenContext {
+                allow: expanded,
+                max_hardening: HardeningLevel::None,
+                service: "test".to_string(),
+                config_path: "/test".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn token_acl_intersection_narrows_scopes() {
+        use kepler_daemon::config::{AclConfig, AclRule};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+
+        // ACL grants config:status + service:logs
+        let acl = AclConfig {
+            users: HashMap::from([(
+                "2000".to_string(),
+                AclRule { allow: vec!["config:status".to_string(), "service:logs".to_string()] },
+            )]),
+            groups: HashMap::new(),
+        };
+        save_raw_config_with_acl(state_dir, Some(acl));
+
+        // Token has service:start + config:status
+        let auth = make_token_auth(2000, 2000, &["service:start", "config:status"]);
+
+        // Intersection = {config:status} → Start denied, Status allowed
+        let start_req = Request::Start {
+            config_path: "/test".into(),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+        };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_err());
+
+        let status_req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).is_ok());
+    }
+
+    #[test]
+    fn token_acl_wildcard_acl_narrows_token() {
+        use kepler_daemon::config::{AclConfig, AclRule};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+
+        // ACL grants *
+        let acl = AclConfig {
+            users: HashMap::from([(
+                "2000".to_string(),
+                AclRule { allow: vec!["*".to_string()] },
+            )]),
+            groups: HashMap::new(),
+        };
+        save_raw_config_with_acl(state_dir, Some(acl));
+
+        // Token has only service:start
+        let auth = make_token_auth(2000, 2000, &["service:start"]);
+
+        // Start allowed (in intersection)
+        let start_req = Request::Start {
+            config_path: "/test".into(),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+        };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_ok());
+
+        // Status denied (not in token)
+        let status_req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).is_err());
+    }
+
+    #[test]
+    fn token_acl_wildcard_token_narrows_to_acl() {
+        use kepler_daemon::config::{AclConfig, AclRule};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+
+        // ACL grants only config:status
+        let acl = AclConfig {
+            users: HashMap::from([(
+                "2000".to_string(),
+                AclRule { allow: vec!["config:status".to_string()] },
+            )]),
+            groups: HashMap::new(),
+        };
+        save_raw_config_with_acl(state_dir, Some(acl));
+
+        // Token has * (everything)
+        let auth = make_token_auth(2000, 2000, &["*"]);
+
+        // Status allowed (in ACL)
+        let status_req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).is_ok());
+
+        // Start denied (not in ACL)
+        let start_req = Request::Start {
+            config_path: "/test".into(),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+        };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_err());
+    }
+
+    #[test]
+    fn token_acl_empty_intersection_denies() {
+        use kepler_daemon::config::{AclConfig, AclRule};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+
+        // ACL grants config:status
+        let acl = AclConfig {
+            users: HashMap::from([(
+                "2000".to_string(),
+                AclRule { allow: vec!["config:status".to_string()] },
+            )]),
+            groups: HashMap::new(),
+        };
+        save_raw_config_with_acl(state_dir, Some(acl));
+
+        // Token has only service:start → no overlap
+        let auth = make_token_auth(2000, 2000, &["service:start"]);
+
+        let start_req = Request::Start {
+            config_path: "/test".into(),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+        };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_err());
+
+        let status_req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).is_err());
+    }
+
+    #[test]
+    fn token_root_uid_bypasses_acl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        save_raw_config_with_acl(state_dir, None); // No ACL
+
+        // Root (uid 0) with token → effective = token.allow (ACL implicit *)
+        let auth = make_token_auth(0, 0, &["service:start"]);
+
+        let start_req = Request::Start {
+            config_path: "/test".into(),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+        };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_ok());
+    }
+
+    #[test]
+    fn token_owner_uid_bypasses_acl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        save_raw_config_with_acl(state_dir, None); // No ACL
+
+        // Owner (uid 1000) with token → effective = token.allow (ACL implicit *)
+        let auth = make_token_auth(1000, 1000, &["service:start", "config:status"]);
+
+        let start_req = Request::Start {
+            config_path: "/test".into(),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+        };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_ok());
+
+        let status_req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).is_ok());
+    }
+
+    // =========================================================================
+    // can_read_config Token bearer tests (Issue #11)
+    // These test through check_unloaded_config_acl with Status requests.
+    // =========================================================================
+
+    #[test]
+    fn can_read_config_token_owner_with_status_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        save_raw_config_with_acl(state_dir, None);
+
+        // Owner with config:status → allowed
+        let auth = make_token_auth(1000, 1000, &["config:status"]);
+        let req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+    }
+
+    #[test]
+    fn can_read_config_token_owner_without_status_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        save_raw_config_with_acl(state_dir, None);
+
+        // Owner without config:status → denied (token restricts even owners)
+        let auth = make_token_auth(1000, 1000, &["service:start"]);
+        let req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+    }
+
+    #[test]
+    fn can_read_config_token_non_owner_with_acl() {
+        use kepler_daemon::config::{AclConfig, AclRule};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+
+        let acl = AclConfig {
+            users: HashMap::from([(
+                "2000".to_string(),
+                AclRule { allow: vec!["config:status".to_string()] },
+            )]),
+            groups: HashMap::new(),
+        };
+        save_raw_config_with_acl(state_dir, Some(acl));
+
+        // Non-owner with config:status in token and matching ACL → allowed
+        let auth = make_token_auth(2000, 2000, &["config:status"]);
+        let req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+    }
+
+    #[test]
+    fn can_read_config_token_non_owner_no_acl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        save_raw_config_with_acl(state_dir, None); // No ACL
+
+        // Non-owner with config:status in token but no ACL → denied
+        let auth = make_token_auth(2000, 2000, &["config:status"]);
+        let req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+    }
+
+    // =========================================================================
+    // Missing tests from review (N-2 cross-config isolation, E-6, S-1)
+    // =========================================================================
+
+    #[test]
+    fn token_cross_config_isolation() {
+        use kepler_daemon::config::{AclConfig, AclRule};
+
+        // Config A: owner 1000, ACL grants uid 2000 service:start
+        let tmp_a = tempfile::tempdir().unwrap();
+        let state_dir_a = tmp_a.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir_a, Some(1000));
+
+        let acl_a = AclConfig {
+            users: HashMap::from([(
+                "2000".to_string(),
+                AclRule { allow: vec!["service:start".to_string()] },
+            )]),
+            groups: HashMap::new(),
+        };
+        save_raw_config_with_acl(state_dir_a, Some(acl_a));
+
+        // Config B: owner 3000, no ACL for uid 2000
+        let tmp_b = tempfile::tempdir().unwrap();
+        let state_dir_b = tmp_b.path();
+        save_state_with_owner(state_dir_b, Some(3000));
+        save_raw_config_with_acl(state_dir_b, None);
+
+        // Token registered for config A's path
+        let auth = make_token_auth(2000, 2000, &["service:start"]);
+
+        let start_req = Request::Start {
+            config_path: "/test".into(),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+        };
+
+        // Token with ACL for config A → allowed
+        assert!(check_unloaded_config_acl(&auth, state_dir_a, &start_req, &cache).is_ok());
+
+        // Same token against config B → denied (no ACL match, not owner)
+        assert!(check_unloaded_config_acl(&auth, state_dir_b, &start_req, &cache).is_err());
+    }
+
+    #[test]
+    fn token_global_status_denied_without_acl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        save_raw_config_with_acl(state_dir, None);
+
+        // Non-owner token without ACL: even scope-less requests are denied
+        // because the Token path requires ACL for non-root non-owner users.
+        // Filtering for global status happens in can_read_config, not here.
+        let auth = make_token_auth(2000, 2000, &["service:start"]);
+        let req = Request::Status { config_path: None };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+    }
+
+    #[test]
+    fn group_global_status_always_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        save_raw_config_with_acl(state_dir, None);
+
+        // Group auth: global status (scope-less) is allowed even for non-owners
+        let auth = kepler_daemon::auth::AuthContext::Group { uid: 2000, gid: 2000 };
+        let req = Request::Status { config_path: None };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+    }
+
+    #[test]
+    fn token_per_config_status_denied_without_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+        save_raw_config_with_acl(state_dir, None);
+
+        // Non-owner token without config:status scope
+        let auth = make_token_auth(2000, 2000, &["service:start"]);
+
+        // Per-config status requires config:status
+        let req = Request::Status { config_path: Some("/test".into()) };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+    }
+
+    #[test]
+    fn token_subscribe_requires_service_scope() {
+        use kepler_daemon::config::{AclConfig, AclRule};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+
+        // ACL gives config:status only
+        let acl = AclConfig {
+            users: HashMap::from([(
+                "2000".to_string(),
+                AclRule { allow: vec!["config:status".to_string()] },
+            )]),
+            groups: HashMap::new(),
+        };
+        save_raw_config_with_acl(state_dir, Some(acl));
+
+        // Token with config:status only → Subscribe denied
+        let auth = make_token_auth(2000, 2000, &["config:status"]);
+        let req = Request::Subscribe {
+            config_path: "/test".into(),
+            services: None,
+        };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+    }
+
+    #[test]
+    fn token_subscribe_allowed_with_service_scope() {
+        use kepler_daemon::config::{AclConfig, AclRule};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let cache = new_acl_cache();
+        save_state_with_owner(state_dir, Some(1000));
+
+        // ACL gives service:start
+        let acl = AclConfig {
+            users: HashMap::from([(
+                "2000".to_string(),
+                AclRule { allow: vec!["service:start".to_string()] },
+            )]),
+            groups: HashMap::new(),
+        };
+        save_raw_config_with_acl(state_dir, Some(acl));
+
+        // Token with service:start → Subscribe allowed
+        let auth = make_token_auth(2000, 2000, &["service:start"]);
+        let req = Request::Subscribe {
+            config_path: "/test".into(),
+            services: None,
+        };
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+    }
 }
 

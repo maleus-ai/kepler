@@ -34,12 +34,13 @@ The daemon spawns a per-request handler task for each incoming request, with a s
 
 ```
 RequestEnvelope {
-    id: u64,            # Unique request identifier
-    request: Request,   # The actual request
+    id: u64,                    # Unique request identifier
+    request: Request,           # The actual request
+    token: Option<[u8; 32]>,    # Bearer token (from KEPLER_TOKEN env var)
 }
 ```
 
-Each request is wrapped in an envelope with a unique ID. This allows the daemon to send responses and events for multiple concurrent requests.
+Each request is wrapped in an envelope with a unique ID. This allows the daemon to send responses and events for multiple concurrent requests. The `token` field carries the bearer token for token-based authentication -- it is automatically populated by the client library from the `KEPLER_TOKEN` environment variable when present.
 
 ### Daemon → Client
 
@@ -74,10 +75,10 @@ ServerMessage::Event {
 | `LogsChunk` | `config_path`, `service?`, `offset`, `limit`, `no_hooks` | Get log entries with offset/limit pagination |
 | `LogsCursor` | `config_path`, `service?`, `cursor_id?`, `from_start`, `no_hooks` | Cursor-based log streaming |
 | `Subscribe` | `config_path`, `services?` | Subscribe to service state change events |
+| `Inspect` | `config_path` | Inspect config and runtime state (JSON output) |
 | `Shutdown` | *(none)* | Shutdown the daemon |
 | `Ping` | *(none)* | Check if daemon is alive |
 | `ListConfigs` | *(none)* | List all loaded configs |
-| `UnloadConfig` | `config_path` | Unload a config (stops all its services) |
 | `Prune` | `force`, `dry_run` | Remove stopped/orphaned config state |
 
 ---
@@ -111,6 +112,7 @@ Response::Error {
 | `LogCursor` | `LogCursorData` | `LogsCursor` |
 | `DaemonInfo` | `DaemonInfo` | `Ping` |
 | `PrunedConfigs` | `Vec<PrunedConfigInfo>` | `Prune` |
+| `Inspect` | `String` | `Inspect` (pre-built JSON) |
 
 ### Key Data Structures
 

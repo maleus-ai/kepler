@@ -59,6 +59,7 @@ impl ConfigRegistry {
         sys_env: Option<HashMap<String, String>>,
         config_owner: Option<(u32, u32)>,
         hardening: Option<HardeningLevel>,
+        permission_ceiling: Option<std::collections::HashSet<&'static str>>,
     ) -> Result<ConfigActorHandle> {
         // Canonicalize path first
         let canonical_path = std::fs::canonicalize(&config_path).map_err(|e| {
@@ -82,7 +83,7 @@ impl ConfigRegistry {
 
         // Exactly one caller initializes; others await the result
         let result = cell.get_or_try_init(|| async {
-            let (handle, actor) = ConfigActor::create(config_path, sys_env, config_owner, hardening)?;
+            let (handle, actor) = ConfigActor::create(config_path, sys_env, config_owner, hardening, permission_ceiling)?;
             tokio::spawn(actor.run());
             Ok(handle)
         }).await;

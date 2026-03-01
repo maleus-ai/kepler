@@ -389,7 +389,7 @@ services:
           timeout: 2m
       - config-service:
           condition: service_healthy
-    env_file: ${{ service.raw_env.GATEWAY_ENV_FILE or ".env" }}$
+    env_file: ${{ kepler.env.GATEWAY_ENV_FILE or ".env" }}$
     environment:
       - GATEWAY_VERSION=${{ global.platform_version }}$
     healthcheck:

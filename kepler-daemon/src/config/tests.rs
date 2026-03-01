@@ -749,3 +749,235 @@ services:
     assert!(resolved.environment.contains(&"PORT=8080".to_string()),
         "Expected PORT=8080 in {:?}", resolved.environment);
 }
+
+// ============================================================================
+// ServicePermissions parsing tests (Issue #6)
+// ============================================================================
+
+#[test]
+fn permissions_list_form() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    permissions: ["service:start", "config:status"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let perms = config.services["svc"].permissions.as_ref().unwrap();
+    assert_eq!(perms.allow, vec!["service:start", "config:status"]);
+    assert!(perms.hardening.is_none());
+}
+
+#[test]
+fn permissions_object_form() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    permissions:
+      allow: ["service:start", "config:status"]
+      hardening: "strict"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let perms = config.services["svc"].permissions.as_ref().unwrap();
+    assert_eq!(perms.allow, vec!["service:start", "config:status"]);
+    assert_eq!(perms.hardening.as_deref(), Some("strict"));
+}
+
+#[test]
+fn permissions_object_no_hardening() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    permissions:
+      allow: ["service:start"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let perms = config.services["svc"].permissions.as_ref().unwrap();
+    assert_eq!(perms.allow, vec!["service:start"]);
+    assert!(perms.hardening.is_none());
+}
+
+#[test]
+fn permissions_security_alias() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    security: ["service:start"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let perms = config.services["svc"].permissions.as_ref().unwrap();
+    assert_eq!(perms.allow, vec!["service:start"]);
+}
+
+#[test]
+fn permissions_absent() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(config.services["svc"].permissions.is_none());
+}
+
+// ============================================================================
+// AclConfig parsing tests (Issue #7)
+// ============================================================================
+
+#[test]
+fn acl_users_and_groups() {
+    let yaml = r#"
+kepler:
+  acl:
+    users:
+      "1000":
+        allow: ["service:start"]
+    groups:
+      "2000":
+        allow: ["config:status"]
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let acl = config.kepler.as_ref().unwrap().acl.as_ref().unwrap();
+    assert_eq!(acl.users.len(), 1);
+    assert_eq!(acl.groups.len(), 1);
+    assert_eq!(acl.users["1000"].allow, vec!["service:start"]);
+    assert_eq!(acl.groups["2000"].allow, vec!["config:status"]);
+}
+
+#[test]
+fn acl_only_groups() {
+    let yaml = r#"
+kepler:
+  acl:
+    groups:
+      "2000":
+        allow: ["config:status"]
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let acl = config.kepler.as_ref().unwrap().acl.as_ref().unwrap();
+    assert!(acl.users.is_empty());
+    assert_eq!(acl.groups.len(), 1);
+}
+
+#[test]
+fn acl_empty() {
+    let yaml = r#"
+kepler:
+  acl: {}
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let acl = config.kepler.as_ref().unwrap().acl.as_ref().unwrap();
+    assert!(acl.users.is_empty());
+    assert!(acl.groups.is_empty());
+}
+
+#[test]
+fn acl_absent() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(config.kepler.is_none() || config.kepler.as_ref().unwrap().acl.is_none());
+}
+
+// ============================================================================
+// Missing tests from review (CF-1, CF-2, CF-6, E-5)
+// ============================================================================
+
+#[test]
+fn permissions_and_security_both_present_errors() {
+    // `security` is a serde alias for `permissions`. When both are present
+    // in YAML, serde_yaml correctly rejects this as a duplicate field.
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    permissions: ["service:start"]
+    security: ["config:status"]
+"#;
+    let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("duplicate field"), "expected duplicate field error, got: {}", err);
+}
+
+#[test]
+fn permissions_empty_allow_list() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    permissions: []
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let perms = config.services["svc"].permissions.as_ref().unwrap();
+    assert!(perms.allow.is_empty());
+    assert!(perms.hardening.is_none());
+}
+
+#[test]
+fn permissions_empty_allow_list_object_form() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    permissions:
+      allow: []
+      hardening: "strict"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let perms = config.services["svc"].permissions.as_ref().unwrap();
+    assert!(perms.allow.is_empty());
+    assert_eq!(perms.hardening.as_deref(), Some("strict"));
+}
+
+#[test]
+fn permissions_hardening_accepts_valid_strings() {
+    for level in &["none", "no-root", "strict"] {
+        let yaml = format!(r#"
+services:
+  svc:
+    command: ["./app"]
+    permissions:
+      allow: ["service:start"]
+      hardening: "{}"
+"#, level);
+        let config: KeplerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let perms = config.services["svc"].permissions.as_ref().unwrap();
+        assert_eq!(perms.hardening.as_deref(), Some(*level));
+    }
+}
+
+#[test]
+fn permissions_hardening_invalid_string_parses_but_stored() {
+    // Serde deserialization accepts any string — KeplerConfig::validate()
+    // catches invalid hardening levels at config load time.
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+    permissions:
+      allow: ["service:start"]
+      hardening: "invalid-level"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let perms = config.services["svc"].permissions.as_ref().unwrap();
+    assert_eq!(perms.hardening.as_deref(), Some("invalid-level"));
+}

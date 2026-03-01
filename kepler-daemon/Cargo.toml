@@ -33,6 +33,8 @@ memchr = "2.7"
 base64 = "0.22"
 sysinfo = "0.37"
 tempfile = "3.10"
+subtle = "2.6"
+getrandom = "0.2"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

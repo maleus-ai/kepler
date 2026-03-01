@@ -5,4 +5,4 @@ edition = "2024"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-nix = { version = "0.31.1", features = ["user", "process"] }
+nix = { version = "0.31.1", features = ["user", "process", "fs"] }

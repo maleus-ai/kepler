@@ -138,8 +138,8 @@ impl EvalContext {
     /// Get a mutable reference to the "active" env — hook env if present, else service env.
     /// Panics if neither is present.
     pub fn active_env_mut(&mut self) -> &mut HashMap<String, String> {
-        if self.hook.is_some() {
-            &mut self.hook.as_mut().unwrap().env
+        if let Some(ref mut hook) = self.hook {
+            &mut hook.env
         } else {
             &mut self.service.as_mut().unwrap().env
         }
@@ -148,8 +148,8 @@ impl EvalContext {
     /// Get a mutable reference to the "active" env_file — hook env_file if present, else service env_file.
     /// Panics if neither is present.
     pub fn active_env_file_mut(&mut self) -> &mut HashMap<String, String> {
-        if self.hook.is_some() {
-            &mut self.hook.as_mut().unwrap().env_file
+        if let Some(ref mut hook) = self.hook {
+            &mut hook.env_file
         } else {
             &mut self.service.as_mut().unwrap().env_file
         }
@@ -479,13 +479,12 @@ impl LuaEvaluator {
                         ));
                     }
                     HardeningLevel::Strict => {
-                        if let Some(owner) = owner_uid {
-                            if resolved.uid != owner {
+                        if let Some(owner) = owner_uid
+                            && resolved.uid != owner {
                                 return Err(mlua::Error::RuntimeError(
                                     format!("os.getgroups: access denied for user '{}' (uid {}) — only config owner uid {} allowed (hardening level: strict)", spec, resolved.uid, owner)
                                 ));
                             }
-                        }
                     }
                     _ => {}
                 }

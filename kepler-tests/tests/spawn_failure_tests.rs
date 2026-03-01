@@ -31,7 +31,8 @@ fn create_test_orchestrator(
     let (exit_tx, exit_rx) = mpsc::channel(32);
     let (restart_tx, restart_rx) = mpsc::channel(32);
     let cursor_manager = Arc::new(kepler_daemon::cursor::CursorManager::new(300));
-    let orchestrator = ServiceOrchestrator::new(registry.clone(), exit_tx, restart_tx, cursor_manager, kepler_daemon::hardening::HardeningLevel::None, None,);
+    let token_store = Arc::new(kepler_daemon::token_store::TokenStore::new());
+    let orchestrator = ServiceOrchestrator::new(registry.clone(), exit_tx, restart_tx, cursor_manager, kepler_daemon::hardening::HardeningLevel::None, None, token_store);
     (orchestrator, registry, exit_rx, restart_rx)
 }
 
@@ -76,7 +77,7 @@ async fn test_start_with_nonexistent_working_dir_retries_without_hanging() {
 
     // First start — spawns the service which fails asynchronously
     let _result = orchestrator
-        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None)
+        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None, None)
         .await;
 
     // Wait for the service to reach Failed status
@@ -96,7 +97,7 @@ async fn test_start_with_nonexistent_working_dir_retries_without_hanging() {
     // Second start must complete (fail or succeed) within a reasonable time — NOT hang.
     let result2 = tokio::time::timeout(
         Duration::from_secs(5),
-        orchestrator.start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None),
+        orchestrator.start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None, None),
     )
     .await;
 
@@ -135,7 +136,7 @@ async fn test_failed_config_remains_in_registry() {
 
     // Start — spawns service which fails asynchronously
     let _result = orchestrator
-        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None)
+        .start_services(&config_path, &[], Some(sys_env.clone()), None, None, false, None, None, None)
         .await;
 
     // Config should be in the registry immediately after start_services returns

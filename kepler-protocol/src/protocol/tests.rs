@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 #[test]
 fn roundtrip_envelope_ping() {
-    let envelope = RequestEnvelope { id: 1, request: Request::Ping };
+    let envelope = RequestEnvelope { id: 1, request: Request::Ping, token: None };
     let bytes = encode_envelope(&envelope).unwrap();
     // Strip 4-byte length prefix
     let decoded = decode_envelope(&bytes[4..]).unwrap();
@@ -17,7 +17,7 @@ fn roundtrip_envelope_ping() {
 
 #[test]
 fn roundtrip_envelope_shutdown() {
-    let envelope = RequestEnvelope { id: 42, request: Request::Shutdown };
+    let envelope = RequestEnvelope { id: 42, request: Request::Shutdown, token: None };
     let bytes = encode_envelope(&envelope).unwrap();
     let decoded = decode_envelope(&bytes[4..]).unwrap();
     assert_eq!(decoded.id, 42);
@@ -28,6 +28,7 @@ fn roundtrip_envelope_shutdown() {
 fn roundtrip_envelope_start() {
     let envelope = RequestEnvelope {
         id: 7,
+        token: None,
         request: Request::Start {
             config_path: PathBuf::from("/tmp/test.yaml"),
             services: vec!["web".into()],
@@ -56,6 +57,7 @@ fn roundtrip_envelope_start() {
 fn roundtrip_envelope_stop() {
     let envelope = RequestEnvelope {
         id: 3,
+        token: None,
         request: Request::Stop {
             config_path: PathBuf::from("/etc/kepler.yaml"),
             service: None,
@@ -81,6 +83,7 @@ fn roundtrip_envelope_stop() {
 fn roundtrip_envelope_restart() {
     let envelope = RequestEnvelope {
         id: 5,
+        token: None,
         request: Request::Restart {
             config_path: PathBuf::from("/app/kepler.yaml"),
             services: vec!["api".into(), "web".into()],
@@ -104,6 +107,7 @@ fn roundtrip_envelope_restart() {
 fn roundtrip_envelope_logs() {
     let envelope = RequestEnvelope {
         id: 10,
+        token: None,
         request: Request::Logs {
             config_path: PathBuf::from("/app/k.yaml"),
             service: Some("worker".into()),
@@ -133,6 +137,7 @@ fn roundtrip_envelope_logs() {
 fn roundtrip_envelope_status() {
     let envelope = RequestEnvelope {
         id: 99,
+        token: None,
         request: Request::Status { config_path: None },
     };
     let bytes = encode_envelope(&envelope).unwrap();
@@ -146,7 +151,7 @@ fn roundtrip_envelope_status() {
 
 #[test]
 fn roundtrip_envelope_list_configs() {
-    let envelope = RequestEnvelope { id: 100, request: Request::ListConfigs };
+    let envelope = RequestEnvelope { id: 100, request: Request::ListConfigs, token: None };
     let bytes = encode_envelope(&envelope).unwrap();
     let decoded = decode_envelope(&bytes[4..]).unwrap();
     assert!(matches!(decoded.request, Request::ListConfigs));
@@ -156,6 +161,7 @@ fn roundtrip_envelope_list_configs() {
 fn roundtrip_envelope_prune() {
     let envelope = RequestEnvelope {
         id: 200,
+        token: None,
         request: Request::Prune { force: true, dry_run: false },
     };
     let bytes = encode_envelope(&envelope).unwrap();
@@ -173,6 +179,7 @@ fn roundtrip_envelope_prune() {
 fn roundtrip_envelope_logs_cursor() {
     let envelope = RequestEnvelope {
         id: 50,
+        token: None,
         request: Request::LogsCursor {
             config_path: PathBuf::from("/app/k.yaml"),
             service: None,
@@ -394,7 +401,7 @@ fn roundtrip_cursor_log_entry() {
 
 #[test]
 fn encode_envelope_includes_length_prefix() {
-    let envelope = RequestEnvelope { id: 1, request: Request::Ping };
+    let envelope = RequestEnvelope { id: 1, request: Request::Ping, token: None };
     let bytes = encode_envelope(&envelope).unwrap();
     assert!(bytes.len() > 4);
     let len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
@@ -445,7 +452,7 @@ fn decode_server_message_empty_payload_fails() {
 
 #[test]
 fn decode_envelope_truncated_payload_fails() {
-    let envelope = RequestEnvelope { id: 1, request: Request::Ping };
+    let envelope = RequestEnvelope { id: 1, request: Request::Ping, token: None };
     let bytes = encode_envelope(&envelope).unwrap();
     // Take only half of the payload (skip length prefix)
     let payload = &bytes[4..];
@@ -482,8 +489,8 @@ fn request_variant_names() {
 
 #[test]
 fn different_request_ids_produce_distinct_envelopes() {
-    let env1 = RequestEnvelope { id: 1, request: Request::Ping };
-    let env2 = RequestEnvelope { id: 2, request: Request::Ping };
+    let env1 = RequestEnvelope { id: 1, request: Request::Ping, token: None };
+    let env2 = RequestEnvelope { id: 2, request: Request::Ping, token: None };
     let bytes1 = encode_envelope(&env1).unwrap();
     let bytes2 = encode_envelope(&env2).unwrap();
     // Payloads should differ (different IDs)

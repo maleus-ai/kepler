@@ -253,8 +253,8 @@ impl FileWatcherActor {
                 }
 
                 // Emit paths whose debounce window (from first event) has expired
-                if let Some(deadline) = debounce_deadline {
-                    if Instant::now() >= deadline {
+                if let Some(deadline) = debounce_deadline
+                    && Instant::now() >= deadline {
                         let now = Instant::now();
                         let mut ready = Vec::new();
                         let mut remaining = HashMap::new();
@@ -271,14 +271,12 @@ impl FileWatcherActor {
                         } else {
                             event_map.values().map(|t| *t + debounce_timeout).min()
                         };
-                        if !ready.is_empty() {
-                            if async_event_tx.blocking_send(ready).is_err() {
+                        if !ready.is_empty()
+                            && async_event_tx.blocking_send(ready).is_err() {
                                 debug!("Async event channel closed, stopping file watcher");
                                 break;
                             }
-                        }
                     }
-                }
             }
             // Keep watcher alive until the loop exits
             drop(watcher);

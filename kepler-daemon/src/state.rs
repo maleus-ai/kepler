@@ -298,6 +298,9 @@ pub struct PersistedConfigState {
     pub config_initialized: bool,
     /// Unix timestamp of when the snapshot was taken
     pub snapshot_time: i64,
+    /// UID of the user who loaded this config (for ACL enforcement on unloaded configs).
+    #[serde(default)]
+    pub owner_uid: Option<u32>,
 }
 
 #[cfg(test)]

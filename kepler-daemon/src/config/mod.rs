@@ -51,11 +51,10 @@ pub const DEFAULT_OUTPUT_MAX_SIZE: usize = 1024 * 1024;
 /// Determine which shell to use for `run:` scripts.
 /// Priority: $SHELL from sys_env → /bin/bash if it exists → sh
 pub fn resolve_shell(env: &HashMap<String, String>) -> String {
-    if let Some(shell) = env.get("SHELL") {
-        if !shell.is_empty() {
+    if let Some(shell) = env.get("SHELL")
+        && !shell.is_empty() {
             return shell.clone();
         }
-    }
     if std::path::Path::new("/bin/bash").exists() {
         return "/bin/bash".to_string();
     }
@@ -466,6 +465,82 @@ pub struct RawServiceConfig {
     /// privilege escalation via setuid/setgid binaries. Defaults to true at runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_new_privileges: Option<bool>,
+    /// Permissions configuration for token-based access control.
+    /// When present, the daemon generates a CSPRNG bearer token with scoped permissions.
+    /// When absent, the service gets no daemon access.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "security")]
+    pub permissions: Option<ServicePermissions>,
+}
+
+/// Per-config ACL section for restricting kepler group members.
+///
+/// Defined under `kepler.acl` in `kepler.yaml`. When present, non-owner group
+/// members are restricted to the scopes listed in matching user/group rules.
+/// When absent, only the config owner and root have access.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AclConfig {
+    /// User rules keyed by UID or username.
+    #[serde(default)]
+    pub users: HashMap<String, AclRule>,
+    /// Group rules keyed by GID or group name.
+    #[serde(default)]
+    pub groups: HashMap<String, AclRule>,
+}
+
+/// A single ACL rule granting a set of scopes.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AclRule {
+    /// Scope strings (same syntax as `permissions.allow`).
+    pub allow: Vec<String>,
+}
+
+/// Permissions configuration for a service's token-based permissions.
+///
+/// Controls what daemon operations a spawned service process can perform
+/// via token-based auth (bearer token in `KEPLER_TOKEN`). Supports two YAML forms:
+///
+/// Short form (list): `permissions: ["config:status", "service:start"]`
+/// Object form: `permissions: { allow: ["config:status"], hardening: "strict" }`
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ServicePermissions {
+    /// Capability scopes granted to this service's token.
+    pub allow: Vec<String>,
+    /// Hardening floor for configs spawned by this process.
+    /// Inherits the config's effective hardening if absent.
+    /// Cannot exceed the parent config's hardening level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardening: Option<String>,
+}
+// Custom deserializer to support both list and object forms
+impl<'de> serde::Deserialize<'de> for ServicePermissions {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum PermissionsHelper {
+            List(Vec<String>),
+            Object {
+                allow: Vec<String>,
+                #[serde(default)]
+                hardening: Option<String>,
+            },
+        }
+
+        match PermissionsHelper::deserialize(deserializer)? {
+            PermissionsHelper::List(allow) => Ok(ServicePermissions {
+                allow,
+                hardening: None,
+            }),
+            PermissionsHelper::Object { allow, hardening } => Ok(ServicePermissions {
+                allow,
+                hardening,
+            }),
+        }
+    }
 }
 
 impl Default for RawServiceConfig {
@@ -490,6 +565,7 @@ impl Default for RawServiceConfig {
             outputs: ConfigValue::default(),
             user_identity: None,
             no_new_privileges: None,
+            permissions: None,
         }
     }
 }
@@ -725,15 +801,12 @@ pub fn resolve_log_buffer_size(
 /// - `autostart: false` or omitted → `Disabled` (default)
 /// - `autostart: true` → `Enabled` (no declared environment)
 /// - `autostart: { environment: [...] }` → `WithEnvironment`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum AutostartConfig {
+    #[default]
     Disabled,
     Enabled,
     WithEnvironment { environment: ConfigValue<EnvironmentEntries> },
-}
-
-impl Default for AutostartConfig {
-    fn default() -> Self { AutostartConfig::Disabled }
 }
 
 impl AutostartConfig {
@@ -849,6 +922,11 @@ pub struct KeplerGlobalConfig {
     /// Autostart configuration: false (default), true, or { environment: [...] }
     #[serde(default)]
     pub autostart: AutostartConfig,
+
+    /// Per-config ACL for restricting kepler group members.
+    /// When absent, only the config owner and root have access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<AclConfig>,
 }
 
 /// Root configuration structure
@@ -918,6 +996,9 @@ pub struct ServiceConfig {
     /// When true, sets PR_SET_NO_NEW_PRIVS on the spawned process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_new_privileges: Option<bool>,
+    /// Permissions configuration for token-based access control.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "security")]
+    pub permissions: Option<ServicePermissions>,
 }
 
 // ============================================================================
@@ -1344,6 +1425,7 @@ impl KeplerConfig {
             outputs,
             user_identity: raw.user_identity,
             no_new_privileges: raw.no_new_privileges,
+            permissions: raw.permissions.clone(),
         })
     }
 
@@ -1421,14 +1503,26 @@ impl KeplerConfig {
                     ));
                 }
 
-            // Validate log retention mutual exclusivity
-            if let Some(log_config) = raw.logs.as_static() {
-                if let Some(retention) = log_config.as_ref().and_then(|l| l.retention.as_ref()) {
-                    if let Err(msg) = retention.validate() {
-                        errors.push(format!("Service '{}': {}", name, msg));
-                    }
+            // Validate permissions scopes
+            if let Some(permissions) = &raw.permissions {
+                if let Err(e) = crate::permissions::validate_scopes(&permissions.allow) {
+                    errors.push(format!("Service '{}': permissions.allow: {}", name, e));
                 }
+                if let Some(hardening) = &permissions.hardening
+                    && hardening.parse::<crate::hardening::HardeningLevel>().is_err() {
+                        errors.push(format!(
+                            "Service '{}': permissions.hardening: invalid level '{}' (expected 'none', 'no-root', or 'strict')",
+                            name, hardening
+                        ));
+                    }
             }
+
+            // Validate log retention mutual exclusivity
+            if let Some(log_config) = raw.logs.as_static()
+                && let Some(retention) = log_config.as_ref().and_then(|l| l.retention.as_ref())
+                && let Err(msg) = retention.validate() {
+                    errors.push(format!("Service '{}': {}", name, msg));
+                }
 
             // Validate healthcheck command/run
             if let Some(hc) = raw.healthcheck.as_static().and_then(|h| h.as_ref()) {
@@ -1444,14 +1538,27 @@ impl KeplerConfig {
             }
         }
 
-        // Validate global log retention mutual exclusivity
-        if let Some(global_logs) = self.global_logs() {
-            if let Some(retention) = global_logs.retention.as_ref() {
-                if let Err(msg) = retention.validate() {
-                    errors.push(format!("Global logs: {}", msg));
+        // Validate ACL scopes
+        if let Some(ref kepler) = self.kepler
+            && let Some(ref acl) = kepler.acl {
+                for (key, rule) in &acl.users {
+                    if let Err(e) = crate::permissions::validate_scopes(&rule.allow) {
+                        errors.push(format!("kepler.acl.users.{}: {}", key, e));
+                    }
+                }
+                for (key, rule) in &acl.groups {
+                    if let Err(e) = crate::permissions::validate_scopes(&rule.allow) {
+                        errors.push(format!("kepler.acl.groups.{}: {}", key, e));
+                    }
                 }
             }
-        }
+
+        // Validate global log retention mutual exclusivity
+        if let Some(global_logs) = self.global_logs()
+            && let Some(retention) = global_logs.retention.as_ref()
+            && let Err(msg) = retention.validate() {
+                errors.push(format!("Global logs: {}", msg));
+            }
 
         if !errors.is_empty() {
             return Err(DaemonError::Config(format!(

@@ -280,3 +280,44 @@ fn test_default_service_state() {
     assert!(state.started_at.is_none());
     assert!(state.pid.is_none());
 }
+
+#[test]
+fn test_persisted_config_state_owner_uid_roundtrip() {
+    let state = PersistedConfigState {
+        services: HashMap::new(),
+        config_initialized: true,
+        snapshot_time: 1700000000,
+        owner_uid: Some(1000),
+    };
+    let json = serde_json::to_string(&state).unwrap();
+    let restored: PersistedConfigState = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.owner_uid, Some(1000));
+    assert!(restored.config_initialized);
+}
+
+#[test]
+fn test_persisted_config_state_owner_uid_none_roundtrip() {
+    let state = PersistedConfigState {
+        services: HashMap::new(),
+        config_initialized: false,
+        snapshot_time: 1700000000,
+        owner_uid: None,
+    };
+    let json = serde_json::to_string(&state).unwrap();
+    let restored: PersistedConfigState = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.owner_uid, None);
+}
+
+#[test]
+fn test_persisted_config_state_backward_compat_no_owner_uid() {
+    // Old state.json without owner_uid should deserialize with None
+    let json = r#"{
+        "services": {},
+        "config_initialized": true,
+        "snapshot_time": 1700000000
+    }"#;
+    let state: PersistedConfigState = serde_json::from_str(json).unwrap();
+    assert_eq!(state.owner_uid, None);
+    assert!(state.config_initialized);
+    assert_eq!(state.snapshot_time, 1700000000);
+}

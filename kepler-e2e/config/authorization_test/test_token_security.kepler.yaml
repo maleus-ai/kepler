@@ -1,0 +1,12 @@
+kepler:
+  logs:
+    buffer_size: 0
+
+services:
+  token-svc:
+    command: ["sh", "-c", "echo PID=$$; sleep 300"]
+    permissions:
+      allow:
+        - service:start
+        - service:stop
+        - config:status

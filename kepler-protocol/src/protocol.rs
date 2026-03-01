@@ -159,11 +159,6 @@ pub enum Request {
     Ping,
     /// List all loaded configs
     ListConfigs,
-    /// Unload a config (stops all its services)
-    UnloadConfig {
-        /// Path to the config file
-        config_path: PathBuf,
-    },
     /// Prune all stopped/orphaned config state directories
     Prune {
         /// Force prune even if services appear running
@@ -218,7 +213,6 @@ impl Request {
             Request::Shutdown => "Shutdown",
             Request::Ping => "Ping",
             Request::ListConfigs => "ListConfigs",
-            Request::UnloadConfig { .. } => "UnloadConfig",
             Request::Prune { .. } => "Prune",
             Request::LogsCursor { .. } => "LogsCursor",
             Request::Subscribe { .. } => "Subscribe",
@@ -425,10 +419,22 @@ pub struct DaemonInfo {
 }
 
 /// Client-to-server message with request ID for multiplexing
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RequestEnvelope {
     pub id: u64,
     pub request: Request,
+    /// Bearer token for process authentication (from `KEPLER_TOKEN` env var).
+    #[serde(default)]
+    pub token: Option<[u8; 32]>,
+}
+
+impl std::fmt::Debug for RequestEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestEnvelope")
+            .field("id", &self.id)
+            .field("request", &self.request)
+            .finish()
+    }
 }
 
 /// Server-to-client message: either a response to a request, or a pushed event
