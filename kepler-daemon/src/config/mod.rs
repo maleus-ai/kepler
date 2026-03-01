@@ -936,6 +936,10 @@ pub struct KeplerGlobalConfig {
 /// are resolved lazily at service start time.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KeplerConfig {
+    /// Version constraint for compatible Kepler daemon versions (semver)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+
     /// Inline Lua code that runs in global scope to define functions
     pub lua: Option<String>,
 
@@ -1056,7 +1060,61 @@ impl KeplerConfig {
             DaemonError::Config(format!("Config file '{}' must be a YAML mapping", path.display()))
         })?;
 
-        // Step 2: Extract and remove lua field
+        // Step 2a: Extract and remove version field
+        let version = if let Some(val) = root_map.remove(serde_yaml::Value::String("version".into())) {
+            match val {
+                serde_yaml::Value::String(s) => Some(s),
+                serde_yaml::Value::Null => None,
+                other => {
+                    return Err(DaemonError::Config(format!(
+                        "Config file '{}': 'version' must be a string, got {}",
+                        path.display(),
+                        match &other {
+                            serde_yaml::Value::Bool(_) => "boolean",
+                            serde_yaml::Value::Number(_) => "number",
+                            serde_yaml::Value::Sequence(_) => "sequence",
+                            serde_yaml::Value::Mapping(_) => "mapping",
+                            serde_yaml::Value::Tagged(_) => "tagged value",
+                            _ => "unexpected type",
+                        }
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+
+        // Step 2b: Validate version compatibility
+        if let Some(ref constraint) = version {
+            let trimmed = constraint.trim();
+            let req_str = if trimmed.starts_with(|c: char| c.is_ascii_digit()) {
+                format!("={}", trimmed)
+            } else {
+                trimmed.to_string()
+            };
+            let req = semver::VersionReq::parse(&req_str).map_err(|e| {
+                DaemonError::Config(format!(
+                    "Invalid version constraint '{}': {}",
+                    constraint, e
+                ))
+            })?;
+            let daemon_version =
+                semver::Version::parse(env!("CARGO_PKG_VERSION")).map_err(|e| {
+                    DaemonError::Internal(format!(
+                        "Failed to parse daemon version '{}': {}",
+                        env!("CARGO_PKG_VERSION"),
+                        e
+                    ))
+                })?;
+            if !req.matches(&daemon_version) {
+                return Err(DaemonError::Config(format!(
+                    "Config requires kepler version '{}', but current version is {}",
+                    constraint, daemon_version
+                )));
+            }
+        }
+
+        // Step 2c: Extract and remove lua field
         let lua = root_map
             .remove(serde_yaml::Value::String("lua".into()))
             .and_then(|v| v.as_str().map(String::from));
@@ -1239,6 +1297,7 @@ impl KeplerConfig {
         }
 
         let config = KeplerConfig {
+            version,
             lua,
             kepler,
             services,
@@ -1646,6 +1705,8 @@ impl<'de> serde::Deserialize<'de> for KeplerConfig {
         #[derive(Deserialize)]
         struct KeplerConfigHelper {
             #[serde(default)]
+            version: Option<String>,
+            #[serde(default)]
             lua: Option<String>,
             #[serde(default)]
             kepler: Option<KeplerGlobalConfig>,
@@ -1655,6 +1716,7 @@ impl<'de> serde::Deserialize<'de> for KeplerConfig {
 
         let helper = KeplerConfigHelper::deserialize(deserializer)?;
         Ok(KeplerConfig {
+            version: helper.version,
             lua: helper.lua,
             kepler: helper.kepler,
             services: helper.services,

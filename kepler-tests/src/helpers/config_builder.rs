@@ -86,6 +86,7 @@ impl TestConfigBuilder {
             })
             .collect();
         KeplerConfig {
+            version: None,
             lua: self.lua,
             kepler,
             services,
@@ -103,6 +104,7 @@ impl TestConfigBuilder {
             })
             .collect();
         let config = KeplerConfig {
+            version: None,
             lua: self.lua.clone(),
             kepler,
             services,
