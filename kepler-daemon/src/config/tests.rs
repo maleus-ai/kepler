@@ -981,3 +981,396 @@ services:
     let perms = config.services["svc"].permissions.as_ref().unwrap();
     assert_eq!(perms.hardening.as_deref(), Some("invalid-level"));
 }
+
+// ============================================================================
+// Version constraint tests
+// ============================================================================
+
+#[test]
+fn version_field_absent_loads_successfully() {
+    let yaml = r#"
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+    assert!(config.version.is_none());
+}
+
+#[test]
+fn version_exact_match_current_version() {
+    let current = env!("CARGO_PKG_VERSION");
+    let yaml = format!(
+        "version: \"={}\"\n\nservices:\n  svc:\n    command: [\"./app\"]\n",
+        current
+    );
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, &yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+    assert_eq!(config.version.as_deref(), Some(&*format!("={}", current)));
+}
+
+#[test]
+fn version_bare_number_treated_as_exact_match() {
+    let current = env!("CARGO_PKG_VERSION");
+    let yaml = format!(
+        "version: \"{}\"\n\nservices:\n  svc:\n    command: [\"./app\"]\n",
+        current
+    );
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, &yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+    assert_eq!(config.version.as_deref(), Some(current));
+}
+
+#[test]
+fn version_incompatible_rejected() {
+    let yaml = r#"
+version: ">99.0.0"
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Config requires kepler version"),
+        "Expected version mismatch error, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn version_range_constraint() {
+    let yaml = r#"
+version: ">=0.0.1, <99.0.0"
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+    assert_eq!(config.version.as_deref(), Some(">=0.0.1, <99.0.0"));
+}
+
+#[test]
+fn version_invalid_constraint_rejected() {
+    let yaml = r#"
+version: "not-a-version"
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Invalid version constraint"),
+        "Expected invalid constraint error, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn version_stored_in_config() {
+    let current = env!("CARGO_PKG_VERSION");
+    let yaml = format!(
+        "version: \"{}\"\n\nservices:\n  svc:\n    command: [\"./app\"]\n",
+        current
+    );
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, &yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+    assert_eq!(config.version, Some(current.to_string()));
+}
+
+#[test]
+fn version_number_rejected() {
+    // YAML `version: 1.0` is parsed as a float, not a string
+    let yaml = r#"
+version: 1.0
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("'version' must be a string") && msg.contains("number"),
+        "Expected type error for number, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn version_boolean_rejected() {
+    let yaml = r#"
+version: true
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("'version' must be a string") && msg.contains("boolean"),
+        "Expected type error for boolean, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn version_sequence_rejected() {
+    let yaml = r#"
+version: [1, 0, 0]
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("'version' must be a string") && msg.contains("sequence"),
+        "Expected type error for sequence, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn version_mapping_rejected() {
+    let yaml = r#"
+version:
+  major: 1
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("'version' must be a string") && msg.contains("mapping"),
+        "Expected type error for mapping, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn version_null_loads_successfully() {
+    // Explicit `version: null` or `version:` (empty) should be treated as absent
+    let yaml = r#"
+version:
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+    assert!(config.version.is_none());
+}
+
+#[test]
+fn version_empty_string_rejected() {
+    let yaml = r#"
+version: ""
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Invalid version constraint"),
+        "Expected invalid constraint error for empty string, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn version_whitespace_only_rejected() {
+    let yaml = "version: \"  \"\n\nservices:\n  svc:\n    command: [\"./app\"]\n";
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Invalid version constraint"),
+        "Expected invalid constraint error for whitespace, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn version_partial_semver_accepted() {
+    // "1.2" is valid semver syntax — the semver crate parses `=1.2` as `>=1.2.0, <1.3.0`
+    // It's a valid constraint, just won't match the current daemon version
+    let yaml = r#"
+version: "1.2"
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    // It parses fine but won't match the current daemon version
+    assert!(
+        msg.contains("Config requires kepler version"),
+        "Expected version mismatch (not parse error) for partial semver, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn version_invalid_operator_rejected() {
+    let yaml = r#"
+version: ">>1.0.0"
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Invalid version constraint"),
+        "Expected invalid constraint error for bad operator, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn version_caret_constraint() {
+    // ^0.11.0 means >=0.11.0, <0.12.0 — current 0.11.x should match
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let yaml = format!(
+        "version: \"^{}.{}.0\"\n\nservices:\n  svc:\n    command: [\"./app\"]\n",
+        current.major, current.minor
+    );
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, &yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+    assert!(config.version.is_some());
+}
+
+#[test]
+fn version_tilde_constraint() {
+    // ~0.11.0 means >=0.11.0, <0.12.0
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let yaml = format!(
+        "version: \"~{}.{}.0\"\n\nservices:\n  svc:\n    command: [\"./app\"]\n",
+        current.major, current.minor
+    );
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, &yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+    assert!(config.version.is_some());
+}
+
+#[test]
+fn version_wildcard_constraint() {
+    // Wildcard should match any version
+    let yaml = r#"
+version: "*"
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let config = KeplerConfig::load_without_sys_env(&config_path).unwrap();
+    assert_eq!(config.version.as_deref(), Some("*"));
+}
+
+#[test]
+fn version_bare_mismatch_rejected() {
+    // Bare "99.0.0" → "=99.0.0" — should fail since daemon isn't 99.0.0
+    let yaml = r#"
+version: "99.0.0"
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Config requires kepler version"),
+        "Expected version mismatch for bare 99.0.0, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn version_range_mismatch_rejected() {
+    // A range that excludes any plausible current version
+    let yaml = r#"
+version: ">=99.0.0, <100.0.0"
+
+services:
+  svc:
+    command: ["./app"]
+"#;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    let err = KeplerConfig::load_without_sys_env(&config_path).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Config requires kepler version"),
+        "Expected version mismatch for range, got: {}",
+        msg
+    );
+}
