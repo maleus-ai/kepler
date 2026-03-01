@@ -12,6 +12,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// Write a minimal config file with one service to `temp_dir/kepler.yaml`.
 fn write_config(temp_dir: &Path) -> (PathBuf, KeplerConfig) {
     let config = KeplerConfig {
+        version: None,
         lua: None,
         kepler: None,
         services: {

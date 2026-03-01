@@ -2383,6 +2383,7 @@ mod tests {
         services.insert("web".to_string(), kepler_daemon::config::RawServiceConfig::default());
 
         let config = KeplerConfig {
+            version: None,
             lua: None,
             kepler: None,
             services,
@@ -2527,6 +2528,7 @@ mod tests {
             acl,
         });
         let config = KeplerConfig {
+            version: None,
             lua: None,
             kepler,
             services: HashMap::new(),
