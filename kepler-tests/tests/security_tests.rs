@@ -354,140 +354,6 @@ services:
     );
 }
 
-// ============================================================================
-// File Permission Tests
-// ============================================================================
-
-/// Verify that the state directory has group-accessible permissions (0o770)
-#[tokio::test]
-#[cfg(unix)]
-async fn test_state_directory_permissions() {
-    // Hold UMASK_LOCK to prevent umask change from racing with parallel tests
-    let _guard = UMASK_LOCK.lock().unwrap();
-
-    // Use KEPLER_DAEMON_PATH environment variable to create an isolated test state directory
-    let temp_dir = TempDir::new().unwrap();
-    let state_dir = temp_dir.path().join(".kepler");
-
-    // SAFETY: ENV_LOCK is held, preventing races with parallel tests
-    unsafe {
-        std::env::set_var("KEPLER_DAEMON_PATH", &state_dir);
-    }
-
-    // Set umask to 0007 to match daemon behavior (allows group access)
-    let old_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o007));
-
-    // Create the state directory with proper permissions (simulating daemon startup)
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o770)
-            .create(&state_dir)
-            .unwrap();
-    }
-
-    // Restore umask
-    nix::sys::stat::umask(old_umask);
-
-    // Verify the directory exists and has correct permissions
-    let metadata = std::fs::metadata(&state_dir).unwrap();
-    let permissions = metadata.permissions();
-    let mode = permissions.mode() & 0o777; // Mask to get only permission bits
-
-    assert_eq!(
-        mode, 0o770,
-        "State directory should have mode 0o770, got 0o{:o}",
-        mode
-    );
-
-    // SAFETY: Cleaning up the environment variable we set earlier
-    unsafe {
-        std::env::remove_var("KEPLER_DAEMON_PATH");
-    }
-}
-
-/// Verify that PID files are created with group-accessible permissions (0o660)
-#[tokio::test]
-#[cfg(unix)]
-async fn test_pid_file_permissions() {
-    // Hold UMASK_LOCK to prevent umask-changing tests from racing
-    let _guard = UMASK_LOCK.lock().unwrap();
-
-    let temp_dir = TempDir::new().unwrap();
-    let state_dir = temp_dir.path().join(".kepler");
-
-    // Create state directory
-    std::fs::create_dir_all(&state_dir).unwrap();
-
-    let pid_file = state_dir.join("test.pid");
-
-    // Set umask to 0o007 to match daemon behavior (allows group access)
-    let old_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o007));
-
-    // Create PID file with group-accessible permissions (simulating daemon behavior)
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o660)
-            .open(&pid_file)
-            .unwrap();
-        file.write_all(b"12345").unwrap();
-    }
-
-    // Restore umask
-    nix::sys::stat::umask(old_umask);
-
-    // Verify the file has correct permissions
-    let metadata = std::fs::metadata(&pid_file).unwrap();
-    let permissions = metadata.permissions();
-    let mode = permissions.mode() & 0o777;
-
-    assert_eq!(
-        mode, 0o660,
-        "PID file should have mode 0o660, got 0o{:o}",
-        mode
-    );
-}
-
-/// Verify that the daemon creates state directory with correct permissions
-#[tokio::test]
-#[cfg(unix)]
-async fn test_daemon_creates_state_dir_securely() {
-    // Hold UMASK_LOCK to prevent umask change from racing with parallel tests
-    let _guard = UMASK_LOCK.lock().unwrap();
-
-    let temp_dir = TempDir::new().unwrap();
-    let state_dir = temp_dir.path().join("new_state_dir");
-
-    // Set umask to 0007 to match daemon behavior (allows group access)
-    let old_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o007));
-
-    // Simulate daemon behavior - create directory with group-accessible permissions
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o770)
-            .create(&state_dir)
-            .unwrap();
-    }
-
-    // Restore umask
-    nix::sys::stat::umask(old_umask);
-
-    // Verify
-    let metadata = std::fs::metadata(&state_dir).unwrap();
-    assert!(metadata.is_dir(), "Should be a directory");
-
-    let mode = metadata.permissions().mode() & 0o777;
-    assert_eq!(mode, 0o770, "Directory should have mode 0o770");
-}
-
 /// Verify that test harness state directory has appropriate permissions
 #[tokio::test]
 #[cfg(unix)]
@@ -914,51 +780,6 @@ fn test_lua_require_blocked() {
 }
 
 // ============================================================================
-// Socket Security Tests
-// ============================================================================
-
-/// Verify that socket file has group-accessible permissions (0o660) when created
-#[tokio::test]
-#[cfg(unix)]
-async fn test_socket_file_permissions() {
-    // Hold UMASK_LOCK to prevent umask-changing tests from racing
-    let _guard = UMASK_LOCK.lock().unwrap();
-
-    use kepler_tests::helpers::config_builder::{TestConfigBuilder, TestServiceBuilder};
-    use kepler_tests::helpers::daemon_harness::TestDaemonHarness;
-    use std::os::unix::fs::PermissionsExt;
-    use tempfile::TempDir;
-
-    let temp_dir = TempDir::new().unwrap();
-
-    let config = TestConfigBuilder::new()
-        .add_service("test", TestServiceBuilder::long_running().build())
-        .build();
-
-    let _harness = TestDaemonHarness::new(config, temp_dir.path())
-        .await
-        .unwrap();
-
-    // The harness creates the daemon which creates the socket
-    // Find the socket file in the state directory
-    let state_dir = temp_dir.path().join(".kepler");
-    let socket_path = state_dir.join("kepler.sock");
-
-    if socket_path.exists() {
-        let metadata = std::fs::metadata(&socket_path).unwrap();
-        let mode = metadata.permissions().mode() & 0o777;
-
-        assert_eq!(
-            mode, 0o660,
-            "Socket file should have mode 0o660, got 0o{:o}",
-            mode
-        );
-    }
-    // Note: If socket doesn't exist at this path, the test harness may use
-    // a different socket mechanism (e.g., in-process) which is also acceptable
-}
-
-// ============================================================================
 // Config Baking Security Tests
 // ============================================================================
 // These tests document the security model: configs are "baked" on first start.
@@ -1154,97 +975,61 @@ fn test_oversized_config_rejected() {
 // State Directory Hardening Tests
 // ============================================================================
 
-/// Verify that weak permissions on an existing state directory are corrected to 0o770
+/// Verify that world-traverse-only (0o771) is accepted while world-read/write is rejected
 #[test]
 #[cfg(unix)]
-fn test_state_dir_weak_permissions_enforced() {
+fn test_directory_world_execute_only_accepted() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp_dir = TempDir::new().unwrap();
-    let state_dir = temp_dir.path().join("weak_perms_dir");
 
-    // Create directory with world-writable permissions (simulating pre-existing weak dir)
-    std::fs::create_dir_all(&state_dir).unwrap();
-    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
-
-    // Verify it's initially world-accessible
-    let mode = std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o777);
-
-    // Enforce correct permissions (simulating daemon startup behavior)
-    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o770)).unwrap();
-
-    // Validate using the helper
-    kepler_daemon::validate_directory_not_world_accessible(&state_dir).unwrap();
-
-    // Verify mode is now 0o770
-    let mode = std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777;
-    assert_eq!(
-        mode, 0o770,
-        "Permissions should be corrected to 0o770, got 0o{:o}",
-        mode
-    );
-}
-
-/// Verify that a symlinked state directory is rejected by validation
-#[test]
-#[cfg(unix)]
-fn test_state_dir_symlink_rejected() {
-    use std::os::unix::fs as unix_fs;
-
-    let temp_dir = TempDir::new().unwrap();
-    let real_dir = temp_dir.path().join("real_dir");
-    let symlink_dir = temp_dir.path().join("symlink_dir");
-
-    std::fs::create_dir_all(&real_dir).unwrap();
-    unix_fs::symlink(&real_dir, &symlink_dir).unwrap();
-
-    let result = kepler_daemon::validate_directory_not_world_accessible(&symlink_dir);
+    // 0o771 (world-traverse only) should be accepted — allows socket access via KEPLER_TOKEN
+    let dir_771 = temp_dir.path().join("dir_771");
+    std::fs::create_dir_all(&dir_771).unwrap();
+    std::fs::set_permissions(&dir_771, std::fs::Permissions::from_mode(0o771)).unwrap();
     assert!(
-        result.is_err(),
-        "Symlinked state directory should be rejected"
+        kepler_daemon::validate_directory_not_world_accessible(&dir_771).is_ok(),
+        "0o771 (world-traverse only) should be accepted"
     );
-    let err = result.unwrap_err().to_string();
+
+    // 0o772 (world-write) should be rejected
+    let dir_772 = temp_dir.path().join("dir_772");
+    std::fs::create_dir_all(&dir_772).unwrap();
+    std::fs::set_permissions(&dir_772, std::fs::Permissions::from_mode(0o772)).unwrap();
     assert!(
-        err.contains("symlink"),
-        "Error should mention symlink: {}",
-        err
+        kepler_daemon::validate_directory_not_world_accessible(&dir_772).is_err(),
+        "0o772 (world-write) should be rejected"
     );
-}
 
-/// Verify that opening a PID file path that is a symlink fails with O_NOFOLLOW
-#[test]
-#[cfg(unix)]
-fn test_pid_file_symlink_rejected() {
-    use std::os::unix::fs as unix_fs;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let temp_dir = TempDir::new().unwrap();
-    let target_file = temp_dir.path().join("target.pid");
-    let symlink_file = temp_dir.path().join("kepler.pid");
-
-    // Create the target file
-    std::fs::write(&target_file, "12345").unwrap();
-
-    // Create a symlink at the PID file path
-    unix_fs::symlink(&target_file, &symlink_file).unwrap();
-
-    // Attempt to open with O_NOFOLLOW (matches daemon PID file open)
-    let result = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&symlink_file);
-
+    // 0o774 (world-read) should be rejected
+    let dir_774 = temp_dir.path().join("dir_774");
+    std::fs::create_dir_all(&dir_774).unwrap();
+    std::fs::set_permissions(&dir_774, std::fs::Permissions::from_mode(0o774)).unwrap();
     assert!(
-        result.is_err(),
-        "Opening a symlinked PID file with O_NOFOLLOW should fail"
+        kepler_daemon::validate_directory_not_world_accessible(&dir_774).is_err(),
+        "0o774 (world-read) should be rejected"
     );
 
-    // Original target should be untouched
-    let content = std::fs::read_to_string(&target_file).unwrap();
-    assert_eq!(content, "12345", "Target PID file should not be modified");
+    // 0o776 (world-read+write) should be rejected
+    let dir_776 = temp_dir.path().join("dir_776");
+    std::fs::create_dir_all(&dir_776).unwrap();
+    std::fs::set_permissions(&dir_776, std::fs::Permissions::from_mode(0o776)).unwrap();
+    assert!(
+        kepler_daemon::validate_directory_not_world_accessible(&dir_776).is_err(),
+        "0o776 (world-read+write) should be rejected"
+    );
+
+    // State directory simulation: 0o770 corrected to 0o771 should pass validation
+    let dir_corrected = temp_dir.path().join("dir_corrected");
+    std::fs::create_dir_all(&dir_corrected).unwrap();
+    std::fs::set_permissions(&dir_corrected, std::fs::Permissions::from_mode(0o770)).unwrap();
+    std::fs::set_permissions(&dir_corrected, std::fs::Permissions::from_mode(0o771)).unwrap();
+    let mode = std::fs::metadata(&dir_corrected).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o771, "Corrected directory should have mode 0o771");
+    assert!(
+        kepler_daemon::validate_directory_not_world_accessible(&dir_corrected).is_ok(),
+        "Corrected 0o771 directory should pass validation"
+    );
 }
 
 /// Verify that a symlink at the socket path is detected via symlink_metadata

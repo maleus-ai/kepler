@@ -67,9 +67,9 @@ pub fn validate_directory_not_world_accessible(path: &Path) -> Result<()> {
     }
 
     let mode = meta.permissions().mode() & 0o777;
-    if mode & 0o007 != 0 {
+    if mode & 0o006 != 0 {
         return Err(crate::errors::DaemonError::Internal(format!(
-            "State directory '{}' has world-accessible permissions (0o{:o}) — refusing to use it",
+            "State directory '{}' has world-readable/writable permissions (0o{:o}) — refusing to use it",
             path.display(),
             mode
         )));

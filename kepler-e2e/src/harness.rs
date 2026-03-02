@@ -335,6 +335,52 @@ impl E2eHarness {
         Ok(())
     }
 
+    /// Start the daemon process expecting it to fail (exit with non-zero code).
+    ///
+    /// Unlike `start_daemon`, this does NOT set up drain tasks or wait for the
+    /// socket. It simply spawns the binary and waits for it to exit. Returns
+    /// `CommandOutput` so tests can assert on stderr/stdout. Errors if the
+    /// daemon exits with code 0 (unexpected success).
+    pub async fn start_daemon_expecting_failure(&self) -> E2eResult<CommandOutput> {
+        self.start_daemon_expecting_failure_at(self.temp_dir.path())
+            .await
+    }
+
+    /// Like `start_daemon_expecting_failure` but with a custom state directory
+    /// (overrides `KEPLER_DAEMON_PATH`).
+    pub async fn start_daemon_expecting_failure_at(
+        &self,
+        state_dir: &Path,
+    ) -> E2eResult<CommandOutput> {
+        let child = Command::new(&self.daemon_bin)
+            .env("KEPLER_DAEMON_PATH", state_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let result = timeout(Duration::from_secs(5), child.wait_with_output()).await;
+
+        match result {
+            Ok(Ok(output)) => {
+                let exit_code = output.status.code().unwrap_or(-1);
+                let cmd_output = CommandOutput {
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    exit_code,
+                };
+                if cmd_output.success() {
+                    Err(E2eError::CommandFailed(
+                        "Daemon exited with code 0 but failure was expected".to_string(),
+                    ))
+                } else {
+                    Ok(cmd_output)
+                }
+            }
+            Ok(Err(e)) => Err(E2eError::SpawnFailed(e)),
+            Err(_) => Err(E2eError::Timeout("daemon to exit with failure".to_string())),
+        }
+    }
+
     /// Wait for the daemon socket to be available
     async fn wait_for_socket(&self, timeout_duration: Duration) -> E2eResult<()> {
         let socket = self.socket_path();
@@ -396,7 +442,7 @@ impl E2eHarness {
     pub async fn run_cli_as_user(&self, user: &str, args: &[&str]) -> E2eResult<CommandOutput> {
         // TempDir creates directories with 0o700, but non-root users need to
         // traverse the temp dir to reach the daemon socket and config files.
-        // Make it world-traversable (the socket is still protected by 0o660 root:kepler).
+        // Make it world-traversable (auth is handled at the protocol level).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
