@@ -65,7 +65,7 @@ groups    # Should include "kepler"
 The daemon creates a Unix domain socket with strict permissions:
 
 - **Path**: `/var/lib/kepler/kepler.sock`
-- **Permissions**: `0o660` (`rw-rw----`)
+- **Permissions**: `0o666` (`rw-rw-rw-`)
 - **Ownership**: `root:kepler`
 
 ### Peer Credential Verification
@@ -81,19 +81,19 @@ See [Architecture](architecture.md#peer-credential-verification) for implementat
 The daemon state directory is secured:
 
 - **Path**: `/var/lib/kepler/` (or `$KEPLER_DAEMON_PATH`)
-- **Permissions**: `0o770` (`rwxrwx---`) -- **enforced at every startup**
+- **Permissions**: `0o771` (`rwxrwx--x`) -- **enforced at every startup**
 - **Ownership**: `root:kepler`
 - **Daemon umask**: `0o007` on startup
 
 ### Startup Hardening
 
-The daemon validates and secures the state directory at every startup. Symlink attacks are rejected, permissions are enforced to `0o770`, and world-accessible bits are verified absent.
+The daemon validates and secures the state directory at every startup. Symlink attacks are rejected, permissions are enforced to `0o771`, and world-readable/writable bits are verified absent.
 
 See [Architecture](architecture.md#state-directory-hardening) for implementation details.
 
 ### Contents
 
-- `kepler.sock` -- Unix domain socket (`0o660`)
+- `kepler.sock` -- Unix domain socket (`0o666`)
 - `kepler.pid` -- Daemon PID file (`0o660`)
 - `configs/` -- Per-config state directories
 
@@ -757,7 +757,7 @@ When hardening is `no-root` or `strict`, the `kepler` group is stripped from the
 
 #### Why Stripping Is Necessary
 
-The daemon socket is owned by `root:kepler` with permissions `0o660`. Any process with the `kepler` group in its supplementary groups can connect to the socket. Without stripping:
+The daemon socket is owned by `root:kepler` with permissions `0o666`. Any process with `KEPLER_TOKEN` or the `kepler` group in its supplementary groups can connect to the socket. Without stripping:
 
 1. A spawned service process inherits the `kepler` group from its parent
 2. The process can connect back to the daemon socket

@@ -6,4 +6,4 @@
 
 pub mod harness;
 
-pub use harness::{E2eHarness, E2eResult, E2eError};
+pub use harness::{CommandOutput, E2eHarness, E2eResult, E2eError};

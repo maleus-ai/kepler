@@ -271,7 +271,7 @@ else
     as_root mkdir -p "${STATE_DIR}"
 fi
 as_root chown root:kepler "${STATE_DIR}"
-as_root chmod 0770 "${STATE_DIR}"
+as_root chmod 0771 "${STATE_DIR}"
 
 # Step 6: Service installation
 install_systemd() {
