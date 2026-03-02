@@ -70,21 +70,9 @@ The daemon creates a Unix domain socket with strict permissions:
 
 ### Peer Credential Verification
 
-Every connection is verified using Unix peer credentials:
+Every connection is verified using Unix peer credentials. Root is always allowed. Other users must be in the `kepler` group (checked via both primary and supplementary group membership). Clients not in the `kepler` group are rejected.
 
-1. Client connects to the socket
-2. Daemon reads peer credentials via `peer_cred()`
-3. **Root clients** (UID 0) are always allowed
-4. **Other clients** are checked for `kepler` group membership:
-   - Primary GID is checked
-   - Supplementary groups are checked via `getgrouplist()` (cross-platform)
-5. Clients not in the `kepler` group are rejected
-
-This ensures that only authorized users can issue commands to the daemon.
-
-### Connection Limits
-
-The server enforces a maximum of 1,024 concurrent connections. When the limit is reached, new connections wait (backpressure) until an existing connection closes. This prevents resource exhaustion from excessive concurrent connections.
+See [Architecture](architecture.md#peer-credential-verification) for implementation details.
 
 ---
 
@@ -99,25 +87,14 @@ The daemon state directory is secured:
 
 ### Startup Hardening
 
-At every daemon startup, the state directory undergoes validation:
+The daemon validates and secures the state directory at every startup. Symlink attacks are rejected, permissions are enforced to `0o770`, and world-accessible bits are verified absent.
 
-1. **Symlink rejection** -- The daemon refuses to start if the state directory is a symlink. This prevents an attacker from redirecting state to an arbitrary location.
-2. **Permission enforcement** -- Permissions are unconditionally set to `0o770`, correcting any pre-existing weak permissions (e.g., a directory previously set to `0o777`).
-3. **World-access validation** -- After permission enforcement, the daemon verifies no world-accessible bits remain (`mode & 0o007 == 0`).
-
-### Symlink Protection
-
-Symlinks are rejected for critical paths:
-
-- **State directory** -- Checked before any directory operations
-- **Socket path** -- Checked before binding; the daemon refuses to bind if `kepler.sock` is a symlink
-- **PID file** -- Opened with `O_NOFOLLOW`, so symlinked PID files cause the open to fail with `ELOOP`
-- **Log files** -- Opened with `O_NOFOLLOW` to prevent symlink-based write redirection
+See [Architecture](architecture.md#state-directory-hardening) for implementation details.
 
 ### Contents
 
 - `kepler.sock` -- Unix domain socket (`0o660`)
-- `kepler.pid` -- Daemon PID file (`0o660`, opened with `O_NOFOLLOW`)
+- `kepler.pid` -- Daemon PID file (`0o660`)
 - `configs/` -- Per-config state directories
 
 ---
@@ -138,7 +115,7 @@ By default, only root and the config owner have access to a config. The config o
 
 ### Access Rules
 
-Scoped operations are requests that require specific permission scopes (e.g., `service:start`, `config:status`). Scope-less requests (`Ping`, `ListConfigs`, global `Status`, `Shutdown`, `Prune`) are always allowed through the ACL gate but may still be restricted by other checks (e.g., `Shutdown` and `Prune` are root-only).
+Scoped operations are requests that require specific permission scopes (e.g., `service:start`, `config:status`). Some operations like `kepler ps --all`, `kepler list`, and `kepler prune` are not governed by per-config ACL scopes — they are always allowed through the ACL gate but may still be restricted by other checks (e.g., `kepler daemon stop` and `kepler prune` are root-only).
 
 1. **Root (UID 0)**: Always has full access -- ACLs are never checked for root
 2. **Config owner** (the user who first loaded the config): Always has full access
@@ -209,16 +186,12 @@ ACL scopes use the same hierarchy as [service permissions](#service-permissions-
 | `service:clean`      | Stop with `--clean` (implies `service:stop`)                          |
 | `service:logs`       | View service logs                                                     |
 | `config`             | All config operations                                                 |
-| `config:status`      | View config/service status; filters `ListConfigs` and global `Status` |
+| `config:status`      | View config/service status; filters `kepler list` and `kepler ps --all` results |
 | `config:inspect`     | Inspect config                                                        |
 | `config:recreate`    | Recreate config                                                       |
 | `config:hardening`   | Override hardening level (`--hardening` on start and recreate). Only required when the flag is used |
 | `config:env`         | Override environment (`-e` / `--refresh-env` on start and restart). Only required when the flag is used |
 | `*`                  | Everything                                                            |
-
-### Subscribe Access
-
-The `Subscribe` request does not map to a specific scope in the table above. Instead, it requires the caller to have at least one `service:*` scope (e.g., `service:start`, `service:logs`, or the `service` category). If the caller has no service-related scopes, the subscription is denied. When no ACL rules match at all, `Subscribe` is also denied.
 
 ### Rule Matching
 
@@ -333,14 +306,14 @@ This prevents users from operating on config files they couldn't read directly, 
 
 ## Service Permissions (Token-Based)
 
-The `permissions` field on a service controls what daemon operations a spawned service process can perform. When present, the daemon generates a CSPRNG bearer token, registers it with the granted permission scopes, and passes it to the spawned process via the `KEPLER_TOKEN` environment variable. The process presents this token in each request, and the daemon looks up its permissions. See [Effective Permissions](#effective-permissions) for how permission scopes interact with ACLs.
+The `permissions` field on a service controls what daemon operations a spawned service process can perform. When present, the daemon generates a secure bearer token, registers it with the granted permission scopes, and passes it to the spawned process via the `KEPLER_TOKEN` environment variable. The process presents this token in each request, and the daemon looks up its permissions. See [Effective Permissions](#effective-permissions) for how permission scopes interact with ACLs.
 
 > **Backward compatibility:** The field `security` is accepted as an alias for `permissions`.
 
 ### How It Works
 
 1. Config owner defines `permissions` on a service with allowed scopes
-2. At service start, the daemon generates a 256-bit CSPRNG bearer token and registers it with the granted permission scopes
+2. At service start, the daemon generates a secure bearer token and registers it with the granted permission scopes
 3. The daemon sets `KEPLER_TOKEN` (hex-encoded, 64 chars) in the service's environment and spawns the process
 4. The spawned process (and any child processes via `fork()`/`exec()` inheritance) connects to the daemon via the Unix socket, presenting the token in each request
 5. The daemon looks up the token in the permission store and computes [effective permissions](#effective-permissions) for each request
@@ -348,13 +321,12 @@ The `permissions` field on a service controls what daemon operations a spawned s
 
 ### Token Security
 
-- **CSPRNG**: Tokens are generated via the OS cryptographic random number generator (`getrandom` syscall, 256-bit)
-- **Constant-time lookup**: Token lookup uses linear scan with constant-time equality (`subtle::ConstantTimeEq`) to prevent timing side-channels
-- **Unpredictable**: Tokens are purely random -- not derived from PID, service name, or timestamps
-- **Inheritable**: Child processes automatically inherit the token via standard `fork()`/`exec()` environment inheritance, so all descendants of a service share the same permissions
-- **Lifecycle-bound**: Tokens are registered before the process spawns (no race condition) and revoked when the service exits or the config is unloaded
-- **Environment variable transport**: The token is passed via the `KEPLER_TOKEN` environment variable, which is readable via `/proc/<pid>/environ` by processes running as the same UID or by root. The token's confidentiality is bounded by Unix process isolation (same-UID boundary). `KEPLER_TOKEN` should not be copied into other environment variables or manipulated by users -- doing so may lead to bugs or security issues when the token is revoked
-- **Token stripping**: `KEPLER_TOKEN` is stripped from the caller's environment at config load time and from computed environments before service spawn. This prevents accidental token leakage from the calling process into child configs
+- **Securely generated**: Tokens are generated using the OS cryptographic random number generator and are unpredictable
+- **Inheritable**: Child processes automatically inherit the token via standard environment inheritance, so all descendants of a service share the same permissions
+- **Lifecycle-bound**: Tokens are registered before the process spawns and revoked when the service exits or the config is unloaded
+- **Environment variable transport**: The token is passed via the `KEPLER_TOKEN` environment variable. `KEPLER_TOKEN` should not be copied into other environment variables or manipulated by users -- doing so may lead to bugs or security issues when the token is revoked
+
+See [Architecture](architecture.md#token-security-implementation) for implementation details.
 
 ### Configuration
 
@@ -392,11 +364,10 @@ services:
 
 ### Permission Lifecycle
 
-- **Registration**: A new token is generated and registered for each service start/restart
-- **Scope**: Each registration is bound to its config path and service name
-- **Revocation**: Registrations are automatically revoked when the service process exits, or when the config is unloaded (`stop --clean`, `recreate`, `prune`)
-- **Isolation**: Each service gets its own independent token -- permissions cannot be shared across unrelated services
-- **Inheritance**: Child processes spawned by `fork()`/`exec()` inherit the `KEPLER_TOKEN` environment variable and share the parent's permissions
+- **Created at start**: A new token is generated for each service start or restart
+- **Revoked at stop**: Tokens are automatically revoked when the service exits, or when the config is unloaded (`stop --clean`, `recreate`, `prune`)
+- **Isolated per-service**: Each service gets its own independent token -- permissions cannot be shared across unrelated services
+- **Inherited by children**: Child processes inherit the `KEPLER_TOKEN` environment variable and share the parent's permissions
 
 Scopes use the same hierarchy as [ACL scopes](#available-scopes).
 
@@ -620,45 +591,14 @@ If the orchestrator tries `kepler start --hardening none inner.kepler.yaml`, the
 
 ### Full Authorization Pipeline
 
-Every request goes through an authorization pipeline. The steps vary by auth type:
+Every request goes through an authorization pipeline. The daemon checks authorization in order: token validity, hardening constraints, filesystem access, then ACL/permission scopes. If any check fails, the request is denied.
 
-```mermaid
-flowchart TD
-    A[Request arrives] --> B{Token present<br/>and valid?}
-    B -- Yes --> T[Token auth path]
-    T --> T1[Check hardening floor]
-    T1 -- Fail --> DENY[Denied]
-    T1 -- Pass --> T2[Filesystem read check]
-    T2 -- Fail --> DENY
-    T2 -- Pass --> T3["Compute effective =<br/>token.allow ∩ ACL(uid, gid)"]
-    T3 --> T4[Check required scopes]
-    T4 -- Fail --> DENY
-    T4 -- Pass --> ALLOW[Allowed]
+- **Root** (UID 0) bypasses all checks
+- **Config owner** bypasses ACL checks (implicit full access)
+- **Group members** are checked against ACL rules
+- **Token-authenticated processes** are checked against both their granted permissions and the ACL (intersection)
 
-    B -- No --> C{UID 0?}
-    C -- Yes --> ALLOW
-    C -- No --> D{In kepler group?}
-    D -- No --> DENY
-    D -- Yes --> E{Config owner?}
-    E -- Yes --> ALLOW
-    E -- No --> F{ACL present?}
-    F -- No --> DENY
-    F -- Yes --> G[Check ACL scopes]
-    G -- Fail --> DENY
-    G -- Pass --> ALLOW
-```
-
-For Token-authenticated requests specifically:
-
-```
-1. Token lookup              → does the request carry a valid bearer token?
-2. Hardening floor check    → is --hardening ≥ process.hardening?
-3. Filesystem read check    → caller must have Unix read permission on the config file (Root bypasses)
-4. ACL gate                 → effective = Process.allow ∩ ACL(uid, gid)
-5. Scope check              → does effective contain the required scopes?
-```
-
-If any step fails, the request is denied. Steps 2-5 also apply to Group auth (with the ACL as sole gate instead of intersection).
+See [Architecture](architecture.md#authorization-pipeline) for the detailed step-by-step pipeline and flowchart.
 
 ### Combined Example
 
@@ -845,9 +785,9 @@ WARN Stripped kepler group from service 'web': spawned processes cannot inherit 
 
 This warns config authors that their explicit group configuration is being overridden by the security model.
 
-#### Implementation
+#### Finer Control
 
-Instead of using `initgroups()` (which loads all supplementary groups including `kepler`), the daemon computes an explicit group list excluding the kepler GID and uses `setgroups()`. If computing the stripped group list fails, the service refuses to start (hard failure, not fallback to empty groups).
+See [Architecture](architecture.md#kepler-group-stripping-implementation) for the implementation details of group stripping.
 
 For finer control without full hardening, you can use `os.getgroups()` in Lua to explicitly set service groups with `kepler` filtered out:
 
@@ -1011,12 +951,6 @@ Error: Privilege escalation denied for service 'myservice': user 'root' resolves
 ```
 Error: Privilege escalation denied for service 'myservice': user 'www-data' (uid 33) is not the config owner uid 1000 (hardening level: strict)
 ```
-
-### Sanitized Authorization Errors
-
-Authorization errors (ACL denial, invalid token, group membership rejection) return generic "permission denied" messages to the client. Detailed information (UID, GID, required scopes, `kepler` group GID) is logged server-side only. This prevents information leakage that could aid enumeration attacks.
-
-Privileged escalation errors remain detailed since they are only returned to authenticated users who already know their own context.
 
 ---
 

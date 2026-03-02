@@ -16,6 +16,7 @@ This document describes Kepler's internal implementation, security measures, and
 - [Lua Scripting Security](#lua-scripting-security)
 - [Process Security](#process-security)
 - [Log Storage](#log-storage)
+- [Security Implementation Details](#security-implementation-details)
 
 ---
 
@@ -668,6 +669,124 @@ sequenceDiagram
 | `kepler-daemon/src/logs/writer.rs` | Buffered log writer with truncation |
 | `kepler-daemon/src/logs/reader.rs` | Log file reader and merged iterators |
 | `kepler-daemon/src/cursor.rs` | CursorManager for streaming |
+
+---
+
+## Security Implementation Details
+
+> For user-facing security documentation (ACL configuration, hardening flags, permissions), see [Security Model](security-model.md).
+
+This section covers internal implementation details of Kepler's security mechanisms.
+
+### Peer Credential Verification
+
+Every connection to the daemon socket is verified using Unix peer credentials in a 5-step process:
+
+1. Client connects to the socket
+2. Daemon reads peer credentials via `peer_cred()`
+3. **Root clients** (UID 0) are always allowed
+4. **Other clients** are checked for `kepler` group membership:
+   - Primary GID is checked
+   - Supplementary groups are checked via `getgrouplist()` (cross-platform)
+5. Clients not in the `kepler` group are rejected
+
+### Connection Limits
+
+The server enforces a maximum of 1,024 concurrent connections. When the limit is reached, new connections wait (backpressure) until an existing connection closes. This prevents resource exhaustion from excessive concurrent connections.
+
+### State Directory Hardening
+
+At every daemon startup, the state directory undergoes validation:
+
+1. **Symlink rejection** -- The daemon refuses to start if the state directory is a symlink. This prevents an attacker from redirecting state to an arbitrary location.
+2. **Permission enforcement** -- Permissions are unconditionally set to `0o770`, correcting any pre-existing weak permissions (e.g., a directory previously set to `0o777`).
+3. **World-access validation** -- After permission enforcement, the daemon verifies no world-accessible bits remain (`mode & 0o007 == 0`).
+
+#### Symlink Protection
+
+Symlinks are rejected for critical paths:
+
+- **State directory** -- Checked before any directory operations
+- **Socket path** -- Checked before binding; the daemon refuses to bind if `kepler.sock` is a symlink
+- **PID file** -- Opened with `O_NOFOLLOW`, so symlinked PID files cause the open to fail with `ELOOP`
+- **Log files** -- Opened with `O_NOFOLLOW` to prevent symlink-based write redirection
+
+### Token Security Implementation
+
+- **CSPRNG**: Tokens are generated via the OS cryptographic random number generator (`getrandom` syscall, 256-bit)
+- **Constant-time lookup**: Token lookup uses linear scan with constant-time equality (`subtle::ConstantTimeEq`) to prevent timing side-channels
+- **Unpredictable**: Tokens are purely random -- not derived from PID, service name, or timestamps
+- **Environment visibility boundary**: The token is passed via `KEPLER_TOKEN`, readable via `/proc/<pid>/environ` by processes running as the same UID or by root. The token's confidentiality is bounded by Unix process isolation (same-UID boundary)
+- **Token stripping**: `KEPLER_TOKEN` is stripped from the caller's environment at config load time and from computed environments before service spawn. This prevents accidental token leakage from the calling process into child configs
+
+### Authorization Pipeline
+
+Every request goes through an authorization pipeline. The steps vary by auth type:
+
+```mermaid
+flowchart TD
+    A[Request arrives] --> B{Token present<br/>and valid?}
+    B -- Yes --> T[Token auth path]
+    T --> T1[Check hardening floor]
+    T1 -- Fail --> DENY[Denied]
+    T1 -- Pass --> T2[Filesystem read check]
+    T2 -- Fail --> DENY
+    T2 -- Pass --> T3["Compute effective =<br/>token.allow ∩ ACL(uid, gid)"]
+    T3 --> T4[Check required scopes]
+    T4 -- Fail --> DENY
+    T4 -- Pass --> ALLOW[Allowed]
+
+    B -- No --> C{UID 0?}
+    C -- Yes --> ALLOW
+    C -- No --> D{In kepler group?}
+    D -- No --> DENY
+    D -- Yes --> E{Config owner?}
+    E -- Yes --> ALLOW
+    E -- No --> F{ACL present?}
+    F -- No --> DENY
+    F -- Yes --> G[Check ACL scopes]
+    G -- Fail --> DENY
+    G -- Pass --> ALLOW
+```
+
+For Token-authenticated requests specifically:
+
+```
+1. Token lookup              → does the request carry a valid bearer token?
+2. Hardening floor check    → is --hardening ≥ process.hardening?
+3. Filesystem read check    → caller must have Unix read permission on the config file (Root bypasses)
+4. ACL gate                 → effective = Process.allow ∩ ACL(uid, gid)
+5. Scope check              → does effective contain the required scopes?
+```
+
+If any step fails, the request is denied. Steps 2-5 also apply to Group auth (with the ACL as sole gate instead of intersection).
+
+See [Security Model](security-model.md#effective-permissions) for the user-facing authorization formulas and examples.
+
+### Sanitized Error Responses
+
+Authorization errors (ACL denial, invalid token, group membership rejection) return generic "permission denied" messages to the client. Detailed information (UID, GID, required scopes, `kepler` group GID) is logged server-side only. This prevents information leakage that could aid enumeration attacks.
+
+Privilege escalation errors remain detailed since they are only returned to authenticated users who already know their own context.
+
+### Kepler Group Stripping Implementation
+
+Instead of using `initgroups()` (which loads all supplementary groups including `kepler`), the daemon computes an explicit group list excluding the kepler GID and uses `setgroups()`. If computing the stripped group list fails, the service refuses to start (hard failure, not fallback to empty groups).
+
+See [Security Model](security-model.md#kepler-group-stripping) for user-facing documentation on when and why stripping occurs.
+
+### Subscribe Authorization
+
+The internal `Subscribe` request does not map to a specific permission scope. Instead, it requires the caller to have at least one `service:*` scope (e.g., `service:start`, `service:logs`, or the `service` category). If the caller has no service-related scopes, the subscription is denied. When no ACL rules match at all, `Subscribe` is also denied.
+
+### Relevant Files
+
+| File | Description |
+|------|-------------|
+| `kepler-protocol/src/server.rs` | Peer credential verification, connection limits |
+| `kepler-daemon/src/main.rs` | State directory hardening, symlink checks |
+| `kepler-daemon/src/process.rs` | Kepler group stripping, privilege dropping |
+| `kepler-daemon/src/config_actor/context.rs` | Token registration, permission store |
 
 ---
 
