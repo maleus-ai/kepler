@@ -30,12 +30,12 @@ For a quick overview of the project, see the [main README](../README.md).
 
 ## Security & Operations
 
-- **[Security Model](security-model.md)** -- Root requirement, kepler group, socket auth
+- **[Security Model](security-model.md)** -- ACL, permissions, hardening -- how to configure security
 - **[Privilege Dropping](privilege-dropping.md)** -- User/group, resource limits, no new privileges
 - **[Platform Compatibility](platform-compatibility.md)** -- OS-specific feature support matrix
 
 ## Internals
 
-- **[Architecture](architecture.md)** -- Internal implementation, design decisions, and diagrams
+- **[Architecture](architecture.md)** -- Internal design, implementation details, and security internals
 - **[Protocol](protocol.md)** -- Multiplexed IPC wire format
 - **[Testing](testing.md)** -- Docker environment, test harnesses, E2E patterns
