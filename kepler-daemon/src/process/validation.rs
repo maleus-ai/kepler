@@ -1,25 +1,7 @@
 //! Process validation for reconnection and lifecycle management
 
+use std::time::Duration;
 use tracing::{debug, error, info, trace, warn};
-
-#[cfg(unix)]
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-
-/// Query process UID and start time in a single sysinfo refresh.
-#[cfg(unix)]
-fn get_process_info(pid: u32) -> Option<(u32, i64)> {
-    let mut sys = System::new();
-    let sysinfo_pid = Pid::from_u32(pid);
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[sysinfo_pid]),
-        false,
-        ProcessRefreshKind::nothing().with_user(UpdateKind::OnlyIfNotSet),
-    );
-    let process = sys.process(sysinfo_pid)?;
-    let uid = **process.user_id()?;
-    let start_time = process.start_time() as i64;
-    Some((uid, start_time))
-}
 
 /// Validate that a process with the given PID is still running.
 ///
@@ -35,60 +17,43 @@ fn get_process_info(pid: u32) -> Option<(u32, i64)> {
 /// * `true` if the process exists (and optionally matches the start time)
 /// * `false` if the process doesn't exist or has been reused
 pub fn validate_running_process(pid: u32, expected_start_time: Option<i64>) -> bool {
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::kill;
-        use nix::unistd::Pid;
+    if !kepler_unix::process_tree::process_is_alive(pid) {
+        trace!("Process {} does not exist", pid);
+        return false;
+    }
 
-        // Check if process exists by sending signal 0 (doesn't actually send anything)
-        let process_exists = kill(Pid::from_raw(pid as i32), None).is_ok();
+    // Query UID and start time in a single sysinfo refresh
+    let Some(info) = kepler_unix::process_tree::get_process_info(pid) else {
+        trace!("Cannot query process info for PID {}, rejecting", pid);
+        return false;
+    };
 
-        if !process_exists {
-            trace!("Process {} does not exist", pid);
-            return false;
-        }
+    // Verify process is owned by daemon user (prevents cross-user confusion)
+    let daemon_uid = kepler_unix::process_tree::get_daemon_uid();
+    if info.owner_id != daemon_uid {
+        trace!(
+            "Process {} owned by UID {} but daemon runs as UID {}",
+            pid, info.owner_id, daemon_uid
+        );
+        return false;
+    }
 
-        // Query UID and start time in a single sysinfo refresh
-        let Some((proc_uid, actual_start_time)) = get_process_info(pid) else {
-            trace!("Cannot query process info for PID {}, rejecting", pid);
-            return false;
-        };
-
-        // Verify process is owned by daemon user (prevents cross-user confusion)
-        let daemon_uid = nix::unistd::getuid().as_raw();
-        if proc_uid != daemon_uid {
+    // Validate start time - CRITICAL for daemon restart safety
+    if let Some(expected_ts) = expected_start_time {
+        let diff = (expected_ts - info.start_time).abs();
+        if diff > 1 {  // Tight 1-second tolerance
             trace!(
-                "Process {} owned by UID {} but daemon runs as UID {}",
-                pid, proc_uid, daemon_uid
+                "Process {} start time mismatch: expected {}, got {} (diff {}s) - likely PID reuse",
+                pid, expected_ts, info.start_time, diff
             );
             return false;
         }
-
-        // Validate start time - CRITICAL for daemon restart safety
-        if let Some(expected_ts) = expected_start_time {
-            let diff = (expected_ts - actual_start_time).abs();
-            if diff > 1 {  // Tight 1-second tolerance
-                trace!(
-                    "Process {} start time mismatch: expected {}, got {} (diff {}s) - likely PID reuse",
-                    pid, expected_ts, actual_start_time, diff
-                );
-                return false;
-            }
-        } else {
-            // No expected start time provided - warn but allow for backwards compatibility
-            warn!("No expected_start_time for PID {} - state may be incomplete", pid);
-        }
-
-        true
+    } else {
+        // No expected start time provided - warn but allow for backwards compatibility
+        warn!("No expected_start_time for PID {} - state may be incomplete", pid);
     }
 
-    #[cfg(not(unix))]
-    {
-        // On non-Unix platforms, we can't easily check process existence
-        // Just assume the process is gone if we can't verify
-        let _ = (pid, expected_start_time);
-        false
-    }
+    true
 }
 
 /// Kill a process by PID.
@@ -104,63 +69,45 @@ pub fn validate_running_process(pid: u32, expected_start_time: Option<i64>) -> b
 /// * `true` if the process was killed or doesn't exist
 /// * `false` if the process couldn't be killed
 pub async fn kill_process_by_pid(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::{kill, killpg, Signal};
-        use nix::unistd::Pid;
+    if !kepler_unix::process_tree::process_is_alive(pid) {
+        // Process doesn't exist, nothing to kill
+        return true;
+    }
 
-        let nix_pid = Pid::from_raw(pid as i32);
+    info!("Killing orphaned process group {} (SIGTERM)", pid);
 
-        // Check if process exists
-        if kill(nix_pid, None).is_err() {
-            // Process doesn't exist, nothing to kill
+    // Send SIGTERM to the entire process group for graceful shutdown
+    if let Err(e) = kepler_unix::process_tree::signal_process_tree(pid, 15) {
+        warn!("Failed to send SIGTERM to process group {}: {}", pid, e);
+        return false;
+    }
+
+    // Wait up to 5 seconds for graceful shutdown
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        if !kepler_unix::process_tree::process_is_alive(pid) {
+            debug!("Process group {} terminated gracefully", pid);
             return true;
-        }
-
-        info!("Killing orphaned process group {} (SIGTERM)", pid);
-
-        // Send SIGTERM to the entire process group for graceful shutdown
-        if let Err(e) = killpg(nix_pid, Signal::SIGTERM) {
-            warn!("Failed to send SIGTERM to process group {}: {}", pid, e);
-            return false;
-        }
-
-        // Wait up to 5 seconds for graceful shutdown
-        for _ in 0..50 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            // Check if process is still alive
-            if kill(nix_pid, None).is_err() {
-                debug!("Process group {} terminated gracefully", pid);
-                return true;
-            }
-        }
-
-        // Process still alive, send SIGKILL to the entire process group
-        warn!("Process group {} did not respond to SIGTERM, sending SIGKILL", pid);
-        if let Err(e) = killpg(nix_pid, Signal::SIGKILL) {
-            warn!("Failed to send SIGKILL to process group {}: {}", pid, e);
-            return false;
-        }
-
-        // Wait a bit for SIGKILL to take effect
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Verify process is gone
-        if kill(nix_pid, None).is_err() {
-            debug!("Process group {} killed with SIGKILL", pid);
-            true
-        } else {
-            error!("Process {} survived SIGKILL", pid);
-            false
         }
     }
 
-    #[cfg(not(unix))]
-    {
-        // On non-Unix platforms, we can't easily kill processes by PID
-        let _ = pid;
-        warn!("kill_process_by_pid not supported on this platform");
+    // Process still alive, send SIGKILL to the entire process group
+    warn!("Process group {} did not respond to SIGTERM, sending SIGKILL", pid);
+    if let Err(e) = kepler_unix::process_tree::force_kill_process_tree(pid) {
+        warn!("Failed to send SIGKILL to process group {}: {}", pid, e);
+        return false;
+    }
+
+    // Wait a bit for SIGKILL to take effect
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Verify process is gone
+    if !kepler_unix::process_tree::process_is_alive(pid) {
+        debug!("Process group {} killed with SIGKILL", pid);
+        true
+    } else {
+        error!("Process {} survived SIGKILL", pid);
         false
     }
 }

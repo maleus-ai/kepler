@@ -106,6 +106,7 @@ For a ready-to-run example, see [`example.kepler.yaml`](examples/example.kepler.
 
 - [Security Model](docs/security-model.md) -- Root, kepler group, socket auth
 - [Privilege Dropping](docs/privilege-dropping.md) -- User/group, resource limits
+- [Platform Compatibility](docs/platform-compatibility.md) -- OS-specific feature support matrix
 
 ### Internals
 

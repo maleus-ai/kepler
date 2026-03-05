@@ -56,6 +56,7 @@ async fn setup_orchestrator(
         kepler_daemon::hardening::HardeningLevel::None,
         None,
         token_store,
+        kepler_daemon::containment::ContainmentManager::detect(),
     ));
 
     (orchestrator, config_path, exit_tx, restart_tx)
@@ -98,6 +99,7 @@ async fn setup_orchestrator_with_exit_handler(
         kepler_daemon::hardening::HardeningLevel::None,
         None,
         token_store,
+        kepler_daemon::containment::ContainmentManager::detect(),
     ));
 
     // Spawn exit event handler (mirrors the one in main.rs)

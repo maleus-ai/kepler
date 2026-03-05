@@ -23,9 +23,10 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::config_actor::{ConfigActorHandle, TaskHandleType};
+use crate::containment::ContainmentManager;
 use crate::errors::{DaemonError, Result};
 use crate::logs::LogWriterConfig;
-use crate::state::{ProcessHandle, ServiceStatus};
+use crate::state::{ProcessHandle, ServiceStatus, ShutdownRequest};
 
 /// Message for process exit events
 #[derive(Debug)]
@@ -47,6 +48,8 @@ pub struct SpawnServiceParams<'a> {
     pub store_stderr: bool,
     /// Optional output capture for `::output::KEY=VALUE` markers
     pub output_capture: Option<OutputCaptureConfig>,
+    pub containment: ContainmentManager,
+    pub config_hash: String,
 }
 
 /// Spawn a service process with signal-based monitoring
@@ -60,6 +63,8 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         store_stdout,
         store_stderr,
         output_capture,
+        containment,
+        config_hash,
     } = params;
 
     // Validate command
@@ -76,6 +81,9 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         &spec.program_and_args[0],
         &spec.program_and_args[1..]
     );
+
+    // Prepare cgroup before spawning (creates cgroup directory if using cgroup v2)
+    containment.prepare_spawn(&config_hash, service_name);
 
     // Spawn the command detached for monitoring
     let result = spawn_detached(
@@ -94,13 +102,18 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         service_name, pid
     );
 
+    // Register PID in cgroup (if using cgroup v2)
+    if let Some(pid) = pid {
+        containment.register_pid(&config_hash, service_name, pid);
+    }
+
     // Store the PID in state immediately after spawning
     let _ = handle
         .set_service_pid(service_name, pid, Some(Utc::now()))
         .await;
 
-    // Create shutdown channel for graceful stop (carries signal number)
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<i32>();
+    // Create shutdown channel for graceful stop (round-trip: request → reply)
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<ShutdownRequest>();
 
     // Spawn process monitor with the Child (signal-based monitoring)
     let config_path = handle.config_path().to_path_buf();
@@ -115,6 +128,8 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
             shutdown_rx,
             handle_clone,
             exit_tx,
+            containment,
+            config_hash,
         )
         .await;
     });
@@ -135,13 +150,16 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
 
 /// Monitor a process using signal-based waiting (child.wait())
 /// This replaces the previous polling-based approach
+#[allow(clippy::too_many_arguments)]
 async fn monitor_process(
     config_path: PathBuf,
     service_name: String,
     mut child: Child,
-    shutdown_rx: oneshot::Receiver<i32>,
-    _handle: ConfigActorHandle,
+    shutdown_rx: oneshot::Receiver<ShutdownRequest>,
+    handle: ConfigActorHandle,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
+    containment: ContainmentManager,
+    config_hash: String,
 ) {
     // Use tokio::select! to wait for either process exit or shutdown signal
     tokio::select! {
@@ -200,29 +218,19 @@ async fn monitor_process(
                 }
             }
         }
-        // Wait for shutdown signal (carries signal number)
-        signal_result = shutdown_rx => {
-            let signal_num = signal_result.unwrap_or(15); // Default SIGTERM
+        // Wait for shutdown request (round-trip: request → reply)
+        request_result = shutdown_rx => {
+            let (signal_num, reply_tx) = match request_result {
+                Ok(req) => (req.signal, Some(req.reply)),
+                Err(_) => (15, None), // Sender dropped — default SIGTERM, no reply
+            };
             debug!("Shutdown signal received for {} (signal {})", service_name, signal_num);
 
-            #[cfg(unix)]
-            {
-                if let Some(pid) = child.id() {
-                    debug!("Sending signal {} to process group {}", signal_num, pid);
-                    use nix::sys::signal::{killpg, Signal};
-                    use nix::unistd::Pid;
-                    if let Ok(sig) = Signal::try_from(signal_num) {
-                        let _ = killpg(Pid::from_raw(pid as i32), sig);
-                    } else {
-                        warn!("Invalid signal number {}, falling back to SIGTERM", signal_num);
-                        let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGTERM);
-                    }
-                }
-            }
-
-            #[cfg(not(unix))]
-            {
-                let _ = signal_num; // suppress unused warning
+            if let Some(pid) = child.id() {
+                debug!("Sending signal {} to process group {}", signal_num, pid);
+                // Graceful signal only — no force kill yet
+                containment.signal_service(pid, signal_num);
+            } else {
                 let _ = child.start_kill();
             }
 
@@ -233,27 +241,43 @@ async fn monitor_process(
             )
             .await;
 
-            match timeout_result {
+            let (exit_code, signal) = match timeout_result {
                 Ok(Ok(status)) => {
                     debug!("Service {} stopped with status {:?}", service_name, status);
+                    let code = status.code();
+                    #[cfg(unix)]
+                    let sig = if code.is_none() {
+                        use std::os::unix::process::ExitStatusExt;
+                        status.signal()
+                    } else {
+                        None
+                    };
+                    #[cfg(not(unix))]
+                    let sig = None;
+                    (code, sig)
                 }
                 Ok(Err(e)) => {
                     warn!("Error waiting for service {}: {}", service_name, e);
+                    (None, None)
                 }
                 Err(_) => {
-                    // Timeout - force kill the entire process group
+                    // Timeout — force kill via cgroup or killpg SIGKILL
                     warn!("Service {} did not stop gracefully, force killing", service_name);
-                    #[cfg(unix)]
                     if let Some(pid) = child.id() {
-                        use nix::sys::signal::{killpg, Signal};
-                        use nix::unistd::Pid;
-                        let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                        containment.force_kill_service(&config_hash, &service_name, pid).await;
                     }
                     let _ = child.kill().await; // reap zombie
+                    (None, Some(9)) // killed by SIGKILL
                 }
-            }
+            };
 
-            // Note: We don't send an exit event here because stop_service handles the state update
+            // Record exit info so it's available even on explicit stop
+            let _ = handle.record_process_exit(&service_name, exit_code, signal).await;
+
+            // Signal stop_service that the process is dead
+            if let Some(tx) = reply_tx {
+                let _ = tx.send(());
+            }
         }
     }
 }
@@ -292,31 +316,48 @@ pub async fn stop_service(
     let process_handle = handle.remove_process_handle(service_name).await;
 
     if let Some(process_handle) = process_handle {
-        // Send shutdown signal to monitor task (with signal number)
+        // Send shutdown request to monitor task and wait for it to confirm the process is dead.
+        // This ensures the process has exited before we drain output tasks.
         if let Some(shutdown_tx) = process_handle.shutdown_tx {
-            let _ = shutdown_tx.send(signal.unwrap_or(15));
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let request = ShutdownRequest {
+                signal: signal.unwrap_or(15),
+                reply: reply_tx,
+            };
+            let _ = shutdown_tx.send(request);
+            // Wait for monitor_process to confirm process death (25s safety timeout)
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(25),
+                reply_rx,
+            ).await;
         }
 
-        // Wait for output tasks to finish flushing remaining pipe data to log files,
-        // then abort if they don't complete in time.
-        if let Some(mut task) = process_handle.stdout_task {
-            tokio::select! {
-                _ = &mut task => {}
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
-                    warn!("stdout capture task for {} did not finish in time, aborting", service_name);
-                    task.abort();
+        // Drain output tasks — process is already dead so pipes are closed.
+        // Use a short timeout (2s) since data should flush quickly.
+        let drain_timeout = std::time::Duration::from_secs(2);
+        let stdout_fut = async {
+            if let Some(mut task) = process_handle.stdout_task {
+                tokio::select! {
+                    _ = &mut task => {}
+                    _ = tokio::time::sleep(drain_timeout) => {
+                        warn!("stdout capture task for {} did not finish in time, aborting", service_name);
+                        task.abort();
+                    }
                 }
             }
-        }
-        if let Some(mut task) = process_handle.stderr_task {
-            tokio::select! {
-                _ = &mut task => {}
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
-                    warn!("stderr capture task for {} did not finish in time, aborting", service_name);
-                    task.abort();
+        };
+        let stderr_fut = async {
+            if let Some(mut task) = process_handle.stderr_task {
+                tokio::select! {
+                    _ = &mut task => {}
+                    _ = tokio::time::sleep(drain_timeout) => {
+                        warn!("stderr capture task for {} did not finish in time, aborting", service_name);
+                        task.abort();
+                    }
                 }
             }
-        }
+        };
+        tokio::join!(stdout_fut, stderr_fut);
     }
 
     // Cancel health check

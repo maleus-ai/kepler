@@ -137,6 +137,9 @@ impl ServiceEventHandler {
                 continue;
             }
 
+            // Clean up cgroup directory after stop
+            self.orchestrator.containment.cleanup_service(self.handle.config_hash(), service_name).await;
+
             // Wait for the dependency's condition to be met
             let dep_config = raw.depends_on
                 .get(restarted_service)

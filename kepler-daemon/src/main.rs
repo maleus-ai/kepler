@@ -8,6 +8,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 use kepler_daemon::config_actor::context::ConfigEvent;
 use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
+use kepler_daemon::containment::ContainmentManager;
 use kepler_daemon::cursor::CursorManager;
 use kepler_daemon::errors::DaemonError;
 use kepler_daemon::hardening::HardeningLevel;
@@ -115,6 +116,7 @@ fn parse_hardening_level() -> HardeningLevel {
 ///   - Root (uid 0) has implicit `*` ACL
 ///   - Owner has implicit `*` ACL
 ///   - Otherwise: look up ACL rules for uid/gid
+///
 /// Unified ACL gate for all auth types in the authorization pipeline.
 ///
 /// - **Root**: Always bypasses — returns `Ok(())` unconditionally.
@@ -564,6 +566,9 @@ async fn main() -> anyhow::Result<()> {
     // Create token-based permission store
     let token_store: SharedTokenStore = Arc::new(TokenStore::new());
 
+    // Detect process containment strategy (cgroup v2 on Linux, killpg fallback otherwise)
+    let containment = ContainmentManager::detect();
+
     // Create ServiceOrchestrator (needs cursor_manager to invalidate cursors on stop --clean)
     #[cfg(unix)]
     let kepler_gid_for_orchestrator = Some(kepler_gid);
@@ -577,6 +582,7 @@ async fn main() -> anyhow::Result<()> {
         hardening,
         kepler_gid_for_orchestrator,
         token_store.clone(),
+        containment.clone(),
     ));
 
     // Spawn cursor cleanup task (runs every 5 seconds)
@@ -626,29 +632,29 @@ async fn main() -> anyhow::Result<()> {
     // (including those authenticating via KEPLER_TOKEN) can reach the socket.
     #[cfg(unix)]
     {
-        if let Some(parent) = socket_path.parent() {
-            if parent != state_dir {
-                if !parent.exists() {
-                    eprintln!(
-                        "Error: socket parent directory '{}' does not exist (from KEPLER_SOCKET_PATH={})",
-                        parent.display(),
-                        socket_path.display()
-                    );
-                    std::process::exit(1);
-                }
-                let parent_meta = std::fs::metadata(parent)?;
-                let parent_mode = {
-                    use std::os::unix::fs::PermissionsExt;
-                    parent_meta.permissions().mode() & 0o777
-                };
-                if parent_mode & 0o001 == 0 {
-                    warn!(
-                        "Socket parent directory '{}' is not world-traversable (mode 0o{:o}). \
-                         Non-root users may not be able to connect to the socket.",
-                        parent.display(),
-                        parent_mode
-                    );
-                }
+        if let Some(parent) = socket_path.parent()
+            && parent != state_dir
+        {
+            if !parent.exists() {
+                eprintln!(
+                    "Error: socket parent directory '{}' does not exist (from KEPLER_SOCKET_PATH={})",
+                    parent.display(),
+                    socket_path.display()
+                );
+                std::process::exit(1);
+            }
+            let parent_meta = std::fs::metadata(parent)?;
+            let parent_mode = {
+                use std::os::unix::fs::PermissionsExt;
+                parent_meta.permissions().mode() & 0o777
+            };
+            if parent_mode & 0o001 == 0 {
+                warn!(
+                    "Socket parent directory '{}' is not world-traversable (mode 0o{:o}). \
+                     Non-root users may not be able to connect to the socket.",
+                    parent.display(),
+                    parent_mode
+                );
             }
         }
     }
@@ -665,7 +671,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Discover and restore existing configs from persisted snapshots
     // Kill orphaned processes and respawn services that were previously running
-    discover_existing_configs(&registry, &orchestrator).await;
+    discover_existing_configs(&registry, &orchestrator, &containment).await;
 
     if let Some(fd_count) = kepler_daemon::fd_count::count_open_fds() {
         info!("FD count after config discovery: {}", fd_count);
@@ -1831,6 +1837,7 @@ fn read_persisted_status(state_dir: &Path) -> HashMap<String, ServiceInfo> {
 async fn discover_existing_configs(
     registry: &SharedConfigRegistry,
     orchestrator: &Arc<ServiceOrchestrator>,
+    containment: &ContainmentManager,
 ) {
     let configs_dir = match kepler_daemon::global_state_dir() {
         Ok(dir) => dir.join("configs"),
@@ -1867,11 +1874,18 @@ async fn discover_existing_configs(
         // Create persistence instance for this config
         let persistence = ConfigPersistence::new(state_dir.clone());
 
+        // Extract config_hash from state_dir name
+        let config_hash = state_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
         // Check if we have an expanded config (means autostart was enabled)
         if !persistence.has_expanded_config() {
             // No snapshot — autostart was disabled. Kill any orphaned processes
             // from state.json but do NOT load the config actor or respawn.
-            kill_orphaned_processes_from_state(&persistence, &state_dir).await;
+            kill_orphaned_processes_from_state(&persistence, &state_dir, containment, &config_hash).await;
             continue;
         }
 
@@ -1907,7 +1921,7 @@ async fn discover_existing_configs(
 
                 // Kill orphaned processes and get list of services to respawn
                 let services_to_respawn =
-                    kill_orphaned_processes_and_get_respawn_list(&handle).await;
+                    kill_orphaned_processes_and_get_respawn_list(&handle, containment).await;
 
                 // Respawn services that were previously running
                 if !services_to_respawn.is_empty() {
@@ -1975,8 +1989,10 @@ async fn discover_existing_configs(
 /// Returns a list of service names that should be respawned.
 async fn kill_orphaned_processes_and_get_respawn_list(
     handle: &kepler_daemon::config_actor::ConfigActorHandle,
+    containment: &ContainmentManager,
 ) -> Vec<String> {
     let mut services_to_respawn = Vec::new();
+    let config_hash = handle.config_hash().to_string();
 
     // Get all service statuses
     let services = match handle.get_service_status(None).await {
@@ -1985,47 +2001,36 @@ async fn kill_orphaned_processes_and_get_respawn_list(
     };
 
     for (service_name, info) in services {
-        // Check if this service was recorded as running
-        let is_running_status = matches!(
+        let is_active = !matches!(
             info.status.as_str(),
-            "running" | "starting" | "healthy" | "unhealthy"
+            "stopped" | "failed" | "exited" | "killed" | "skipped"
         );
 
-        if !is_running_status {
-            continue;
-        }
-
-        // This service was running before daemon restart - it needs to be respawned
-        services_to_respawn.push(service_name.clone());
-
-        // Kill the process if it's still alive
-        if let Some(pid) = info.pid {
-            let is_alive = validate_running_process(pid, info.started_at);
-
-            if is_alive {
-                info!(
-                    "Service {} (PID {}) is still running, killing for respawn",
-                    service_name, pid
-                );
-                kill_process_by_pid(pid).await;
-            } else {
-                info!(
-                    "Service {} (PID {}) is no longer running, will respawn",
-                    service_name, pid
-                );
-            }
-        } else {
-            info!(
-                "Service {} has no PID recorded, will respawn",
-                service_name
-            );
-        }
-
-        // Mark as stopped (will be restarted after)
-        let _ = handle
-            .set_service_status(&service_name, ServiceStatus::Stopped)
+        // Kill orphaned processes for this service.
+        // With cgroups: enumerates the cgroup and kills all (no PID validation needed).
+        // Without cgroups: validates PID ownership/timing, then kills via killpg.
+        // In both cases, kills regardless of persisted status (it may be stale).
+        containment
+            .kill_orphans(&config_hash, &service_name, info.pid, info.started_at)
             .await;
-        let _ = handle.set_service_pid(&service_name, None, None).await;
+
+        // Only respawn services that were in an active, non-stopping state.
+        // Stopping means the user intended to stop it; terminal states don't
+        // need respawning.
+        if is_active && info.status.as_str() != "stopping" {
+            services_to_respawn.push(service_name.clone());
+        }
+
+        // Clear stale PID and reset to Stopped for any service we touched
+        if is_active || info.pid.is_some() {
+            let _ = handle
+                .set_service_status(&service_name, ServiceStatus::Stopped)
+                .await;
+            let _ = handle.set_service_pid(&service_name, None, None).await;
+        }
+
+        // Clean up service cgroup (it's empty now)
+        containment.cleanup_service(&config_hash, &service_name).await;
     }
 
     services_to_respawn
@@ -2036,7 +2041,18 @@ async fn kill_orphaned_processes_and_get_respawn_list(
 /// This handles configs where autostart was disabled: we still need to clean up
 /// any processes that were running when the daemon was killed, but we don't load
 /// the config actor or respawn anything.
-async fn kill_orphaned_processes_from_state(persistence: &ConfigPersistence, state_dir: &Path) {
+async fn kill_orphaned_processes_from_state(
+    persistence: &ConfigPersistence,
+    state_dir: &Path,
+    containment: &ContainmentManager,
+    config_hash: &str,
+) {
+    // With cgroups: kill all processes in any cgroups for this config hash,
+    // regardless of what state.json says.
+    if containment.has_cgroup() {
+        containment.kill_orphans_from_cgroups(config_hash).await;
+    }
+
     let state = match persistence.load_state() {
         Ok(Some(state)) => state,
         Ok(None) => return,
@@ -2046,39 +2062,39 @@ async fn kill_orphaned_processes_from_state(persistence: &ConfigPersistence, sta
         }
     };
 
-    for (service_name, ps) in &state.services {
-        let status: ServiceStatus = ps.status.into();
-        if !status.is_active() {
-            continue;
-        }
-
-        if let Some(pid) = ps.pid {
-            // Require started_at for PID validation — without it we can't
-            // distinguish the original process from a recycled PID.
-            if ps.started_at.is_none() {
-                warn!(
-                    "Skipping orphan kill for {} (PID {}): no started_at recorded",
-                    service_name, pid
-                );
-                continue;
-            }
-            let is_alive = validate_running_process(pid, ps.started_at);
-            if is_alive {
-                info!(
-                    "Killing orphaned process {} (PID {}) from {:?}",
-                    service_name, pid, state_dir.file_name().unwrap_or_default()
-                );
-                kill_process_by_pid(pid).await;
+    // Without cgroups: fall back to PID validation + killpg
+    if !containment.has_cgroup() {
+        for (service_name, ps) in &state.services {
+            // Kill any validated process regardless of status — the persisted status
+            // could be stale if the daemon crashed mid-transition.
+            if let Some(pid) = ps.pid {
+                // Require started_at for PID validation — without it we can't
+                // distinguish the original process from a recycled PID.
+                if ps.started_at.is_none() {
+                    warn!(
+                        "Skipping orphan kill for {} (PID {}): no started_at recorded",
+                        service_name, pid
+                    );
+                    continue;
+                }
+                let is_alive = validate_running_process(pid, ps.started_at);
+                if is_alive {
+                    info!(
+                        "Killing orphaned process {} (PID {}, status={:?}) from {:?}",
+                        service_name, pid, ps.status, state_dir.file_name().unwrap_or_default()
+                    );
+                    kill_process_by_pid(pid).await;
+                }
             }
         }
     }
 
-    // Update state.json to reflect that active services are now stopped
+    // Update state.json: reset active services to Stopped, clear stale PIDs
     let mut updated_state = state;
     let mut any_changed = false;
     for ps in updated_state.services.values_mut() {
         let status: ServiceStatus = ps.status.into();
-        if status.is_active() {
+        if status.is_active() || ps.pid.is_some() {
             ps.status = ServiceStatus::Stopped.into();
             ps.pid = None;
             any_changed = true;

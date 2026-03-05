@@ -6,6 +6,7 @@ pub mod acl;
 pub mod allocator;
 pub mod auth;
 pub mod config;
+pub mod containment;
 
 pub mod config_actor;
 pub mod config_registry;

@@ -43,6 +43,7 @@ fn create_test_orchestrator(
         kepler_daemon::hardening::HardeningLevel::None,
         None,
         token_store,
+        kepler_daemon::containment::ContainmentManager::detect(),
     ));
     (orchestrator, registry, exit_rx, restart_rx)
 }
