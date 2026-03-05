@@ -36,6 +36,7 @@ pub use config_registry::LoadedConfigInfo;
 
 const DEFAULT_STATE_DIR: &str = "/var/lib/kepler";
 const KEPLER_DAEMON_PATH_ENV: &str = "KEPLER_DAEMON_PATH";
+const KEPLER_SOCKET_PATH_ENV: &str = "KEPLER_SOCKET_PATH";
 
 pub fn global_state_dir() -> Result<PathBuf> {
     if let Ok(path) = std::env::var(KEPLER_DAEMON_PATH_ENV) {
@@ -86,6 +87,9 @@ impl Daemon {
     }
 
     pub fn get_socket_path() -> Result<PathBuf> {
+        if let Ok(path) = std::env::var(KEPLER_SOCKET_PATH_ENV) {
+            return Ok(PathBuf::from(path));
+        }
         Ok(global_state_dir()?.join("kepler.sock"))
     }
 

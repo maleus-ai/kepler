@@ -620,6 +620,39 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
+
+    // When the socket lives outside the state directory (via KEPLER_SOCKET_PATH),
+    // ensure its parent directory exists and is world-traversable so all users
+    // (including those authenticating via KEPLER_TOKEN) can reach the socket.
+    #[cfg(unix)]
+    {
+        if let Some(parent) = socket_path.parent() {
+            if parent != state_dir {
+                if !parent.exists() {
+                    eprintln!(
+                        "Error: socket parent directory '{}' does not exist (from KEPLER_SOCKET_PATH={})",
+                        parent.display(),
+                        socket_path.display()
+                    );
+                    std::process::exit(1);
+                }
+                let parent_meta = std::fs::metadata(parent)?;
+                let parent_mode = {
+                    use std::os::unix::fs::PermissionsExt;
+                    parent_meta.permissions().mode() & 0o777
+                };
+                if parent_mode & 0o001 == 0 {
+                    warn!(
+                        "Socket parent directory '{}' is not world-traversable (mode 0o{:o}). \
+                         Non-root users may not be able to connect to the socket.",
+                        parent.display(),
+                        parent_mode
+                    );
+                }
+            }
+        }
+    }
+
     let disconnect_cursor_manager = cursor_manager.clone();
     let server = Server::new(socket_path.clone(), handler)?
         .with_on_disconnect(move |connection_id| {

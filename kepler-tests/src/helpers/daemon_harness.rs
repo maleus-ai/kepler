@@ -301,8 +301,9 @@ impl TestDaemonHarness {
             ).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         }
 
-        // Strip KEPLER_TOKEN from computed_env (stale caller token)
+        // Strip KEPLER_TOKEN and KEPLER_SOCKET_PATH from computed_env (stale caller values)
         computed_env.remove("KEPLER_TOKEN");
+        computed_env.remove("KEPLER_SOCKET_PATH");
 
         // Store resolved config + computed state in the actor
         let svc_env_file = eval_ctx.service.as_ref().unwrap().env_file.clone();
@@ -410,10 +411,18 @@ impl TestDaemonHarness {
             resolved.no_new_privileges.unwrap_or(true),
         );
 
-        // Inject KEPLER_TOKEN into the process environment
+        // Inject KEPLER_TOKEN and KEPLER_SOCKET_PATH into the process environment
         spec.environment.remove("KEPLER_TOKEN");
+        spec.environment.remove("KEPLER_SOCKET_PATH");
         if let Some(ref token_hex) = service_token {
             spec.environment.insert("KEPLER_TOKEN".to_string(), token_hex.clone());
+            // Derive socket path from this harness's own state dir, not from the
+            // process-wide env var which may point to another parallel test's dir.
+            let socket_path = self.config_dir.join(".kepler").join("kepler.sock");
+            spec.environment.insert(
+                "KEPLER_SOCKET_PATH".to_string(),
+                socket_path.to_string_lossy().into_owned(),
+            );
         }
 
         // Set up a log flush notifier so we can wait for capture tasks to

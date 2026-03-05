@@ -217,6 +217,13 @@ async fn run_hook_step(
         // Inject service token so hooks can authenticate to the daemon
         if let Some(ref token) = params.service_token {
             spec.environment.insert("KEPLER_TOKEN".to_string(), token.clone());
+            // Ensure the hook knows where to connect back to the daemon socket.
+            if let Ok(socket_path) = crate::Daemon::get_socket_path() {
+                spec.environment.insert(
+                    "KEPLER_SOCKET_PATH".to_string(),
+                    socket_path.to_string_lossy().into_owned(),
+                );
+            }
         }
 
         debug!(
