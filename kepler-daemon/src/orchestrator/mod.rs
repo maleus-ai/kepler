@@ -1491,7 +1491,12 @@ impl ServiceOrchestrator {
 
         // Phase 2: Start services (forward dependency order)
         for service_name in &start_order {
-            // Re-resolve service config with updated context (restart_count, deps, etc.)
+            // Increment restart count before hooks so pre_start sees the updated value
+            if let Err(e) = handle.increment_restart_count(service_name).await {
+                warn!("Failed to increment restart count for {}: {}", service_name, e);
+            }
+
+            // Re-resolve service config with updated restart_count
             let ctx = match self.re_resolve_service(&handle, service_name, None).await {
                 Ok(ctx) => ctx,
                 Err(e) => {
@@ -1538,11 +1543,6 @@ impl ServiceOrchestrator {
 
                     // Spawn auxiliary tasks
                     self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
-
-                    // Increment restart count
-                    if let Err(e) = handle.increment_restart_count(service_name).await {
-                        warn!("Failed to increment restart count for {}: {}", service_name, e);
-                    }
                 }
                 Err(e) => {
                     error!("Failed to spawn service {}: {}", service_name, e);
@@ -1711,7 +1711,12 @@ impl ServiceOrchestrator {
         // Small delay between stop and start
         tokio::time::sleep(RESTART_DELAY).await;
 
-        // Re-resolve service config with updated context
+        // Increment restart count before hooks so pre_start sees the updated value
+        if let Err(e) = handle.increment_restart_count(service_name).await {
+            warn!("Failed to increment restart count for {}: {}", service_name, e);
+        }
+
+        // Re-resolve service config with updated restart_count
         let ctx = self.re_resolve_service(&handle, service_name, None).await?;
 
         // Emit Start event (restart includes a start)
@@ -1749,10 +1754,6 @@ impl ServiceOrchestrator {
 
         // Spawn auxiliary tasks (health checker, file watcher)
         self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
-
-        if let Err(e) = handle.increment_restart_count(service_name).await {
-            warn!("Failed to increment restart count for {}: {}", service_name, e);
-        }
 
         Ok(())
     }
@@ -2255,6 +2256,7 @@ impl ServiceOrchestrator {
             kepler_env_denied,
             service_no_new_privileges: resolved.no_new_privileges,
             service_token,
+            socket_path: None,
         };
 
         // Read prior hook outputs from disk and set output_max_size
