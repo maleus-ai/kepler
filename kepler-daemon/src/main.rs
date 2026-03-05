@@ -145,7 +145,7 @@ fn check_config_acl(
                 Some(acl) => acl,
                 None => {
                     let required = kepler_daemon::permissions::required_scopes(request);
-                    if required.is_empty() && !matches!(request, Request::Subscribe { .. }) {
+                    if required.is_empty() && !matches!(request, Request::Subscribe { .. } | Request::CheckQuiescence { .. } | Request::CheckReadiness { .. }) {
                         return Ok(());
                     }
                     warn!("ACL denied: UID {} attempted operation requiring scopes {:?} but is not config owner", uid, required);
@@ -304,7 +304,7 @@ fn check_unloaded_config_acl(
                 Some(resolved_acl) => resolved_acl.check_access(*uid, *gid, request),
                 None => {
                     let required = kepler_daemon::permissions::required_scopes(request);
-                    if required.is_empty() && !matches!(request, Request::Subscribe { .. }) {
+                    if required.is_empty() && !matches!(request, Request::Subscribe { .. } | Request::CheckQuiescence { .. } | Request::CheckReadiness { .. }) {
                         return Ok(());
                     }
                     warn!("ACL denied: UID {} attempted operation requiring scopes {:?} but is not config owner", uid, required);
@@ -740,7 +740,9 @@ fn extract_config_path(request: &Request) -> Option<&PathBuf> {
         | Request::Logs { config_path, .. }
         | Request::LogsChunk { config_path, .. }
         | Request::LogsCursor { config_path, .. }
-        | Request::Subscribe { config_path, .. } => Some(config_path),
+        | Request::Subscribe { config_path, .. }
+        | Request::CheckQuiescence { config_path, .. }
+        | Request::CheckReadiness { config_path, .. } => Some(config_path),
         Request::Inspect { config_path } => Some(config_path),
         Request::Status { config_path } => config_path.as_ref(),
         _ => None,
@@ -1118,6 +1120,7 @@ async fn handle_request(
                             continue;
                         }
                         let phase = match change.status {
+                            ServiceStatus::Restarting => ServicePhase::Restarting,
                             ServiceStatus::Stopping => ServicePhase::Stopping,
                             ServiceStatus::Stopped => ServicePhase::Stopped,
                             ServiceStatus::Starting => ServicePhase::Starting,
@@ -1653,6 +1656,32 @@ async fn handle_request(
                 Err(e) => Response::error(format!("Failed to serialize inspect data: {}", e)),
             }
         }
+
+        Request::CheckQuiescence { config_path } => {
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+            let handle = match registry.get(&config_path) {
+                Some(h) => h,
+                None => return Response::ok_with_data(ResponseData::CheckResult(true)),
+            };
+            let result = handle.check_quiescence().await;
+            Response::ok_with_data(ResponseData::CheckResult(result))
+        }
+
+        Request::CheckReadiness { config_path } => {
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+            let handle = match registry.get(&config_path) {
+                Some(h) => h,
+                None => return Response::error("Config not loaded"),
+            };
+            let result = handle.check_readiness().await;
+            Response::ok_with_data(ResponseData::CheckResult(result))
+        }
     }
 }
 
@@ -1664,6 +1693,7 @@ fn status_to_phase(state: Option<&ServiceState>, target: ServiceTarget) -> Servi
         Some(ServiceStatus::Starting) => ServicePhase::Starting,
         Some(ServiceStatus::Running) => ServicePhase::Started,
         Some(ServiceStatus::Healthy) => ServicePhase::Healthy,
+        Some(ServiceStatus::Restarting) => ServicePhase::Restarting,
         Some(ServiceStatus::Stopping) => ServicePhase::Stopping,
         Some(ServiceStatus::Stopped) | Some(ServiceStatus::Exited) | Some(ServiceStatus::Killed) => ServicePhase::Stopped,
         Some(ServiceStatus::Skipped) => {
@@ -1783,6 +1813,7 @@ fn read_persisted_status(state_dir: &Path) -> HashMap<String, ServiceInfo> {
                 initialized: ps.initialized,
                 skip_reason: ps.skip_reason,
                 fail_reason: ps.fail_reason,
+
             })
         }).collect(),
         _ => HashMap::new(),

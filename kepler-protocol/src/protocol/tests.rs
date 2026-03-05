@@ -255,6 +255,7 @@ fn roundtrip_server_message_service_status() {
         initialized: false,
         skip_reason: None,
         fail_reason: None,
+
     });
     services.insert("api".into(), ServiceInfo {
         status: "exited".into(),
@@ -267,6 +268,7 @@ fn roundtrip_server_message_service_status() {
         initialized: false,
         skip_reason: None,
         fail_reason: None,
+
     });
     services.insert("worker".into(), ServiceInfo {
         status: "killed".into(),
@@ -279,6 +281,7 @@ fn roundtrip_server_message_service_status() {
         initialized: false,
         skip_reason: None,
         fail_reason: None,
+
     });
 
     let msg = ServerMessage::Response {
@@ -597,5 +600,54 @@ fn roundtrip_all_service_phases() {
         let bytes = encode_server_message(&msg).unwrap();
         let decoded = decode_server_message(&bytes[4..]).unwrap();
         assert!(matches!(decoded, ServerMessage::Event { .. }));
+    }
+}
+
+// ========================================================================
+// CheckQuiescence / CheckReadiness roundtrip tests
+// ========================================================================
+
+#[test]
+fn roundtrip_envelope_check_quiescence() {
+    let envelope = RequestEnvelope {
+        id: 200,
+        request: Request::CheckQuiescence { config_path: PathBuf::from("/test.yaml") },
+        token: None,
+    };
+    let bytes = encode_envelope(&envelope).unwrap();
+    let decoded = decode_envelope(&bytes[4..]).unwrap();
+    assert_eq!(decoded.id, 200);
+    assert!(matches!(decoded.request, Request::CheckQuiescence { .. }));
+}
+
+#[test]
+fn roundtrip_envelope_check_readiness() {
+    let envelope = RequestEnvelope {
+        id: 201,
+        request: Request::CheckReadiness { config_path: PathBuf::from("/test.yaml") },
+        token: None,
+    };
+    let bytes = encode_envelope(&envelope).unwrap();
+    let decoded = decode_envelope(&bytes[4..]).unwrap();
+    assert_eq!(decoded.id, 201);
+    assert!(matches!(decoded.request, Request::CheckReadiness { .. }));
+}
+
+#[test]
+fn roundtrip_server_message_check_result() {
+    for val in [true, false] {
+        let msg = ServerMessage::Response {
+            id: 50,
+            response: Response::ok_with_data(ResponseData::CheckResult(val)),
+        };
+        let bytes = encode_server_message(&msg).unwrap();
+        let decoded = decode_server_message(&bytes[4..]).unwrap();
+        match decoded {
+            ServerMessage::Response { id, response: Response::Ok { data: Some(ResponseData::CheckResult(v)), .. } } => {
+                assert_eq!(id, 50);
+                assert_eq!(v, val);
+            }
+            other => panic!("Unexpected: {:?}", other),
+        }
     }
 }

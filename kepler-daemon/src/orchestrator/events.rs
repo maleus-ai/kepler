@@ -132,7 +132,7 @@ impl ServiceEventHandler {
             );
 
             // Stop the dependent service
-            if let Err(e) = stop_service(service_name, self.handle.clone(), None).await {
+            if let Err(e) = stop_service(service_name, self.handle.clone(), None, false).await {
                 warn!("Failed to stop {} for restart propagation: {}", service_name, e);
                 continue;
             }

@@ -1084,6 +1084,24 @@ impl ConfigActorHandle {
         reply_rx.await.unwrap_or(false)
     }
 
+    /// Check if all services are quiescent (settled). Respects startup_in_progress fence.
+    pub async fn check_quiescence(&self) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.tx.send(ConfigCommand::CheckQuiescence { reply: reply_tx }).await.is_err() {
+            warn!("Config actor closed, cannot send CheckQuiescence");
+        }
+        reply_rx.await.unwrap_or(false)
+    }
+
+    /// Check if all services are ready (reached target state). Respects startup_in_progress fence.
+    pub async fn check_readiness(&self) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.tx.send(ConfigCommand::CheckReadiness { reply: reply_tx }).await.is_err() {
+            warn!("Config actor closed, cannot send CheckReadiness");
+        }
+        reply_rx.await.unwrap_or(false)
+    }
+
     /// Set the startup fence. When true, Ready/Quiescent signals are suppressed.
     /// Set to true before marking services as Waiting, false after all are marked.
     pub async fn set_startup_in_progress(&self, in_progress: bool) {

@@ -703,6 +703,14 @@ impl ConfigActor {
                 let _ = reply.send(all_stopped);
             }
 
+            ConfigCommand::CheckQuiescence { reply } => {
+                let result = if self.startup_in_progress { false } else { self.compute_quiescence() };
+                let _ = reply.send(result);
+            }
+            ConfigCommand::CheckReadiness { reply } => {
+                let result = if self.startup_in_progress { false } else { self.compute_ready() };
+                let _ = reply.send(result);
+            }
             ConfigCommand::RecheckReadyQuiescent => {
                 // Reset flags and re-check — ensures new subscribers get the signal
                 // if the system is already in a ready/quiescent state.
@@ -1298,7 +1306,7 @@ impl ConfigActor {
             .get_mut(service_name)
             .ok_or_else(|| DaemonError::ServiceNotFound(service_name.to_string()))?;
 
-        if status == ServiceStatus::Waiting || status == ServiceStatus::Starting {
+        if status == ServiceStatus::Waiting || status == ServiceStatus::Starting || status == ServiceStatus::Restarting {
             // Clear stale reasons from previous cycles
             service_state.fail_reason = None;
             service_state.skip_reason = None;
@@ -1354,8 +1362,8 @@ impl ConfigActor {
             }
         }
 
-        // Reset Ready signal when a service enters Starting (no longer at target state)
-        if status == ServiceStatus::Starting {
+        // Reset Ready signal when a service enters Starting or Restarting (no longer at target state)
+        if status == ServiceStatus::Starting || status == ServiceStatus::Restarting {
             self.last_ready = false;
         }
 

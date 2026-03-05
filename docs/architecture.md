@@ -775,9 +775,11 @@ Instead of using `initgroups()` (which loads all supplementary groups including 
 
 See [Security Model](security-model.md#kepler-group-stripping) for user-facing documentation on when and why stripping occurs.
 
-### Subscribe Authorization
+### Subscribe / CheckQuiescence / CheckReadiness Authorization
 
-The internal `Subscribe` request does not map to a specific permission scope. Instead, it requires the caller to have at least one `service:*` scope (e.g., `service:start`, `service:logs`, or the `service` category). If the caller has no service-related scopes, the subscription is denied. When no ACL rules match at all, `Subscribe` is also denied.
+The internal `Subscribe`, `CheckQuiescence`, and `CheckReadiness` requests do not map to a specific permission scope. Instead, they require the caller to have at least one `service:*` scope (e.g., `service:start`, `service:logs`, or the `service` category). If the caller has no service-related scopes, the request is denied. When no ACL rules match at all, these requests are also denied.
+
+`CheckQuiescence` and `CheckReadiness` are read-only queries that ask the daemon whether all services have settled (quiescent) or reached their target state (ready). They respect the `startup_in_progress` fence — returning `false` while the fence is up — making the daemon the single source of truth for lifecycle state evaluation.
 
 ### Relevant Files
 

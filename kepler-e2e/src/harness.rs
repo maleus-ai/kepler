@@ -612,6 +612,19 @@ impl E2eHarness {
         self.run_cli_with_env_and_timeout(args, &[], timeout_duration).await
     }
 
+    /// Spawn the kepler CLI as a background process without waiting for it.
+    /// Returns the child process so the caller can check if it's still alive
+    /// or wait for it to finish.
+    pub fn spawn_cli_background(&self, args: &[&str]) -> E2eResult<std::process::Child> {
+        let child = std::process::Command::new(&self.kepler_bin)
+            .args(args)
+            .env("KEPLER_DAEMON_PATH", self.temp_dir.path())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        Ok(child)
+    }
+
     /// Start services from a config file (detached mode for tests)
     pub async fn start_services(&self, config_path: &Path) -> E2eResult<CommandOutput> {
         let config_str = config_path.to_str().ok_or_else(|| {

@@ -54,6 +54,7 @@ fn test_persisted_status_all_variants_roundtrip() {
         ServiceStatus::Starting,
         ServiceStatus::Running,
         ServiceStatus::Stopping,
+        ServiceStatus::Restarting,
         ServiceStatus::Failed,
         ServiceStatus::Healthy,
         ServiceStatus::Unhealthy,
@@ -266,6 +267,7 @@ fn test_is_active_non_terminal_states() {
     assert!(ServiceStatus::Starting.is_active());
     assert!(ServiceStatus::Running.is_active());
     assert!(ServiceStatus::Stopping.is_active());
+    assert!(ServiceStatus::Restarting.is_active());
     assert!(ServiceStatus::Healthy.is_active());
     assert!(ServiceStatus::Unhealthy.is_active());
 }

@@ -379,6 +379,22 @@ impl Client {
         self.send_request(Request::Inspect { config_path })
     }
 
+    /// Check if all services are quiescent (settled — nothing more will change)
+    pub fn check_quiescence(
+        &self,
+        config_path: PathBuf,
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::CheckQuiescence { config_path })
+    }
+
+    /// Check if all services are ready (reached target state)
+    pub fn check_readiness(
+        &self,
+        config_path: PathBuf,
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::CheckReadiness { config_path })
+    }
+
     /// Fire-and-forget subscribe: sends the Subscribe request eagerly and returns
     /// only the progress receiver. The response future is discarded — when the server
     /// returns "Subscription ended", the pending entry is cleaned up and progress_tx

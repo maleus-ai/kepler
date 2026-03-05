@@ -70,7 +70,7 @@ impl ResolvedAcl {
                     // Scope-less requests (Ping, etc.) are always allowed
                     return Ok(());
                 }
-                if matches!(request, Request::Subscribe { .. }) {
+                if matches!(request, Request::Subscribe { .. } | Request::CheckQuiescence { .. } | Request::CheckReadiness { .. }) {
                     warn!("ACL denied: no matching rules for UID {} (Subscribe)", uid);
                 } else {
                     warn!("ACL denied: no matching rules for UID {} (required scopes: {:?})", uid, required);
