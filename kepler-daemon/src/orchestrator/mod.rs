@@ -2256,7 +2256,7 @@ impl ServiceOrchestrator {
             kepler_env_denied,
             service_no_new_privileges: resolved.no_new_privileges,
             service_token,
-            socket_path: None,
+            socket_path: crate::Daemon::get_socket_path().ok(),
         };
 
         // Read prior hook outputs from disk and set output_max_size
