@@ -1,0 +1,28 @@
+name: Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [master]
+
+jobs:
+  test:
+    name: Run the Test Suite
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Run tests
+        run: |
+          docker compose run --rm test
+
+  test-cgroup:
+    name: Run the Test Suite with CGroup
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Run tests
+        run: |
+          docker compose run --rm test-cgroup

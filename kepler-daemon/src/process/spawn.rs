@@ -270,8 +270,7 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
         .stderr(Stdio::piped());
 
     // Create a new process group so we can kill all descendants
-    #[cfg(unix)]
-    cmd.process_group(0);
+    kepler_unix::process_tree::configure_process_tree(&mut cmd);
 
     // Clear environment if requested (secure default)
     if spec.clear_env {

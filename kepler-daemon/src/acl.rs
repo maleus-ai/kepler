@@ -91,10 +91,10 @@ impl ResolvedAcl {
     /// Returns `false` on supplementary group lookup failure (fail-closed).
     pub fn has_read_access(&self, uid: u32, gid: u32) -> bool {
         // Check UID rules directly
-        if let Some(user_scopes) = self.user_rules.get(&uid) {
-            if user_scopes.contains("config:status") {
-                return true;
-            }
+        if let Some(user_scopes) = self.user_rules.get(&uid)
+            && user_scopes.contains("config:status")
+        {
+            return true;
         }
         // Check all GID rules
         let all_gids = match get_all_gids(uid, gid) {
@@ -102,10 +102,10 @@ impl ResolvedAcl {
             Err(_) => return false,
         };
         for g in &all_gids {
-            if let Some(group_scopes) = self.group_rules.get(g) {
-                if group_scopes.contains("config:status") {
-                    return true;
-                }
+            if let Some(group_scopes) = self.group_rules.get(g)
+                && group_scopes.contains("config:status")
+            {
+                return true;
             }
         }
         false

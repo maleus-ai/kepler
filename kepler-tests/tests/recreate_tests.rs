@@ -54,6 +54,7 @@ async fn setup_orchestrator(
         kepler_daemon::hardening::HardeningLevel::None,
         None,
         token_store,
+        kepler_daemon::containment::ContainmentManager::detect(),
     ));
 
     (orchestrator, config_path, exit_tx, restart_tx)

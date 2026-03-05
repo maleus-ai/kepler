@@ -9,6 +9,7 @@ path = "src/lib.rs"
 [dependencies]
 kepler-daemon = { path = "../kepler-daemon" }
 kepler-protocol = { path = "../kepler-protocol" }
+kepler-unix = { path = "../kepler-unix" }
 tokio = { version = "1.35", features = ["full", "test-util"] }
 tempfile = "3.10"
 serde = { version = "1.0", features = ["derive"] }

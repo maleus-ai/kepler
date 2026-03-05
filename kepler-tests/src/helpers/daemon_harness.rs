@@ -1,20 +1,25 @@
 //! Test harness that manages daemon state without full binary
 
-use kepler_daemon::config::{KeplerConfig, LogRetention, RawServiceConfig, ServiceConfig, ServiceHooks, resolve_log_store};
+use kepler_daemon::config::{
+    KeplerConfig, LogRetention, RawServiceConfig, ServiceConfig, ServiceHooks, resolve_log_store,
+};
 use kepler_daemon::config_actor::{ConfigActor, ConfigActorHandle, TaskHandleType};
+use kepler_daemon::containment::ContainmentManager;
 use kepler_daemon::env::{insert_env_entries, load_env_file};
 use kepler_daemon::hardening::HardeningLevel;
 use kepler_daemon::health::spawn_health_checker;
-use kepler_daemon::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
-use kepler_daemon::logs::{BufferedLogWriter, LogReader, LogStream, LogWriterConfig, LogLine};
-use kepler_daemon::process::{spawn_service, stop_service, CommandSpec, ProcessExitEvent, SpawnServiceParams};
+use kepler_daemon::hooks::{ServiceHookParams, ServiceHookType, run_service_hook};
+use kepler_daemon::logs::{BufferedLogWriter, LogLine, LogReader, LogStream, LogWriterConfig};
+use kepler_daemon::process::{
+    CommandSpec, ProcessExitEvent, SpawnServiceParams, spawn_service, stop_service,
+};
 use kepler_daemon::state::ServiceStatus;
-use kepler_daemon::token_store::{SharedTokenStore, TokenStore, TokenContext, ServiceTokenGuard};
-use kepler_daemon::watcher::{spawn_file_watcher, FileChangeEvent};
+use kepler_daemon::token_store::{ServiceTokenGuard, SharedTokenStore, TokenContext, TokenStore};
+use kepler_daemon::watcher::{FileChangeEvent, spawn_file_watcher};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 
 /// Mutex to synchronize environment variable setting and ConfigActor creation.
 /// This ensures that parallel tests don't interfere with each other's env vars.
@@ -55,6 +60,8 @@ pub struct TestDaemonHarness {
     daemon_hardening: HardeningLevel,
     /// Token store for service permission tokens
     token_store: SharedTokenStore,
+    /// Cached containment manager (detected once, reused for all spawns)
+    containment: ContainmentManager,
 }
 
 impl TestDaemonHarness {
@@ -72,7 +79,10 @@ impl TestDaemonHarness {
 
     /// Create a new test harness assuming the caller already holds `ENV_LOCK`.
     /// Use when you need to set env vars atomically with harness creation.
-    pub async fn new_with_env_lock_held(config: KeplerConfig, config_dir: &Path) -> std::io::Result<Self> {
+    pub async fn new_with_env_lock_held(
+        config: KeplerConfig,
+        config_dir: &Path,
+    ) -> std::io::Result<Self> {
         let config_path = Self::write_config(&config, config_dir)?;
         let (handle, actor) = Self::create_actor(&config_path, config_dir)?;
         Self::finish(handle, actor, config_path, config_dir)
@@ -114,7 +124,12 @@ impl TestDaemonHarness {
 
         let (handle, actor) = {
             let _guard = ENV_LOCK.lock().unwrap();
-            Self::create_actor_with_owner_and_hardening(&config_path, config_dir, config_owner, config_hardening)?
+            Self::create_actor_with_owner_and_hardening(
+                &config_path,
+                config_dir,
+                config_owner,
+                config_hardening,
+            )?
         };
 
         Self::finish_with_hardening(handle, actor, config_path, config_dir, daemon_hardening)
@@ -122,13 +137,15 @@ impl TestDaemonHarness {
 
     fn write_config(config: &KeplerConfig, config_dir: &Path) -> std::io::Result<PathBuf> {
         let config_path = config_dir.join("kepler.yaml");
-        let config_yaml = serde_yaml::to_string(config)
-            .map_err(std::io::Error::other)?;
+        let config_yaml = serde_yaml::to_string(config).map_err(std::io::Error::other)?;
         std::fs::write(&config_path, &config_yaml)?;
         Ok(config_path)
     }
 
-    fn create_actor(config_path: &Path, config_dir: &Path) -> std::io::Result<(ConfigActorHandle, ConfigActor)> {
+    fn create_actor(
+        config_path: &Path,
+        config_dir: &Path,
+    ) -> std::io::Result<(ConfigActorHandle, ConfigActor)> {
         Self::create_actor_with_owner(config_path, config_dir, None)
     }
 
@@ -151,15 +168,32 @@ impl TestDaemonHarness {
         unsafe {
             std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir);
         }
-        ConfigActor::create(config_path.to_path_buf(), Some(std::env::vars().collect()), config_owner, config_hardening, None)
-            .map_err(|e| std::io::Error::other(e.to_string()))
+        ConfigActor::create(
+            config_path.to_path_buf(),
+            Some(std::env::vars().collect()),
+            config_owner,
+            config_hardening,
+            None,
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
-    fn finish(handle: ConfigActorHandle, actor: ConfigActor, config_path: PathBuf, config_dir: &Path) -> std::io::Result<Self> {
+    fn finish(
+        handle: ConfigActorHandle,
+        actor: ConfigActor,
+        config_path: PathBuf,
+        config_dir: &Path,
+    ) -> std::io::Result<Self> {
         Self::finish_with_hardening(handle, actor, config_path, config_dir, HardeningLevel::None)
     }
 
-    fn finish_with_hardening(handle: ConfigActorHandle, actor: ConfigActor, config_path: PathBuf, config_dir: &Path, daemon_hardening: HardeningLevel) -> std::io::Result<Self> {
+    fn finish_with_hardening(
+        handle: ConfigActorHandle,
+        actor: ConfigActor,
+        config_path: PathBuf,
+        config_dir: &Path,
+        daemon_hardening: HardeningLevel,
+    ) -> std::io::Result<Self> {
         tokio::spawn(actor.run());
 
         let (exit_tx, exit_rx) = mpsc::channel(32);
@@ -176,6 +210,7 @@ impl TestDaemonHarness {
             tracked_pids: Arc::new(Mutex::new(Vec::new())),
             daemon_hardening,
             token_store: Arc::new(TokenStore::new()),
+            containment: ContainmentManager::detect(),
         })
     }
 
@@ -218,7 +253,10 @@ impl TestDaemonHarness {
     /// Compute the effective hardening level for this harness.
     /// Result = max(daemon_hardening, config_hardening).
     pub fn effective_hardening(&self) -> HardeningLevel {
-        std::cmp::max(self.daemon_hardening, self.handle.hardening().unwrap_or_default())
+        std::cmp::max(
+            self.daemon_hardening,
+            self.handle.hardening().unwrap_or_default(),
+        )
     }
 
     /// Get the config actor handle
@@ -232,17 +270,20 @@ impl TestDaemonHarness {
     }
 
     /// Start a specific service
-    pub async fn start_service(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start_service(
+        &self,
+        service_name: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Get service context (single round-trip)
-        let ctx = self.handle
+        let ctx = self
+            .handle
             .get_service_context(service_name)
             .await
             .ok_or("Service not found")?;
 
         // Build evaluation context and resolve service (evaluate ${{ }}$ + !lua + deserialize)
         let sys_env = self.handle.get_kepler_env().await;
-        let config = self.handle.get_config().await
-            .ok_or("Config not found")?;
+        let config = self.handle.get_config().await.ok_or("Config not found")?;
 
         // Load env_file vars (try state dir copy first, then original path)
         let env_file_vars = self.load_service_env_file(service_name, &ctx.service_config);
@@ -265,17 +306,20 @@ impl TestDaemonHarness {
         };
 
         // Create Lua evaluator with config's lua: block loaded
-        let lua_evaluator = config.create_lua_evaluator()
+        let lua_evaluator = config
+            .create_lua_evaluator()
             .map_err(|e| format!("Failed to create Lua evaluator: {}", e))?;
 
         // Resolve service: evaluate ${{ }}$ + !lua + deserialize to ServiceConfig
-        let resolved = config.resolve_service(
-            service_name,
-            &mut eval_ctx,
-            &lua_evaluator,
-            &self.config_path,
-            None,
-        ).map_err(|e| format!("Failed to resolve service: {}", e))?;
+        let resolved = config
+            .resolve_service(
+                service_name,
+                &mut eval_ctx,
+                &lua_evaluator,
+                &self.config_path,
+                None,
+            )
+            .map_err(|e| format!("Failed to resolve service: {}", e))?;
 
         // Build computed_env: sys_env + env_file_vars + expanded service environment
         let mut computed_env = sys_env.clone();
@@ -298,7 +342,8 @@ impl TestDaemonHarness {
                 resolved.user.as_deref(),
                 self.handle.owner_uid(),
                 &context,
-            ).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            )
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         }
 
         // Strip KEPLER_TOKEN and KEPLER_SOCKET_PATH from computed_env (stale caller values)
@@ -307,31 +352,33 @@ impl TestDaemonHarness {
 
         // Store resolved config + computed state in the actor
         let svc_env_file = eval_ctx.service.as_ref().unwrap().env_file.clone();
-        self.handle.store_resolved_config(
-            service_name,
-            resolved.clone(),
-            computed_env.clone(),
-            working_dir.clone(),
-            svc_env_file,
-        ).await;
+        self.handle
+            .store_resolved_config(
+                service_name,
+                resolved.clone(),
+                computed_env.clone(),
+                working_dir.clone(),
+                svc_env_file,
+            )
+            .await;
 
         // Update status to starting
-        let _ = self.handle
+        let _ = self
+            .handle
             .set_service_status(service_name, ServiceStatus::Starting)
             .await;
 
         // Track whether this is the first start for this service
-        let should_mark_initialized = !self.handle
-            .is_service_initialized(service_name)
-            .await;
+        let should_mark_initialized = !self.handle.is_service_initialized(service_name).await;
 
         // Create token guard before pre_start hooks so hooks can use the token.
         let service_token = if let Some(permissions) = &resolved.permissions {
             let allow_set: HashSet<String> = permissions.allow.iter().cloned().collect();
-            let expanded = kepler_daemon::permissions::expand_scopes(&allow_set)
-                .map_err(|e| -> Box<dyn std::error::Error> {
+            let expanded = kepler_daemon::permissions::expand_scopes(&allow_set).map_err(
+                |e| -> Box<dyn std::error::Error> {
                     format!("invalid permission scopes: {}", e).into()
-                })?;
+                },
+            )?;
             let token_ctx = TokenContext {
                 allow: expanded,
                 max_hardening: HardeningLevel::None,
@@ -343,7 +390,8 @@ impl TestDaemonHarness {
                 .map_err(|e| -> Box<dyn std::error::Error> {
                     format!("failed to generate auth token: {}", e).into()
                 })?;
-            let hex = guard.token_hex()
+            let hex = guard
+                .token_hex()
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             self.handle.store_token_guard(service_name, guard).await;
             Some(hex)
@@ -352,8 +400,13 @@ impl TestDaemonHarness {
         };
 
         let (hooks, _lua_code) = resolve_hooks_for_execution(
-            &self.handle, service_name, ServiceHookType::PreStart, &resolved, &computed_env,
-        ).await;
+            &self.handle,
+            service_name,
+            ServiceHookType::PreStart,
+            &resolved,
+            &computed_env,
+        )
+        .await;
         let hook_params = ServiceHookParams {
             working_dir: &working_dir,
             env: &computed_env,
@@ -383,9 +436,7 @@ impl TestDaemonHarness {
 
         if should_mark_initialized {
             // Mark as initialized after first start
-            let _ = self.handle
-                .mark_service_initialized(service_name)
-                .await;
+            let _ = self.handle.mark_service_initialized(service_name).await;
         }
 
         // Run on_start hook
@@ -400,7 +451,8 @@ impl TestDaemonHarness {
         .await?;
 
         // Spawn the process
-        let (store_stdout, store_stderr) = resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
+        let (store_stdout, store_stderr) =
+            resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
         let mut spec = CommandSpec::with_all_options(
             resolved.command.clone(),
             working_dir.clone(),
@@ -416,7 +468,8 @@ impl TestDaemonHarness {
         spec.environment.remove("KEPLER_TOKEN");
         spec.environment.remove("KEPLER_SOCKET_PATH");
         if let Some(ref token_hex) = service_token {
-            spec.environment.insert("KEPLER_TOKEN".to_string(), token_hex.clone());
+            spec.environment
+                .insert("KEPLER_TOKEN".to_string(), token_hex.clone());
             // Derive socket path from this harness's own state dir, not from the
             // process-wide env var which may point to another parallel test's dir.
             let socket_path = self.config_dir.join(".kepler").join("kepler.sock");
@@ -443,6 +496,8 @@ impl TestDaemonHarness {
             store_stdout,
             store_stderr,
             output_capture: None,
+            containment: self.containment.clone(),
+            config_hash: self.handle.config_hash().to_string(),
         };
         let process_handle = spawn_service(spawn_params).await?;
 
@@ -459,7 +514,8 @@ impl TestDaemonHarness {
         }
 
         // Update status to Running (PID is already set by spawn_service)
-        let _ = self.handle
+        let _ = self
+            .handle
             .set_service_status(service_name, ServiceStatus::Running)
             .await;
 
@@ -481,7 +537,8 @@ impl TestDaemonHarness {
         let _ = tokio::time::timeout(
             std::time::Duration::from_millis(50),
             flush_notify.notified(),
-        ).await;
+        )
+        .await;
 
         // Start file watcher if configured
         if !resolved.restart.watch_patterns().is_empty() {
@@ -501,11 +558,18 @@ impl TestDaemonHarness {
     }
 
     /// Load env_file vars for a service, checking state dir copy first (for persistence).
-    fn load_service_env_file(&self, service_name: &str, raw_config: &RawServiceConfig) -> HashMap<String, String> {
-        let env_file_path = raw_config.env_file.as_static().and_then(|v| v.as_ref()).cloned();
+    fn load_service_env_file(
+        &self,
+        service_name: &str,
+        raw_config: &RawServiceConfig,
+    ) -> HashMap<String, String> {
+        let env_file_path = raw_config
+            .env_file
+            .as_static()
+            .and_then(|v| v.as_ref())
+            .cloned();
 
         if let Some(env_file_path) = env_file_path {
-
             // Check state dir copy first (persisted env_file)
             let state_copy = {
                 let config_hash = self.handle.config_hash().to_string();
@@ -513,9 +577,16 @@ impl TestDaemonHarness {
                 let dest_name = format!(
                     "{}_{}",
                     service_name,
-                    env_file_path.file_name().unwrap_or_default().to_string_lossy()
+                    env_file_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
                 );
-                state_dir.join("configs").join(&config_hash).join("env_files").join(&dest_name)
+                state_dir
+                    .join("configs")
+                    .join(&config_hash)
+                    .join("env_files")
+                    .join(&dest_name)
             };
 
             let source = if state_copy.exists() {
@@ -527,17 +598,22 @@ impl TestDaemonHarness {
             };
 
             if source.exists()
-                && let Ok(file_env) = load_env_file(&source) {
-                    return file_env;
-                }
+                && let Ok(file_env) = load_env_file(&source)
+            {
+                return file_env;
+            }
         }
 
         HashMap::new()
     }
 
     /// Start the health checker for a service
-    pub async fn start_health_checker(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let ctx = self.handle
+    pub async fn start_health_checker(
+        &self,
+        service_name: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = self
+            .handle
             .get_service_context(service_name)
             .await
             .ok_or("Service not found")?;
@@ -555,11 +631,7 @@ impl TestDaemonHarness {
 
             // Store the health check handle
             self.handle
-                .store_task_handle(
-                    service_name,
-                    TaskHandleType::HealthCheck,
-                    task_handle,
-                )
+                .store_task_handle(service_name, TaskHandleType::HealthCheck, task_handle)
                 .await;
         }
 
@@ -567,9 +639,14 @@ impl TestDaemonHarness {
     }
 
     /// Stop a specific service with a specific signal
-    pub async fn stop_service_with_signal(&self, service_name: &str, signal: i32) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn stop_service_with_signal(
+        &self,
+        service_name: &str,
+        signal: i32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Get service context for hooks
-        let ctx = self.handle
+        let ctx = self
+            .handle
             .get_service_context(service_name)
             .await
             .ok_or("Service not found")?;
@@ -581,14 +658,22 @@ impl TestDaemonHarness {
 
         // Run on_stop hook
         let (hooks, _lua_code) = resolve_hooks_for_execution(
-            &self.handle, service_name, ServiceHookType::PreStop, resolved, &ctx.env,
-        ).await;
+            &self.handle,
+            service_name,
+            ServiceHookType::PreStop,
+            resolved,
+            &ctx.env,
+        )
+        .await;
         let working_dir = resolved
             .working_dir
             .as_ref()
             .map(|wd| self.config_dir.join(wd))
             .unwrap_or_else(|| self.config_dir.clone());
-        let lua_evaluator = self.handle.get_config().await
+        let lua_evaluator = self
+            .handle
+            .get_config()
+            .await
             .and_then(|c| c.create_lua_evaluator().ok());
         let kepler_env = self.handle.get_kepler_env().await;
         let hook_params = ServiceHookParams {
@@ -631,6 +716,11 @@ impl TestDaemonHarness {
         // Stop the service with the specified signal
         stop_service(service_name, self.handle.clone(), Some(signal), false).await?;
 
+        // Clean up cgroup directory after stop
+        self.containment
+            .cleanup_service(self.handle.config_hash(), service_name)
+            .await;
+
         // Run post_stop hook (token is still valid)
         run_service_hook(
             &hooks,
@@ -653,7 +743,8 @@ impl TestDaemonHarness {
     /// Stop a specific service
     pub async fn stop_service(&self, service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Get service context for hooks
-        let ctx = self.handle
+        let ctx = self
+            .handle
             .get_service_context(service_name)
             .await
             .ok_or("Service not found")?;
@@ -665,14 +756,22 @@ impl TestDaemonHarness {
 
         // Run on_stop hook
         let (hooks, _lua_code) = resolve_hooks_for_execution(
-            &self.handle, service_name, ServiceHookType::PreStop, resolved, &ctx.env,
-        ).await;
+            &self.handle,
+            service_name,
+            ServiceHookType::PreStop,
+            resolved,
+            &ctx.env,
+        )
+        .await;
         let working_dir = resolved
             .working_dir
             .as_ref()
             .map(|wd| self.config_dir.join(wd))
             .unwrap_or_else(|| self.config_dir.clone());
-        let lua_evaluator = self.handle.get_config().await
+        let lua_evaluator = self
+            .handle
+            .get_config()
+            .await
             .and_then(|c| c.create_lua_evaluator().ok());
         let kepler_env = self.handle.get_kepler_env().await;
         let hook_params = ServiceHookParams {
@@ -714,6 +813,11 @@ impl TestDaemonHarness {
 
         // Stop the service
         stop_service(service_name, self.handle.clone(), None, false).await?;
+
+        // Clean up cgroup directory after stop
+        self.containment
+            .cleanup_service(self.handle.config_hash(), service_name)
+            .await;
 
         // Run post_stop hook (token is still valid)
         run_service_hook(
@@ -769,7 +873,6 @@ impl TestDaemonHarness {
         self.handle.get_log_config().await.map(TestLogHelper::new)
     }
 
-
     /// Spawn a file change handler that restarts services on file changes
     /// Must be called after taking restart_rx with take_restart_rx()
     pub fn spawn_file_change_handler(&self, mut restart_rx: mpsc::Receiver<FileChangeEvent>) {
@@ -777,6 +880,7 @@ impl TestDaemonHarness {
         let exit_tx = self.exit_tx.clone();
         let tracked_pids = self.tracked_pids.clone();
         let effective_hardening = self.effective_hardening();
+        let containment = self.containment.clone();
 
         tokio::spawn(async move {
             while let Some(event) = restart_rx.recv().await {
@@ -794,17 +898,27 @@ impl TestDaemonHarness {
 
                 // Run on_restart hook
                 let (hooks, _lua_code) = resolve_hooks_for_execution(
-                    &handle, &event.service_name, ServiceHookType::PreRestart, resolved, &ctx.env,
-                ).await;
+                    &handle,
+                    &event.service_name,
+                    ServiceHookType::PreRestart,
+                    resolved,
+                    &ctx.env,
+                )
+                .await;
                 let working_dir = resolved
                     .working_dir
                     .as_ref()
                     .map(|wd| ctx.config_dir.join(wd))
                     .unwrap_or_else(|| ctx.config_dir.clone());
-                let lua_evaluator = handle.get_config().await
+                let lua_evaluator = handle
+                    .get_config()
+                    .await
                     .and_then(|c| c.create_lua_evaluator().ok());
                 let config_path = handle.config_path().to_path_buf();
-                let config_dir = config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+                let config_dir = config_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf();
                 let kepler_env = handle.get_kepler_env().await;
                 let hook_params = ServiceHookParams {
                     working_dir: &working_dir,
@@ -829,8 +943,8 @@ impl TestDaemonHarness {
                     kepler_gid: None,
                     kepler_env_denied: false,
                     service_no_new_privileges: None,
-            service_token: None,
-            socket_path: None,
+                    service_token: None,
+                    socket_path: None,
                 };
 
                 let _ = run_service_hook(
@@ -856,16 +970,17 @@ impl TestDaemonHarness {
                     let should_clear = retention == LogRetention::Clear;
 
                     if should_clear {
-                        let reader = LogReader::new(
-                            ctx.log_config.logs_dir.clone(),
-                        );
+                        let reader = LogReader::new(ctx.log_config.logs_dir.clone());
                         reader.clear_service(&event.service_name);
                         reader.clear_service_prefix(&format!("{}.", event.service_name));
                     }
                 }
 
                 // Stop the service
-                if stop_service(&event.service_name, handle.clone(), None, false).await.is_err() {
+                if stop_service(&event.service_name, handle.clone(), None, false)
+                    .await
+                    .is_err()
+                {
                     continue;
                 }
 
@@ -873,7 +988,8 @@ impl TestDaemonHarness {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                 // Restart the service
-                let (store_stdout, store_stderr) = resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
+                let (store_stdout, store_stderr) =
+                    resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
                 let spec = CommandSpec::with_all_options(
                     resolved.command.clone(),
                     working_dir,
@@ -893,6 +1009,8 @@ impl TestDaemonHarness {
                     store_stdout,
                     store_stderr,
                     output_capture: None,
+                    containment: containment.clone(),
+                    config_hash: handle.config_hash().to_string(),
                 };
                 if let Ok(process_handle) = spawn_service(spawn_params).await {
                     handle
@@ -910,9 +1028,7 @@ impl TestDaemonHarness {
                         .set_service_status(&event.service_name, ServiceStatus::Running)
                         .await;
                     // Note: PID is already set by spawn_service
-                    let _ = handle
-                        .increment_restart_count(&event.service_name)
-                        .await;
+                    let _ = handle.increment_restart_count(&event.service_name).await;
                 }
             }
         });
@@ -925,6 +1041,7 @@ impl TestDaemonHarness {
         let exit_tx = self.exit_tx.clone();
         let tracked_pids = self.tracked_pids.clone();
         let effective_hardening = self.effective_hardening();
+        let containment = self.containment.clone();
 
         tokio::spawn(async move {
             while let Some(event) = exit_rx.recv().await {
@@ -935,7 +1052,9 @@ impl TestDaemonHarness {
                 };
 
                 // Record process exit in state
-                let _ = handle.record_process_exit(&event.service_name, event.exit_code, event.signal).await;
+                let _ = handle
+                    .record_process_exit(&event.service_name, event.exit_code, event.signal)
+                    .await;
 
                 // Use resolved config (available after service has started)
                 let resolved = match ctx.resolved_config.as_ref() {
@@ -945,17 +1064,27 @@ impl TestDaemonHarness {
 
                 // Run on_exit hook
                 let (hooks, _lua_code) = resolve_hooks_for_execution(
-                    &handle, &event.service_name, ServiceHookType::PostExit, resolved, &ctx.env,
-                ).await;
+                    &handle,
+                    &event.service_name,
+                    ServiceHookType::PostExit,
+                    resolved,
+                    &ctx.env,
+                )
+                .await;
                 let working_dir = resolved
                     .working_dir
                     .as_ref()
                     .map(|wd| ctx.config_dir.join(wd))
                     .unwrap_or_else(|| ctx.config_dir.clone());
-                let lua_evaluator = handle.get_config().await
+                let lua_evaluator = handle
+                    .get_config()
+                    .await
                     .and_then(|c| c.create_lua_evaluator().ok());
                 let config_path = handle.config_path().to_path_buf();
-                let config_dir = config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+                let config_dir = config_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf();
                 let kepler_env = handle.get_kepler_env().await;
                 let hook_params = ServiceHookParams {
                     working_dir: &working_dir,
@@ -980,8 +1109,8 @@ impl TestDaemonHarness {
                     kepler_gid: None,
                     kepler_env_denied: false,
                     service_no_new_privileges: None,
-            service_token: None,
-            socket_path: None,
+                    service_token: None,
+                    socket_path: None,
                 };
 
                 let _ = run_service_hook(
@@ -1007,16 +1136,20 @@ impl TestDaemonHarness {
                     let should_clear = retention == LogRetention::Clear;
 
                     if should_clear {
-                        let reader = LogReader::new(
-                            ctx.log_config.logs_dir.clone(),
-                        );
+                        let reader = LogReader::new(ctx.log_config.logs_dir.clone());
                         reader.clear_service(&event.service_name);
                         reader.clear_service_prefix(&format!("{}.", event.service_name));
                     }
                 }
 
                 // Determine if we should restart
-                let should_restart = ctx.service_config.restart.as_static().cloned().unwrap_or_default().should_restart_on_exit(event.exit_code);
+                let should_restart = ctx
+                    .service_config
+                    .restart
+                    .as_static()
+                    .cloned()
+                    .unwrap_or_default()
+                    .should_restart_on_exit(event.exit_code);
 
                 if should_restart {
                     // Small delay before restart
@@ -1024,8 +1157,13 @@ impl TestDaemonHarness {
 
                     // Run on_restart hook
                     let (restart_hooks, _restart_lua_code) = resolve_hooks_for_execution(
-                        &handle, &event.service_name, ServiceHookType::PreRestart, resolved, &ctx.env,
-                    ).await;
+                        &handle,
+                        &event.service_name,
+                        ServiceHookType::PreRestart,
+                        resolved,
+                        &ctx.env,
+                    )
+                    .await;
 
                     let _ = run_service_hook(
                         &restart_hooks,
@@ -1050,16 +1188,15 @@ impl TestDaemonHarness {
                         let should_clear = retention == LogRetention::Clear;
 
                         if should_clear {
-                            let reader = LogReader::new(
-                                ctx.log_config.logs_dir.clone(),
-                            );
+                            let reader = LogReader::new(ctx.log_config.logs_dir.clone());
                             reader.clear_service(&event.service_name);
                             reader.clear_service_prefix(&format!("{}.", event.service_name));
                         }
                     }
 
                     // Restart the service
-                    let (store_stdout, store_stderr) = resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
+                    let (store_stdout, store_stderr) =
+                        resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
                     let spec = CommandSpec::with_all_options(
                         resolved.command.clone(),
                         working_dir.clone(),
@@ -1079,7 +1216,9 @@ impl TestDaemonHarness {
                         store_stdout,
                         store_stderr,
                         output_capture: None,
-                        };
+                        containment: containment.clone(),
+                        config_hash: handle.config_hash().to_string(),
+                    };
                     if let Ok(process_handle) = spawn_service(spawn_params).await {
                         handle
                             .store_process_handle(&event.service_name, process_handle)
@@ -1095,9 +1234,7 @@ impl TestDaemonHarness {
                         let _ = handle
                             .set_service_status(&event.service_name, ServiceStatus::Running)
                             .await;
-                        let _ = handle
-                            .increment_restart_count(&event.service_name)
-                            .await;
+                        let _ = handle.increment_restart_count(&event.service_name).await;
                     }
                 } else {
                     // Mark as exited (clean exit) or failed
@@ -1111,21 +1248,14 @@ impl TestDaemonHarness {
             }
         });
     }
-
 }
 
 impl Drop for TestDaemonHarness {
     fn drop(&mut self) {
         // Kill all tracked process groups to prevent orphans on test panic
-        #[cfg(unix)]
-        {
-            use nix::sys::signal::{killpg, Signal};
-            use nix::unistd::Pid;
-
-            let pids = self.tracked_pids.lock().unwrap();
-            for &pid in pids.iter() {
-                let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
-            }
+        let pids = self.tracked_pids.lock().unwrap();
+        for &pid in pids.iter() {
+            let _ = kepler_unix::process_tree::force_kill_process_tree(pid);
         }
     }
 }
@@ -1150,39 +1280,32 @@ impl TestLogHelper {
         let mut writer = BufferedLogWriter::from_config(&self.config, service, stream);
         writer.write(&line);
         // writer.flush() is called by drop
-        self.sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Get the last N log entries, optionally filtered by service
     pub fn tail(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
-        let reader = LogReader::new(
-            self.config.logs_dir.clone(),
-        );
+        let reader = LogReader::new(self.config.logs_dir.clone());
         reader.tail(count, service, false)
     }
 
     /// Clear all logs
     pub fn clear(&self) {
-        let reader = LogReader::new(
-            self.config.logs_dir.clone(),
-        );
+        let reader = LogReader::new(self.config.logs_dir.clone());
         reader.clear();
         self.sequence.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Clear logs for a specific service
     pub fn clear_service(&self, service: &str) {
-        let reader = LogReader::new(
-            self.config.logs_dir.clone(),
-        );
+        let reader = LogReader::new(self.config.logs_dir.clone());
         reader.clear_service(service);
     }
 
     /// Clear logs for services matching a prefix
     pub fn clear_service_prefix(&self, prefix: &str) {
-        let reader = LogReader::new(
-            self.config.logs_dir.clone(),
-        );
+        let reader = LogReader::new(self.config.logs_dir.clone());
         reader.clear_service_prefix(prefix);
     }
 
@@ -1193,9 +1316,7 @@ impl TestLogHelper {
 
     /// Get entries since a sequence number
     pub fn entries_since(&self, since: u64, service: Option<&str>) -> Vec<LogLine> {
-        let reader = LogReader::new(
-            self.config.logs_dir.clone(),
-        );
+        let reader = LogReader::new(self.config.logs_dir.clone());
         // Get all entries and filter by index
         // Note: this is less efficient than the old approach but maintains API compatibility
         let all = reader.tail(10000, service, false);

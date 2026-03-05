@@ -57,12 +57,7 @@ pub fn intern_scope(scope: &str) -> Option<&'static str> {
             return Some(s);
         }
     }
-    for s in COMMAND_SCOPES {
-        if *s == scope {
-            return Some(s);
-        }
-    }
-    None
+    COMMAND_SCOPES.iter().find(|&s| *s == scope).copied()
 }
 
 /// Validate scope strings.
@@ -130,8 +125,7 @@ fn expand_scopes_unchecked<S: AsRef<str>>(scopes: &HashSet<S>) -> HashSet<&'stat
             return expanded;
         }
 
-        if scope.ends_with(":*") {
-            let prefix = &scope[..scope.len() - 2];
+        if let Some(prefix) = scope.strip_suffix(":*") {
             // Expand wildcard: add prefix + all descendants
             if let Some(interned) = intern_scope(prefix) {
                 expanded.insert(interned);
