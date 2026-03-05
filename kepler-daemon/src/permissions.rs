@@ -233,8 +233,10 @@ pub fn required_scopes(request: &Request) -> Vec<&'static str> {
         // Always allowed
         Request::Ping => vec![],
         Request::ListConfigs => vec![],
-        // Subscribe: allowed if caller has any service: scope
-        Request::Subscribe { .. } => vec![],
+        // Subscribe / Check*: allowed if caller has any service: scope
+        Request::Subscribe { .. }
+        | Request::CheckQuiescence { .. }
+        | Request::CheckReadiness { .. } => vec![],
     }
 }
 
@@ -245,10 +247,10 @@ pub fn check_subscribe_access(granted: &HashSet<&'static str>) -> bool {
 
 /// Check if all required scopes for a request are satisfied by the granted (expanded) set.
 pub fn check_scopes(granted: &HashSet<&'static str>, request: &Request) -> Result<(), String> {
-    // Subscribe has special logic
-    if matches!(request, Request::Subscribe { .. }) {
+    // Subscribe / Check* have special logic: require any service: scope
+    if matches!(request, Request::Subscribe { .. } | Request::CheckQuiescence { .. } | Request::CheckReadiness { .. }) {
         if !check_subscribe_access(granted) {
-            return Err("permission denied: Subscribe requires at least one 'service:' scope".to_string());
+            return Err("permission denied: requires at least one 'service:' scope".to_string());
         }
         return Ok(());
     }

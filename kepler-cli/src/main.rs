@@ -432,6 +432,9 @@ async fn run_with_progress(
                                 pb.set_style(style_done.clone());
                                 pb.finish_with_message("Healthy");
                             }
+                            ServicePhase::Restarting => {
+                                pb.set_message("Restarting...");
+                            }
                             ServicePhase::Stopping => {
                                 pb.set_message("Stopping...");
                             }
@@ -629,6 +632,9 @@ async fn wait_until_ready_with_start(
                                 pb.set_style(style_done.clone());
                                 pb.finish_with_message("Healthy");
                                 finished.insert(event.service.clone(), true);
+                            }
+                            ServicePhase::Restarting => {
+                                pb.set_message("Restarting...");
                             }
                             ServicePhase::Stopping => {
                                 pb.set_message("Stopping...");
@@ -1115,6 +1121,7 @@ fn format_status(info: &ServiceInfo) -> String {
             }
         }
         "starting" => "Starting".to_string(),
+        "restarting" => "Restarting".to_string(),
         "stopping" => "Stopping".to_string(),
         "stopped" => {
             let ago = info.stopped_at.map(format_duration_since).unwrap_or_default();
@@ -1400,6 +1407,10 @@ async fn stream_cursor_logs(
                     // 1. Startup race: config not loaded YET → retry
                     // 2. Config was unloaded (stop --clean) → quiescence future fires
                     if params.mode == StreamMode::UntilQuiescent && message == "Config not loaded" {
+                        if quiescent_received {
+                            // Config unloaded and quiescence already signaled — nothing left to drain.
+                            break;
+                        }
                         tokio::select! {
                             biased;
                             _ = &mut shutdown => {
@@ -1567,6 +1578,7 @@ async fn quiescence_monitor(
                 if matches!(pe.phase,
                     ServicePhase::Waiting
                     | ServicePhase::Starting
+                    | ServicePhase::Restarting
                     | ServicePhase::Stopping
                     | ServicePhase::Cleaning
                     | ServicePhase::Pending { .. }
@@ -1624,8 +1636,6 @@ async fn follow_logs_until_quiescent(
     // (all services already terminal at snapshot time, daemon bugs, empty config)
     let quiescence_future = {
         let config_path = config_path.to_path_buf();
-        let seen_non_terminal = Arc::clone(&seen_non_terminal);
-        let start_acknowledged = Arc::clone(&start_acknowledged);
         async move {
             loop {
                 tokio::select! {
@@ -1647,24 +1657,14 @@ async fn follow_logs_until_quiescent(
                         }
                     }
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                        // Fallback: poll status to handle missed events / daemon bugs.
-                        // Only act if we know services have started (via start_acknowledged
-                        // or seen_non_terminal); otherwise we'd prematurely exit before
-                        // the Start request is processed.
-                        if !start_acknowledged.load(Ordering::Acquire)
-                            && !seen_non_terminal.load(Ordering::Relaxed)
+                        // Fallback: ask the daemon directly if all services are settled.
+                        // The daemon's startup_in_progress fence ensures this returns false
+                        // before services have begun starting — no CLI-side guards needed.
+                        if let Ok((_, resp_future)) = client.check_quiescence(config_path.clone())
+                            && let Ok(Response::Ok { data: Some(ResponseData::CheckResult(true)), .. }) = resp_future.await
                         {
-                            continue;
+                            return (has_unhandled_failure, abort_triggered);
                         }
-                        if let Ok((_, resp_future)) = client.status(Some(config_path.clone()))
-                            && let Ok(Response::Ok { data: Some(ResponseData::ServiceStatus(services)), .. }) = resp_future.await {
-                                let all_terminal = services.values().all(|info| {
-                                    matches!(info.status.as_str(), "stopped" | "exited" | "killed" | "failed" | "skipped")
-                                });
-                                if all_terminal {
-                                    return (has_unhandled_failure, abort_triggered);
-                                }
-                            }
                     }
                 }
             }

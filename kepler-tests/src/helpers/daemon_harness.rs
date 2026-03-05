@@ -629,7 +629,7 @@ impl TestDaemonHarness {
         .await?;
 
         // Stop the service with the specified signal
-        stop_service(service_name, self.handle.clone(), Some(signal)).await?;
+        stop_service(service_name, self.handle.clone(), Some(signal), false).await?;
 
         // Run post_stop hook (token is still valid)
         run_service_hook(
@@ -713,7 +713,7 @@ impl TestDaemonHarness {
         .await?;
 
         // Stop the service
-        stop_service(service_name, self.handle.clone(), None).await?;
+        stop_service(service_name, self.handle.clone(), None, false).await?;
 
         // Run post_stop hook (token is still valid)
         run_service_hook(
@@ -865,7 +865,7 @@ impl TestDaemonHarness {
                 }
 
                 // Stop the service
-                if stop_service(&event.service_name, handle.clone(), None).await.is_err() {
+                if stop_service(&event.service_name, handle.clone(), None, false).await.is_err() {
                     continue;
                 }
 

@@ -348,7 +348,8 @@ async fn test_stop_already_stopped_is_noop() {
 // Restart Tests
 // ============================================================================
 
-/// restart_services transitions Stopping → Stopped → Starting → Running
+/// restart_services transitions Restarting → Running
+/// (Stopping/Stopped are skipped because skip_status_update=true preserves Restarting)
 #[tokio::test]
 async fn test_restart_full_lifecycle() {
     let temp_dir = TempDir::new().unwrap();
@@ -384,32 +385,28 @@ async fn test_restart_full_lifecycle() {
         .await
         .unwrap();
 
-    // Collect status transitions. The Starting status may be too brief to catch,
-    // so we expect at minimum: Stopping → Stopped → Running (Starting is optional).
+    // Collect status transitions. With the Restarting status, the service goes
+    // Restarting → Running (Stopping/Stopped are skipped to prevent premature CLI exit).
     let events = collect_status_changes(&mut rx, 4, Duration::from_secs(5)).await;
     let web_events: Vec<_> = events.iter().filter(|(name, _)| name == "web").collect();
 
     assert!(
-        web_events.len() >= 3,
-        "Expected at least 3 events for web during restart, got {}: {:?}",
+        web_events.len() >= 2,
+        "Expected at least 2 events for web during restart, got {}: {:?}",
         web_events.len(),
         web_events
     );
 
-    // Verify ordering: must see Stopping, then Stopped, then Running
-    let has_stopping = web_events.iter().any(|(_, s)| *s == ServiceStatus::Stopping);
-    let has_stopped = web_events.iter().any(|(_, s)| *s == ServiceStatus::Stopped);
+    // Verify ordering: must see Restarting, then Running
+    let has_restarting = web_events.iter().any(|(_, s)| *s == ServiceStatus::Restarting);
     let has_running = web_events.iter().any(|(_, s)| *s == ServiceStatus::Running);
-    assert!(has_stopping, "Expected Stopping event");
-    assert!(has_stopped, "Expected Stopped event");
+    assert!(has_restarting, "Expected Restarting event");
     assert!(has_running, "Expected Running event");
 
-    // Verify order: Stopping before Stopped before Running
-    let stopping_idx = web_events.iter().position(|(_, s)| *s == ServiceStatus::Stopping).unwrap();
-    let stopped_idx = web_events.iter().position(|(_, s)| *s == ServiceStatus::Stopped).unwrap();
+    // Verify order: Restarting before Running
+    let restarting_idx = web_events.iter().position(|(_, s)| *s == ServiceStatus::Restarting).unwrap();
     let running_idx = web_events.iter().position(|(_, s)| *s == ServiceStatus::Running).unwrap();
-    assert!(stopping_idx < stopped_idx, "Stopping should come before Stopped");
-    assert!(stopped_idx < running_idx, "Stopped should come before Running");
+    assert!(restarting_idx < running_idx, "Restarting should come before Running");
 
     // Cleanup
     orchestrator
@@ -795,7 +792,7 @@ async fn test_dependency_waiting_reacts_via_broadcast() {
 // ============================================================================
 
 /// Restart with healthcheck broadcasts the full lifecycle including Healthy.
-/// Verifies: Stopping → Stopped → Starting → Running → Healthy
+/// Verifies: Restarting → Running → Healthy
 #[tokio::test]
 async fn test_restart_broadcasts_full_lifecycle_with_healthcheck() {
     let temp_dir = TempDir::new().unwrap();
@@ -868,24 +865,20 @@ async fn test_restart_broadcasts_full_lifecycle_with_healthcheck() {
     let events = collect_status_changes(&mut rx, 10, Duration::from_secs(2)).await;
     let web_events: Vec<_> = events.iter().filter(|(name, _)| name == "web").collect();
 
-    // Must see: Stopping, Stopped, Running (Starting may be too brief), Healthy
-    let has_stopping = web_events.iter().any(|(_, s)| *s == ServiceStatus::Stopping);
-    let has_stopped = web_events.iter().any(|(_, s)| *s == ServiceStatus::Stopped);
+    // Must see: Restarting, Running, Healthy (Stopping/Stopped are skipped during restart)
+    let has_restarting = web_events.iter().any(|(_, s)| *s == ServiceStatus::Restarting);
     let has_running = web_events.iter().any(|(_, s)| *s == ServiceStatus::Running);
     let has_healthy = web_events.iter().any(|(_, s)| *s == ServiceStatus::Healthy);
 
-    assert!(has_stopping, "Expected Stopping event, got {:?}", web_events);
-    assert!(has_stopped, "Expected Stopped event, got {:?}", web_events);
+    assert!(has_restarting, "Expected Restarting event, got {:?}", web_events);
     assert!(has_running, "Expected Running event, got {:?}", web_events);
     assert!(has_healthy, "Expected Healthy event after restart, got {:?}", web_events);
 
-    // Verify order: Stopping < Stopped < Running < Healthy
-    let stopping_idx = web_events.iter().position(|(_, s)| *s == ServiceStatus::Stopping).unwrap();
-    let stopped_idx = web_events.iter().position(|(_, s)| *s == ServiceStatus::Stopped).unwrap();
+    // Verify order: Restarting < Running < Healthy
+    let restarting_idx = web_events.iter().position(|(_, s)| *s == ServiceStatus::Restarting).unwrap();
     let running_idx = web_events.iter().position(|(_, s)| *s == ServiceStatus::Running).unwrap();
     let healthy_idx = web_events.iter().position(|(_, s)| *s == ServiceStatus::Healthy).unwrap();
-    assert!(stopping_idx < stopped_idx, "Stopping before Stopped");
-    assert!(stopped_idx < running_idx, "Stopped before Running");
+    assert!(restarting_idx < running_idx, "Restarting before Running");
     assert!(running_idx < healthy_idx, "Running before Healthy");
 
     // Cleanup

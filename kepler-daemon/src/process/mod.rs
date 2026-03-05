@@ -277,13 +277,16 @@ pub async fn stop_service(
     service_name: &str,
     handle: ConfigActorHandle,
     signal: Option<i32>,
+    skip_status_update: bool,
 ) -> Result<()> {
     info!("Stopping service {}", service_name);
 
-    // Update status to stopping
-    let _ = handle
-        .set_service_status(service_name, ServiceStatus::Stopping)
-        .await;
+    // Update status to stopping (skipped during restart to preserve Restarting status)
+    if !skip_status_update {
+        let _ = handle
+            .set_service_status(service_name, ServiceStatus::Stopping)
+            .await;
+    }
 
     // Get the process handle
     let process_handle = handle.remove_process_handle(service_name).await;
@@ -326,10 +329,12 @@ pub async fn stop_service(
         .cancel_task_handle(service_name, TaskHandleType::FileWatcher)
         .await;
 
-    // Update status to stopped
-    let _ = handle
-        .set_service_status(service_name, ServiceStatus::Stopped)
-        .await;
+    // Update status to stopped (skipped during restart to preserve Restarting status)
+    if !skip_status_update {
+        let _ = handle
+            .set_service_status(service_name, ServiceStatus::Stopped)
+            .await;
+    }
 
     let _ = handle.set_service_pid(service_name, None, None).await;
 

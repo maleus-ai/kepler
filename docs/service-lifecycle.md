@@ -29,13 +29,14 @@ How services transition between states, how start modes work, and how quiescence
 
 ## Service Status States
 
-Kepler services have 9 possible status states:
+Kepler services have 10 possible status states:
 
 | Status        | Description                                                        |
 | ------------- | ------------------------------------------------------------------ |
 | **Stopped**   | Manually stopped via `kepler stop`                                 |
 | **Starting**  | Service is in the process of starting                              |
 | **Running**   | Process is running (no healthcheck, or healthcheck not yet passed) |
+| **Restarting**| Being restarted via `kepler restart` (stop→start cycle in progress)|
 | **Stopping**  | Service is in the process of stopping                              |
 | **Failed**    | Spawn failure or dependency permanently unsatisfied                |
 | **Healthy**   | Running and healthcheck is passing                                 |
@@ -57,6 +58,10 @@ stateDiagram-v2
     Healthy --> Unhealthy : healthcheck fails
     Unhealthy --> Healthy : healthcheck passes
     Unhealthy --> Stopping : on-unhealthy restart
+    Running --> Restarting : kepler restart
+    Healthy --> Restarting : kepler restart
+    Unhealthy --> Restarting : kepler restart
+    Restarting --> Running : process respawned
     Running --> Stopping : kepler stop
     Healthy --> Stopping : kepler stop
     Unhealthy --> Stopping : kepler stop
@@ -67,7 +72,7 @@ Key distinctions:
 - **Exited** vs **Stopped**: Exited means the process exited naturally (any exit code) and won't restart. Stopped means it was manually stopped via `kepler stop`.
 - **Killed** vs **Exited**: Killed means the process was terminated by a signal (SIGKILL, SIGTERM, etc.). Exited means the process exited on its own.
 - **Failed** is reserved for infrastructure failures: spawn failures or permanently unsatisfied dependencies.
-- **Stopped** is transient during restart (stop → start), so it should not be treated as a final state in automated workflows.
+- **Restarting** means the service is being manually restarted via `kepler restart`. The status stays `Restarting` through the entire stop→start cycle, preventing the CLI from seeing a transient terminal state and exiting prematurely.
 
 ---
 
@@ -81,6 +86,7 @@ The `kepler ps` command shows status in a Docker-style format:
 | Healthy   | `Up <duration> (healthy)`             | `Up 5m (healthy)`                         |
 | Unhealthy | `Up <duration> (unhealthy)`           | `Up 2m (unhealthy)`                       |
 | Starting  | `Starting`                            | `Starting`                                |
+| Restarting| `Restarting`                          | `Restarting`                              |
 | Stopping  | `Stopping`                            | `Stopping`                                |
 | Stopped   | `Stopped` or `Stopped <duration> ago` | `Stopped`, `Stopped 5m ago`               |
 | Exited    | `Exited (<code>) <duration> ago`      | `Exited (0) 14s ago`, `Exited (1) 5s ago` |
@@ -145,6 +151,8 @@ Terminal states are:
 - **Exited** -- process exited (any exit code)
 - **Killed** -- process killed by signal
 - **Failed** -- spawn failure or dependency permanently unsatisfied
+
+Non-terminal active states like **Restarting** prevent quiescence from firing, so the CLI won't exit prematurely during a restart cycle.
 
 If a deferred service's dependency is permanently unsatisfied (the dependency has stopped and won't restart), the deferred service is marked as Failed so the CLI can exit cleanly.
 

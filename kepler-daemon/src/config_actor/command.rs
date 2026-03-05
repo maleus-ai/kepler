@@ -109,6 +109,15 @@ pub enum ConfigCommand {
         reply: oneshot::Sender<bool>,
     },
 
+    /// Check if all services are quiescent (settled). Respects startup_in_progress fence.
+    CheckQuiescence {
+        reply: oneshot::Sender<bool>,
+    },
+    /// Check if all services are ready (reached target state). Respects startup_in_progress fence.
+    CheckReadiness {
+        reply: oneshot::Sender<bool>,
+    },
+
     /// Re-check and emit Ready/Quiescent signals if conditions are met.
     /// Used by Subscribe handler to avoid missing signals due to race conditions.
     RecheckReadyQuiescent,
