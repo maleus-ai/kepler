@@ -378,6 +378,7 @@ impl TestDaemonHarness {
             kepler_env_denied: false,
             service_no_new_privileges: None,
             service_token: service_token.clone(),
+            socket_path: Some(self.config_dir.join(".kepler").join("kepler.sock")),
         };
 
         if should_mark_initialized {
@@ -614,6 +615,7 @@ impl TestDaemonHarness {
             kepler_env_denied: false,
             service_no_new_privileges: None,
             service_token: service_token.clone(),
+            socket_path: Some(self.config_dir.join(".kepler").join("kepler.sock")),
         };
 
         run_service_hook(
@@ -697,6 +699,7 @@ impl TestDaemonHarness {
             kepler_env_denied: false,
             service_no_new_privileges: None,
             service_token: service_token.clone(),
+            socket_path: Some(self.config_dir.join(".kepler").join("kepler.sock")),
         };
 
         run_service_hook(
@@ -827,6 +830,7 @@ impl TestDaemonHarness {
                     kepler_env_denied: false,
                     service_no_new_privileges: None,
             service_token: None,
+            socket_path: None,
                 };
 
                 let _ = run_service_hook(
@@ -977,6 +981,7 @@ impl TestDaemonHarness {
                     kepler_env_denied: false,
                     service_no_new_privileges: None,
             service_token: None,
+            socket_path: None,
                 };
 
                 let _ = run_service_hook(
