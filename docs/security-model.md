@@ -64,7 +64,7 @@ groups    # Should include "kepler"
 
 The daemon creates a Unix domain socket with strict permissions:
 
-- **Path**: `/var/lib/kepler/kepler.sock`
+- **Path**: `/var/lib/kepler/kepler.sock` (or `$KEPLER_SOCKET_PATH` if set)
 - **Permissions**: `0o666` (`rw-rw-rw-`)
 - **Ownership**: `root:kepler`
 
@@ -93,7 +93,7 @@ See [Architecture](architecture.md#state-directory-hardening) for implementation
 
 ### Contents
 
-- `kepler.sock` -- Unix domain socket (`0o666`)
+- `kepler.sock` -- Unix domain socket (`0o666`), or at `$KEPLER_SOCKET_PATH` if set
 - `kepler.pid` -- Daemon PID file (`0o660`)
 - `configs/` -- Per-config state directories
 

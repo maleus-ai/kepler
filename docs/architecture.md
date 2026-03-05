@@ -26,7 +26,7 @@ This document describes Kepler's internal implementation, security measures, and
 
 Kepler uses a single global daemon architecture. The daemon runs as root and manages all configurations and services:
 
-- **Single socket**: `/var/lib/kepler/kepler.sock` handles all CLI communication
+- **Single socket**: `/var/lib/kepler/kepler.sock` (or `$KEPLER_SOCKET_PATH` if set) handles all CLI communication
 - **Group-based access**: CLI access is controlled via `kepler` group membership on the socket
 - **Per-config isolation**: Each config gets its own state directory (hashed path)
 - **Persistent state**: Daemon survives CLI disconnections, services continue running
@@ -50,7 +50,7 @@ The daemon stores all state in `/var/lib/kepler/` (or `$KEPLER_DAEMON_PATH` if s
 
 ```
 /var/lib/kepler/
-├── kepler.sock           # Unix domain socket (0o666 root:kepler)
+├── kepler.sock           # Unix domain socket (0o666 root:kepler) — or at $KEPLER_SOCKET_PATH
 ├── kepler.pid            # Daemon PID file (0o660)
 └── configs/              # Per-config state directories
     └── <config-hash>/

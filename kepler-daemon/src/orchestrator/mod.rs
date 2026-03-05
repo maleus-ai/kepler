@@ -579,9 +579,10 @@ impl ServiceOrchestrator {
             svc_ctx.env.clone()
         };
 
-        // Strip KEPLER_TOKEN so hooks/healthchecks don't inherit a stale caller token.
-        // spawn_service() will inject a fresh token for services with `permissions`.
+        // Strip KEPLER_TOKEN and KEPLER_SOCKET_PATH so hooks/healthchecks don't inherit
+        // stale values. spawn_service() will inject fresh values for services with `permissions`.
         computed_env.remove("KEPLER_TOKEN");
+        computed_env.remove("KEPLER_SOCKET_PATH");
 
         // Inject user-specific env vars (HOME, USER, LOGNAME, SHELL)
         #[cfg(unix)]
@@ -864,9 +865,10 @@ impl ServiceOrchestrator {
             svc_ctx.env.clone()
         };
 
-        // Strip KEPLER_TOKEN so hooks/healthchecks don't inherit a stale caller token.
-        // spawn_service() will inject a fresh token for services with `permissions`.
+        // Strip KEPLER_TOKEN and KEPLER_SOCKET_PATH so hooks/healthchecks don't inherit
+        // stale values. spawn_service() will inject fresh values for services with `permissions`.
         computed_env.remove("KEPLER_TOKEN");
+        computed_env.remove("KEPLER_SOCKET_PATH");
 
         // Inject user-specific env vars (HOME, USER, LOGNAME, SHELL)
         #[cfg(unix)]
@@ -2499,14 +2501,23 @@ impl ServiceOrchestrator {
             no_new_privileges,
         );
 
-        // Defensive: ensure no stale KEPLER_TOKEN reaches the process.
-        // The guard-managed token (if any) is injected below.
+        // Defensive: ensure no stale KEPLER_TOKEN or KEPLER_SOCKET_PATH reaches the process.
+        // The guard-managed token and socket path (if any) are injected below.
         spec.environment.remove("KEPLER_TOKEN");
+        spec.environment.remove("KEPLER_SOCKET_PATH");
 
         // Inject the token from the stored guard (created by create_service_token_guard
         // before pre_start hooks). The guard handles registration and RAII revocation.
         if let Some(token_hex) = handle.get_service_token_hex(service_name).await {
             spec.environment.insert("KEPLER_TOKEN".to_string(), token_hex);
+            // Ensure the process knows where to connect back to the daemon socket,
+            // especially when KEPLER_SOCKET_PATH or KEPLER_DAEMON_PATH override the default.
+            if let Ok(socket_path) = crate::Daemon::get_socket_path() {
+                spec.environment.insert(
+                    "KEPLER_SOCKET_PATH".to_string(),
+                    socket_path.to_string_lossy().into_owned(),
+                );
+            }
         }
 
         // Resolve store settings

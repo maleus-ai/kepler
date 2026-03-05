@@ -21,6 +21,7 @@ How Kepler handles environment variables, including inheritance, expansion, and 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `KEPLER_DAEMON_PATH` | `/var/lib/kepler` | Override state directory location |
+| `KEPLER_SOCKET_PATH` | `{state_dir}/kepler.sock` | Override the Unix socket file path |
 
 ```bash
 export KEPLER_DAEMON_PATH=/opt/kepler
@@ -28,6 +29,22 @@ sudo kepler daemon start -d
 ```
 
 This only changes where state files are stored. All security checks (root requirement, kepler group auth, socket permissions) remain the same.
+
+### Custom Socket Path
+
+`KEPLER_SOCKET_PATH` overrides the full path to the Unix domain socket. This is useful when the state directory is on a filesystem that does not support Unix sockets (e.g., some network-mounted or persistent volumes):
+
+```bash
+export KEPLER_DAEMON_PATH=/mnt/persistent/kepler   # State on persistent volume
+export KEPLER_SOCKET_PATH=/run/kepler.sock          # Socket on a local filesystem
+sudo kepler daemon start -d
+```
+
+Both the daemon and CLI read `KEPLER_SOCKET_PATH`, so both sides must have the same value set. When unset, the socket defaults to `{state_dir}/kepler.sock`.
+
+**Parent directory requirements:** The socket's parent directory must exist and be world-traversable (`o+x`) so that all users — including non-root `kepler` group members and processes authenticating via `KEPLER_TOKEN` — can reach the socket. The daemon warns at startup if the parent directory is not world-traversable. Good default choices include `/run/`, `/tmp/`, or a dedicated directory with `0o711`/`0o755` permissions.
+
+**Automatic injection:** When a service has [`permissions`](security-model.md#service-permissions-token-based) configured, the daemon automatically injects `KEPLER_SOCKET_PATH` into the service's environment alongside `KEPLER_TOKEN`, so spawned processes can connect back to the daemon at the correct path.
 
 ---
 

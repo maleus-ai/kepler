@@ -136,6 +136,13 @@ async fn health_check_loop(
         let service_token = handle.get_service_token_hex(&service_name).await;
         if let Some(ref token_hex) = service_token {
             health_env.insert("KEPLER_TOKEN".to_string(), token_hex.clone());
+            // Ensure the health check knows where to connect back to the daemon socket.
+            if let Ok(socket_path) = crate::Daemon::get_socket_path() {
+                health_env.insert(
+                    "KEPLER_SOCKET_PATH".to_string(),
+                    socket_path.to_string_lossy().into_owned(),
+                );
+            }
         }
 
         let service_no_new_privileges = resolved.and_then(|r| r.no_new_privileges);

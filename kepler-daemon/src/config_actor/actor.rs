@@ -289,6 +289,7 @@ impl ConfigActor {
                 // and spawn_service (spec.environment), which cover both fresh loads
                 // and snapshot restores.
                 cli_env.remove("KEPLER_TOKEN");
+                cli_env.remove("KEPLER_SOCKET_PATH");
 
                 // Read original file contents
                 let contents = std::fs::read(&canonical_path).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", canonical_path.display(), e)))?;
