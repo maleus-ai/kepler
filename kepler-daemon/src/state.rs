@@ -289,7 +289,7 @@ impl PersistedServiceState {
             exit_code: self.exit_code,
             signal: self.signal,
             health_check_failures: self.health_check_failures,
-            restart_count: self.restart_count,
+            restart_count: 0,
             initialized: self.initialized,
             computed_env,
             working_dir,
