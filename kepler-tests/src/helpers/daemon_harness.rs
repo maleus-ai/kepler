@@ -713,8 +713,13 @@ impl TestDaemonHarness {
         )
         .await?;
 
+        // Extract grace_period from service restart config
+        let grace_period = ctx.service_config.restart.as_static()
+            .map(|r| r.grace_period())
+            .unwrap_or(std::time::Duration::ZERO);
+
         // Stop the service with the specified signal
-        stop_service(service_name, self.handle.clone(), Some(signal), false).await?;
+        stop_service(service_name, self.handle.clone(), Some(signal), false, grace_period).await?;
 
         // Clean up cgroup directory after stop
         self.containment
@@ -811,8 +816,13 @@ impl TestDaemonHarness {
         )
         .await?;
 
+        // Extract grace_period from service restart config
+        let grace_period = ctx.service_config.restart.as_static()
+            .map(|r| r.grace_period())
+            .unwrap_or(std::time::Duration::ZERO);
+
         // Stop the service
-        stop_service(service_name, self.handle.clone(), None, false).await?;
+        stop_service(service_name, self.handle.clone(), None, false, grace_period).await?;
 
         // Clean up cgroup directory after stop
         self.containment
@@ -976,8 +986,13 @@ impl TestDaemonHarness {
                     }
                 }
 
+                // Extract grace_period from service restart config
+                let grace_period = ctx.service_config.restart.as_static()
+                    .map(|r| r.grace_period())
+                    .unwrap_or(std::time::Duration::ZERO);
+
                 // Stop the service
-                if stop_service(&event.service_name, handle.clone(), None, false)
+                if stop_service(&event.service_name, handle.clone(), None, false, grace_period)
                     .await
                     .is_err()
                 {

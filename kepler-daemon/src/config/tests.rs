@@ -1374,3 +1374,92 @@ services:
         msg
     );
 }
+
+// ============================================================================
+// Grace Period Tests
+// ============================================================================
+
+#[test]
+fn test_grace_period_simple_returns_zero() {
+    let config = RestartConfig::Simple(RestartPolicy::always());
+    assert_eq!(config.grace_period(), Duration::ZERO);
+}
+
+#[test]
+fn test_grace_period_extended_default() {
+    let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    restart:
+      policy: always
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let svc = config.services.get("app").unwrap();
+    let restart = svc.restart.as_static().unwrap();
+    assert_eq!(restart.grace_period(), Duration::ZERO);
+}
+
+#[test]
+fn test_grace_period_extended_static_value() {
+    let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    restart:
+      policy: always
+      grace_period: "5s"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let svc = config.services.get("app").unwrap();
+    let restart = svc.restart.as_static().unwrap();
+    assert_eq!(restart.grace_period(), Duration::from_secs(5));
+}
+
+#[test]
+fn test_grace_period_extended_milliseconds() {
+    let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    restart:
+      policy: always
+      grace_period: "500ms"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let svc = config.services.get("app").unwrap();
+    let restart = svc.restart.as_static().unwrap();
+    assert_eq!(restart.grace_period(), Duration::from_millis(500));
+}
+
+#[test]
+fn test_grace_period_serialize_roundtrip() {
+    let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    restart:
+      policy: always
+      grace_period: "10s"
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let serialized = serde_yaml::to_string(&config).unwrap();
+    let config2: KeplerConfig = serde_yaml::from_str(&serialized).unwrap();
+    let svc = config2.services.get("app").unwrap();
+    let restart = svc.restart.as_static().unwrap();
+    assert_eq!(restart.grace_period(), Duration::from_secs(10));
+}
+
+#[test]
+fn test_grace_period_simple_form_unchanged() {
+    let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+    restart: always
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let svc = config.services.get("app").unwrap();
+    let restart = svc.restart.as_static().unwrap();
+    assert_eq!(restart.grace_period(), Duration::ZERO);
+}

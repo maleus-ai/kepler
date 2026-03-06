@@ -1178,8 +1178,14 @@ impl ServiceOrchestrator {
                     }
                 }
 
+                // Extract grace_period from service restart config
+                let grace_period = ctx.as_ref()
+                    .and_then(|c| c.service_config.restart.as_static())
+                    .map(|r| r.grace_period())
+                    .unwrap_or(std::time::Duration::ZERO);
+
                 // Stop the service
-                stop_service(service_name, handle.clone(), signal, false)
+                stop_service(service_name, handle.clone(), signal, false, grace_period)
                     .await
                     .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
 
@@ -1327,8 +1333,9 @@ impl ServiceOrchestrator {
             // Drop all cursors holding file handles into this config's log directory
             self.cursor_manager.invalidate_config_cursors(config_path);
 
-            // Unload config from registry (triggers actor cleanup + save_state)
-            self.registry.unload(&config_path.to_path_buf()).await;
+            // Unload config from registry — clean=true skips save_state since
+            // the state directory is about to be removed
+            self.registry.unload(&config_path.to_path_buf(), true).await;
 
             // Clean up config-level cgroup
             self.containment.cleanup_config(config_hash);
@@ -1485,8 +1492,13 @@ impl ServiceOrchestrator {
             // Apply on_restart log retention
             self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart).await;
 
+            // Extract grace_period from service restart config
+            let grace_period = ctx.service_config.restart.as_static()
+                .map(|r| r.grace_period())
+                .unwrap_or(std::time::Duration::ZERO);
+
             // Stop process
-            if let Err(e) = stop_service(service_name, handle.clone(), None, true).await {
+            if let Err(e) = stop_service(service_name, handle.clone(), None, true, grace_period).await {
                 warn!("Failed to stop service {}: {}", service_name, e);
             }
 
@@ -1620,7 +1632,7 @@ impl ServiceOrchestrator {
             self.token_store.revoke_for_config(config_path).await;
 
             // Unload the config actor completely
-            self.registry.unload(&config_path.to_path_buf()).await;
+            self.registry.unload(&config_path.to_path_buf(), false).await;
         }
 
         // Re-load config with new sys_env (re-reads source, re-expands env vars)
@@ -1708,8 +1720,13 @@ impl ServiceOrchestrator {
         self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart)
             .await;
 
+        // Extract grace_period from service restart config
+        let grace_period = ctx.service_config.restart.as_static()
+            .map(|r| r.grace_period())
+            .unwrap_or(std::time::Duration::ZERO);
+
         // Stop the service
-        stop_service(service_name, handle.clone(), None, false)
+        stop_service(service_name, handle.clone(), None, false, grace_period)
             .await
             .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
 
@@ -2736,7 +2753,7 @@ impl ServiceOrchestrator {
             if !is_orphaned
                 && let Ok(canonical) = PathBuf::from(&original_path).canonicalize() {
                     self.token_store.revoke_for_config(&canonical).await;
-                    self.registry.unload(&canonical).await;
+                    self.registry.unload(&canonical, true).await;
                 }
 
             // Delete entire state directory

@@ -111,6 +111,10 @@ pub struct ConfigActor {
     /// Cached topological order for quiescence computation (dep graph is immutable)
     cached_topo_order: Option<Vec<String>>,
 
+    /// Set when Shutdown{clean: true} is processed. Tells cleanup() to skip
+    /// save_state — the state directory is about to be removed.
+    clean_shutdown: bool,
+
     rx: mpsc::Receiver<ConfigCommand>,
 }
 
@@ -468,6 +472,7 @@ impl ConfigActor {
             last_quiescent: false,
             startup_in_progress: false,
             cached_topo_order: None,
+            clean_shutdown: false,
             rx,
         };
 
@@ -1012,9 +1017,14 @@ impl ConfigActor {
             }
 
             // === Lifecycle ===
-            ConfigCommand::Shutdown { reply } => {
-                // Save state before shutdown
-                let _ = self.save_state();
+            ConfigCommand::Shutdown { clean, reply } => {
+                if clean {
+                    // State dir will be removed — skip save to avoid racing
+                    // with remove_dir_all (cleanup() also skips via this flag)
+                    self.clean_shutdown = true;
+                } else {
+                    let _ = self.save_state();
+                }
                 let _ = reply.send(());
                 return true;
             }
@@ -1789,9 +1799,12 @@ impl ConfigActor {
             debug!("FD count before cleanup: {}", fd_count);
         }
 
-        // Save state as safety net (in case shutdown wasn't triggered via command)
-        if let Err(e) = self.save_state() {
-            warn!("Failed to save state during cleanup: {}", e);
+        // Save state as safety net (in case shutdown wasn't triggered via command).
+        // Skip when clean_shutdown — the state dir is about to be deleted.
+        if !self.clean_shutdown {
+            if let Err(e) = self.save_state() {
+                warn!("Failed to save state during cleanup: {}", e);
+            }
         }
 
         // Cancel all health checks

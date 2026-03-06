@@ -242,7 +242,21 @@ impl TestServiceBuilder {
 
     /// Set restart policy with watch patterns
     pub fn with_restart_and_watch(mut self, policy: RestartPolicy, watch: Vec<String>) -> Self {
-        self.restart = RestartConfig::Extended { policy, watch: ConfigValue::wrap_vec(watch).into() };
+        self.restart = RestartConfig::Extended {
+            policy,
+            watch: ConfigValue::wrap_vec(watch).into(),
+            grace_period: ConfigValue::Static("0s".to_string()),
+        };
+        self
+    }
+
+    /// Set restart policy with grace period
+    pub fn with_restart_and_grace_period(mut self, policy: RestartPolicy, grace_period: &str) -> Self {
+        self.restart = RestartConfig::Extended {
+            policy,
+            watch: ConfigValue::default(),
+            grace_period: ConfigValue::Static(grace_period.to_string()),
+        };
         self
     }
 
