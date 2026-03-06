@@ -1,8 +1,10 @@
 //! Restart configuration types
 
 use serde::{Deserialize, Deserializer};
+use std::time::Duration;
 
 use super::ConfigValue;
+use super::duration::parse_duration;
 
 /// Restart policy for services (bitfield).
 ///
@@ -126,14 +128,21 @@ pub enum RestartConfig {
     /// e.g., restart: always
     Simple(RestartPolicy),
 
-    /// Extended form: policy + optional watch patterns
-    /// e.g., restart: { policy: always, watch: ["*.ts"] }
+    /// Extended form: policy + optional watch patterns + optional grace period
+    /// e.g., restart: { policy: always, watch: ["*.ts"], grace_period: "5s" }
     Extended {
         #[serde(default)]
         policy: RestartPolicy,
         #[serde(default)]
         watch: ConfigValue<Vec<ConfigValue<String>>>,
+        #[serde(default = "default_grace_period")]
+        grace_period: ConfigValue<String>,
     },
+}
+
+/// Default grace period value for extended restart config
+fn default_grace_period() -> ConfigValue<String> {
+    ConfigValue::Static("0s".to_string())
 }
 
 impl<'de> Deserialize<'de> for RestartConfig {
@@ -156,12 +165,15 @@ impl<'de> Deserialize<'de> for RestartConfig {
                     policy: RestartPolicy,
                     #[serde(default)]
                     watch: ConfigValue<Vec<ConfigValue<String>>>,
+                    #[serde(default = "default_grace_period")]
+                    grace_period: ConfigValue<String>,
                 }
                 let helper: ExtendedHelper =
                     serde_yaml::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(RestartConfig::Extended {
                     policy: helper.policy,
                     watch: helper.watch,
+                    grace_period: helper.grace_period,
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -183,6 +195,22 @@ impl RestartConfig {
         match self {
             RestartConfig::Simple(p) => p,
             RestartConfig::Extended { policy, .. } => policy,
+        }
+    }
+
+    /// Get the grace period duration.
+    ///
+    /// Returns `Duration::ZERO` for `Simple` form or if the value is dynamic/invalid.
+    /// For `Extended` form, parses the static string via `parse_duration()`.
+    pub fn grace_period(&self) -> Duration {
+        match self {
+            RestartConfig::Simple(_) => Duration::ZERO,
+            RestartConfig::Extended { grace_period, .. } => {
+                grace_period
+                    .as_static()
+                    .and_then(|s| parse_duration(s).ok())
+                    .unwrap_or(Duration::ZERO)
+            }
         }
     }
 

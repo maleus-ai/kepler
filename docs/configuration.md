@@ -219,13 +219,14 @@ restart: always              # Single flag
 restart: "on-failure|on-unhealthy"  # Combined flags (quotes required for pipe syntax)
 ```
 
-**Extended form with file watching:**
+**Extended form with file watching and grace period:**
 
 ```yaml
 restart:
   policy: "on-failure|on-unhealthy"   # Combinable flags
   watch:                               # Glob patterns for auto-restart
     - "src/**/*.ts"
+  grace_period: "5s"                   # Time to wait after SIGTERM before SIGKILL
 ```
 
 | Flag | Description |
@@ -239,6 +240,32 @@ restart:
 Flags are combined with `|`: `"on-failure|on-unhealthy"` restarts on both non-zero exit and healthcheck failure. The `no` flag cannot be combined with other flags.
 
 > **Note:** `policy: no` cannot be combined with `watch` patterns.
+
+#### Grace Period
+
+The `grace_period` option controls how long Kepler waits after sending SIGTERM before force-killing the process with SIGKILL. Only available in the extended form.
+
+| Value | Behavior |
+|-------|----------|
+| `"0s"` (default) | No SIGTERM is sent; the process is force-killed immediately with SIGKILL |
+| `"5s"`, `"10s"`, etc. | SIGTERM is sent first, then SIGKILL after the specified duration if the process hasn't exited |
+
+```yaml
+# Default: force kill immediately (no grace period)
+restart: always
+
+# Allow 5 seconds for graceful shutdown
+restart:
+  policy: always
+  grace_period: "5s"
+
+# Dynamic grace period via expression
+restart:
+  policy: always
+  grace_period: "${{ grace_time }}$"
+```
+
+Duration units: `ms` (milliseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days).
 
 See [File Watching](file-watching.md) for details on watch patterns.
 

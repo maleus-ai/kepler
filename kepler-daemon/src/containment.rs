@@ -112,11 +112,18 @@ impl ContainmentManager {
 
     /// Force-kill a service and all its descendants.
     ///
-    /// With cgroup v2: kills the entire cgroup with retry loop (catches processes
-    /// that escaped the process group or forked between enumerate and kill).
-    /// With fallback: SIGKILL via killpg.
+    /// With cgroup v2: kills the entire cgroup **and** the process group.
+    /// The cgroup kill catches processes that forked between enumerate and kill,
+    /// while killpg catches children that forked before `register_pid` moved
+    /// the leader into the cgroup (they inherit the parent's original cgroup).
+    /// With fallback: SIGKILL via killpg only.
     pub async fn force_kill_service(&self, config_hash: &str, service_name: &str, pid: u32) {
         if let ContainmentStrategy::CgroupV2 { ref kepler_root } = self.inner.strategy {
+            // Kill process group first so children that escaped the cgroup are reaped
+            // before we wait on cgroup retry delays.
+            if let Err(e) = kepler_unix::process_tree::force_kill_process_tree(pid) {
+                warn!("Failed to force kill process tree {}: {}", pid, e);
+            }
             let cgroup_path =
                 kepler_unix::cgroup::service_cgroup_path(kepler_root, config_hash, service_name);
             Self::kill_cgroup_with_retry(&cgroup_path).await;

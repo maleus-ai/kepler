@@ -220,54 +220,64 @@ async fn monitor_process(
         }
         // Wait for shutdown request (round-trip: request → reply)
         request_result = shutdown_rx => {
-            let (signal_num, reply_tx) = match request_result {
-                Ok(req) => (req.signal, Some(req.reply)),
-                Err(_) => (15, None), // Sender dropped — default SIGTERM, no reply
+            let (signal_num, grace_period, reply_tx) = match request_result {
+                Ok(req) => (req.signal, req.grace_period, Some(req.reply)),
+                Err(_) => (15, std::time::Duration::ZERO, None), // Sender dropped — default SIGTERM, no grace, no reply
             };
-            debug!("Shutdown signal received for {} (signal {})", service_name, signal_num);
+            debug!("Shutdown signal received for {} (signal {}, grace_period {:?})", service_name, signal_num, grace_period);
 
-            if let Some(pid) = child.id() {
-                debug!("Sending signal {} to process group {}", signal_num, pid);
-                // Graceful signal only — no force kill yet
-                containment.signal_service(pid, signal_num);
+            let (exit_code, signal) = if grace_period.is_zero() {
+                // No grace period — force kill immediately
+                debug!("Grace period is 0 for {}, force killing immediately", service_name);
+                if let Some(pid) = child.id() {
+                    containment.force_kill_service(&config_hash, &service_name, pid).await;
+                }
+                let _ = child.kill().await; // reap zombie
+                (None, Some(9)) // killed by SIGKILL
             } else {
-                let _ = child.start_kill();
-            }
-
-            // Wait for process to exit with timeout
-            let timeout_result = tokio::time::timeout(
-                tokio::time::Duration::from_secs(10),
-                child.wait(),
-            )
-            .await;
-
-            let (exit_code, signal) = match timeout_result {
-                Ok(Ok(status)) => {
-                    debug!("Service {} stopped with status {:?}", service_name, status);
-                    let code = status.code();
-                    #[cfg(unix)]
-                    let sig = if code.is_none() {
-                        use std::os::unix::process::ExitStatusExt;
-                        status.signal()
-                    } else {
-                        None
-                    };
-                    #[cfg(not(unix))]
-                    let sig = None;
-                    (code, sig)
+                // Send graceful signal and wait for grace period
+                if let Some(pid) = child.id() {
+                    debug!("Sending signal {} to process group {}", signal_num, pid);
+                    containment.signal_service(pid, signal_num);
+                } else {
+                    let _ = child.start_kill();
                 }
-                Ok(Err(e)) => {
-                    warn!("Error waiting for service {}: {}", service_name, e);
-                    (None, None)
-                }
-                Err(_) => {
-                    // Timeout — force kill via cgroup or killpg SIGKILL
-                    warn!("Service {} did not stop gracefully, force killing", service_name);
-                    if let Some(pid) = child.id() {
-                        containment.force_kill_service(&config_hash, &service_name, pid).await;
+
+                // Wait for process to exit within grace period
+                let timeout_result = tokio::time::timeout(
+                    grace_period,
+                    child.wait(),
+                )
+                .await;
+
+                match timeout_result {
+                    Ok(Ok(status)) => {
+                        debug!("Service {} stopped with status {:?}", service_name, status);
+                        let code = status.code();
+                        #[cfg(unix)]
+                        let sig = if code.is_none() {
+                            use std::os::unix::process::ExitStatusExt;
+                            status.signal()
+                        } else {
+                            None
+                        };
+                        #[cfg(not(unix))]
+                        let sig = None;
+                        (code, sig)
                     }
-                    let _ = child.kill().await; // reap zombie
-                    (None, Some(9)) // killed by SIGKILL
+                    Ok(Err(e)) => {
+                        warn!("Error waiting for service {}: {}", service_name, e);
+                        (None, None)
+                    }
+                    Err(_) => {
+                        // Timeout — force kill via cgroup or killpg SIGKILL
+                        warn!("Service {} did not stop within grace period ({:?}), force killing", service_name, grace_period);
+                        if let Some(pid) = child.id() {
+                            containment.force_kill_service(&config_hash, &service_name, pid).await;
+                        }
+                        let _ = child.kill().await; // reap zombie
+                        (None, Some(9)) // killed by SIGKILL
+                    }
                 }
             };
 
@@ -302,6 +312,7 @@ pub async fn stop_service(
     handle: ConfigActorHandle,
     signal: Option<i32>,
     skip_status_update: bool,
+    grace_period: std::time::Duration,
 ) -> Result<()> {
     info!("Stopping service {}", service_name);
 
@@ -322,12 +333,14 @@ pub async fn stop_service(
             let (reply_tx, reply_rx) = oneshot::channel();
             let request = ShutdownRequest {
                 signal: signal.unwrap_or(15),
+                grace_period,
                 reply: reply_tx,
             };
             let _ = shutdown_tx.send(request);
-            // Wait for monitor_process to confirm process death (25s safety timeout)
+            // Wait for monitor_process to confirm process death (grace_period + 15s safety margin)
+            let safety_timeout = grace_period + std::time::Duration::from_secs(15);
             let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(25),
+                safety_timeout,
                 reply_rx,
             ).await;
         }

@@ -142,6 +142,7 @@ impl From<&ServiceState> for ServiceInfo {
 /// Request to shut down a process. monitor_process sends the reply when the process is dead.
 pub struct ShutdownRequest {
     pub signal: i32,
+    pub grace_period: std::time::Duration,
     pub reply: tokio::sync::oneshot::Sender<()>,
 }
 

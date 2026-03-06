@@ -263,6 +263,7 @@ async fn test_restart_config_extended_policy_only() {
             .with_restart_config(RestartConfig::Extended {
                 policy: RestartPolicy::always(),
                 watch: vec![].into(),
+                grace_period: ConfigValue::Static("0s".to_string()),
             })
             .build(),
         )
@@ -704,6 +705,7 @@ fn test_should_restart_on_file_change_helper() {
     let extended_no_watch = RestartConfig::Extended {
         policy: RestartPolicy::always(),
         watch: vec![].into(),
+        grace_period: ConfigValue::Static("0s".to_string()),
     };
     assert!(!extended_no_watch.should_restart_on_file_change());
 
@@ -711,6 +713,7 @@ fn test_should_restart_on_file_change_helper() {
     let extended_with_watch = RestartConfig::Extended {
         policy: RestartPolicy::always(),
         watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
+        grace_period: ConfigValue::Static("0s".to_string()),
     };
     assert!(extended_with_watch.should_restart_on_file_change());
 }
@@ -726,6 +729,7 @@ fn test_watch_patterns_accessor() {
     let extended = RestartConfig::Extended {
         policy: RestartPolicy::always(),
         watch: ConfigValue::wrap_vec(vec!["src/**/*.ts".to_string(), "*.json".to_string()]).into(),
+        grace_period: ConfigValue::Static("0s".to_string()),
     };
     assert_eq!(extended.watch_patterns().len(), 2);
     assert_eq!(extended.watch_patterns()[0], "src/**/*.ts");
@@ -744,6 +748,7 @@ fn test_policy_accessor() {
     let extended = RestartConfig::Extended {
         policy: RestartPolicy::on_failure(),
         watch: vec![].into(),
+        grace_period: ConfigValue::Static("0s".to_string()),
     };
     assert_eq!(extended.policy(), &RestartPolicy::on_failure());
 }
@@ -759,6 +764,7 @@ fn test_restart_config_validate() {
     let extended_valid = RestartConfig::Extended {
         policy: RestartPolicy::always(),
         watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
+        grace_period: ConfigValue::Static("0s".to_string()),
     };
     assert!(extended_valid.validate().is_ok());
 
@@ -766,6 +772,7 @@ fn test_restart_config_validate() {
     let extended_on_failure = RestartConfig::Extended {
         policy: RestartPolicy::on_failure(),
         watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
+        grace_period: ConfigValue::Static("0s".to_string()),
     };
     assert!(extended_on_failure.validate().is_ok());
 
@@ -773,6 +780,7 @@ fn test_restart_config_validate() {
     let invalid = RestartConfig::Extended {
         policy: RestartPolicy::no(),
         watch: ConfigValue::wrap_vec(vec!["*.ts".to_string()]).into(),
+        grace_period: ConfigValue::Static("0s".to_string()),
     };
     let result = invalid.validate();
     assert!(result.is_err());
@@ -969,4 +977,106 @@ fn test_restart_config_simple_pipe_yaml() {
     assert!(config.policy().should_restart_on_exit(Some(1)));
     assert!(!config.policy().should_restart_on_exit(Some(0)));
     assert!(config.policy().should_restart_on_unhealthy());
+}
+
+// ============================================================================
+// Grace Period Tests
+// ============================================================================
+
+/// grace_period: 0s (default) — service that traps SIGTERM gets killed quickly
+#[tokio::test]
+async fn test_grace_period_zero_force_kills() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("running");
+
+    // Service that traps SIGTERM and sleeps (won't exit on SIGTERM)
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "trap '' TERM; echo 'running' >> {} && sleep 3600",
+                    marker_path.display()
+                ),
+            ])
+            .with_restart(RestartPolicy::no())
+            .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    // Wait for service to start
+    let content = marker.wait_for_marker_content("running", Duration::from_secs(2)).await;
+    assert!(content.is_some(), "Service should have started");
+
+    // Stop with default grace_period (0s) — should force kill immediately
+    let start = std::time::Instant::now();
+    harness.stop_service("test").await.unwrap();
+    let elapsed = start.elapsed();
+
+    // Should complete quickly (well under 5s since grace_period=0 means immediate SIGKILL)
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "Stop should complete quickly with grace_period=0, took {:?}",
+        elapsed
+    );
+
+    harness.stop_all().await.unwrap();
+}
+
+/// grace_period: 5s — service that handles SIGTERM exits gracefully within grace period
+#[tokio::test]
+async fn test_grace_period_allows_graceful_shutdown() {
+    let temp_dir = TempDir::new().unwrap();
+    let marker = MarkerFileHelper::new(temp_dir.path());
+    let marker_path = marker.marker_path("running");
+    let exit_marker_path = marker.marker_path("exited");
+
+    // Service that traps SIGTERM and exits cleanly
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "test",
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "trap 'echo done >> {} && exit 0' TERM; echo running >> {} && sleep 3600",
+                    exit_marker_path.display(),
+                    marker_path.display()
+                ),
+            ])
+            .with_restart_and_grace_period(RestartPolicy::no(), "5s")
+            .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("test").await.unwrap();
+
+    // Wait for service to start
+    let content = marker.wait_for_marker_content("running", Duration::from_secs(2)).await;
+    assert!(content.is_some(), "Service should have started");
+
+    // Stop with grace_period=5s — should send SIGTERM and allow graceful exit
+    harness.stop_service("test").await.unwrap();
+
+    // Verify the service handled SIGTERM gracefully (trap fired)
+    let exit_content = marker.wait_for_marker_content("exited", Duration::from_secs(2)).await;
+    assert!(
+        exit_content.is_some(),
+        "Service should have exited gracefully via SIGTERM trap"
+    );
+
+    harness.stop_all().await.unwrap();
 }

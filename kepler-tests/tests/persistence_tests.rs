@@ -106,7 +106,7 @@ services:
     );
 
     // Cleanup
-    handle.shutdown().await;
+    handle.shutdown(false).await;
     let _ = actor_task.await;
 }
 
@@ -147,7 +147,7 @@ services:
     );
 
     // Shutdown first actor
-    handle1.shutdown().await;
+    handle1.shutdown(false).await;
     let _ = actor_task1.await;
 
     // Modify the source config file (but snapshot should be used)
@@ -184,7 +184,7 @@ services:
     );
 
     // Cleanup
-    handle2.shutdown().await;
+    handle2.shutdown(false).await;
     let _ = actor_task2.await;
 }
 
@@ -229,7 +229,7 @@ services:
         "Snapshot should be cleared"
     );
 
-    handle1.shutdown().await;
+    handle1.shutdown(false).await;
     let _ = actor_task1.await;
 
     // Create second actor with a NEW sys_env — should load fresh (no snapshot)
@@ -254,7 +254,7 @@ services:
         "After clear_snapshot, should use new sys_env"
     );
 
-    handle2.shutdown().await;
+    handle2.shutdown(false).await;
     let _ = actor_task2.await;
 }
 
@@ -291,7 +291,7 @@ services:
         "Source path should match canonical config path"
     );
 
-    handle.shutdown().await;
+    handle.shutdown(false).await;
     let _ = actor_task.await;
 }
 
@@ -324,7 +324,7 @@ services:
     handle1.mark_config_initialized().await.unwrap();
 
     // Shutdown (should save state)
-    handle1.shutdown().await;
+    handle1.shutdown(false).await;
     let _ = actor_task1.await;
 
     // Create second actor
@@ -341,7 +341,7 @@ services:
         "Service initialized state should be restored"
     );
 
-    handle2.shutdown().await;
+    handle2.shutdown(false).await;
     let _ = actor_task2.await;
 }
 
@@ -383,7 +383,7 @@ services:
     );
 
     handle1.take_snapshot_if_needed().await.unwrap();
-    handle1.shutdown().await;
+    handle1.shutdown(false).await;
     let _ = actor_task1.await;
 
     // Create second actor with a DIFFERENT sys_env (should restore snapshot's sys_env)
@@ -407,7 +407,7 @@ services:
         "Snapshot sys_env should preserve original value, not use new CLI env"
     );
 
-    handle2.shutdown().await;
+    handle2.shutdown(false).await;
     let _ = actor_task2.await;
 }
 
@@ -503,7 +503,7 @@ services:
         "Daemon process env must NOT leak into sys_env"
     );
 
-    handle.shutdown().await;
+    handle.shutdown(false).await;
     let _ = actor_task.await;
 
     unsafe {
@@ -554,7 +554,7 @@ services:
     assert_eq!(snapshot.kepler_env.get("CLI_VAR"), Some(&"from_cli".to_string()));
     assert_eq!(snapshot.kepler_env.get("ANOTHER"), Some(&"value".to_string()));
 
-    handle.shutdown().await;
+    handle.shutdown(false).await;
     let _ = actor_task.await;
 }
 
@@ -585,7 +585,7 @@ services:
             .unwrap();
 
     handle1.take_snapshot_if_needed().await.unwrap();
-    handle1.shutdown().await;
+    handle1.shutdown(false).await;
     let _ = actor_task1.await;
 
     // Second actor: restore from snapshot.
@@ -615,6 +615,6 @@ services:
         "New vars from the second CLI env must not appear when restoring from snapshot"
     );
 
-    handle2.shutdown().await;
+    handle2.shutdown(false).await;
     let _ = actor_task2.await;
 }
