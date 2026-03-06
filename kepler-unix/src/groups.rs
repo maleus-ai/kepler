@@ -42,6 +42,7 @@ pub fn getgrouplist(user: &CStr, base_gid: u32) -> Result<Vec<u32>, nix::errno::
             groups.resize(new_len, 0);
         } else {
             groups.truncate(ngroups as usize);
+            #[allow(clippy::unnecessary_cast)]
             return Ok(groups.into_iter().map(|g| g as u32).collect());
         }
     }

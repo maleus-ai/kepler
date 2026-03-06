@@ -48,6 +48,7 @@ use crate::state::ServiceStatus;
 use crate::watcher::{spawn_file_watcher, FileChangeEvent};
 use kepler_protocol::protocol::PrunedConfigInfo;
 use kepler_protocol::server::ProgressSender;
+use crate::containment::ContainmentManager;
 use crate::token_store::{SharedTokenStore, TokenContext};
 
 /// Context for post-startup work, bundling all parameters into a single struct.
@@ -77,10 +78,12 @@ pub struct ServiceOrchestrator {
     hardening: HardeningLevel,
     kepler_gid: Option<u32>,
     token_store: SharedTokenStore,
+    containment: ContainmentManager,
 }
 
 impl ServiceOrchestrator {
     /// Create a new ServiceOrchestrator
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: SharedConfigRegistry,
         exit_tx: mpsc::Sender<ProcessExitEvent>,
@@ -89,6 +92,7 @@ impl ServiceOrchestrator {
         hardening: HardeningLevel,
         kepler_gid: Option<u32>,
         token_store: SharedTokenStore,
+        containment: ContainmentManager,
     ) -> Self {
         Self {
             registry,
@@ -98,6 +102,7 @@ impl ServiceOrchestrator {
             hardening,
             kepler_gid,
             token_store,
+            containment,
         }
     }
 
@@ -1178,6 +1183,9 @@ impl ServiceOrchestrator {
                     .await
                     .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
 
+                // Clean up service cgroup
+                self.containment.cleanup_service(handle.config_hash(), service_name).await;
+
                 // Run post_stop hook (after process stopped)
                 if let Some(ref ctx) = ctx
                     && let Err(e) = self
@@ -1321,6 +1329,9 @@ impl ServiceOrchestrator {
 
             // Unload config from registry (triggers actor cleanup + save_state)
             self.registry.unload(&config_path.to_path_buf()).await;
+
+            // Clean up config-level cgroup
+            self.containment.cleanup_config(config_hash);
 
             // Remove entire state directory (logs, config snapshots, env_files, etc.)
             // Done AFTER unload so save_state in cleanup() doesn't fail
@@ -1479,6 +1490,9 @@ impl ServiceOrchestrator {
                 warn!("Failed to stop service {}: {}", service_name, e);
             }
 
+            // Clean up cgroup directory after stop
+            self.containment.cleanup_service(handle.config_hash(), service_name).await;
+
             // Run post_stop hook
             if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStop, &None, Some(&handle)).await {
                 warn!("Hook post_stop failed for {}: {}", service_name, e);
@@ -1513,11 +1527,11 @@ impl ServiceOrchestrator {
             handle.emit_event(service_name, ServiceEvent::Start).await;
 
             // Create token guard before pre_start hooks
-            if let Some(resolved) = ctx.resolved_config.as_ref() {
-                if let Err(e) = self.create_service_token_guard(&handle, service_name, resolved).await {
-                    error!("Failed to create token guard for {}, skipping restart: {}", service_name, e);
-                    continue;
-                }
+            if let Some(resolved) = ctx.resolved_config.as_ref()
+                && let Err(e) = self.create_service_token_guard(&handle, service_name, resolved).await
+            {
+                error!("Failed to create token guard for {}, skipping restart: {}", service_name, e);
+                continue;
             }
 
             // Run pre_start hook
@@ -1550,6 +1564,7 @@ impl ServiceOrchestrator {
                 }
                 Err(e) => {
                     error!("Failed to spawn service {}: {}", service_name, e);
+                    self.containment.cleanup_service(handle.config_hash(), service_name).await;
                     if let Err(err) = handle.set_service_status(service_name, ServiceStatus::Failed).await {
                         warn!("Failed to set {} to Failed: {}", service_name, err);
                     }
@@ -1697,6 +1712,9 @@ impl ServiceOrchestrator {
         stop_service(service_name, handle.clone(), None, false)
             .await
             .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
+
+        // Clean up cgroup directory after stop
+        self.containment.cleanup_service(handle.config_hash(), service_name).await;
 
         // Run post_stop hook (after process stopped)
         if let Err(e) = self
@@ -1905,14 +1923,14 @@ impl ServiceOrchestrator {
             handle.suppress_file_watcher(service_name).await;
 
             // Create new token guard before pre_restart/pre_start hooks
-            if let Some(resolved) = ctx.resolved_config.as_ref() {
-                if let Err(e) = self.create_service_token_guard(&handle, service_name, resolved).await {
-                    error!("Failed to create token guard for {}, aborting restart: {}", service_name, e);
-                    let _ = handle
-                        .set_service_status(service_name, ServiceStatus::Failed)
-                        .await;
-                    return Ok(());
-                }
+            if let Some(resolved) = ctx.resolved_config.as_ref()
+                && let Err(e) = self.create_service_token_guard(&handle, service_name, resolved).await
+            {
+                error!("Failed to create token guard for {}, aborting restart: {}", service_name, e);
+                let _ = handle
+                    .set_service_status(service_name, ServiceStatus::Failed)
+                    .await;
+                return Ok(());
             }
 
             // Run pre_restart hook
@@ -1960,6 +1978,8 @@ impl ServiceOrchestrator {
                 }
                 Err(e) => {
                     error!("Failed to restart service {}: {}", service_name, e);
+                    // Clean up cgroup from the failed spawn attempt
+                    self.containment.cleanup_service(handle.config_hash(), service_name).await;
                     let _ = handle
                         .set_service_status(service_name, ServiceStatus::Failed)
                         .await;
@@ -2078,6 +2098,9 @@ impl ServiceOrchestrator {
                     warn!("Failed to set {} to {:?}: {}", service_name, status, e);
                 }
             }
+
+            // Clean up service cgroup (process exited, not restarting)
+            self.containment.cleanup_service(handle.config_hash(), service_name).await;
         }
 
         if let Some(fd_count) = crate::fd_count::count_open_fds() {
@@ -2539,12 +2562,16 @@ impl ServiceOrchestrator {
             store_stdout,
             store_stderr,
             output_capture,
+            containment: self.containment.clone(),
+            config_hash: handle.config_hash().to_string(),
         };
 
         let process_handle = match spawn_service(spawn_params).await {
             Ok(ph) => ph,
             Err(e) => {
-                // Spawn failed — revoke the token guard (RAII Drop would also handle
+                // Spawn failed — clean up the cgroup created by prepare_spawn
+                self.containment.cleanup_service(handle.config_hash(), service_name).await;
+                // Revoke the token guard (RAII Drop would also handle
                 // this, but explicit revocation is cleaner and avoids the warning).
                 self.revoke_service_token_guard(handle, service_name).await;
                 return Err(OrchestratorError::SpawnFailed(e.to_string()));
@@ -2700,6 +2727,9 @@ impl ServiceOrchestrator {
                 });
                 continue;
             }
+
+            // Kill orphaned cgroup processes and remove cgroup directories
+            self.containment.kill_orphans_from_cgroups(&hash).await;
 
             // Revoke tokens and unload from registry BEFORE deleting state directory
             // Use the ORIGINAL source path which matches the registry key

@@ -941,8 +941,7 @@ impl ConfigActor {
                 reply,
             } => {
                 let hex = self.token_guards.get(&service_name)
-                    .map(|g| g.token_hex().ok())
-                    .flatten();
+                    .and_then(|g| g.token_hex().ok());
                 let _ = reply.send(hex);
             }
 

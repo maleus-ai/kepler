@@ -206,18 +206,15 @@ pub fn effective_groups(
     kepler_gid: Option<u32>,
     context: &str,
 ) -> Vec<String> {
-    let mut result = if groups.is_empty() && user.is_some() {
-        if let Some(kgid) = kepler_gid {
-            let user_spec = user.unwrap();
-            match compute_groups_excluding(user_spec, kgid) {
-                Ok(g) => g,
-                Err(e) => {
-                    tracing::debug!("Failed to compute groups for {}: {}", context, e);
-                    groups.to_vec()
-                }
+    let mut result = if let (true, Some(user_spec), Some(kgid)) =
+        (groups.is_empty(), user, kepler_gid)
+    {
+        match compute_groups_excluding(user_spec, kgid) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::debug!("Failed to compute groups for {}: {}", context, e);
+                groups.to_vec()
             }
-        } else {
-            groups.to_vec()
         }
     } else {
         groups.to_vec()

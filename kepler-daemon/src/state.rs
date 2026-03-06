@@ -139,11 +139,17 @@ impl From<&ServiceState> for ServiceInfo {
     }
 }
 
+/// Request to shut down a process. monitor_process sends the reply when the process is dead.
+pub struct ShutdownRequest {
+    pub signal: i32,
+    pub reply: tokio::sync::oneshot::Sender<()>,
+}
+
 /// Process handle for a running service
 /// Note: Child is not stored here - it's owned by the monitor task
 pub struct ProcessHandle {
-    /// Channel to signal shutdown to the monitor task (carries signal number, 15=SIGTERM)
-    pub shutdown_tx: Option<tokio::sync::oneshot::Sender<i32>>,
+    /// Channel to signal shutdown to the monitor task (carries ShutdownRequest)
+    pub shutdown_tx: Option<tokio::sync::oneshot::Sender<ShutdownRequest>>,
     /// Stdout capture task. Returns `Some(Vec<String>)` of raw `KEY=VALUE` lines
     /// when output capture is enabled, `None` otherwise.
     pub stdout_task: Option<JoinHandle<Option<Vec<String>>>>,
