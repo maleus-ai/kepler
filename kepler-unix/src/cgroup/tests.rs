@@ -68,6 +68,9 @@ fn test_cgroupv2_required_when_env_set() {
     let root_procs = PathBuf::from("/sys/fs/cgroup/cgroup.procs");
     std::fs::write(&root_procs, std::process::id().to_string()).unwrap();
 
+    // Give the kernel time to finish migrating all threads out of the cgroup
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
     remove_service_cgroup(&cgroup).unwrap();
     remove_config_cgroup(&root, &hash).unwrap();
     assert!(!cgroup.exists());

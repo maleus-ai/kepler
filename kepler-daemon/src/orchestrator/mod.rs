@@ -2575,10 +2575,13 @@ impl ServiceOrchestrator {
             ctx.global_log_config.as_ref(),
         );
 
+        let mut log_config = ctx.log_config.clone();
+        log_config.log_notify = Some(self.cursor_manager.get_log_notify(handle.config_path()));
+
         let spawn_params = SpawnServiceParams {
             service_name,
             spec,
-            log_config: ctx.log_config.clone(),
+            log_config,
             handle: handle.clone(),
             exit_tx: self.exit_tx.clone(),
             store_stdout,
