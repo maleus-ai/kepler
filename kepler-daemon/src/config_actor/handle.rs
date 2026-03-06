@@ -713,6 +713,21 @@ impl ConfigActorHandle {
             .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
     }
 
+    /// Reset restart count to zero
+    pub async fn reset_restart_count(&self, service_name: &str) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(ConfigCommand::ResetRestartCount {
+                service_name: service_name.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor closed".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
+    }
+
     /// Store the resolved (expanded) ServiceConfig for a service after lazy expansion,
     /// and update computed_env and working_dir in ServiceState.
     pub async fn store_resolved_config(

@@ -876,6 +876,21 @@ impl ConfigActor {
                 }
                 let _ = reply.send(result);
             }
+            ConfigCommand::ResetRestartCount {
+                service_name,
+                reply,
+            } => {
+                let result = if let Some(ss) = self.services.get_mut(&service_name) {
+                    ss.restart_count = 0;
+                    Ok(())
+                } else {
+                    Err(DaemonError::ServiceNotFound(service_name))
+                };
+                if result.is_ok() {
+                    let _ = self.save_state();
+                }
+                let _ = reply.send(result);
+            }
             ConfigCommand::StoreResolvedConfig {
                 service_name,
                 config,
