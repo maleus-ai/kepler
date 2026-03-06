@@ -262,6 +262,9 @@ pub enum ConfigCommand {
 
     // === Lifecycle ===
     Shutdown {
+        /// When true, the state directory will be removed after shutdown,
+        /// so saving state is skipped to avoid a race with remove_dir_all.
+        clean: bool,
         reply: oneshot::Sender<()>,
     },
 

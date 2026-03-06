@@ -272,7 +272,7 @@ async fn test_subscribers_cleared_on_shutdown() {
 
     assert_eq!(harness.handle().subscriber_count(), 3);
 
-    harness.handle().shutdown().await;
+    harness.handle().shutdown(false).await;
 
     // After shutdown the actor clears all subscribers
     assert_eq!(harness.handle().subscriber_count(), 0, "All subscribers cleared on shutdown");
@@ -374,7 +374,7 @@ async fn test_dep_watchers_cleared_on_shutdown() {
 
     assert_eq!(harness.handle().dep_watcher_count(), 3);
 
-    harness.handle().shutdown().await;
+    harness.handle().shutdown(false).await;
 
     assert_eq!(harness.handle().dep_watcher_count(), 0, "All dep watchers cleared on shutdown");
 }
@@ -546,7 +546,7 @@ async fn test_shutdown_full_cleanup() {
     harness.stop_service("svc-b").await.unwrap();
 
     // Shutdown the actor
-    harness.handle().shutdown().await;
+    harness.handle().shutdown(false).await;
 
     // Verify everything is cleaned up
     let counts = harness.handle().diagnostic_counts().await;
@@ -634,7 +634,7 @@ async fn test_event_sender_cleanup() {
     assert_eq!(counts.event_senders, 1, "Should have 1 event sender after remove");
 
     // Shutdown clears remaining
-    harness.handle().shutdown().await;
+    harness.handle().shutdown(false).await;
 
     let counts = harness.handle().diagnostic_counts().await;
     assert_eq!(counts.event_senders, 0, "No event senders after shutdown");

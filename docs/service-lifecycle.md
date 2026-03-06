@@ -250,6 +250,11 @@ kepler stop --clean      # Stop and run cleanup hooks
 
 Services transition: Running/Healthy/Unhealthy → Stopping → Stopped
 
+The stop behavior depends on the service's `grace_period` setting (see [Restart Configuration](configuration.md#grace-period)):
+
+- **`grace_period: "0s"` (default):** The process is force-killed immediately with SIGKILL. No SIGTERM is sent.
+- **`grace_period: "5s"` (or any non-zero value):** SIGTERM is sent first. If the process doesn't exit within the grace period, it is force-killed with SIGKILL.
+
 The `--clean` flag performs cleanup after services are stopped.
 
 ---

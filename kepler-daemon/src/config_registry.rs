@@ -105,13 +105,16 @@ impl ConfigRegistry {
         self.actors.get(&canonical_path).and_then(|cell| cell.get().cloned())
     }
 
-    /// Unload a config - stops the actor
-    pub async fn unload(&self, config_path: &PathBuf) {
+    /// Unload a config - stops the actor.
+    ///
+    /// When `clean` is true, the actor skips saving state (the state directory
+    /// will be removed immediately after by the caller).
+    pub async fn unload(&self, config_path: &PathBuf, clean: bool) {
         // Canonicalize the path
         if let Ok(canonical_path) = std::fs::canonicalize(config_path)
             && let Some((_, cell)) = self.actors.remove(&canonical_path)
             && let Some(handle) = cell.get() {
-                handle.shutdown().await;
+                handle.shutdown(clean).await;
             }
     }
 
@@ -136,7 +139,7 @@ impl ConfigRegistry {
         let handles: Vec<_> = self.all_handles();
 
         // Shutdown all in parallel
-        futures::future::join_all(handles.into_iter().map(|h| async move { h.shutdown().await })).await;
+        futures::future::join_all(handles.into_iter().map(|h| async move { h.shutdown(false).await })).await;
         self.actors.clear();
 
         paths

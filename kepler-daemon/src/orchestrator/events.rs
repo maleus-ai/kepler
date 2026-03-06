@@ -131,8 +131,13 @@ impl ServiceEventHandler {
                 restarted_service, service_name
             );
 
+            // Extract grace_period from service restart config
+            let grace_period = raw.restart.as_static()
+                .map(|r| r.grace_period())
+                .unwrap_or(std::time::Duration::ZERO);
+
             // Stop the dependent service
-            if let Err(e) = stop_service(service_name, self.handle.clone(), None, false).await {
+            if let Err(e) = stop_service(service_name, self.handle.clone(), None, false, grace_period).await {
                 warn!("Failed to stop {} for restart propagation: {}", service_name, e);
                 continue;
             }

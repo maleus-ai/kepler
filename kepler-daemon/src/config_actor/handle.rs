@@ -1178,12 +1178,15 @@ impl ConfigActorHandle {
 
     // === Lifecycle ===
 
-    /// Shutdown the actor
-    pub async fn shutdown(&self) {
+    /// Shutdown the actor.
+    ///
+    /// When `clean` is true (stop --clean), state saving is skipped entirely
+    /// because the state directory will be removed immediately after.
+    pub async fn shutdown(&self, clean: bool) {
         let (reply_tx, reply_rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(ConfigCommand::Shutdown { reply: reply_tx })
+            .send(ConfigCommand::Shutdown { clean, reply: reply_tx })
             .await;
         let _ = reply_rx.await;
     }

@@ -1444,9 +1444,10 @@ impl KeplerConfig {
         let restart = raw.restart.resolve_with_env(evaluator, ctx, config_path, &format!("{}.restart", name), &mut shared_env)?;
         // Resolve inner ConfigValue fields of RestartConfig
         let restart = match restart {
-            RestartConfig::Extended { policy, watch } => {
+            RestartConfig::Extended { policy, watch, grace_period } => {
                 let resolved_patterns = resolve_nested_vec(&watch, evaluator, ctx, config_path, &format!("{}.restart.watch", name), &mut shared_env)?;
-                RestartConfig::Extended { policy, watch: ConfigValue::wrap_vec(resolved_patterns).into() }
+                let resolved_grace_period = grace_period.resolve_with_env(evaluator, ctx, config_path, &format!("{}.restart.grace_period", name), &mut shared_env)?;
+                RestartConfig::Extended { policy, watch: ConfigValue::wrap_vec(resolved_patterns).into(), grace_period: ConfigValue::Static(resolved_grace_period) }
             }
             simple => simple,
         };
