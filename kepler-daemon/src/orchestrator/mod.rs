@@ -1201,6 +1201,11 @@ impl ServiceOrchestrator {
                         warn!("Hook post_stop failed for {}: {}", service_name, e);
                     }
 
+                // Reset restart count on manual stop
+                if let Err(e) = handle.reset_restart_count(service_name).await {
+                    warn!("Failed to reset restart count for {}: {}", service_name, e);
+                }
+
                 // Revoke token guard after post_stop hook
                 self.revoke_service_token_guard(&handle, service_name).await;
 

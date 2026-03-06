@@ -184,6 +184,10 @@ pub enum ConfigCommand {
         service_name: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    ResetRestartCount {
+        service_name: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
     /// Store the resolved (expanded) ServiceConfig for a service, and update
     /// computed_env and working_dir in its ServiceState.
     StoreResolvedConfig {
