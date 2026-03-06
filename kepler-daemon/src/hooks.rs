@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, error, info};
 
 use crate::config::{resolve_log_store, ConfigValue, HookCommand, HookList, LogConfig, ResolvableCommand, ServiceHooks};
@@ -69,6 +69,10 @@ pub struct ServiceHookParams<'a> {
     /// Injected into the hook environment as KEPLER_TOKEN so hooks can
     /// authenticate to the daemon with the service's scoped permissions.
     pub service_token: Option<String>,
+    /// Explicit socket path for the daemon.
+    /// When set, used instead of `Daemon::get_socket_path()` to avoid
+    /// reading the process-wide environment (important for parallel tests).
+    pub socket_path: Option<PathBuf>,
 }
 
 /// Types of service hooks
@@ -218,7 +222,7 @@ async fn run_hook_step(
         if let Some(ref token) = params.service_token {
             spec.environment.insert("KEPLER_TOKEN".to_string(), token.clone());
             // Ensure the hook knows where to connect back to the daemon socket.
-            if let Ok(socket_path) = crate::Daemon::get_socket_path() {
+            if let Some(ref socket_path) = params.socket_path {
                 spec.environment.insert(
                     "KEPLER_SOCKET_PATH".to_string(),
                     socket_path.to_string_lossy().into_owned(),
