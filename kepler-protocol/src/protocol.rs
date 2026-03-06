@@ -197,6 +197,16 @@ pub enum Request {
         /// Path to the config file
         config_path: PathBuf,
     },
+    /// Check if all services are quiescent (settled — nothing more will change)
+    CheckQuiescence {
+        /// Path to the config file
+        config_path: PathBuf,
+    },
+    /// Check if all services are ready (reached target state)
+    CheckReadiness {
+        /// Path to the config file
+        config_path: PathBuf,
+    },
 }
 
 impl Request {
@@ -217,6 +227,8 @@ impl Request {
             Request::LogsCursor { .. } => "LogsCursor",
             Request::Subscribe { .. } => "Subscribe",
             Request::Inspect { .. } => "Inspect",
+            Request::CheckQuiescence { .. } => "CheckQuiescence",
+            Request::CheckReadiness { .. } => "CheckReadiness",
         }
     }
 }
@@ -284,6 +296,8 @@ pub enum ResponseData {
     PrunedConfigs(Vec<PrunedConfigInfo>),
     /// Inspect output (pre-built JSON string)
     Inspect(String),
+    /// Boolean result for check commands (quiescence, readiness)
+    CheckResult(bool),
 }
 
 /// Information about a pruned config
@@ -503,6 +517,7 @@ pub enum ServicePhase {
     Starting,
     Started,
     Healthy,
+    Restarting,
     Stopping,
     Stopped,
     Cleaning,

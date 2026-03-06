@@ -13,6 +13,7 @@ pub enum ServiceStatus {
     Starting,
     Running,
     Stopping,
+    Restarting, // Being manually restarted (stop→start cycle in progress)
     Failed,    // Spawn failure or dependency permanently unsatisfied
     Healthy,   // Running + health checks passing
     Unhealthy, // Running but health checks failing
@@ -29,6 +30,7 @@ impl ServiceStatus {
             ServiceStatus::Starting => "starting",
             ServiceStatus::Running => "running",
             ServiceStatus::Stopping => "stopping",
+            ServiceStatus::Restarting => "restarting",
             ServiceStatus::Failed => "failed",
             ServiceStatus::Healthy => "healthy",
             ServiceStatus::Unhealthy => "unhealthy",
@@ -171,6 +173,7 @@ pub enum PersistedServiceStatus {
     Starting,
     Running,
     Stopping,
+    Restarting,
     Failed,
     Healthy,
     Unhealthy,
@@ -187,6 +190,7 @@ impl From<ServiceStatus> for PersistedServiceStatus {
             ServiceStatus::Starting => PersistedServiceStatus::Starting,
             ServiceStatus::Running => PersistedServiceStatus::Running,
             ServiceStatus::Stopping => PersistedServiceStatus::Stopping,
+            ServiceStatus::Restarting => PersistedServiceStatus::Restarting,
             ServiceStatus::Failed => PersistedServiceStatus::Failed,
             ServiceStatus::Healthy => PersistedServiceStatus::Healthy,
             ServiceStatus::Unhealthy => PersistedServiceStatus::Unhealthy,
@@ -205,6 +209,7 @@ impl From<PersistedServiceStatus> for ServiceStatus {
             PersistedServiceStatus::Starting => ServiceStatus::Starting,
             PersistedServiceStatus::Running => ServiceStatus::Running,
             PersistedServiceStatus::Stopping => ServiceStatus::Stopping,
+            PersistedServiceStatus::Restarting => ServiceStatus::Restarting,
             PersistedServiceStatus::Failed => ServiceStatus::Failed,
             PersistedServiceStatus::Healthy => ServiceStatus::Healthy,
             PersistedServiceStatus::Unhealthy => ServiceStatus::Unhealthy,

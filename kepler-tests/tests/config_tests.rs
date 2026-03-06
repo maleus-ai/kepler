@@ -1012,6 +1012,7 @@ fn test_service_info_serialization_with_exit_code() {
         initialized: false,
         skip_reason: None,
         fail_reason: None,
+
     };
 
     let yaml = serde_yaml::to_string(&info).unwrap();
@@ -1033,6 +1034,7 @@ fn test_service_info_serialization_none_exit_code_roundtrips() {
         initialized: false,
         skip_reason: None,
         fail_reason: None,
+
     };
 
     let yaml = serde_yaml::to_string(&info).unwrap();
@@ -1119,6 +1121,7 @@ fn test_service_info_serialization_new_fields_roundtrip() {
         initialized: false,
         skip_reason: None,
         fail_reason: None,
+
     };
 
     let yaml = serde_yaml::to_string(&info).unwrap();

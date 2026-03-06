@@ -1174,7 +1174,7 @@ impl ServiceOrchestrator {
                 }
 
                 // Stop the service
-                stop_service(service_name, handle.clone(), signal)
+                stop_service(service_name, handle.clone(), signal, false)
                     .await
                     .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
 
@@ -1429,8 +1429,12 @@ impl ServiceOrchestrator {
             (start, stop)
         };
 
-        // Suppress Quiescent/Ready signals during the stop+start cycle
-        handle.set_startup_in_progress(true).await;
+        // Mark all restarting services before the stop phase.
+        // Restarting is active and non-terminal, so quiescence/ready signals
+        // won't fire while any service is in this state.
+        for service_name in &stop_order {
+            let _ = handle.set_service_status(service_name, ServiceStatus::Restarting).await;
+        }
 
         // Phase 1: Run pre_restart hooks and stop (reverse dependency order)
         for service_name in &stop_order {
@@ -1471,7 +1475,7 @@ impl ServiceOrchestrator {
             self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart).await;
 
             // Stop process
-            if let Err(e) = stop_service(service_name, handle.clone(), None).await {
+            if let Err(e) = stop_service(service_name, handle.clone(), None, true).await {
                 warn!("Failed to stop service {}: {}", service_name, e);
             }
 
@@ -1552,9 +1556,6 @@ impl ServiceOrchestrator {
                 }
             }
         }
-
-        // Re-enable Quiescent/Ready signals now that restart is complete
-        handle.set_startup_in_progress(false).await;
 
         if restarted.is_empty() {
             Ok("No services were restarted".to_string())
@@ -1693,7 +1694,7 @@ impl ServiceOrchestrator {
             .await;
 
         // Stop the service
-        stop_service(service_name, handle.clone(), None)
+        stop_service(service_name, handle.clone(), None, false)
             .await
             .map_err(|e| OrchestratorError::StopFailed(e.to_string()))?;
 
