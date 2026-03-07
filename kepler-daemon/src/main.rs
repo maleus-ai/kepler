@@ -2124,6 +2124,7 @@ mod tests {
             signal: None,
             health_check_failures: 0,
             restart_count: 0,
+            restart_count_since_healthy: 0,
             initialized: true,
             was_healthy: false,
             skip_reason: None,

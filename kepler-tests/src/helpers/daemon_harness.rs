@@ -1167,8 +1167,21 @@ impl TestDaemonHarness {
                     .should_restart_on_exit(event.exit_code);
 
                 if should_restart {
-                    // Small delay before restart
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    // Increment restart count (also increments restart_count_since_healthy)
+                    let _ = handle.increment_restart_count(&event.service_name).await;
+
+                    // Compute backoff delay from restart config
+                    let restart_cfg = resolved;
+                    let restart_count_since_healthy = handle.get_service_state(&event.service_name).await
+                        .map(|s| s.restart_count_since_healthy)
+                        .unwrap_or(0);
+                    let delay = restart_cfg.restart.compute_restart_delay(restart_count_since_healthy);
+                    if delay.is_zero() {
+                        // Minimum 100ms delay if no backoff configured (test stability)
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    } else {
+                        tokio::time::sleep(delay).await;
+                    }
 
                     // Run on_restart hook
                     let (restart_hooks, _restart_lua_code) = resolve_hooks_for_execution(

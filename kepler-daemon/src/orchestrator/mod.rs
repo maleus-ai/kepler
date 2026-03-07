@@ -466,6 +466,7 @@ impl ServiceOrchestrator {
                     exit_code: dep_state.exit_code,
                     initialized: dep_state.initialized,
                     restart_count: dep_state.restart_count,
+                    restart_count_since_healthy: dep_state.restart_count_since_healthy,
                     env: dep_state.computed_env.clone(),
                     outputs: dep_outputs,
                 });
@@ -506,6 +507,7 @@ impl ServiceOrchestrator {
                 env: full_env,
                 initialized: state.as_ref().map(|s| s.initialized),
                 restart_count: state.as_ref().map(|s| s.restart_count),
+                restart_count_since_healthy: state.as_ref().map(|s| s.restart_count_since_healthy),
                 exit_code: state.as_ref().and_then(|s| s.exit_code),
                 status: state.as_ref().map(|s| s.status.as_str().to_string()),
                 hooks: HashMap::new(),
@@ -772,6 +774,7 @@ impl ServiceOrchestrator {
                     exit_code: dep_state.exit_code,
                     initialized: dep_state.initialized,
                     restart_count: dep_state.restart_count,
+                    restart_count_since_healthy: dep_state.restart_count_since_healthy,
                     env: dep_state.computed_env.clone(),
                     outputs: dep_outputs,
                 });
@@ -812,6 +815,7 @@ impl ServiceOrchestrator {
                 env: full_env,
                 initialized: service_state.as_ref().map(|s| s.initialized),
                 restart_count: service_state.as_ref().map(|s| s.restart_count),
+                restart_count_since_healthy: service_state.as_ref().map(|s| s.restart_count_since_healthy),
                 exit_code,
                 status: service_state.as_ref().map(|s| s.status.as_str().to_string()),
                 hooks: HashMap::new(),
@@ -1749,8 +1753,22 @@ impl ServiceOrchestrator {
         // Revoke old token guard after post_stop hook
         self.revoke_service_token_guard(&handle, service_name).await;
 
-        // Small delay between stop and start
-        tokio::time::sleep(RESTART_DELAY).await;
+        // Compute backoff delay from restart config
+        {
+            let restart_cfg = ctx.resolved_config.as_ref()
+                .map(|c| &c.restart)
+                .or_else(|| ctx.service_config.restart.as_static());
+            let restart_count_since_healthy = handle.get_service_state(service_name).await
+                .map(|s| s.restart_count_since_healthy)
+                .unwrap_or(0);
+            let delay = restart_cfg
+                .map(|r| r.compute_restart_delay(restart_count_since_healthy))
+                .unwrap_or(std::time::Duration::ZERO);
+            if !delay.is_zero() {
+                info!("Backoff delay before restart for {}: {:?}", service_name, delay);
+                tokio::time::sleep(delay).await;
+            }
+        }
 
         // Increment restart count before hooks so pre_start sees the updated value
         if let Err(e) = handle.increment_restart_count(service_name).await {
@@ -1928,8 +1946,22 @@ impl ServiceOrchestrator {
                 warn!("Failed to set {} to Starting: {}", service_name, e);
             }
 
-            // Small delay before restart
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            // Compute backoff delay from restart config
+            {
+                let restart_cfg = ctx.resolved_config.as_ref()
+                    .map(|c| &c.restart)
+                    .or_else(|| ctx.service_config.restart.as_static());
+                let restart_count_since_healthy = handle.get_service_state(service_name).await
+                    .map(|s| s.restart_count_since_healthy)
+                    .unwrap_or(0);
+                let delay = restart_cfg
+                    .map(|r| r.compute_restart_delay(restart_count_since_healthy))
+                    .unwrap_or(std::time::Duration::ZERO);
+                if !delay.is_zero() {
+                    info!("Backoff delay before restart for {}: {:?}", service_name, delay);
+                    tokio::time::sleep(delay).await;
+                }
+            }
 
             let restart_policy = ctx.resolved_config.as_ref()
                 .map(|c| *c.restart.policy())
@@ -2322,6 +2354,7 @@ impl ServiceOrchestrator {
                         exit_code: dep_state.exit_code,
                         initialized: dep_state.initialized,
                         restart_count: dep_state.restart_count,
+                        restart_count_since_healthy: dep_state.restart_count_since_healthy,
                         env: dep_state.computed_env.clone(),
                         outputs: dep_outputs,
                     });

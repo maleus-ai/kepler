@@ -127,6 +127,7 @@ Available in service-level expressions and service hook contexts:
 | `service.env` | Read-only full merged environment (raw_env + env_file + environment) |
 | `service.initialized` | Whether the service has been initialized |
 | `service.restart_count` | Number of times the service has restarted |
+| `service.restart_count_since_healthy` | Number of restarts since last healthy (resets on healthcheck pass) |
 | `service.exit_code` | Last exit code (available during restart) |
 | `service.status` | Current service status |
 | `service.hooks` | Hook step outputs (`hook_name.outputs.step_name.key`). See [Outputs](outputs.md) |
@@ -177,6 +178,7 @@ Available in all contexts (including `lua:` directive and `autostart.environment
 | `deps.NAME.exit_code` | Last exit code (`nil` if still running) |
 | `deps.NAME.initialized` | Whether the dependency has been initialized |
 | `deps.NAME.restart_count` | Number of times the dependency has restarted |
+| `deps.NAME.restart_count_since_healthy` | Number of restarts since dependency last became healthy |
 | `deps.NAME.env.VAR` | A variable from the dependency's computed environment |
 | `deps.NAME.outputs.KEY` | A named output from the dependency. See [Outputs](outputs.md) |
 

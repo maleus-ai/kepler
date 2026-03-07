@@ -219,7 +219,7 @@ restart: always              # Single flag
 restart: "on-failure|on-unhealthy"  # Combined flags (quotes required for pipe syntax)
 ```
 
-**Extended form with file watching and grace period:**
+**Extended form with file watching, grace period, and backoff:**
 
 ```yaml
 restart:
@@ -227,6 +227,9 @@ restart:
   watch:                               # Glob patterns for auto-restart
     - "src/**/*.ts"
   grace_period: "5s"                   # Time to wait after SIGTERM before SIGKILL
+  delay: "1s"                          # Base delay before restart
+  backoff: 2.0                         # Exponential backoff multiplier
+  max_delay: "30s"                     # Maximum delay cap
 ```
 
 | Flag | Description |
@@ -240,6 +243,60 @@ restart:
 Flags are combined with `|`: `"on-failure|on-unhealthy"` restarts on both non-zero exit and healthcheck failure. The `no` flag cannot be combined with other flags.
 
 > **Note:** `policy: no` cannot be combined with `watch` patterns.
+
+#### Restart Backoff
+
+The `delay`, `backoff`, and `max_delay` options control how long Kepler waits before restarting a service. Only available in the extended form.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `delay` | `duration` | `"0s"` | Base delay before restart |
+| `backoff` | `float` | `1.0` | Exponential backoff multiplier |
+| `max_delay` | `duration` | `"0s"` | Maximum delay cap (0 = no cap) |
+
+**Delay formula:** `min(delay * backoff ^ restart_count_since_healthy, max_delay)`
+
+The `restart_count_since_healthy` counter tracks restarts since the service last passed its healthcheck. It resets to 0 when the service becomes healthy, so recovered services restart quickly if they fail again later.
+
+Behavior:
+- **No `delay` configured (default):** No delay before restart (current behavior)
+- **`delay` only (no `backoff`):** Constant delay of `delay` before each restart
+- **`delay` + `backoff`:** Exponential growth — delay doubles (or multiplies by `backoff`) on each restart
+- **`delay` + `backoff` + `max_delay`:** Exponential growth capped at `max_delay`
+
+```yaml
+# No delay (default behavior)
+restart: always
+
+# Constant 2-second delay before each restart
+restart:
+  policy: on-failure
+  delay: "2s"
+
+# Exponential backoff: 1s, 2s, 4s, 8s, 16s, ...
+restart:
+  policy: on-failure
+  delay: "1s"
+  backoff: 2.0
+
+# Exponential backoff capped at 30 seconds
+restart:
+  policy: always
+  delay: "1s"
+  backoff: 2.0
+  max_delay: "30s"
+
+# Dynamic delay via expression
+restart:
+  policy: on-failure
+  delay: "${{ service.env.RESTART_DELAY or '1s' }}$"
+  backoff: 2.0
+  max_delay: "30s"
+```
+
+All three fields support `${{ }}$` expressions and `!lua` tags.
+
+Duration units: `ms` (milliseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days).
 
 #### Grace Period
 
