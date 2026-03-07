@@ -141,6 +141,7 @@ user: ${{ service.env.SERVICE_USER or "nobody" }}$
 | `service.env_file.VAR`    | Service env_file variables only                            |
 | `service.env.VAR`         | Full merged environment (raw_env + env_file + environment) |
 | `service.restart_count`   | Number of times the service has restarted                  |
+| `service.restart_count_since_healthy` | Number of restarts since last healthy (resets on healthcheck pass) |
 | `service.initialized`     | Whether the service has been initialized                   |
 | `service.exit_code`       | Last exit code (if restarting)                             |
 | `service.status`          | Current service status                                     |
@@ -171,6 +172,7 @@ user: ${{ service.env.SERVICE_USER or "nobody" }}$
 | `deps.NAME.exit_code`     | Dependency's last exit code                                |
 | `deps.NAME.initialized`   | Whether dependency has been initialized                    |
 | `deps.NAME.restart_count` | Dependency's restart count                                 |
+| `deps.NAME.restart_count_since_healthy` | Dependency's restart count since last healthy |
 | `deps.NAME.env.VAR`       | A variable from a dependency's environment                 |
 | `deps.NAME.outputs.KEY`   | A named output from a dependency service. See [Outputs](outputs.md) |
 | `global`                  | Shared mutable table (set via `lua:` directive)            |

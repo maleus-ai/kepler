@@ -78,6 +78,9 @@ pub struct ServiceState {
     pub signal: Option<i32>,
     pub health_check_failures: u32,
     pub restart_count: u32,
+    /// Restart count since last healthy status — used as backoff exponent.
+    /// Resets to 0 when the service becomes healthy.
+    pub restart_count_since_healthy: u32,
     /// Whether this service has completed its first start
     pub initialized: bool,
     /// Pre-computed environment variables for this service
@@ -105,6 +108,7 @@ impl Default for ServiceState {
             signal: None,
             health_check_failures: 0,
             restart_count: 0,
+            restart_count_since_healthy: 0,
             initialized: false,
             computed_env: HashMap::new(),
             working_dir: PathBuf::new(),
@@ -242,6 +246,8 @@ pub struct PersistedServiceState {
     pub signal: Option<i32>,
     pub health_check_failures: u32,
     pub restart_count: u32,
+    #[serde(default)]
+    pub restart_count_since_healthy: u32,
     pub initialized: bool,
     #[serde(default)]
     pub was_healthy: bool,
@@ -262,6 +268,7 @@ impl From<&ServiceState> for PersistedServiceState {
             signal: state.signal,
             health_check_failures: state.health_check_failures,
             restart_count: state.restart_count,
+            restart_count_since_healthy: state.restart_count_since_healthy,
             initialized: state.initialized,
             was_healthy: state.was_healthy,
             skip_reason: state.skip_reason.clone(),
@@ -290,6 +297,7 @@ impl PersistedServiceState {
             signal: self.signal,
             health_check_failures: self.health_check_failures,
             restart_count: 0,
+            restart_count_since_healthy: 0,
             initialized: self.initialized,
             computed_env,
             working_dir,
