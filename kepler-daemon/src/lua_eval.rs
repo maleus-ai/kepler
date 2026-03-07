@@ -65,6 +65,7 @@ pub struct DepInfo {
     pub exit_code: Option<i32>,
     pub initialized: bool,
     pub restart_count: u32,
+    pub restart_count_since_healthy: u32,
     /// Dependency's computed environment variables
     pub env: HashMap<String, String>,
     /// Final combined outputs (process + resolved) for dependent service access
@@ -80,6 +81,7 @@ pub struct ServiceEvalContext {
     pub env: HashMap<String, String>,
     pub initialized: Option<bool>,
     pub restart_count: Option<u32>,
+    pub restart_count_since_healthy: Option<u32>,
     pub exit_code: Option<i32>,
     pub status: Option<String>,
     /// Hook outputs: `hook_name -> step_name -> { key -> value }`
@@ -633,6 +635,9 @@ impl LuaEvaluator {
         if let Some(restart_count) = svc.restart_count {
             table.raw_set("restart_count", restart_count)?;
         }
+        if let Some(restart_count_since_healthy) = svc.restart_count_since_healthy {
+            table.raw_set("restart_count_since_healthy", restart_count_since_healthy)?;
+        }
         if let Some(exit_code) = svc.exit_code {
             table.raw_set("exit_code", exit_code)?;
         }
@@ -713,6 +718,7 @@ impl LuaEvaluator {
             }
             dep_table.raw_set("initialized", dep.initialized)?;
             dep_table.raw_set("restart_count", dep.restart_count)?;
+            dep_table.raw_set("restart_count_since_healthy", dep.restart_count_since_healthy)?;
 
             // Add dep.env sub-table (frozen)
             let dep_env = self.create_frozen_env(&dep.env)?;

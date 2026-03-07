@@ -334,6 +334,7 @@ pub async fn run_service_hook(
                 env: params.env.clone(),
                 initialized: state.as_ref().map(|s| s.initialized),
                 restart_count: state.as_ref().map(|s| s.restart_count),
+                restart_count_since_healthy: state.as_ref().map(|s| s.restart_count_since_healthy),
                 exit_code: state.as_ref().and_then(|s| s.exit_code),
                 status: state.as_ref().map(|s| s.status.as_str().to_string()),
                 hooks: hooks_ctx,

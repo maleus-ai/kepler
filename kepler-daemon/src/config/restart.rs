@@ -137,12 +137,28 @@ pub enum RestartConfig {
         watch: ConfigValue<Vec<ConfigValue<String>>>,
         #[serde(default = "default_grace_period")]
         grace_period: ConfigValue<String>,
+        #[serde(default = "default_delay")]
+        delay: ConfigValue<String>,
+        #[serde(default = "default_backoff")]
+        backoff: ConfigValue<f64>,
+        #[serde(default = "default_delay")]
+        max_delay: ConfigValue<String>,
     },
 }
 
 /// Default grace period value for extended restart config
 fn default_grace_period() -> ConfigValue<String> {
     ConfigValue::Static("0s".to_string())
+}
+
+/// Default delay value (no delay)
+fn default_delay() -> ConfigValue<String> {
+    ConfigValue::Static("0s".to_string())
+}
+
+/// Default backoff multiplier (no exponential growth)
+fn default_backoff() -> ConfigValue<f64> {
+    ConfigValue::Static(1.0)
 }
 
 impl<'de> Deserialize<'de> for RestartConfig {
@@ -167,6 +183,12 @@ impl<'de> Deserialize<'de> for RestartConfig {
                     watch: ConfigValue<Vec<ConfigValue<String>>>,
                     #[serde(default = "default_grace_period")]
                     grace_period: ConfigValue<String>,
+                    #[serde(default = "default_delay")]
+                    delay: ConfigValue<String>,
+                    #[serde(default = "default_backoff")]
+                    backoff: ConfigValue<f64>,
+                    #[serde(default = "default_delay")]
+                    max_delay: ConfigValue<String>,
                 }
                 let helper: ExtendedHelper =
                     serde_yaml::from_value(value).map_err(serde::de::Error::custom)?;
@@ -174,6 +196,9 @@ impl<'de> Deserialize<'de> for RestartConfig {
                     policy: helper.policy,
                     watch: helper.watch,
                     grace_period: helper.grace_period,
+                    delay: helper.delay,
+                    backoff: helper.backoff,
+                    max_delay: helper.max_delay,
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -227,6 +252,73 @@ impl RestartConfig {
                     None => Vec::new(), // Dynamic — not yet resolved
                 }
             }
+        }
+    }
+
+    /// Get the base restart delay.
+    ///
+    /// Returns `Duration::ZERO` for `Simple` form or if the value is dynamic/invalid.
+    pub fn delay(&self) -> Duration {
+        match self {
+            RestartConfig::Simple(_) => Duration::ZERO,
+            RestartConfig::Extended { delay, .. } => {
+                delay
+                    .as_static()
+                    .and_then(|s| parse_duration(s).ok())
+                    .unwrap_or(Duration::ZERO)
+            }
+        }
+    }
+
+    /// Get the backoff multiplier.
+    ///
+    /// Returns `1.0` for `Simple` form or if the value is dynamic.
+    pub fn backoff_factor(&self) -> f64 {
+        match self {
+            RestartConfig::Simple(_) => 1.0,
+            RestartConfig::Extended { backoff, .. } => {
+                backoff.as_static().copied().unwrap_or(1.0)
+            }
+        }
+    }
+
+    /// Get the maximum restart delay cap.
+    ///
+    /// Returns `Duration::ZERO` for `Simple` form or if the value is dynamic/invalid.
+    pub fn max_delay(&self) -> Duration {
+        match self {
+            RestartConfig::Simple(_) => Duration::ZERO,
+            RestartConfig::Extended { max_delay, .. } => {
+                max_delay
+                    .as_static()
+                    .and_then(|s| parse_duration(s).ok())
+                    .unwrap_or(Duration::ZERO)
+            }
+        }
+    }
+
+    /// Compute the restart delay using exponential backoff.
+    ///
+    /// Formula: `min(delay * backoff^restart_count_since_healthy, max_delay)`
+    /// - If only `delay` is set (no backoff): constant delay = `delay`
+    /// - If `backoff` is set without `delay`: no delay
+    /// - If `max_delay` is set: clamps the computed delay
+    /// - Default: no delay
+    pub fn compute_restart_delay(&self, restart_count_since_healthy: u32) -> Duration {
+        let base = self.delay();
+        if base.is_zero() {
+            return Duration::ZERO;
+        }
+        let factor = self.backoff_factor();
+        let multiplier = factor.powi(restart_count_since_healthy as i32);
+        let delay_secs = base.as_secs_f64() * multiplier;
+        let computed = Duration::from_secs_f64(delay_secs.max(0.0));
+
+        let cap = self.max_delay();
+        if !cap.is_zero() && computed > cap {
+            cap
+        } else {
+            computed
         }
     }
 

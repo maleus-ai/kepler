@@ -246,6 +246,9 @@ impl TestServiceBuilder {
             policy,
             watch: ConfigValue::wrap_vec(watch).into(),
             grace_period: ConfigValue::Static("0s".to_string()),
+            delay: ConfigValue::Static("0s".to_string()),
+            backoff: ConfigValue::Static(1.0),
+            max_delay: ConfigValue::Static("0s".to_string()),
         };
         self
     }
@@ -256,6 +259,28 @@ impl TestServiceBuilder {
             policy,
             watch: ConfigValue::default(),
             grace_period: ConfigValue::Static(grace_period.to_string()),
+            delay: ConfigValue::Static("0s".to_string()),
+            backoff: ConfigValue::Static(1.0),
+            max_delay: ConfigValue::Static("0s".to_string()),
+        };
+        self
+    }
+
+    /// Set restart policy with backoff configuration
+    pub fn with_restart_and_backoff(
+        mut self,
+        policy: RestartPolicy,
+        delay: &str,
+        backoff: f64,
+        max_delay: &str,
+    ) -> Self {
+        self.restart = RestartConfig::Extended {
+            policy,
+            watch: ConfigValue::default(),
+            grace_period: ConfigValue::Static("0s".to_string()),
+            delay: ConfigValue::Static(delay.to_string()),
+            backoff: ConfigValue::Static(backoff),
+            max_delay: ConfigValue::Static(max_delay.to_string()),
         };
         self
     }
