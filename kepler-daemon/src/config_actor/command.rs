@@ -303,4 +303,14 @@ pub enum ConfigCommand {
         overrides: HashMap<String, String>,
         reply: oneshot::Sender<()>,
     },
+
+    // === Monitor Commands ===
+    /// Store (or clear) the monitor task handle
+    SetMonitorTask {
+        handle: Option<JoinHandle<()>>,
+    },
+    /// Check if a monitor task is running
+    HasMonitorTask {
+        reply: oneshot::Sender<bool>,
+    },
 }

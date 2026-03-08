@@ -16,6 +16,7 @@ This document describes Kepler's internal implementation, security measures, and
 - [Lua Scripting Security](#lua-scripting-security)
 - [Process Security](#process-security)
 - [Log Storage](#log-storage)
+- [Resource Monitoring](#resource-monitoring)
 - [Security Implementation Details](#security-implementation-details)
 
 ---
@@ -59,7 +60,8 @@ The daemon stores all state in `/var/lib/kepler/` (or `$KEPLER_DAEMON_PATH` if s
         ├── state.json          # Runtime service state
         ├── source_path.txt     # Original config location
         ├── env_files/          # Copied env files
-        └── logs/               # Per-service log files
+        ├── logs/               # Per-service log files
+        └── monitor.db          # Resource metrics (if monitoring enabled)
 ```
 
 ### Security
@@ -693,6 +695,63 @@ For follow mode, the client subscribes to `SubscribeLogs` notifications and issu
 
 ---
 
+## Resource Monitoring
+
+Kepler includes an optional resource monitoring subsystem that periodically samples CPU and memory usage for running services.
+
+### Architecture
+
+When `kepler.monitor` is configured, a single monitor task is spawned per config on the first service start. The task loops on the configured interval, collecting metrics for all running services and writing them to SQLite.
+
+```mermaid
+flowchart LR
+    M[Monitor Task] -->|"enumerate PIDs"| C[Containment Manager]
+    M -->|"get running services"| A[Config Actor]
+    M -->|"refresh + read"| S[sysinfo]
+    M -->|"batch INSERT"| DB[(monitor.db)]
+```
+
+### Metric Collection
+
+For each running service, the monitor:
+
+1. **Enumerates PIDs** — Uses cgroup v2 (if available) to get all PIDs in the service's cgroup, or falls back to the main PID + sysinfo process tree walking
+2. **Refreshes process info** — Calls `sysinfo` to get current CPU and memory stats for the enumerated PIDs
+3. **Aggregates** — Sums CPU percentage, RSS memory, and virtual memory across the entire process tree
+4. **Stores** — Batch-inserts all service metrics into SQLite in a single transaction
+
+### Storage
+
+Metrics are stored in `<state_dir>/monitor.db` using SQLite with WAL mode for concurrent read/write performance. The schema:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `timestamp` | `INTEGER` | Unix epoch milliseconds |
+| `service` | `TEXT` | Service name |
+| `cpu_percent` | `REAL` | Total CPU usage across process tree |
+| `memory_rss` | `INTEGER` | Total RSS memory in bytes |
+| `memory_vss` | `INTEGER` | Total virtual memory in bytes |
+| `pids` | `TEXT` | JSON array of PIDs (e.g., `[1234,1235]`) |
+
+Indexes on `timestamp` and `(service, timestamp)` enable efficient range queries.
+
+### Retention
+
+- **No retention configured**: Database is cleared (`DELETE FROM metrics`) when the monitor starts
+- **With retention**: Rows older than the retention period are deleted on startup
+
+The database file is automatically removed by `stop --clean` since it resides inside the state directory.
+
+### Relevant Files
+
+| File | Description |
+|------|-------------|
+| `kepler-daemon/src/monitor.rs` | Monitor loop, SQLite schema, metric collection |
+| `kepler-daemon/src/containment.rs` | `enumerate_service_pids()` for cgroup PID enumeration |
+| `kepler-daemon/src/config/mod.rs` | `MonitorConfig` struct |
+
+---
+
 ## Security Implementation Details
 
 > For user-facing security documentation (ACL configuration, hardening flags, permissions), see [Security Model](security-model.md).
@@ -823,6 +882,7 @@ See [Security Model](security-model.md#kepler-group-stripping) for user-facing d
 | Dependency graph | `kepler-daemon/src/deps.rs` | Start/stop ordering, condition checking |
 | Service orchestration | `kepler-daemon/src/orchestrator/` | Event handling, restart propagation |
 | Health checking | `kepler-daemon/src/health.rs` | Health check loop, event emission |
+| Resource monitoring | `kepler-daemon/src/monitor.rs` | CPU/memory metric collection to SQLite |
 | Log writing | `kepler-daemon/src/logs/log_writer.rs` | Per-service LogWriter |
 | Log reading | `kepler-daemon/src/logs/log_reader.rs` | SqliteLogReader (read-only queries, filter injection) |
 

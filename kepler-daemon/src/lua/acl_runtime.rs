@@ -532,6 +532,7 @@ pub fn build_authorizer_context(
         Request::SubscribeLogs { .. } => ("logs", HashMap::new()),
         Request::CheckQuiescence { .. } => ("quiescence", HashMap::new()),
         Request::CheckReadiness { .. } => ("readiness", HashMap::new()),
+        Request::MonitorMetrics { .. } => ("monitor", HashMap::new()),
         // Rights-free requests — no authorizer evaluation
         Request::Ping
         | Request::ListConfigs

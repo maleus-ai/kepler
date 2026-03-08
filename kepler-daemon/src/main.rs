@@ -677,7 +677,8 @@ fn extract_config_path(request: &Request) -> Option<&PathBuf> {
         | Request::Subscribe { config_path, .. }
         | Request::CheckQuiescence { config_path, .. }
         | Request::CheckReadiness { config_path, .. }
-        | Request::UserRights { config_path, .. } => Some(config_path),
+        | Request::UserRights { config_path, .. }
+        | Request::MonitorMetrics { config_path, .. } => Some(config_path),
         Request::Inspect { config_path } => Some(config_path),
         Request::Status { config_path } => config_path.as_ref(),
         _ => None,
@@ -1520,6 +1521,31 @@ async fn handle_request(
             };
 
             Response::ok_with_data(ResponseData::UserRights(rights))
+        }
+
+        Request::MonitorMetrics { config_path, service, since, limit } => {
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+            let state_dir = match registry.get(&config_path) {
+                Some(h) => h.get_state_dir().await,
+                None => match compute_state_dir(&config_path) {
+                    Some(d) => d,
+                    None => return Response::error("Config not loaded and no state directory found"),
+                },
+            };
+            match tokio::task::spawn_blocking(move || {
+                let conn = kepler_daemon::monitor::open_monitor_db_readonly(&state_dir)?;
+                match since {
+                    Some(since_ts) => kepler_daemon::monitor::query_history(&conn, service.as_deref(), since_ts, limit),
+                    None => kepler_daemon::monitor::query_latest(&conn, service.as_deref()),
+                }
+            }).await {
+                Ok(Ok(entries)) => Response::ok_with_data(ResponseData::MonitorMetrics(entries)),
+                Ok(Err(e)) => Response::error(format!("Monitor query failed: {}", e)),
+                Err(e) => Response::error(format!("Monitor query task failed: {}", e)),
+            }
         }
     }
 }
@@ -2542,6 +2568,7 @@ mod tests {
             autostart: Default::default(),
             storage: Default::default(),
             acl,
+            monitor: None,
         });
         let config = KeplerConfig {
             version: None,

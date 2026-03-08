@@ -892,6 +892,29 @@ impl serde::Serialize for AutostartConfig {
 }
 
 // ============================================================================
+// MonitorConfig
+// ============================================================================
+
+/// Configuration for resource monitoring (CPU/memory) of running services.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MonitorConfig {
+    #[serde(
+        deserialize_with = "duration::deserialize_duration",
+        serialize_with = "duration::serialize_duration"
+    )]
+    pub interval: std::time::Duration,
+
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "duration::deserialize_optional_duration",
+        serialize_with = "duration::serialize_optional_duration"
+    )]
+    pub retention: Option<std::time::Duration>,
+}
+
+// ============================================================================
 // KeplerGlobalConfig
 // ============================================================================
 
@@ -948,6 +971,10 @@ pub struct KeplerGlobalConfig {
     /// When absent, only the config owner and root have access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acl: Option<AclConfig>,
+
+    /// Resource monitoring configuration (CPU/memory metrics to SQLite).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<MonitorConfig>,
 }
 
 /// Root configuration structure
@@ -1729,6 +1756,11 @@ impl KeplerConfig {
     /// Get global autostart setting (defaults to false)
     pub fn global_autostart(&self) -> bool {
         self.kepler.as_ref().map(|k| k.autostart.is_enabled()).unwrap_or(false)
+    }
+
+    /// Get global monitor configuration
+    pub fn global_monitor(&self) -> Option<&MonitorConfig> {
+        self.kepler.as_ref().and_then(|k| k.monitor.as_ref())
     }
 
     /// Get autostart environment config (if WithEnvironment variant)
