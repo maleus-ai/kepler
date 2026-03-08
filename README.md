@@ -13,6 +13,7 @@ A process orchestrator for managing application lifecycles. Kepler provides a si
 - **Environment isolation** -- Controlled env with `${{ }}$` inline Lua expressions and `.env` file support
 - **Lua scripting** -- Dynamic config generation with `!lua` tags and `${{ }}$` expressions
 - **Privilege dropping** -- Run services as specific users/groups with resource limits
+- **Resource monitoring** -- Periodic CPU/memory metrics per service, stored in SQLite
 - **Colored persistent logs** -- Real-time streaming with per-service colors, persisted to disk
 
 ## Installation

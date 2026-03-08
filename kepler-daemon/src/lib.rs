@@ -20,6 +20,7 @@ pub mod health;
 pub mod hooks;
 pub mod logs;
 pub mod lua;
+pub mod monitor;
 pub mod orchestrator;
 pub mod outputs;
 pub mod permissions;

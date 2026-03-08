@@ -74,6 +74,7 @@ impl TestConfigBuilder {
             output_max_size: None,
             autostart: self.autostart.clone(),
             acl: None,
+            monitor: None,
         })
     }
 
