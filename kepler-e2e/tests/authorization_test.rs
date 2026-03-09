@@ -426,7 +426,7 @@ async fn test_acl_grants_scoped_access() -> E2eResult<()> {
         output.stdout
     );
 
-    // testuser2 has service:logs in ACL — should be able to view logs
+    // testuser2 has logs:read in ACL — should be able to view logs
     let output = harness
         .run_cli_as_user(
             "testuser2",
@@ -466,7 +466,7 @@ async fn test_acl_denies_unlisted_operations() -> E2eResult<()> {
         .wait_for_service_status(&config_path, "acl-svc", "running", Duration::from_secs(10))
         .await?;
 
-    // testuser2 has config:status + service:logs but NOT service:stop
+    // testuser2 has config:status + logs:read but NOT service:stop
     let output = harness
         .run_cli_as_user(
             "testuser2",

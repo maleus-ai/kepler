@@ -1,7 +1,3 @@
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   on-unhealthy-service:
     command: ["sh", "-c", "echo ON_UNHEALTHY_START; sleep 300"]

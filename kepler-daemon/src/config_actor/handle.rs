@@ -16,10 +16,10 @@ use crate::errors::{DaemonError, Result};
 use crate::events::{ServiceEvent, ServiceEventReceiver};
 use crate::hardening::HardeningLevel;
 use crate::lua_eval::{ConditionResult, EvalContext};
-use crate::logs::LogWriterConfig;
+use crate::logs::LogStoreHandle;
 use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
 use crate::watcher::FileWatcherHandle;
-use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
+use kepler_protocol::protocol::ServiceInfo;
 
 use super::command::{ConfigCommand, OutputTasks};
 use super::context::{ConfigEvent, DiagnosticCounts, HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
@@ -47,6 +47,9 @@ pub struct ConfigActorHandle {
     /// Permission ceiling inherited from the caller's token (if token-started).
     /// When set, child tokens cannot exceed these scopes.
     permission_ceiling: Option<std::collections::HashSet<&'static str>>,
+    /// Direct handle to the log store — allows shutdown_discard() without
+    /// going through the config actor's message queue.
+    log_store: crate::logs::LogStoreHandle,
 }
 
 impl ConfigActorHandle {
@@ -64,6 +67,7 @@ impl ConfigActorHandle {
         owner_user: Option<String>,
         acl: Option<crate::acl::ResolvedAcl>,
         permission_ceiling: Option<std::collections::HashSet<&'static str>>,
+        log_store: crate::logs::LogStoreHandle,
     ) -> Self {
         Self {
             config_path,
@@ -77,7 +81,16 @@ impl ConfigActorHandle {
             owner_user,
             acl,
             permission_ceiling,
+            log_store,
         }
+    }
+
+    /// Immediately set the discard flag on the log store and interrupt any
+    /// running SQLite query. This does NOT go through the config actor's
+    /// message queue, so it takes effect even while the actor is busy.
+    pub fn shutdown_discard_log_store(&self) {
+        self.log_store.shutdown_discard();
+        self.log_store.shutdown();
     }
 
     /// Get the config path this handle is for
@@ -218,105 +231,6 @@ impl ConfigActorHandle {
             .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
     }
 
-    /// Get logs
-    pub async fn get_logs(&self, service: Option<String>, lines: usize, no_hooks: bool) -> Vec<LogEntry> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(ConfigCommand::GetLogs {
-                service,
-                lines,
-                no_hooks,
-                reply: reply_tx,
-            })
-            .await
-            .is_err()
-        {
-            warn!("Config actor closed, cannot send GetLogs");
-        }
-        reply_rx.await.unwrap_or_default()
-    }
-
-    /// Get logs with bounded reading (prevents OOM with large log files)
-    pub async fn get_logs_bounded(
-        &self,
-        service: Option<String>,
-        lines: usize,
-        max_bytes: Option<usize>,
-        no_hooks: bool,
-    ) -> Vec<LogEntry> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(ConfigCommand::GetLogsBounded {
-                service,
-                lines,
-                max_bytes,
-                no_hooks,
-                reply: reply_tx,
-            })
-            .await
-            .is_err()
-        {
-            warn!("Config actor closed, cannot send GetLogsBounded");
-        }
-        reply_rx.await.unwrap_or_default()
-    }
-
-    /// Get logs with mode support (head, tail, or all)
-    pub async fn get_logs_with_mode(
-        &self,
-        service: Option<String>,
-        lines: usize,
-        max_bytes: Option<usize>,
-        mode: LogMode,
-        no_hooks: bool,
-    ) -> Vec<LogEntry> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(ConfigCommand::GetLogsWithMode {
-                service,
-                lines,
-                max_bytes,
-                mode,
-                no_hooks,
-                reply: reply_tx,
-            })
-            .await
-            .is_err()
-        {
-            warn!("Config actor closed, cannot send GetLogsWithMode");
-        }
-        reply_rx.await.unwrap_or_default()
-    }
-
-    /// Get logs with true pagination (reads efficiently from disk with offset/limit)
-    pub async fn get_logs_paginated(
-        &self,
-        service: Option<String>,
-        offset: usize,
-        limit: usize,
-        no_hooks: bool,
-    ) -> (Vec<LogEntry>, bool) {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(ConfigCommand::GetLogsPaginated {
-                service,
-                offset,
-                limit,
-                no_hooks,
-                reply: reply_tx,
-            })
-            .await
-            .is_err()
-        {
-            warn!("Config actor closed, cannot send GetLogsPaginated");
-        }
-        reply_rx.await.unwrap_or_else(|_| (Vec::new(), false))
-    }
-
     /// Get a service's raw (unexpanded) configuration
     pub async fn get_service_config(&self, service_name: &str) -> Option<RawServiceConfig> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -376,8 +290,8 @@ impl ConfigActorHandle {
         reply_rx.await.unwrap_or_else(|_| PathBuf::from("."))
     }
 
-    /// Get log config
-    pub async fn get_log_config(&self) -> Option<LogWriterConfig> {
+    /// Get log store handle
+    pub async fn get_log_store(&self) -> Option<LogStoreHandle> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .tx

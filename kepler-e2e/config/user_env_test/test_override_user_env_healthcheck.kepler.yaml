@@ -4,9 +4,6 @@
 # The healthcheck asserts that USER == testuser1 (from /etc/passwd, not from
 # the service's explicit environment). If user_identity works, the check
 # passes -> service becomes healthy.
-kepler:
-  logs:
-    buffer_size: 0
 
 services:
   user-env-svc:

@@ -2,10 +2,6 @@
 # The setup service has a hook that emits outputs, and an `outputs:` map that references them.
 # The app service depends on setup and accesses the declared outputs.
 
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   setup:
     command: ["sh", "-c", "echo SETUP_DONE; exit 0"]

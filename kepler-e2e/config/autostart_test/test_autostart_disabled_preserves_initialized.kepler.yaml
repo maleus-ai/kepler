@@ -1,8 +1,5 @@
 # Test that service.initialized persists across daemon restart when autostart is false.
 # After daemon restart + kepler start, the init hook should NOT re-fire.
-kepler:
-  logs:
-    buffer_size: 0
 
 services:
   init-service:

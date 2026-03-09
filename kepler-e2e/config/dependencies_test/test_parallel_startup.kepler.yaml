@@ -6,10 +6,6 @@
 # Each worker sleeps 3s then echoes a marker. If parallel, all markers
 # appear after ~3s total. If sequential, it would take ~9s.
 
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   root:
     command: ["sh", "-c", "echo ROOT_STARTED; sleep 300"]

@@ -16,9 +16,9 @@ pub type OutputTasks = (Option<JoinHandle<Option<Vec<String>>>>, Option<JoinHand
 use crate::errors::Result;
 use crate::events::{ServiceEvent, ServiceEventReceiver};
 use crate::lua_eval::{ConditionResult, EvalContext};
-use crate::logs::LogWriterConfig;
+use crate::logs::LogStoreHandle;
 use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
-use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
+use kepler_protocol::protocol::ServiceInfo;
 
 /// Commands for a single config's actor
 pub enum ConfigCommand {
@@ -30,34 +30,6 @@ pub enum ConfigCommand {
     GetServiceStatus {
         service: Option<String>,
         reply: oneshot::Sender<Result<HashMap<String, ServiceInfo>>>,
-    },
-    GetLogs {
-        service: Option<String>,
-        lines: usize,
-        no_hooks: bool,
-        reply: oneshot::Sender<Vec<LogEntry>>,
-    },
-    GetLogsBounded {
-        service: Option<String>,
-        lines: usize,
-        max_bytes: Option<usize>,
-        no_hooks: bool,
-        reply: oneshot::Sender<Vec<LogEntry>>,
-    },
-    GetLogsWithMode {
-        service: Option<String>,
-        lines: usize,
-        max_bytes: Option<usize>,
-        mode: LogMode,
-        no_hooks: bool,
-        reply: oneshot::Sender<Vec<LogEntry>>,
-    },
-    GetLogsPaginated {
-        service: Option<String>,
-        offset: usize,
-        limit: usize,
-        no_hooks: bool,
-        reply: oneshot::Sender<(Vec<LogEntry>, bool)>,
     },
     GetServiceConfig {
         service_name: String,
@@ -73,7 +45,7 @@ pub enum ConfigCommand {
         reply: oneshot::Sender<PathBuf>,
     },
     GetLogConfig {
-        reply: oneshot::Sender<LogWriterConfig>,
+        reply: oneshot::Sender<LogStoreHandle>,
     },
     GetGlobalLogConfig {
         reply: oneshot::Sender<Option<LogConfig>>,

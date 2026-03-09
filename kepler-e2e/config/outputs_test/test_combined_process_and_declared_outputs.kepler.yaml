@@ -2,10 +2,6 @@
 # Process emits outputs via ::output::, and service also has an `outputs:` map.
 # Declared outputs should override process outputs on conflict.
 
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   combined:
     command: ["sh", "-c", "echo '::output::process_key=process_val'; echo '::output::shared_key=from_process'; echo COMBINED_DONE; exit 0"]

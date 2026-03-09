@@ -8,7 +8,7 @@
 
 use kepler_daemon::config::{HookCommand, HookList, KeplerConfig, ServiceHooks};
 use kepler_daemon::config_registry::ConfigRegistry;
-use kepler_daemon::logs::{LogReader, LogStream};
+use kepler_daemon::logs::SqliteLogReader;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::process::ProcessExitEvent;
 use kepler_daemon::state::ServiceStatus;
@@ -34,9 +34,9 @@ fn create_test_orchestrator(
     let registry = Arc::new(ConfigRegistry::new());
     let (exit_tx, exit_rx) = mpsc::channel(32);
     let (restart_tx, restart_rx) = mpsc::channel(32);
-    let cursor_manager = Arc::new(kepler_daemon::cursor::CursorManager::new(300));
+    let log_notifiers: kepler_daemon::orchestrator::LogNotifiers = Arc::new(dashmap::DashMap::new());
     let token_store = Arc::new(kepler_daemon::token_store::TokenStore::new());
-    let orchestrator = ServiceOrchestrator::new(registry.clone(), exit_tx, restart_tx, cursor_manager, kepler_daemon::hardening::HardeningLevel::None, None, token_store, kepler_daemon::containment::ContainmentManager::detect());
+    let orchestrator = ServiceOrchestrator::new(registry.clone(), exit_tx, restart_tx, log_notifiers, kepler_daemon::hardening::HardeningLevel::None, None, token_store, kepler_daemon::containment::ContainmentManager::detect());
     (orchestrator, registry, exit_rx, restart_rx)
 }
 
@@ -116,12 +116,13 @@ services:
     );
 
     // Read the service's stderr log — the error should be there
-    let log_config = handle.get_log_config().await.expect("Log config should exist");
-    let reader = LogReader::new(log_config.logs_dir);
+    let log_store = handle.get_log_store().await.expect("Log store should exist");
+    log_store.wait_flush_sync();
+    let reader = SqliteLogReader::new(log_store.db_path().to_path_buf(), log_store.storage_mode());
     let entries = reader.tail(100, Some("test"), true);
     let stderr_entries: Vec<_> = entries
         .iter()
-        .filter(|e| e.stream == LogStream::Stderr)
+        .filter(|e| &*e.level == "err")
         .collect();
 
     assert!(
@@ -186,16 +187,14 @@ async fn test_hook_failure_logged_to_stderr() {
         "Service should reach Failed status due to hook failure"
     );
 
-    // Give a moment for logs to be flushed
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     // Read the service's stderr log — should contain the hook failure error
-    let log_config = handle.get_log_config().await.expect("Log config should exist");
-    let reader = LogReader::new(log_config.logs_dir);
+    let log_store = handle.get_log_store().await.expect("Log store should exist");
+    log_store.wait_flush_sync();
+    let reader = SqliteLogReader::new(log_store.db_path().to_path_buf(), log_store.storage_mode());
     let entries = reader.tail(100, Some("test"), true);
     let stderr_entries: Vec<_> = entries
         .iter()
-        .filter(|e| e.stream == LogStream::Stderr)
+        .filter(|e| &*e.level == "err")
         .collect();
 
     assert!(
@@ -256,12 +255,13 @@ services:
     );
 
     // Read the service's stderr log — should contain the Lua error
-    let log_config = handle.get_log_config().await.expect("Log config should exist");
-    let reader = LogReader::new(log_config.logs_dir);
+    let log_store = handle.get_log_store().await.expect("Log store should exist");
+    log_store.wait_flush_sync();
+    let reader = SqliteLogReader::new(log_store.db_path().to_path_buf(), log_store.storage_mode());
     let entries = reader.tail(100, Some("test"), true);
     let stderr_entries: Vec<_> = entries
         .iter()
-        .filter(|e| e.stream == LogStream::Stderr)
+        .filter(|e| &*e.level == "err")
         .collect();
 
     assert!(

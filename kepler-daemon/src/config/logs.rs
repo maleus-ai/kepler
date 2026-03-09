@@ -3,7 +3,7 @@
 use serde::Deserialize;
 
 use super::ConfigValue;
-use super::resources::parse_memory_limit;
+use super::duration::parse_duration;
 
 /// Log retention policy on service stop
 #[derive(Debug, Clone, Copy, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
@@ -88,7 +88,10 @@ impl LogRetentionConfig {
     }
 }
 
-/// Log configuration
+/// Log configuration — used at both global (kepler.logs) and per-service level.
+///
+/// `flush_interval` and `retention_period` are only meaningful at the global level
+/// (one LogStore actor per config). At the service level they are parsed but ignored.
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogConfig {
@@ -98,15 +101,23 @@ pub struct LogConfig {
     /// Nested log retention settings
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<LogRetentionConfig>,
-    /// Maximum size of a single log file before truncation (e.g., "10M", "100K")
-    /// If not specified, logs are unbounded (no truncation).
+    /// How often the writer flushes batched inserts to SQLite.
+    /// Duration string: "10ms", "100ms", "1s". Default: "100ms".
+    /// Only meaningful at global level (kepler.logs).
+    /// Supports `!lua` and `${{ }}$` expressions.
     #[serde(default)]
-    pub max_size: ConfigValue<Option<String>>,
-    /// Buffer size in bytes before flushing to disk.
-    /// Default: 0 (synchronous writes, safest for crash recovery).
-    /// 0 = write directly to disk (synchronous writes, safest for crash recovery).
+    pub flush_interval: ConfigValue<Option<String>>,
+    /// Time-based log retention. On config load, logs older than this are deleted.
+    /// Duration string: "1h", "24h", "7d", "30d". Default: none (keep forever).
+    /// Only meaningful at global level (kepler.logs).
+    /// Supports `!lua` and `${{ }}$` expressions.
     #[serde(default)]
-    pub buffer_size: ConfigValue<Option<usize>>,
+    pub retention_period: ConfigValue<Option<String>>,
+    /// Maximum number of log entries buffered in memory before forcing a flush.
+    /// Default: 4096. Only meaningful at global level (kepler.logs).
+    /// Supports `!lua` and `${{ }}$` expressions.
+    #[serde(default)]
+    pub batch_size: ConfigValue<Option<usize>>,
 }
 
 impl LogConfig {
@@ -147,10 +158,29 @@ impl LogConfig {
         self.retention.as_ref().and_then(|r| r.on_skipped)
     }
 
-    /// Parse max_size into bytes. Returns None if max_size is not specified (unbounded).
-    pub fn max_size_bytes(&self) -> Option<u64> {
-        self.max_size.as_static()
-            .and_then(|v| v.as_ref())
-            .and_then(|s| parse_memory_limit(s).ok())
+    /// Get flush_interval as a Duration, parsing from the static string value.
+    /// Returns None if unset, dynamic (not yet resolved), or invalid.
+    pub fn flush_interval(&self) -> Option<std::time::Duration> {
+        self.flush_interval
+            .as_static()
+            .and_then(|opt| opt.as_deref())
+            .and_then(|s| parse_duration(s).ok())
+    }
+
+    /// Get retention_period as a Duration, parsing from the static string value.
+    /// Returns None if unset, dynamic (not yet resolved), or invalid.
+    pub fn retention_period(&self) -> Option<std::time::Duration> {
+        self.retention_period
+            .as_static()
+            .and_then(|opt| opt.as_deref())
+            .and_then(|s| parse_duration(s).ok())
+    }
+
+    /// Get batch_size from the static value.
+    /// Returns None if unset, dynamic (not yet resolved).
+    pub fn batch_size(&self) -> Option<usize> {
+        self.batch_size
+            .as_static()
+            .and_then(|opt| *opt)
     }
 }

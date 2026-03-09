@@ -7,26 +7,31 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::config::{resolve_log_buffer_size, resolve_log_max_size, ConfigValue, DependencyConfig, EnvironmentEntries, KeplerConfig, ServiceConfig};
-use crate::hardening::HardeningLevel;
+use crate::config::{
+    ConfigValue, DependencyConfig, EnvironmentEntries, KeplerConfig, ServiceConfig,
+};
 use crate::deps::{get_start_order, is_condition_met, is_failure_handled};
-use crate::lua_eval::{ConditionResult, EvalContext, LuaEvaluator};
 use crate::errors::{DaemonError, Result};
-use crate::events::{service_event_channel, ServiceEventMessage, ServiceEventSender};
-use crate::logs::{LogReader, LogWriterConfig, DEFAULT_BUFFER_SIZE};
+use crate::events::{ServiceEventMessage, ServiceEventSender, service_event_channel};
+use crate::hardening::HardeningLevel;
+use crate::logs::LogStoreHandle;
+use crate::lua_eval::{ConditionResult, EvalContext, LuaEvaluator};
 use crate::persistence::{ConfigPersistence, ExpandedConfigSnapshot};
 use crate::state::{
     PersistedConfigState, PersistedServiceState, ProcessHandle, ServiceState, ServiceStatus,
 };
 use crate::watcher::FileWatcherHandle;
-use kepler_protocol::protocol::{LogEntry, LogMode, ServiceInfo};
+use kepler_protocol::protocol::ServiceInfo;
 
 use super::command::ConfigCommand;
-use super::context::{ConfigEvent, DiagnosticCounts, HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
+use super::context::{
+    ConfigEvent, DiagnosticCounts, HealthCheckUpdate, ServiceContext, ServiceStatusChange,
+    TaskHandleType,
+};
 use super::handle::ConfigActorHandle;
 
 use crate::config::DynamicExpr;
@@ -45,7 +50,7 @@ pub struct ConfigActor {
     config: KeplerConfig,
     config_dir: PathBuf,
     services: HashMap<String, ServiceState>,
-    log_config: LogWriterConfig,
+    log_store: LogStoreHandle,
     initialized: bool,
 
     /// Cached resolved (expanded) ServiceConfigs per service.
@@ -114,6 +119,9 @@ pub struct ConfigActor {
     /// Set when Shutdown{clean: true} is processed. Tells cleanup() to skip
     /// save_state — the state directory is about to be removed.
     clean_shutdown: bool,
+    /// Deferred reply for clean shutdown — sent after cleanup() finishes
+    /// so the caller knows the log store Connection is closed.
+    shutdown_reply: Option<oneshot::Sender<()>>,
 
     rx: mpsc::Receiver<ConfigCommand>,
 }
@@ -144,7 +152,11 @@ impl ConfigActor {
             if e.kind() == std::io::ErrorKind::NotFound {
                 DaemonError::ConfigNotFound(config_path.clone())
             } else {
-                DaemonError::Internal(format!("Failed to canonicalize '{}': {}", config_path.display(), e))
+                DaemonError::Internal(format!(
+                    "Failed to canonicalize '{}': {}",
+                    config_path.display(),
+                    e
+                ))
             }
         })?;
 
@@ -179,265 +191,310 @@ impl ConfigActor {
         // Persist owner_uid early so that even if config parsing fails below,
         // the owner can still run stop --clean on the broken config.
         if let Some((uid, _)) = config_owner {
-            let mut early_state = persistence.load_state()
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| crate::state::PersistedConfigState {
+            let mut early_state = persistence.load_state().ok().flatten().unwrap_or_else(|| {
+                crate::state::PersistedConfigState {
                     services: HashMap::new(),
                     config_initialized: false,
                     snapshot_time: chrono::Utc::now().timestamp(),
                     owner_uid: None,
-                });
+                }
+            });
             early_state.owner_uid = Some(uid);
             let _ = persistence.save_state(&early_state);
         }
 
         // Check if we have an existing expanded config snapshot
-        let (config, config_dir, services, initialized, snapshot_taken, restored_from_snapshot, resolved_kepler_env, owner_uid, owner_gid, resolved_hardening, evaluator, permission_ceiling) =
-            if let Ok(Some(snapshot)) = persistence.load_expanded_config() {
-                info!(
-                    "Restoring config from snapshot (taken at {})",
-                    snapshot.snapshot_time
-                );
+        let (
+            config,
+            config_dir,
+            services,
+            initialized,
+            snapshot_taken,
+            restored_from_snapshot,
+            resolved_kepler_env,
+            owner_uid,
+            owner_gid,
+            resolved_hardening,
+            evaluator,
+            permission_ceiling,
+        ) = if let Ok(Some(snapshot)) = persistence.load_expanded_config() {
+            info!(
+                "Restoring config from snapshot (taken at {})",
+                snapshot.snapshot_time
+            );
 
-                // Load persisted state if available
-                let persisted_state = persistence.load_state().ok().flatten();
+            // Load persisted state if available
+            let persisted_state = persistence.load_state().ok().flatten();
 
-                // Restore service states from snapshot + persisted state
-                // computed_env and working_dir start empty — they are built lazily
-                // at service start time via ${{}}$ expansion.
-                let services = snapshot
-                    .config
-                    .services
-                    .keys()
-                    .map(|name| {
-                        let computed_env = HashMap::new();
-                        let working_dir = snapshot.config_dir.clone();
+            // Restore service states from snapshot + persisted state
+            // computed_env and working_dir start empty — they are built lazily
+            // at service start time via ${{}}$ expansion.
+            let services = snapshot
+                .config
+                .services
+                .keys()
+                .map(|name| {
+                    let computed_env = HashMap::new();
+                    let working_dir = snapshot.config_dir.clone();
 
-                        // Restore runtime state if available
-                        let state = if let Some(ref ps) = persisted_state {
-                            if let Some(ss) = ps.services.get(name) {
-                                ss.to_service_state(computed_env, working_dir)
-                            } else {
-                                ServiceState {
-                                    computed_env,
-                                    working_dir,
-                                    ..Default::default()
-                                }
-                            }
+                    // Restore runtime state if available
+                    let state = if let Some(ref ps) = persisted_state {
+                        if let Some(ss) = ps.services.get(name) {
+                            ss.to_service_state(computed_env, working_dir)
                         } else {
                             ServiceState {
                                 computed_env,
                                 working_dir,
                                 ..Default::default()
                             }
-                        };
+                        }
+                    } else {
+                        ServiceState {
+                            computed_env,
+                            working_dir,
+                            ..Default::default()
+                        }
+                    };
 
-                        (name.clone(), state)
-                    })
-                    .collect();
+                    (name.clone(), state)
+                })
+                .collect();
 
-                let initialized = persisted_state
-                    .as_ref()
-                    .map(|ps| ps.config_initialized)
-                    .unwrap_or(false);
+            let initialized = persisted_state
+                .as_ref()
+                .map(|ps| ps.config_initialized)
+                .unwrap_or(false);
 
-                let restored_sys_env = snapshot.kepler_env;
-                let owner_uid = snapshot.owner_uid;
-                let owner_gid = snapshot.owner_gid;
-                let restored_hardening = snapshot.hardening
-                    .as_deref()
-                    .and_then(|s| s.parse::<HardeningLevel>().ok());
-                let restored_permission_ceiling: Option<std::collections::HashSet<&'static str>> = snapshot.permission_ceiling
-                    .map(|v| v.into_iter().filter_map(|s| crate::permissions::intern_scope(&s)).collect());
+            let restored_sys_env = snapshot.kepler_env;
+            let owner_uid = snapshot.owner_uid;
+            let owner_gid = snapshot.owner_gid;
+            let restored_hardening = snapshot
+                .hardening
+                .as_deref()
+                .and_then(|s| s.parse::<HardeningLevel>().ok());
+            let restored_permission_ceiling: Option<std::collections::HashSet<&'static str>> =
+                snapshot.permission_ceiling.map(|v| {
+                    v.into_iter()
+                        .filter_map(|s| crate::permissions::intern_scope(&s))
+                        .collect()
+                });
 
-                let config = snapshot.config;
+            let config = snapshot.config;
 
-                // After restoring config from snapshot, create evaluator for runtime use
-                let evaluator = LuaEvaluator::new().map_err(|e| DaemonError::Internal(
-                    format!("Failed to create Lua evaluator: {}", e),
-                ))?;
-                if let Some(ref code) = config.lua
-                    && let Err(e) = evaluator.load_inline(code) {
-                        warn!("Failed to load lua: block from snapshot (runtime Lua evals may fail): {}", e);
-                    }
+            // After restoring config from snapshot, create evaluator for runtime use
+            let evaluator = LuaEvaluator::new().map_err(|e| {
+                DaemonError::Internal(format!("Failed to create Lua evaluator: {}", e))
+            })?;
+            if let Some(ref code) = config.lua
+                && let Err(e) = evaluator.load_inline(code)
+            {
+                warn!(
+                    "Failed to load lua: block from snapshot (runtime Lua evals may fail): {}",
+                    e
+                );
+            }
 
-                (
-                    config,
-                    snapshot.config_dir,
-                    services,
-                    initialized,
-                    true,  // snapshot was already taken
-                    true,  // restored from snapshot
-                    restored_sys_env,
-                    owner_uid,
-                    owner_gid,
-                    restored_hardening,
-                    Some(evaluator),
-                    restored_permission_ceiling,
-                )
-            } else {
-                // No snapshot - parse fresh from source
-                info!("Loading config fresh from source (no snapshot)");
+            (
+                config,
+                snapshot.config_dir,
+                services,
+                initialized,
+                true, // snapshot was already taken
+                true, // restored from snapshot
+                restored_sys_env,
+                owner_uid,
+                owner_gid,
+                restored_hardening,
+                Some(evaluator),
+                restored_permission_ceiling,
+            )
+        } else {
+            // No snapshot - parse fresh from source
+            info!("Loading config fresh from source (no snapshot)");
 
-                let mut cli_env = match sys_env {
-                    Some(env) => env,
-                    None => {
-                        warn!("No sys_env provided and no snapshot exists; using empty environment");
-                        HashMap::new()
-                    }
-                };
-                // Defense-in-depth: strip KEPLER_TOKEN from the CLI environment so it
-                // is not baked into the config snapshot. The authoritative strip point
-                // is in the orchestrator's resolve_service_env_and_config (computed_env)
-                // and spawn_service (spec.environment), which cover both fresh loads
-                // and snapshot restores.
-                cli_env.remove("KEPLER_TOKEN");
-                cli_env.remove("KEPLER_SOCKET_PATH");
-
-                // Read original file contents
-                let contents = std::fs::read(&canonical_path).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", canonical_path.display(), e)))?;
-
-                // Copy config to secure location
-                let copied_config_path = state_dir.join("config.yaml");
-                #[cfg(unix)]
-                {
-                    use std::io::Write;
-                    use std::os::unix::fs::OpenOptionsExt;
-                    let mut file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .mode(0o600)
-                        .open(&copied_config_path)
-                        .map_err(DaemonError::ConfigCopy)?;
-                    file.write_all(&contents).map_err(DaemonError::ConfigCopy)?;
+            let mut cli_env = match sys_env {
+                Some(env) => env,
+                None => {
+                    warn!("No sys_env provided and no snapshot exists; using empty environment");
+                    HashMap::new()
                 }
-                #[cfg(not(unix))]
-                {
-                    std::fs::write(&copied_config_path, &contents)
-                        .map_err(DaemonError::ConfigCopy)?;
-                }
+            };
+            // Defense-in-depth: strip KEPLER_TOKEN from the CLI environment so it
+            // is not baked into the config snapshot. The authoritative strip point
+            // is in the orchestrator's resolve_service_env_and_config (computed_env)
+            // and spawn_service (spec.environment), which cover both fresh loads
+            // and snapshot restores.
+            cli_env.remove("KEPLER_TOKEN");
+            cli_env.remove("KEPLER_SOCKET_PATH");
 
-                // Parse config from the secure copy (baking with cli_env initially)
-                // Map error to show the original config path, not the internal copy
-                let mut config = KeplerConfig::load(&copied_config_path, &cli_env)
-                    .map_err(|e| match e {
-                        DaemonError::ConfigParse { source, .. } => DaemonError::ConfigParse {
-                            path: canonical_path.clone(),
-                            source,
-                        },
-                        other => other,
-                    })?;
+            // Read original file contents
+            let contents = std::fs::read(&canonical_path).map_err(|e| {
+                DaemonError::Internal(format!(
+                    "Failed to read '{}': {}",
+                    canonical_path.display(),
+                    e
+                ))
+            })?;
 
-                // Create the LuaEvaluator that the actor will own for its lifetime.
-                // This is the same evaluator later used by handle_lua_eval() for runtime conditions.
-                let evaluator = LuaEvaluator::new().map_err(|e| DaemonError::Internal(
-                    format!("Failed to create Lua evaluator: {}", e),
-                ))?;
-                if let Some(ref code) = config.lua {
-                    evaluator.load_inline(code).map_err(|e| DaemonError::LuaError {
+            // Copy config to secure location
+            let copied_config_path = state_dir.join("config.yaml");
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&copied_config_path)
+                    .map_err(DaemonError::ConfigCopy)?;
+                file.write_all(&contents).map_err(DaemonError::ConfigCopy)?;
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::write(&copied_config_path, &contents).map_err(DaemonError::ConfigCopy)?;
+            }
+
+            // Parse config from the secure copy (baking with cli_env initially)
+            // Map error to show the original config path, not the internal copy
+            let mut config =
+                KeplerConfig::load(&copied_config_path, &cli_env).map_err(|e| match e {
+                    DaemonError::ConfigParse { source, .. } => DaemonError::ConfigParse {
+                        path: canonical_path.clone(),
+                        source,
+                    },
+                    other => other,
+                })?;
+
+            // Create the LuaEvaluator that the actor will own for its lifetime.
+            // This is the same evaluator later used by handle_lua_eval() for runtime conditions.
+            let evaluator = LuaEvaluator::new().map_err(|e| {
+                DaemonError::Internal(format!("Failed to create Lua evaluator: {}", e))
+            })?;
+            if let Some(ref code) = config.lua {
+                evaluator
+                    .load_inline(code)
+                    .map_err(|e| DaemonError::LuaError {
                         path: canonical_path.clone(),
                         message: format!("Error in lua: block: {}", e),
                     })?;
-                }
+            }
 
-                // Resolve kepler.environment using the actor's evaluator
-                let resolved_kepler_env = Self::compute_kepler_env(&config, &cli_env, &evaluator)?;
+            // Resolve kepler.environment using the actor's evaluator
+            let resolved_kepler_env = Self::compute_kepler_env(&config, &cli_env, &evaluator)?;
 
-                // Bake default user into services based on CLI user
-                if let Some((uid, gid)) = config_owner {
-                    config.resolve_default_user(uid, gid);
-                }
+            // Bake default user into services based on CLI user
+            if let Some((uid, gid)) = config_owner {
+                config.resolve_default_user(uid, gid);
+            }
 
-                // Get config directory
-                let config_dir = canonical_path
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from("."));
+            // Get config directory
+            let config_dir = canonical_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
 
-                // Copy env_files to state directory when autostart is enabled,
-                // so they survive even if the originals are deleted before snapshot time.
-                if config.global_autostart() {
-                    let _ = persistence.copy_env_files(&config.services, &config_dir);
-                }
+            // Copy env_files to state directory when autostart is enabled,
+            // so they survive even if the originals are deleted before snapshot time.
+            if config.global_autostart() {
+                let _ = persistence.copy_env_files(&config.services, &config_dir);
+            }
 
-                // Load persisted state if available — even without a snapshot (autostart
-                // disabled), permanent flags like `service.initialized` must survive
-                // daemon restarts so that `${{ not service.initialized }}$` hooks don't
-                // re-fire on every `kepler start`.
-                let persisted_state = persistence.load_state().ok().flatten();
+            // Load persisted state if available — even without a snapshot (autostart
+            // disabled), permanent flags like `service.initialized` must survive
+            // daemon restarts so that `${{ not service.initialized }}$` hooks don't
+            // re-fire on every `kepler start`.
+            let persisted_state = persistence.load_state().ok().flatten();
 
-                // Initialize service states with empty computed_env and working_dir.
-                // These are built lazily at service start time via ${{}}$ expansion.
-                // Only restore permanent flags (initialized) from persisted state —
-                // runtime state (status, pid, etc.) is not restored since the config
-                // is being loaded fresh without autostart.
-                let services = config
-                    .services
-                    .keys()
-                    .map(|name| {
-                        let initialized = persisted_state
-                            .as_ref()
-                            .and_then(|ps| ps.services.get(name))
-                            .map(|ss| ss.initialized)
-                            .unwrap_or(false);
-                        let state = ServiceState {
-                            computed_env: HashMap::new(),
-                            working_dir: config_dir.clone(),
-                            initialized,
-                            ..Default::default()
-                        };
-                        (name.clone(), state)
-                    })
-                    .collect();
+            // Initialize service states with empty computed_env and working_dir.
+            // These are built lazily at service start time via ${{}}$ expansion.
+            // Only restore permanent flags (initialized) from persisted state —
+            // runtime state (status, pid, etc.) is not restored since the config
+            // is being loaded fresh without autostart.
+            let services = config
+                .services
+                .keys()
+                .map(|name| {
+                    let initialized = persisted_state
+                        .as_ref()
+                        .and_then(|ps| ps.services.get(name))
+                        .map(|ss| ss.initialized)
+                        .unwrap_or(false);
+                    let state = ServiceState {
+                        computed_env: HashMap::new(),
+                        working_dir: config_dir.clone(),
+                        initialized,
+                        ..Default::default()
+                    };
+                    (name.clone(), state)
+                })
+                .collect();
 
-                let config_initialized = persisted_state
-                    .as_ref()
-                    .map(|ps| ps.config_initialized)
-                    .unwrap_or(false);
+            let config_initialized = persisted_state
+                .as_ref()
+                .map(|ps| ps.config_initialized)
+                .unwrap_or(false);
 
-                (
-                    config,
-                    config_dir,
-                    services,
-                    config_initialized,
-                    false, // snapshot not yet taken
-                    false, // not restored from snapshot
-                    resolved_kepler_env,
-                    config_owner.map(|(uid, _)| uid),
-                    config_owner.map(|(_, gid)| gid),
-                    hardening,
-                    Some(evaluator),
-                    permission_ceiling,
-                )
-            };
+            (
+                config,
+                config_dir,
+                services,
+                config_initialized,
+                false, // snapshot not yet taken
+                false, // not restored from snapshot
+                resolved_kepler_env,
+                config_owner.map(|(uid, _)| uid),
+                config_owner.map(|(_, gid)| gid),
+                hardening,
+                Some(evaluator),
+                permission_ceiling,
+            )
+        };
 
         // Create log config (writers are created per-task, no shared state)
         let logs_dir = state_dir.join("logs");
-        let log_config = Self::create_log_config(&logs_dir, &config);
+        let log_store = Self::create_log_store(&logs_dir, &config);
 
         // Create channels
         let (tx, rx) = mpsc::channel(256);
         let subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<ConfigEvent>>>> =
             Arc::new(Mutex::new(Vec::new()));
-        let dep_watchers: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let dep_watchers: Arc<
+            Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServiceStatusChange>>>>,
+        > = Arc::new(Mutex::new(HashMap::new()));
 
         // Resolve owner username from UID via passwd lookup
-        let owner_user = owner_uid.and_then(|uid|
+        let owner_user = owner_uid.and_then(|uid| {
             nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
-                .ok().flatten().map(|u| u.name)
-        );
+                .ok()
+                .flatten()
+                .map(|u| u.name)
+        });
 
         // Resolve ACL from config (if kepler.acl is present)
-        let resolved_acl = config.kepler.as_ref()
+        let resolved_acl = config
+            .kepler
+            .as_ref()
             .and_then(|k| k.acl.as_ref())
             .map(crate::acl::ResolvedAcl::from_config)
             .transpose()
             .map_err(|e| DaemonError::Config(format!("ACL resolution failed: {}", e)))?;
 
-        let handle = ConfigActorHandle::new(canonical_path.clone(), hash.clone(), tx, subscribers.clone(), dep_watchers.clone(), owner_uid, owner_gid, resolved_hardening, owner_user, resolved_acl, permission_ceiling.clone());
+        let handle = ConfigActorHandle::new(
+            canonical_path.clone(),
+            hash.clone(),
+            tx,
+            subscribers.clone(),
+            dep_watchers.clone(),
+            owner_uid,
+            owner_gid,
+            resolved_hardening,
+            owner_user,
+            resolved_acl,
+            permission_ceiling.clone(),
+            log_store.clone(),
+        );
 
         let actor = ConfigActor {
             config_path: canonical_path,
@@ -445,7 +502,7 @@ impl ConfigActor {
             config,
             config_dir,
             services,
-            log_config,
+            log_store,
             initialized,
             resolved_configs: HashMap::new(),
             processes: HashMap::new(),
@@ -473,24 +530,29 @@ impl ConfigActor {
             startup_in_progress: false,
             cached_topo_order: None,
             clean_shutdown: false,
+            shutdown_reply: None,
             rx,
         };
 
         Ok((handle, actor))
     }
 
-    /// Create a log config with size and buffer settings from config.
-    /// Uses truncation if max_size is specified, otherwise unbounded.
-    fn create_log_config(logs_dir: &Path, config: &KeplerConfig) -> LogWriterConfig {
-        let global_logs = config.global_logs();
+    /// Create the log store actor from global settings.
+    fn create_log_store(logs_dir: &Path, config: &KeplerConfig) -> LogStoreHandle {
+        let flush_interval = config.log_flush_interval();
+        let batch_size = config.log_batch_size();
+        let storage_mode = config.storage_mode();
+        let db_path = logs_dir.join("logs.db");
 
-        // Get max size from global config (None = unbounded)
-        let max_size = resolve_log_max_size(None, global_logs);
+        let handle = LogStoreHandle::spawn(db_path, flush_interval, batch_size, storage_mode, None);
 
-        // Get buffer size (default to 8KB for better performance)
-        let buffer_size = resolve_log_buffer_size(None, global_logs, DEFAULT_BUFFER_SIZE);
+        // Apply retention period cleanup on startup
+        if let Some(period) = config.log_retention_period() {
+            let cutoff = chrono::Utc::now().timestamp_millis() - period.as_millis() as i64;
+            handle.cleanup_before(cutoff);
+        }
 
-        LogWriterConfig::with_options(logs_dir.to_path_buf(), max_size, buffer_size)
+        handle
     }
 
     /// Run the actor event loop
@@ -498,7 +560,12 @@ impl ConfigActor {
         info!("ConfigActor started for {:?}", self.config_path);
         while let Some(cmd) = self.rx.recv().await {
             // Handle EvalIfCondition directly — forwards to the worker, never blocks
-            if let ConfigCommand::EvalIfCondition { expr, context, reply } = cmd {
+            if let ConfigCommand::EvalIfCondition {
+                expr,
+                context,
+                reply,
+            } = cmd
+            {
                 self.handle_lua_eval(*expr, *context, reply);
                 continue;
             }
@@ -507,7 +574,13 @@ impl ConfigActor {
             }
         }
         info!("ConfigActor stopped for {:?}", self.config_path);
-        self.cleanup();
+        self.cleanup().await;
+        // Send deferred shutdown reply after cleanup (for clean shutdown).
+        // This ensures the log store Connection is closed before the caller
+        // proceeds to remove_dir_all.
+        if let Some(reply) = self.shutdown_reply.take() {
+            let _ = reply.send(());
+        }
     }
 
     /// Forward a Lua eval request to the dedicated worker thread.
@@ -536,15 +609,17 @@ impl ConfigActor {
                             }
                         };
                         if let Some(ref code) = config_lua
-                            && let Err(err) = e.load_inline(code) {
-                                tracing::error!("Failed to load Lua code: {}", err);
-                                while let Ok(req) = rx.try_recv() {
-                                    let _ = req.reply.send(Err(DaemonError::Internal(
-                                        format!("Lua initialization failed: {}", err),
-                                    )));
-                                }
-                                return;
+                            && let Err(err) = e.load_inline(code)
+                        {
+                            tracing::error!("Failed to load Lua code: {}", err);
+                            while let Ok(req) = rx.try_recv() {
+                                let _ = req.reply.send(Err(DaemonError::Internal(format!(
+                                    "Lua initialization failed: {}",
+                                    err
+                                ))));
                             }
+                            return;
+                        }
                         e
                     }
                 };
@@ -561,18 +636,22 @@ impl ConfigActor {
                             Ok(mlua::VmState::Continue)
                         }
                     });
-                    let result = evaluator.eval_condition_expr(&req.expr, &req.context)
+                    let result = evaluator
+                        .eval_condition_expr(&req.expr, &req.context)
                         .map_err(|e| DaemonError::Internal(format!("Lua eval failed: {}", e)));
                     evaluator.remove_interrupt();
                     let _ = req.reply.send(result);
                 }
-
             });
             self.lua_eval_tx = Some(tx);
         }
 
         if let Some(ref tx) = self.lua_eval_tx {
-            let _ = tx.send(LuaEvalRequest { expr, context, reply });
+            let _ = tx.send(LuaEvalRequest {
+                expr,
+                context,
+                reply,
+            });
         }
     }
 
@@ -589,46 +668,6 @@ impl ConfigActor {
             }
             ConfigCommand::GetServiceStatus { service, reply } => {
                 let result = self.get_service_status(service.as_deref());
-                let _ = reply.send(result);
-            }
-            ConfigCommand::GetLogs {
-                service,
-                lines,
-                no_hooks,
-                reply,
-            } => {
-                let result = self.get_logs(service.as_deref(), lines, no_hooks);
-                let _ = reply.send(result);
-            }
-            ConfigCommand::GetLogsBounded {
-                service,
-                lines,
-                max_bytes,
-                no_hooks,
-                reply,
-            } => {
-                let result = self.get_logs_bounded(service.as_deref(), lines, max_bytes, no_hooks);
-                let _ = reply.send(result);
-            }
-            ConfigCommand::GetLogsWithMode {
-                service,
-                lines,
-                max_bytes,
-                mode,
-                no_hooks,
-                reply,
-            } => {
-                let result = self.get_logs_with_mode(service.as_deref(), lines, max_bytes, mode, no_hooks);
-                let _ = reply.send(result);
-            }
-            ConfigCommand::GetLogsPaginated {
-                service,
-                offset,
-                limit,
-                no_hooks,
-                reply,
-            } => {
-                let result = self.get_logs_paginated(service.as_deref(), offset, limit, no_hooks);
                 let _ = reply.send(result);
             }
             ConfigCommand::GetServiceConfig {
@@ -648,7 +687,7 @@ impl ConfigActor {
                 let _ = reply.send(self.persistence.state_dir().to_path_buf());
             }
             ConfigCommand::GetLogConfig { reply } => {
-                let _ = reply.send(self.log_config.clone());
+                let _ = reply.send(self.log_store.clone());
             }
             ConfigCommand::GetGlobalLogConfig { reply } => {
                 let _ = reply.send(self.config.global_logs().cloned());
@@ -709,11 +748,19 @@ impl ConfigActor {
             }
 
             ConfigCommand::CheckQuiescence { reply } => {
-                let result = if self.startup_in_progress { false } else { self.compute_quiescence() };
+                let result = if self.startup_in_progress {
+                    false
+                } else {
+                    self.compute_quiescence()
+                };
                 let _ = reply.send(result);
             }
             ConfigCommand::CheckReadiness { reply } => {
-                let result = if self.startup_in_progress { false } else { self.compute_ready() };
+                let result = if self.startup_in_progress {
+                    false
+                } else {
+                    self.compute_ready()
+                };
                 let _ = reply.send(result);
             }
             ConfigCommand::RecheckReadyQuiescent => {
@@ -910,12 +957,10 @@ impl ConfigActor {
                 self.resolved_configs.insert(service_name, *config);
             }
             ConfigCommand::ClearServiceLogs { service_name } => {
-                let reader = LogReader::new(self.log_config.logs_dir.clone());
-                reader.clear_service(&service_name);
+                self.log_store.clear_service(&service_name);
             }
             ConfigCommand::ClearServiceLogsPrefix { prefix } => {
-                let reader = LogReader::new(self.log_config.logs_dir.clone());
-                reader.clear_service_prefix(&prefix);
+                self.log_store.clear_service_prefix(&prefix);
             }
 
             // === Process Handle Commands ===
@@ -962,7 +1007,9 @@ impl ConfigActor {
                 service_name,
                 reply,
             } => {
-                let hex = self.token_guards.get(&service_name)
+                let hex = self
+                    .token_guards
+                    .get(&service_name)
                     .and_then(|g| g.token_hex().ok());
                 let _ = reply.send(hex);
             }
@@ -1037,12 +1084,15 @@ impl ConfigActor {
             ConfigCommand::Shutdown { clean, reply } => {
                 if clean {
                     // State dir will be removed — skip save to avoid racing
-                    // with remove_dir_all (cleanup() also skips via this flag)
+                    // with remove_dir_all (cleanup() also skips via this flag).
+                    // Defer reply until after cleanup() so the caller knows
+                    // the log store Connection is closed before remove_dir_all.
                     self.clean_shutdown = true;
+                    self.shutdown_reply = Some(reply);
                 } else {
                     let _ = self.save_state();
+                    let _ = reply.send(());
                 }
-                let _ = reply.send(());
                 return true;
             }
 
@@ -1085,7 +1135,10 @@ impl ConfigActor {
                     if let Err(e) = sender.try_send(msg) {
                         match e {
                             tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                                warn!("Event channel full for service '{}', dropping event", service_name);
+                                warn!(
+                                    "Event channel full for service '{}', dropping event",
+                                    service_name
+                                );
                             }
                             tokio::sync::mpsc::error::TrySendError::Closed(_) => {
                                 warn!("Event channel closed for service '{}'", service_name);
@@ -1112,7 +1165,10 @@ impl ConfigActor {
             ConfigCommand::SetEventHandlerSpawned => {
                 self.event_handler_spawned = true;
             }
-            ConfigCommand::StoreEventHandlerTasks { handler, forwarders } => {
+            ConfigCommand::StoreEventHandlerTasks {
+                handler,
+                forwarders,
+            } => {
                 // Abort previous event handler/forwarders if any
                 if let Some(old) = self.event_handler_task.take() {
                     old.abort();
@@ -1151,7 +1207,10 @@ impl ConfigActor {
                         owner_uid: self.owner_uid,
                         owner_gid: self.owner_gid,
                         hardening: self.hardening.map(|h| h.to_string()),
-                        permission_ceiling: self.permission_ceiling.as_ref().map(|s| s.iter().map(|s| s.to_string()).collect()),
+                        permission_ceiling: self
+                            .permission_ceiling
+                            .as_ref()
+                            .map(|s| s.iter().map(|s| s.to_string()).collect()),
                     };
                     if let Err(e) = self.persistence.save_expanded_config(&snapshot) {
                         warn!("Failed to re-save snapshot after MergeKeplerEnv: {}", e);
@@ -1197,7 +1256,10 @@ impl ConfigActor {
             owner_uid: self.owner_uid,
             owner_gid: self.owner_gid,
             hardening: self.hardening.map(|h| h.to_string()),
-            permission_ceiling: self.permission_ceiling.as_ref().map(|s| s.iter().map(|s| s.to_string()).collect()),
+            permission_ceiling: self
+                .permission_ceiling
+                .as_ref()
+                .map(|s| s.iter().map(|s| s.to_string()).collect()),
         };
 
         // Save the snapshot
@@ -1239,7 +1301,7 @@ impl ConfigActor {
             resolved_config,
             config_dir: self.config_dir.clone(),
             state_dir: self.persistence.state_dir().to_path_buf(),
-            log_config: self.log_config.clone(),
+            log_store: self.log_store.clone(),
             global_log_config: self.config.global_logs().cloned(),
             env: service_state.computed_env.clone(),
             working_dir: service_state.working_dir.clone(),
@@ -1266,73 +1328,16 @@ impl ConfigActor {
         }
     }
 
-    fn get_logs(&self, service: Option<&str>, lines: usize, no_hooks: bool) -> Vec<LogEntry> {
-        let reader = LogReader::new(self.log_config.logs_dir.clone());
-        reader
-            .tail(lines, service, no_hooks)
-            .into_iter()
-            .map(|l| l.into())
-            .collect()
-    }
-
-    fn get_logs_bounded(
-        &self,
-        service: Option<&str>,
-        lines: usize,
-        max_bytes: Option<usize>,
-        no_hooks: bool,
-    ) -> Vec<LogEntry> {
-        let reader = LogReader::new(self.log_config.logs_dir.clone());
-        reader
-            .tail_bounded(lines, service, max_bytes, no_hooks)
-            .into_iter()
-            .map(|l| l.into())
-            .collect()
-    }
-
-    fn get_logs_with_mode(
-        &self,
-        service: Option<&str>,
-        lines: usize,
-        max_bytes: Option<usize>,
-        mode: LogMode,
-        no_hooks: bool,
-    ) -> Vec<LogEntry> {
-        let reader = LogReader::new(self.log_config.logs_dir.clone());
-        match mode {
-            LogMode::Head => reader
-                .head(lines, service, no_hooks)
-                .into_iter()
-                .map(|l| l.into())
-                .collect(),
-            LogMode::Tail => reader
-                .tail_bounded(lines, service, max_bytes, no_hooks)
-                .into_iter()
-                .map(|l| l.into())
-                .collect(),
-            LogMode::All => reader.iter(service, no_hooks).take(lines).map(|l| l.into()).collect(),
-        }
-    }
-
-    fn get_logs_paginated(
-        &self,
-        service: Option<&str>,
-        offset: usize,
-        limit: usize,
-        no_hooks: bool,
-    ) -> (Vec<LogEntry>, bool) {
-        let reader = LogReader::new(self.log_config.logs_dir.clone());
-        let (logs, has_more) = reader.get_paginated(service, offset, limit, no_hooks);
-        (logs.into_iter().map(|l| l.into()).collect(), has_more)
-    }
-
     fn set_service_status(&mut self, service_name: &str, status: ServiceStatus) -> Result<()> {
         let service_state = self
             .services
             .get_mut(service_name)
             .ok_or_else(|| DaemonError::ServiceNotFound(service_name.to_string()))?;
 
-        if status == ServiceStatus::Waiting || status == ServiceStatus::Starting || status == ServiceStatus::Restarting {
+        if status == ServiceStatus::Waiting
+            || status == ServiceStatus::Starting
+            || status == ServiceStatus::Restarting
+        {
             // Clear stale reasons from previous cycles
             service_state.fail_reason = None;
             service_state.skip_reason = None;
@@ -1344,7 +1349,14 @@ impl ConfigActor {
             service_state.signal = None;
             service_state.exit_code = None;
         }
-        if matches!(status, ServiceStatus::Stopped | ServiceStatus::Exited | ServiceStatus::Failed | ServiceStatus::Killed | ServiceStatus::Skipped) {
+        if matches!(
+            status,
+            ServiceStatus::Stopped
+                | ServiceStatus::Exited
+                | ServiceStatus::Failed
+                | ServiceStatus::Killed
+                | ServiceStatus::Skipped
+        ) {
             service_state.pid = None;
             service_state.started_at = None;
             service_state.stopped_at = Some(Utc::now());
@@ -1373,11 +1385,19 @@ impl ConfigActor {
         };
 
         if is_failure {
-            let would_restart = self.resolved_configs.get(service_name)
+            let would_restart = self
+                .resolved_configs
+                .get(service_name)
                 .map(|rc| rc.restart.should_restart_on_exit(exit_code))
-                .or_else(|| self.config.services.get(service_name)
-                    .map(|raw| raw.restart.as_static().cloned().unwrap_or_default()
-                        .should_restart_on_exit(exit_code)))
+                .or_else(|| {
+                    self.config.services.get(service_name).map(|raw| {
+                        raw.restart
+                            .as_static()
+                            .cloned()
+                            .unwrap_or_default()
+                            .should_restart_on_exit(exit_code)
+                    })
+                })
                 .unwrap_or(false);
 
             if !would_restart && !is_failure_handled(service_name, &self.config.services) {
@@ -1424,7 +1444,12 @@ impl ConfigActor {
         Ok(())
     }
 
-    fn record_process_exit(&mut self, service_name: &str, exit_code: Option<i32>, signal: Option<i32>) -> Result<()> {
+    fn record_process_exit(
+        &mut self,
+        service_name: &str,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) -> Result<()> {
         // Remove process handle
         self.processes.remove(service_name);
 
@@ -1512,7 +1537,9 @@ impl ConfigActor {
 
     /// Check and emit Ready signal if all services reached their target state.
     fn check_and_notify_ready(&mut self) {
-        if self.startup_in_progress { return; }
+        if self.startup_in_progress {
+            return;
+        }
         let ready = self.compute_ready();
         if ready && !self.last_ready {
             self.last_ready = true;
@@ -1522,18 +1549,31 @@ impl ConfigActor {
 
     /// Check and emit Quiescent signal if all services are settled.
     fn check_and_notify_quiescent(&mut self) {
-        if self.startup_in_progress { return; }
+        if self.startup_in_progress {
+            return;
+        }
         let q = self.compute_quiescence();
         if q && !self.last_quiescent {
             self.last_quiescent = true;
+            // Flush pending log writes before signaling quiescence so that
+            // any drain pass by the CLI sees the final logs in SQLite.
+            self.log_store.wait_flush_sync();
             self.notify_subscribers(ConfigEvent::Quiescent);
+            // Purge allocator caches — the startup burst is over and
+            // temporary allocations (config parsing, dep resolution, etc.)
+            // can be returned to the OS.
+            debug!("Quiescent: purging allocator caches");
+            crate::allocator::purge_caches();
         }
     }
 
     /// Returns true when all services have reached their target state or are permanently blocked.
     /// This implements the `--wait` semantic (like `docker compose up -d --wait`).
     fn compute_ready(&self) -> bool {
-        self.config.services.keys().all(|s| self.is_service_ready(s))
+        self.config
+            .services
+            .keys()
+            .all(|s| self.is_service_ready(s))
     }
 
     /// A service is "ready" when it reached its target state, completed, or is a deferred wait.
@@ -1546,23 +1586,30 @@ impl ConfigActor {
 
         // Stopped = explicitly stopped (not completed) → not ready
         // This prevents stale Ready signals after `kepler stop`.
-        if status == ServiceStatus::Stopped { return false; }
+        if status == ServiceStatus::Stopped {
+            return false;
+        }
 
         // Other terminal states (Exited, Failed, Killed, Skipped) → ready
-        if !status.is_active() { return true; }
+        if !status.is_active() {
+            return true;
+        }
 
         // Running states: check if healthcheck resolved (if applicable)
         if status.is_running() {
             if let Some(raw) = self.config.services.get(service_name)
-                && raw.has_healthcheck() {
-                    // Healthy or Unhealthy means the healthcheck has resolved
-                    return status == ServiceStatus::Healthy || status == ServiceStatus::Unhealthy;
-                }
+                && raw.has_healthcheck()
+            {
+                // Healthy or Unhealthy means the healthcheck has resolved
+                return status == ServiceStatus::Healthy || status == ServiceStatus::Unhealthy;
+            }
             return true; // no healthcheck, Running is enough
         }
 
         // Starting → actively starting up (deps already satisfied) → NOT ready yet
-        if status == ServiceStatus::Starting { return false; }
+        if status == ServiceStatus::Starting {
+            return false;
+        }
 
         // Waiting → check if this is a deferred wait (unsatisfied deps that are all stable)
         // vs "about to start" (all deps satisfied or no deps — will transition to Starting momentarily)
@@ -1570,24 +1617,39 @@ impl ConfigActor {
             if let Some(raw) = self.config.services.get(service_name) {
                 let mut has_unsatisfied_stable_dep = false;
                 for (dep_name, dep_config) in raw.depends_on.iter() {
-                    if self.is_condition_satisfied_sync(dep_name, &dep_config) { continue; }
+                    if self.is_condition_satisfied_sync(dep_name, &dep_config) {
+                        continue;
+                    }
                     // Condition not met. Is dep still settling?
                     let dep_state = self.services.get(dep_name);
                     let dep_status = dep_state.map(|s| s.status);
-                    if matches!(dep_status, Some(ServiceStatus::Starting) | Some(ServiceStatus::Waiting) | Some(ServiceStatus::Stopping)) {
+                    if matches!(
+                        dep_status,
+                        Some(ServiceStatus::Starting)
+                            | Some(ServiceStatus::Waiting)
+                            | Some(ServiceStatus::Stopping)
+                    ) {
                         return false; // dep still settling → not ready yet
                     }
                     // Check if dep is terminal but will restart — still settling
                     if let Some(ds) = dep_state
-                        && matches!(ds.status, ServiceStatus::Exited | ServiceStatus::Killed | ServiceStatus::Failed)
-                            && let Some(dep_raw) = self.config.services.get(dep_name) {
-                                let dep_restart = self.resolved_configs.get(dep_name)
-                                    .map(|rc| rc.restart.clone())
-                                    .unwrap_or_else(|| dep_raw.restart.as_static().cloned().unwrap_or_default());
-                                if dep_restart.should_restart_on_exit(ds.exit_code) {
-                                    return false; // dep will restart → still settling
-                                }
-                            }
+                        && matches!(
+                            ds.status,
+                            ServiceStatus::Exited | ServiceStatus::Killed | ServiceStatus::Failed
+                        )
+                        && let Some(dep_raw) = self.config.services.get(dep_name)
+                    {
+                        let dep_restart = self
+                            .resolved_configs
+                            .get(dep_name)
+                            .map(|rc| rc.restart.clone())
+                            .unwrap_or_else(|| {
+                                dep_raw.restart.as_static().cloned().unwrap_or_default()
+                            });
+                        if dep_restart.should_restart_on_exit(ds.exit_code) {
+                            return false; // dep will restart → still settling
+                        }
+                    }
                     // dep is in a stable state (Running/Healthy/Unhealthy/terminal-no-restart)
                     has_unsatisfied_stable_dep = true;
                 }
@@ -1625,14 +1687,20 @@ impl ConfigActor {
     }
 
     /// A service is "settled" when it's in a permanent terminal state or permanently blocked.
-    fn is_service_settled(&self, service_name: &str, settled_cache: &HashMap<String, bool>) -> bool {
+    fn is_service_settled(
+        &self,
+        service_name: &str,
+        settled_cache: &HashMap<String, bool>,
+    ) -> bool {
         let state = match self.services.get(service_name) {
             Some(s) => s,
             None => return true,
         };
         let status = state.status;
 
-        if status == ServiceStatus::Skipped { return true; }
+        if status == ServiceStatus::Skipped {
+            return true;
+        }
 
         // Waiting → check if this has unsatisfied deps that are all settled (condition will never be met)
         // vs "about to start" (all deps satisfied or no deps — will transition to Starting momentarily)
@@ -1640,7 +1708,9 @@ impl ConfigActor {
             if let Some(raw) = self.config.services.get(service_name) {
                 let mut has_unsatisfied_settled_dep = false;
                 for (dep_name, dep_config) in raw.depends_on.iter() {
-                    if self.is_condition_satisfied_sync(dep_name, &dep_config) { continue; }
+                    if self.is_condition_satisfied_sync(dep_name, &dep_config) {
+                        continue;
+                    }
                     // Condition not met. Is dep settled?
                     if !settled_cache.get(dep_name).copied().unwrap_or(false) {
                         return false; // dep still settling
@@ -1656,16 +1726,29 @@ impl ConfigActor {
         }
 
         // Any other active state (Starting, Running, Stopping, Healthy, Unhealthy) → not settled
-        if status.is_active() { return false; }
+        if status.is_active() {
+            return false;
+        }
 
         // Terminal (Stopped, Failed, Exited, Killed)
-        let would_restart = self.resolved_configs.get(service_name)
+        let would_restart = self
+            .resolved_configs
+            .get(service_name)
             .map(|rc| rc.restart.should_restart_on_exit(state.exit_code))
-            .or_else(|| self.config.services.get(service_name)
-                .map(|raw| raw.restart.as_static().cloned().unwrap_or_default().should_restart_on_exit(state.exit_code)))
+            .or_else(|| {
+                self.config.services.get(service_name).map(|raw| {
+                    raw.restart
+                        .as_static()
+                        .cloned()
+                        .unwrap_or_default()
+                        .should_restart_on_exit(state.exit_code)
+                })
+            })
             .unwrap_or(false);
 
-        if !would_restart { return true; }
+        if !would_restart {
+            return true;
+        }
 
         // Would restart — but only if deps are still satisfiable
         !self.are_deps_satisfiable(service_name, settled_cache)
@@ -1673,14 +1756,20 @@ impl ConfigActor {
 
     /// Check if all dependencies for a service can still be satisfied.
     /// Returns false if any dep is settled but its condition is not met.
-    fn are_deps_satisfiable(&self, service_name: &str, settled_cache: &HashMap<String, bool>) -> bool {
+    fn are_deps_satisfiable(
+        &self,
+        service_name: &str,
+        settled_cache: &HashMap<String, bool>,
+    ) -> bool {
         let raw = match self.config.services.get(service_name) {
             Some(v) => v,
             None => return false,
         };
 
         for (dep_name, dep_config) in raw.depends_on.iter() {
-            if self.is_condition_satisfied_sync(dep_name, &dep_config) { continue; }
+            if self.is_condition_satisfied_sync(dep_name, &dep_config) {
+                continue;
+            }
             // Condition not met. If dep is settled, it can never reach the required state.
             let dep_state = match self.services.get(dep_name) {
                 Some(s) => s,
@@ -1704,10 +1793,16 @@ impl ConfigActor {
             None => return false,
         };
 
-        let dep_restart = self.resolved_configs.get(dep_name)
+        let dep_restart = self
+            .resolved_configs
+            .get(dep_name)
             .map(|rc| rc.restart.clone())
-            .or_else(|| self.config.services.get(dep_name)
-                .map(|raw| raw.restart.as_static().cloned().unwrap_or_default()));
+            .or_else(|| {
+                self.config
+                    .services
+                    .get(dep_name)
+                    .map(|raw| raw.restart.as_static().cloned().unwrap_or_default())
+            });
         is_condition_met(state, dep_config, dep_restart.as_ref())
     }
 
@@ -1725,7 +1820,9 @@ impl ConfigActor {
     ) -> Result<HashMap<String, String>> {
         use crate::config::AutostartConfig;
 
-        let autostart = config.kepler.as_ref()
+        let autostart = config
+            .kepler
+            .as_ref()
             .map(|k| &k.autostart)
             .unwrap_or(&AutostartConfig::Disabled);
 
@@ -1755,19 +1852,25 @@ impl ConfigActor {
         };
 
         // Build PreparedEnv ONCE — reused for both top-level and per-entry evaluation
-        let prepared = evaluator.prepare_env_mutable(&ctx).map_err(|e| DaemonError::LuaError {
-            path: config_path.clone(),
-            message: format!("Error building Lua environment: {}", e),
-        })?;
+        let prepared = evaluator
+            .prepare_env_mutable(&ctx)
+            .map_err(|e| DaemonError::LuaError {
+                path: config_path.clone(),
+                message: format!("Error building Lua environment: {}", e),
+            })?;
 
         // Get inner entries using the prepared table
         let entries: Vec<ConfigValue<String>> = match env_config {
             ConfigValue::Static(entries) => entries.0.clone(),
             ConfigValue::Dynamic(expr) => {
-                let yaml = expr.evaluate(evaluator, &prepared.table, &config_path, "kepler.environment")?;
-                let env: EnvironmentEntries = serde_yaml::from_value(yaml).map_err(|e| {
-                    DaemonError::Config(format!("kepler.environment: {}", e))
-                })?;
+                let yaml = expr.evaluate(
+                    evaluator,
+                    &prepared.table,
+                    &config_path,
+                    "kepler.environment",
+                )?;
+                let env: EnvironmentEntries = serde_yaml::from_value(yaml)
+                    .map_err(|e| DaemonError::Config(format!("kepler.environment: {}", e)))?;
                 env.0
             }
         };
@@ -1779,7 +1882,9 @@ impl ConfigActor {
                 ConfigValue::Static(s) => s.clone(),
                 ConfigValue::Dynamic(expr) => {
                     let yaml = expr.evaluate(
-                        evaluator, &prepared.table, &config_path,
+                        evaluator,
+                        &prepared.table,
+                        &config_path,
                         &format!("kepler.environment[{}]", i),
                     )?;
                     serde_yaml::from_value(yaml).map_err(|e| {
@@ -1799,10 +1904,12 @@ impl ConfigActor {
                 // Bare key: resolve from CLI env
                 if let Some(v) = cli_env.get(&resolved) {
                     result.insert(resolved.clone(), v.clone());
-                    prepared.set_env(&resolved, v).map_err(|e| DaemonError::LuaError {
-                        path: config_path.clone(),
-                        message: format!("Error updating Lua env table: {}", e),
-                    })?;
+                    prepared
+                        .set_env(&resolved, v)
+                        .map_err(|e| DaemonError::LuaError {
+                            path: config_path.clone(),
+                            message: format!("Error updating Lua env table: {}", e),
+                        })?;
                     ctx.kepler_env.insert(resolved, v.clone());
                 }
             }
@@ -1812,7 +1919,7 @@ impl ConfigActor {
     }
 
     /// Cleanup all resources when shutting down
-    fn cleanup(&mut self) {
+    async fn cleanup(&mut self) {
         if let Some(fd_count) = crate::fd_count::count_open_fds() {
             debug!("FD count before cleanup: {}", fd_count);
         }
@@ -1835,9 +1942,9 @@ impl ConfigActor {
             handle.abort();
         }
 
-        // Abort output tasks before clearing process handles.
-        // Dropping a JoinHandle does NOT cancel the underlying task, so we must
-        // explicitly abort to release pipe FDs and log file FDs.
+        // Abort output tasks before shutting down the log store.
+        // These tasks pipe process stdout/stderr into log writes — they must be
+        // stopped first to prevent new writes after ShutdownDiscard drains the channel.
         for (_, process_handle) in self.processes.drain() {
             if let Some(task) = process_handle.stdout_task {
                 task.abort();
@@ -1847,9 +1954,32 @@ impl ConfigActor {
             }
         }
 
+        // Shut down the log store: discard pending writes on clean shutdown
+        // (state dir will be deleted), flush on graceful shutdown.
+        if self.clean_shutdown {
+            // Set the discard flag and send Shutdown so the actor stops ASAP.
+            // Don't wait for exit — the state directory (including the SQLite DB)
+            // will be removed by the caller. On Linux, remove_dir_all succeeds
+            // even with files still open; data is reclaimed when the actor thread
+            // finishes and closes the Connection. This avoids blocking if the
+            // actor is stuck in a long SQLite operation (e.g. DELETE FROM logs
+            // triggered by a concurrent `stop` command's log retention).
+            info!("cleanup: setting discard flag on log store (not waiting)");
+            self.log_store.shutdown_discard();
+            self.log_store.shutdown();
+        } else {
+            self.log_store.shutdown();
+        }
+
         // Clear all channel-based resources to avoid dead sender accumulation
-        self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        self.dep_watchers.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.dep_watchers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.event_senders.clear();
 
         // Drop Lua worker channel sender so the spawn_blocking thread exits promptly

@@ -1,41 +1,44 @@
 use super::*;
 use std::collections::VecDeque;
 use tokio::sync::oneshot;
-use kepler_protocol::protocol::{CursorLogEntry, ProgressEvent, StreamType};
+use kepler_protocol::protocol::{StreamLogEntry, ProgressEvent};
 
 type ClientResult = std::result::Result<Response, ClientError>;
 
 struct MockClient {
-    cursor_responses: std::sync::Mutex<VecDeque<ClientResult>>,
+    responses: std::sync::Mutex<VecDeque<ClientResult>>,
 }
 
 impl MockClient {
     fn new() -> Self {
         Self {
-            cursor_responses: std::sync::Mutex::new(VecDeque::new()),
+            responses: std::sync::Mutex::new(VecDeque::new()),
         }
     }
 
-    fn push_cursor(&self, resp: ClientResult) {
-        self.cursor_responses.lock().unwrap().push_back(resp);
+    fn push_response(&self, resp: ClientResult) {
+        self.responses.lock().unwrap().push_back(resp);
     }
 }
 
 impl FollowClient for MockClient {
-    async fn logs_cursor(
+    async fn logs_stream(
         &self,
         _config_path: &Path,
         _service: Option<&str>,
-        _cursor_id: Option<&str>,
-        _from_start: bool,
+        _after_id: Option<i64>,
+        _from_end: bool,
+        _limit: usize,
         _no_hooks: bool,
-        _poll_timeout_ms: Option<u32>,
+        _filter: Option<&str>,
+        _raw: bool,
+        _tail: bool,
     ) -> std::result::Result<Response, ClientError> {
-        self.cursor_responses
+        self.responses
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or_else(|| Ok(empty_cursor_response()))
+            .unwrap_or_else(|| Ok(empty_stream_response()))
     }
 }
 
@@ -43,11 +46,11 @@ impl FollowClient for MockClient {
 // Response helpers
 // ========================================================================
 
-fn cursor_response(entries: &[(&str, &str)], has_more: bool) -> ClientResult {
+fn stream_response(entries: &[(&str, &str)], has_more: bool) -> ClientResult {
     // Build service table and compact entries
     let mut service_table: Vec<Arc<str>> = Vec::new();
     let mut service_map: HashMap<&str, u16> = HashMap::new();
-    let compact_entries: Vec<CursorLogEntry> = entries
+    let compact_entries: Vec<StreamLogEntry> = entries
         .iter()
         .map(|(svc, line)| {
             let service_id = match service_map.get(svc) {
@@ -59,30 +62,32 @@ fn cursor_response(entries: &[(&str, &str)], has_more: bool) -> ClientResult {
                     id
                 }
             };
-            CursorLogEntry {
+            StreamLogEntry {
                 service_id,
                 line: line.to_string(),
                 timestamp: 1000,
-                stream: StreamType::Stdout,
+                level: Arc::from("out"),
+                hook: None,
+                attributes: None,
             }
         })
         .collect();
 
-    Ok(Response::ok_with_data(ResponseData::LogCursor(
-        LogCursorData {
+    Ok(Response::ok_with_data(ResponseData::LogStream(
+        LogStreamData {
             service_table,
             entries: compact_entries,
-            cursor_id: "test-cursor".to_string(),
+            last_id: 0,
             has_more,
         },
     )))
 }
 
-fn empty_cursor_response() -> Response {
-    Response::ok_with_data(ResponseData::LogCursor(LogCursorData {
+fn empty_stream_response() -> Response {
+    Response::ok_with_data(ResponseData::LogStream(LogStreamData {
         service_table: vec![],
         entries: vec![],
-        cursor_id: "test-cursor".to_string(),
+        last_id: 0,
         has_more: false,
     }))
 }
@@ -98,7 +103,7 @@ fn never_quiescent() -> impl Future<Output = ()> {
 }
 
 /// Helper: collect lines from a batch callback
-fn collect_batch(collected: &mut Vec<String>, _service_table: &[Arc<str>], entries: &[CursorLogEntry]) {
+fn collect_batch(collected: &mut Vec<String>, _service_table: &[Arc<str>], entries: &[StreamLogEntry]) {
     for entry in entries {
         collected.push(entry.line.clone());
     }
@@ -108,14 +113,14 @@ fn collect_batch(collected: &mut Vec<String>, _service_table: &[Arc<str>], entri
 // Quiescence via subscription (event-driven)
 // ========================================================================
 
-/// Reads all cursor batches and exits when quiescence future fires.
+/// Reads all batches and exits when quiescence future fires.
 #[tokio::test(start_paused = true)]
-async fn test_follow_reads_cursor_and_exits_on_quiescence() {
+async fn test_follow_reads_and_exits_on_quiescence() {
     let mock = MockClient::new();
-    mock.push_cursor(cursor_response(&[("svc", "line-1"), ("svc", "line-2")], true));
-    mock.push_cursor(cursor_response(&[("svc", "line-3")], false));
-    // After quiescence fires, one more empty cursor to drain
-    mock.push_cursor(cursor_response(&[], false));
+    mock.push_response(stream_response(&[("svc", "line-1"), ("svc", "line-2")], true));
+    mock.push_response(stream_response(&[("svc", "line-3")], false));
+    // After quiescence fires, one more empty response to drain
+    mock.push_response(stream_response(&[], false));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
@@ -124,9 +129,10 @@ async fn test_follow_reads_cursor_and_exits_on_quiescence() {
     let mut tx = Some(tx);
 
     // Fire quiescence after we've collected 3 lines
-    let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
         async { let _ = rx.await; },
+        None,
         |st, entries| {
             collect_batch(&mut collected, st, entries);
             if collected.len() == 3
@@ -144,18 +150,19 @@ async fn test_follow_reads_cursor_and_exits_on_quiescence() {
 #[tokio::test(start_paused = true)]
 async fn test_follow_drains_logs_after_quiescence() {
     let mock = MockClient::new();
-    mock.push_cursor(cursor_response(&[("svc", "a")], true));
-    mock.push_cursor(cursor_response(&[("svc", "b")], true));
-    mock.push_cursor(cursor_response(&[("svc", "c")], false));
-    mock.push_cursor(cursor_response(&[], false));
+    mock.push_response(stream_response(&[("svc", "a")], true));
+    mock.push_response(stream_response(&[("svc", "b")], true));
+    mock.push_response(stream_response(&[("svc", "c")], false));
+    mock.push_response(stream_response(&[], false));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
     // Quiescence fires immediately — but logs should still be drained
-    let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
         async {},  // quiescence fires immediately
+        None,
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
 
@@ -163,13 +170,13 @@ async fn test_follow_drains_logs_after_quiescence() {
     assert_eq!(collected, vec!["a", "b", "c"]);
 }
 
-/// When quiescence doesn't fire, loop continues polling cursor.
+/// When quiescence doesn't fire, loop continues polling.
 #[tokio::test(start_paused = true)]
 async fn test_follow_continues_without_quiescence() {
     let mock = MockClient::new();
-    // Provide some data then empty cursor
-    mock.push_cursor(cursor_response(&[("svc", "a")], false));
-    mock.push_cursor(cursor_response(&[("svc", "b")], false));
+    // Provide some data then empty response
+    mock.push_response(stream_response(&[("svc", "a")], false));
+    mock.push_response(stream_response(&[("svc", "b")], false));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
@@ -177,9 +184,10 @@ async fn test_follow_continues_without_quiescence() {
     let (tx, rx) = oneshot::channel::<()>();
     let mut tx = Some(tx);
 
-    let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
         async { let _ = rx.await; },
+        None,
         |st, entries| {
             collect_batch(&mut collected, st, entries);
             if collected.len() == 2
@@ -197,13 +205,13 @@ async fn test_follow_continues_without_quiescence() {
 // Ctrl+C / shutdown signal
 // ========================================================================
 
-/// Shutdown signal stops cursor reads and returns ShutdownRequested.
+/// Shutdown signal stops reads and returns ShutdownRequested.
 #[tokio::test(start_paused = true)]
-async fn test_follow_shutdown_stops_cursor_reads() {
+async fn test_follow_shutdown_stops_reads() {
     let mock = MockClient::new();
-    // Queue many cursor batches — only the first should be consumed
+    // Queue many batches — only the first should be consumed
     for i in 0..100 {
-        mock.push_cursor(cursor_response(
+        mock.push_response(stream_response(
             &[("svc", &format!("line-{}", i))],
             true,
         ));
@@ -212,26 +220,27 @@ async fn test_follow_shutdown_stops_cursor_reads() {
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
-    // Shutdown resolves immediately — the biased select picks it up after first cursor read
-    let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, async {},
+    // Shutdown resolves immediately — the biased select picks it up after first read
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, async {},
         never_quiescent(),
+        None,
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
 
     assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
-    assert_eq!(collected.len(), 1, "Only one cursor batch before shutdown");
+    assert_eq!(collected.len(), 1, "Only one batch before shutdown");
     assert_eq!(collected[0], "line-0");
 
 }
 
-/// Shutdown triggered via Notify after N cursor reads.
+/// Shutdown triggered via Notify after N reads.
 #[tokio::test(start_paused = true)]
 async fn test_follow_shutdown_after_n_reads() {
     let mock = MockClient::new();
-    // 5 cursor batches with has_more=true, then many more
+    // 5 batches with has_more=true, then many more
     for i in 0..50 {
-        mock.push_cursor(cursor_response(
+        mock.push_response(stream_response(
             &[("svc", &format!("line-{}", i))],
             true,
         ));
@@ -244,10 +253,11 @@ async fn test_follow_shutdown_after_n_reads() {
     let notify_clone = notify.clone();
 
     // Trigger shutdown after 3 batches are collected
-    let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None },
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false },
         async move { notify_clone.notified().await },
         never_quiescent(),
+        None,
         |st, entries| {
             collect_batch(&mut collected, st, entries);
             if collected.len() == 3 {
@@ -269,14 +279,15 @@ async fn test_follow_shutdown_after_n_reads() {
 #[tokio::test(start_paused = true)]
 async fn test_follow_daemon_disconnect_exits() {
     let mock = MockClient::new();
-    mock.push_cursor(Err(ClientError::Disconnected));
+    mock.push_response(Err(ClientError::Disconnected));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
-    stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
+    stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
         never_quiescent(),
+        None,
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
 
@@ -284,50 +295,19 @@ async fn test_follow_daemon_disconnect_exits() {
 
 }
 
-/// Cursor expired error resets cursor_id and retries.
-#[tokio::test(start_paused = true)]
-async fn test_follow_cursor_expired_resets_and_retries() {
-    let mock = MockClient::new();
-    mock.push_cursor(Ok(Response::error(
-        "Cursor expired or invalid: cursor_0",
-    )));
-    mock.push_cursor(cursor_response(&[("svc", "line-1")], false));
-    mock.push_cursor(cursor_response(&[], false));
-
-    let config_path = PathBuf::from("/fake/config.yaml");
-    let mut collected = Vec::new();
-
-    let (tx, rx) = oneshot::channel::<()>();
-    let mut tx = Some(tx);
-    let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
-        async { let _ = rx.await; },
-        |st, entries| {
-            collect_batch(&mut collected, st, entries);
-            if !collected.is_empty()
-                && let Some(tx) = tx.take() {
-                    let _ = tx.send(());
-                }
-        },
-    ).await.unwrap();
-
-    assert_eq!(exit_reason, StreamExitReason::Done);
-    assert_eq!(collected, vec!["line-1"]);
-
-}
-
-/// Non-cursor error breaks the loop.
+/// Non-stream error breaks the loop.
 #[tokio::test(start_paused = true)]
 async fn test_follow_server_error_breaks_loop() {
     let mock = MockClient::new();
-    mock.push_cursor(Ok(Response::error("Internal server error")));
+    mock.push_response(Ok(Response::error("Internal server error")));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
-    stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
+    stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
         never_quiescent(),
+        None,
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
 
@@ -338,19 +318,20 @@ async fn test_follow_server_error_breaks_loop() {
 // Edge cases
 // ========================================================================
 
-/// Empty cursor responses: quiescence fires while no data → exits.
+/// Empty responses: quiescence fires while no data → exits.
 #[tokio::test(start_paused = true)]
-async fn test_follow_empty_cursor_exits_on_quiescence() {
+async fn test_follow_empty_exits_on_quiescence() {
     let mock = MockClient::new();
-    mock.push_cursor(cursor_response(&[], false));
-    mock.push_cursor(cursor_response(&[], false));
+    mock.push_response(stream_response(&[], false));
+    mock.push_response(stream_response(&[], false));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
-    let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
         async {},  // quiescence fires immediately
+        None,
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
 
@@ -362,20 +343,21 @@ async fn test_follow_empty_cursor_exits_on_quiescence() {
 #[tokio::test(start_paused = true)]
 async fn test_follow_shutdown_returns_immediately() {
     let mock = MockClient::new();
-    // One cursor batch then shutdown
-    mock.push_cursor(cursor_response(&[("svc", "x")], true));
+    // One batch then shutdown
+    mock.push_response(stream_response(&[("svc", "x")], true));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
-    let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, async {},
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, async {},
         never_quiescent(),
+        None,
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
 
     assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
-    // Only 1 cursor read before shutdown took effect
+    // Only 1 read before shutdown took effect
 
 }
 
@@ -584,26 +566,27 @@ fn test_format_duration_since_days() {
 // Config not loaded + quiescence
 // ========================================================================
 
-/// First cursor returns "Config not loaded", retries, then config available.
+/// First request returns "Config not loaded", retries, then config available.
 /// Quiescence fires after logs are received.
 #[tokio::test(start_paused = true)]
 async fn test_follow_config_not_loaded_retries_then_starts() {
     let mock = MockClient::new();
-    // First two cursor calls: config not loaded yet (start request being processed)
-    mock.push_cursor(Ok(Response::error("Config not loaded")));
-    mock.push_cursor(Ok(Response::error("Config not loaded")));
+    // First two calls: config not loaded yet (start request being processed)
+    mock.push_response(Ok(Response::error("Config not loaded")));
+    mock.push_response(Ok(Response::error("Config not loaded")));
     // Third: config available, logs arrive
-    mock.push_cursor(cursor_response(&[("svc", "started")], false));
-    mock.push_cursor(cursor_response(&[], false));
+    mock.push_response(stream_response(&[("svc", "started")], false));
+    mock.push_response(stream_response(&[], false));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
     let (tx, rx) = oneshot::channel::<()>();
     let mut tx = Some(tx);
-    stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
+    stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
         async { let _ = rx.await; },
+        None,
         |st, entries| {
             collect_batch(&mut collected, st, entries);
             if !collected.is_empty()
@@ -614,21 +597,21 @@ async fn test_follow_config_not_loaded_retries_then_starts() {
     ).await.unwrap();
 
     assert_eq!(collected, vec!["started"]);
-    // At least 3 cursor calls (2 config not loaded retries + 1 successful read)
 }
 
 /// "Config not loaded" with quiescence already fired → exits immediately.
 #[tokio::test(start_paused = true)]
 async fn test_follow_config_not_loaded_exits_on_quiescence() {
     let mock = MockClient::new();
-    mock.push_cursor(Ok(Response::error("Config not loaded")));
+    mock.push_response(Ok(Response::error("Config not loaded")));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
-    let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
         async {},  // quiescence fires immediately (config was unloaded)
+        None,
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
 
@@ -640,14 +623,15 @@ async fn test_follow_config_not_loaded_exits_on_quiescence() {
 #[tokio::test(start_paused = true)]
 async fn test_follow_config_not_loaded_shutdown() {
     let mock = MockClient::new();
-    mock.push_cursor(Ok(Response::error("Config not loaded")));
+    mock.push_response(Ok(Response::error("Config not loaded")));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
-    let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, async {},  // shutdown fires immediately
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, async {},  // shutdown fires immediately
         never_quiescent(),
+        None,
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
 
@@ -658,15 +642,16 @@ async fn test_follow_config_not_loaded_shutdown() {
 #[tokio::test(start_paused = true)]
 async fn test_follow_shutdown_handles_starting_services() {
     let mock = MockClient::new();
-    // One cursor batch then shutdown fires
-    mock.push_cursor(cursor_response(&[("svc", "init")], true));
+    // One batch then shutdown fires
+    mock.push_response(stream_response(&[("svc", "init")], true));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
-    let exit_reason = stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, async {},
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, async {},
         never_quiescent(),
+        None,
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
 
@@ -678,17 +663,18 @@ async fn test_follow_shutdown_handles_starting_services() {
 #[tokio::test(start_paused = true)]
 async fn test_follow_exits_on_quiescence() {
     let mock = MockClient::new();
-    mock.push_cursor(cursor_response(&[("svc", "done")], false));
-    mock.push_cursor(cursor_response(&[], false));
+    mock.push_response(stream_response(&[("svc", "done")], false));
+    mock.push_response(stream_response(&[], false));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
     let (tx, rx) = oneshot::channel::<()>();
     let mut tx = Some(tx);
-    stream_cursor_logs(
-        &mock, StreamCursorParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, poll_timeout_ms: None }, never_shutdown(),
+    stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
         async { let _ = rx.await; },
+        None,
         |st, entries| {
             collect_batch(&mut collected, st, entries);
             if let Some(tx) = tx.take() {

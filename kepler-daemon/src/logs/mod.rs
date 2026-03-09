@@ -1,128 +1,74 @@
 //! Log management for Kepler daemon
 //!
-//! This module provides:
-//! - `BufferedLogWriter` - Per-task buffered writer (no shared state)
-//! - `LogReader` - Stateless reader for querying logs
-//! - `MergedLogIterator` - Forward iteration (oldest first)
-//! - `ReverseMergedLogIterator` - Reverse iteration (newest first)
+//! SQLite-backed logging with single-writer architecture:
+//! - `LogStoreHandle` - Cloneable handle to the writer actor (batched writes, flush interval)
+//! - `LogWriter` - Per-service writer that sends entries through the store
+//! - `SqliteLogReader` - Read-only reader (opens a new connection per query)
 
-mod config;
-mod iterator;
-mod reader;
-mod reverse;
-mod writer;
+pub mod filter;
+pub mod store;
+mod log_reader;
+mod log_writer;
+mod json_parse;
 
-pub use config::LogWriterConfig;
-pub use iterator::MergedLogIterator;
-pub use reader::LogReader;
-pub use reverse::{ReverseLineReader, ReverseMergedLogIterator};
-pub use writer::BufferedLogWriter;
+pub use log_reader::LogReader as SqliteLogReader;
+pub use log_writer::LogWriter;
+pub use store::{DEFAULT_BATCH_SIZE, LogStoreHandle};
 
-use kepler_protocol::protocol::{LogEntry, StreamType};
 use std::sync::Arc;
-
-/// Default maximum bytes to read when tailing logs (10MB)
-pub const DEFAULT_MAX_BYTES: usize = 10 * 1024 * 1024;
-
-/// Default maximum lines to return
-pub const DEFAULT_MAX_LINES: usize = 10_000;
-
-/// Default max log file size before truncation (10MB)
-pub const DEFAULT_MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
-
-/// Default buffer size (0 = synchronous writes)
-pub const DEFAULT_BUFFER_SIZE: usize = 0;
-
-/// Validate that a path is not a symlink (security measure to prevent symlink attacks)
-#[cfg(unix)]
-pub(crate) fn validate_not_symlink(path: &std::path::Path) -> std::io::Result<()> {
-    if let Ok(meta) = std::fs::symlink_metadata(path)
-        && meta.file_type().is_symlink() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Log path is a symlink: {:?}", path),
-            ));
-        }
-    Ok(())
-}
 
 /// A single log line with metadata
 #[derive(Debug, Clone)]
 pub struct LogLine {
-    /// Service name (Arc for cheap cloning when reading many lines from same service)
+    /// Row ID (monotonically increasing, used as stream position)
+    pub id: i64,
+    /// Service name
     pub service: Arc<str>,
+    /// Log line content (extracted message for JSON logs, raw line otherwise)
     pub line: String,
-    /// Timestamp in milliseconds since Unix epoch (raw i64, avoids chrono in hot path)
+    /// Timestamp in milliseconds since Unix epoch
     pub timestamp: i64,
-    pub stream: LogStream,
+    /// Log level string ("out", "err", "trace", "debug", "info", "warn", "error", "fatal")
+    pub level: Arc<str>,
+    /// Hook name (None for service process logs)
+    pub hook: Option<Arc<str>>,
+    /// Remaining JSON attributes (NULL for non-JSON lines)
+    pub attributes: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogStream {
-    Stdout,
-    Stderr,
-}
-
-impl LogStream {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            LogStream::Stdout => "stdout",
-            LogStream::Stderr => "stderr",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "stdout" => Some(LogStream::Stdout),
-            "stderr" => Some(LogStream::Stderr),
-            _ => None,
-        }
-    }
-
-    /// Get file extension for log files
-    pub fn extension(&self) -> &'static str {
-        match self {
-            LogStream::Stdout => "stdout.log",
-            LogStream::Stderr => "stderr.log",
-        }
+/// Normalize a log level string to a canonical form.
+///
+/// Handles common aliases:
+/// - "warning" → "warn"
+/// - "informational" → "info"
+/// - "critical", "emergency", "emerg", "alert" → "fatal"
+///
+/// For non-JSON lines, "out" (stdout) and "err" (stderr) are used as-is.
+/// Unknown level strings are stored as-is (lowercase).
+pub fn normalize_level(s: &str) -> &'static str {
+    match s.to_ascii_lowercase().as_str() {
+        "trace" => "trace",
+        "debug" => "debug",
+        "info" | "informational" => "info",
+        "warn" | "warning" => "warn",
+        "error" => "error",
+        "fatal" | "critical" | "emergency" | "emerg" | "alert" => "fatal",
+        "out" => "out",
+        "err" => "err",
+        _ => "info", // unknown → default to info
     }
 }
 
-impl std::fmt::Display for LogStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
+/// Format a level string for CLI display (full uppercase).
+pub fn format_level(level: &str) -> &'static str {
+    match level {
+        "trace" => "TRACE",
+        "debug" => "DEBUG",
+        "info" | "out" => "INFO",
+        "warn" => "WARN",
+        "error" | "err" => "ERROR",
+        "fatal" => "FATAL",
+        _ => "INFO",
     }
 }
 
-// ============================================================================
-// Conversions
-// ============================================================================
-
-/// Convert LogLine to protocol LogEntry
-impl From<LogLine> for LogEntry {
-    fn from(line: LogLine) -> Self {
-        LogEntry {
-            service: line.service,
-            line: line.line,
-            timestamp: Some(line.timestamp),
-            stream: match line.stream {
-                LogStream::Stdout => StreamType::Stdout,
-                LogStream::Stderr => StreamType::Stderr,
-            },
-        }
-    }
-}
-
-impl From<&LogLine> for LogEntry {
-    fn from(line: &LogLine) -> Self {
-        LogEntry {
-            service: Arc::clone(&line.service),
-            line: line.line.clone(),
-            timestamp: Some(line.timestamp),
-            stream: match line.stream {
-                LogStream::Stdout => StreamType::Stdout,
-                LogStream::Stderr => StreamType::Stderr,
-            },
-        }
-    }
-}

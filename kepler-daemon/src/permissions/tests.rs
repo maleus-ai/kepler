@@ -37,7 +37,8 @@ fn expand_category() {
     assert!(expanded.contains("service:stop"));
     assert!(expanded.contains("service:restart"));
     assert!(expanded.contains("service:clean"));
-    assert!(expanded.contains("service:logs"));
+    // logs:read is NOT under service category
+    assert!(!expanded.contains("logs:read"));
     // Should not include other categories
     assert!(!expanded.contains("config:recreate"));
     assert!(!expanded.contains("config:status"));
@@ -61,7 +62,8 @@ fn expand_category_wildcard() {
     assert!(expanded.contains("service:stop"));
     assert!(expanded.contains("service:restart"));
     assert!(expanded.contains("service:clean"));
-    assert!(expanded.contains("service:logs"));
+    // logs:read is NOT under service category
+    assert!(!expanded.contains("logs:read"));
 }
 
 #[test]
@@ -318,40 +320,6 @@ fn check_scopes_recreate_with_hardening_granted() {
 }
 
 #[test]
-fn check_scopes_logs() {
-    use kepler_protocol::protocol::LogMode;
-    let granted: HashSet<String> = ["service:logs".to_string()].into();
-    let expanded = expand_scopes(&granted).unwrap();
-    let req = Request::Logs {
-        config_path: "/test".into(),
-        service: None,
-        follow: false,
-        lines: 100,
-        max_bytes: None,
-        mode: LogMode::All,
-        no_hooks: false,
-    };
-    assert!(check_scopes(&expanded, &req).is_ok());
-}
-
-#[test]
-fn check_scopes_logs_denied() {
-    use kepler_protocol::protocol::LogMode;
-    let granted: HashSet<String> = ["service:start".to_string()].into();
-    let expanded = expand_scopes(&granted).unwrap();
-    let req = Request::Logs {
-        config_path: "/test".into(),
-        service: None,
-        follow: false,
-        lines: 100,
-        max_bytes: None,
-        mode: LogMode::All,
-        no_hooks: false,
-    };
-    assert!(check_scopes(&expanded, &req).is_err());
-}
-
-#[test]
 fn check_scopes_per_config_status() {
     let granted: HashSet<String> = ["config:status".to_string()].into();
     let expanded = expand_scopes(&granted).unwrap();
@@ -472,7 +440,8 @@ fn no_ceiling_preserves_all() {
     assert!(expanded.contains("service:stop"));
     assert!(expanded.contains("service:restart"));
     assert!(expanded.contains("service:clean"));
-    assert!(expanded.contains("service:logs"));
+    // logs:read is NOT under service category
+    assert!(!expanded.contains("logs:read"));
 }
 
 #[test]
@@ -580,61 +549,123 @@ fn validate_scopes_empty_input() {
 }
 
 #[test]
-fn check_scopes_logs_chunk_requires_service_logs() {
-    let granted: HashSet<String> = ["service:logs".to_string()].into();
+fn check_scopes_logs_stream_requires_logs_read() {
+    let granted: HashSet<String> = ["logs:read".to_string()].into();
     let expanded = expand_scopes(&granted).unwrap();
-    let req = Request::LogsChunk {
+    let req = Request::LogsStream {
         config_path: "/test".into(),
         service: None,
-        offset: 0,
-        limit: 100,
+        after_id: None,
+        from_end: false,
+        limit: 1000,
         no_hooks: false,
+
+        filter: None,
+        raw: false,
+        tail: false,
     };
     assert!(check_scopes(&expanded, &req).is_ok());
 }
 
 #[test]
-fn check_scopes_logs_chunk_denied_without_service_logs() {
+fn check_scopes_logs_stream_denied_without_logs_read() {
     let granted: HashSet<String> = ["service:start".to_string()].into();
     let expanded = expand_scopes(&granted).unwrap();
-    let req = Request::LogsChunk {
+    let req = Request::LogsStream {
         config_path: "/test".into(),
         service: None,
-        offset: 0,
-        limit: 100,
+        after_id: None,
+        from_end: false,
+        limit: 1000,
         no_hooks: false,
+
+        filter: None,
+        raw: false,
+        tail: false,
     };
     assert!(check_scopes(&expanded, &req).is_err());
 }
 
 #[test]
-fn check_scopes_logs_cursor_requires_service_logs() {
-    let granted: HashSet<String> = ["service:logs".to_string()].into();
+fn check_scopes_logs_stream_filter_requires_logs_search() {
+    // logs:read alone cannot use filter
+    let granted: HashSet<String> = ["logs:read".to_string()].into();
     let expanded = expand_scopes(&granted).unwrap();
-    let req = Request::LogsCursor {
+    let req = Request::LogsStream {
         config_path: "/test".into(),
         service: None,
-        cursor_id: None,
-        from_start: false,
+        after_id: None,
+        from_end: false,
+        limit: 1000,
         no_hooks: false,
-        poll_timeout_ms: None,
+
+        filter: Some("level='err'".to_string()),
+        raw: false,
+        tail: false,
+    };
+    assert!(check_scopes(&expanded, &req).is_err());
+}
+
+#[test]
+fn check_scopes_logs_stream_filter_with_logs_search() {
+    // logs:search implies logs:read, so filter is allowed
+    let granted: HashSet<String> = ["logs:search".to_string()].into();
+    let expanded = expand_scopes(&granted).unwrap();
+    let req = Request::LogsStream {
+        config_path: "/test".into(),
+        service: None,
+        after_id: None,
+        from_end: false,
+        limit: 1000,
+        no_hooks: false,
+
+        filter: Some("level='err'".to_string()),
+        raw: false,
+        tail: false,
     };
     assert!(check_scopes(&expanded, &req).is_ok());
 }
 
 #[test]
-fn check_scopes_logs_cursor_denied_without_service_logs() {
-    let granted: HashSet<String> = ["service:start".to_string()].into();
+fn check_scopes_logs_search_implies_logs_read() {
+    // logs:search expands to include logs:read
+    let granted: HashSet<String> = ["logs:search".to_string()].into();
     let expanded = expand_scopes(&granted).unwrap();
-    let req = Request::LogsCursor {
+    assert!(expanded.contains("logs:search"));
+    assert!(expanded.contains("logs:read"));
+
+    // Can also do non-filtered stream
+    let req = Request::LogsStream {
         config_path: "/test".into(),
         service: None,
-        cursor_id: None,
-        from_start: false,
+        after_id: None,
+        from_end: false,
+        limit: 1000,
         no_hooks: false,
-        poll_timeout_ms: None,
+
+        filter: None,
+        raw: false,
+        tail: false,
     };
-    assert!(check_scopes(&expanded, &req).is_err());
+    assert!(check_scopes(&expanded, &req).is_ok());
+}
+
+#[test]
+fn expand_logs_category() {
+    let scopes: HashSet<String> = ["logs".to_string()].into();
+    let expanded = expand_scopes(&scopes).unwrap();
+    assert!(expanded.contains("logs"));
+    assert!(expanded.contains("logs:read"));
+    assert!(expanded.contains("logs:search"));
+}
+
+#[test]
+fn expand_logs_wildcard() {
+    let scopes: HashSet<String> = ["logs:*".to_string()].into();
+    let expanded = expand_scopes(&scopes).unwrap();
+    assert!(expanded.contains("logs"));
+    assert!(expanded.contains("logs:read"));
+    assert!(expanded.contains("logs:search"));
 }
 
 #[test]
