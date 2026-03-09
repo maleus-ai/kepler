@@ -56,10 +56,10 @@ async fn setup_orchestrator(temp_dir: &Path) -> (ServiceOrchestrator, ConfigActo
     let registry = Arc::new(ConfigRegistry::new());
     let (exit_tx, _) = mpsc::channel(32);
     let (restart_tx, _) = mpsc::channel(32);
-    let cursor_manager = Arc::new(crate::cursor::CursorManager::new(60));
+    let log_notifiers: super::LogNotifiers = Arc::new(dashmap::DashMap::new());
     let token_store = Arc::new(crate::token_store::TokenStore::new());
     let orch = ServiceOrchestrator::new(
-        registry, exit_tx, restart_tx, cursor_manager, HardeningLevel::None, None, token_store,
+        registry, exit_tx, restart_tx, log_notifiers, HardeningLevel::None, None, token_store,
         crate::containment::ContainmentManager::detect(),
     );
 
@@ -78,9 +78,9 @@ fn create_orchestrator() -> ServiceOrchestrator {
     let registry = Arc::new(ConfigRegistry::new());
     let (exit_tx, _) = mpsc::channel(32);
     let (restart_tx, _) = mpsc::channel(32);
-    let cursor_manager = Arc::new(crate::cursor::CursorManager::new(60));
+    let log_notifiers: super::LogNotifiers = Arc::new(dashmap::DashMap::new());
     let token_store = Arc::new(crate::token_store::TokenStore::new());
-    ServiceOrchestrator::new(registry, exit_tx, restart_tx, cursor_manager, HardeningLevel::None, None, token_store, crate::containment::ContainmentManager::detect())
+    ServiceOrchestrator::new(registry, exit_tx, restart_tx, log_notifiers, HardeningLevel::None, None, token_store, crate::containment::ContainmentManager::detect())
 }
 
 // ---------------------------------------------------------------------------

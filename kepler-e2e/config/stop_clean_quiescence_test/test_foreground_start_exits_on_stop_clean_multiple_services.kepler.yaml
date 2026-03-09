@@ -1,7 +1,3 @@
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   web:
     command: ["sh", "-c", "echo WEB_STARTED; sleep 300"]

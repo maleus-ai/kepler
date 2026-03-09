@@ -30,9 +30,9 @@ fn create_test_orchestrator(
     let registry = Arc::new(ConfigRegistry::new());
     let (exit_tx, exit_rx) = mpsc::channel(32);
     let (restart_tx, restart_rx) = mpsc::channel(32);
-    let cursor_manager = Arc::new(kepler_daemon::cursor::CursorManager::new(300));
+    let log_notifiers: kepler_daemon::orchestrator::LogNotifiers = Arc::new(dashmap::DashMap::new());
     let token_store = Arc::new(kepler_daemon::token_store::TokenStore::new());
-    let orchestrator = ServiceOrchestrator::new(registry.clone(), exit_tx, restart_tx, cursor_manager, kepler_daemon::hardening::HardeningLevel::None, None, token_store, kepler_daemon::containment::ContainmentManager::detect());
+    let orchestrator = ServiceOrchestrator::new(registry.clone(), exit_tx, restart_tx, log_notifiers, kepler_daemon::hardening::HardeningLevel::None, None, token_store, kepler_daemon::containment::ContainmentManager::detect());
     (orchestrator, registry, exit_rx, restart_rx)
 }
 

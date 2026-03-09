@@ -1,7 +1,5 @@
 # Test that restart calls all hooks in correct order
 kepler:
-  logs:
-    buffer_size: 0
 services:
   test-svc:
     command: ["sleep", "3600"]

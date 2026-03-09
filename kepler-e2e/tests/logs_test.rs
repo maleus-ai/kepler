@@ -241,42 +241,6 @@ async fn test_multi_service_rotation_reconciliation() -> E2eResult<()> {
         logs_a.stdout
     );
 
-    // Verify truncation model: no rotation files should exist
-    if let Some(state_dir) = harness.get_config_state_dir(&config_path) {
-        let logs_dir = state_dir.join("logs");
-
-        // List all log files in the directory
-        let log_files: Vec<_> = std::fs::read_dir(&logs_dir)
-            .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // No rotation files should exist with truncation model
-        let rotated_files: Vec<_> = log_files
-            .iter()
-            .filter(|f| f.contains(".log.1") || f.contains(".log.2") || f.contains(".log.3"))
-            .collect();
-
-        assert!(
-            rotated_files.is_empty(),
-            "No rotation files should exist with truncation model. Found: {:?}",
-            rotated_files
-        );
-
-        // Main log files should exist
-        let main_log_exists = logs_dir.join("log-rotation-a.stdout.log").exists();
-        assert!(
-            main_log_exists,
-            "Main log file should exist. logs_dir: {:?}, files: {:?}",
-            logs_dir,
-            log_files
-        );
-    }
-
     // Verify logs are in chronological order by checking timestamps
     // The timestamps in the output should be monotonically increasing
     let lines: Vec<&str> = all_logs.stdout.lines().collect();
@@ -303,13 +267,11 @@ async fn test_multi_service_rotation_reconciliation() -> E2eResult<()> {
     Ok(())
 }
 
-/// Test that log truncation works correctly when max_size is reached
+/// Test that large volumes of log output are captured correctly
 ///
 /// This test verifies that:
-/// 1. Log files are truncated when they reach max_size
-/// 2. No rotation files (.1, .2, etc) are created
-/// 3. The service can continue writing logs after truncation
-/// 4. Recent logs are preserved after truncation
+/// 1. A service writing many log lines has its output stored in SQLite
+/// 2. Recent logs are preserved and retrievable via the API
 #[tokio::test]
 async fn test_log_truncation_behavior() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -330,36 +292,6 @@ async fn test_log_truncation_behavior() -> E2eResult<()> {
     harness
         .wait_for_log_content(&config_path, "TRUNCATION_DONE", Duration::from_secs(30))
         .await?;
-
-    // Verify log file exists and is truncated
-    if let Some(state_dir) = harness.get_config_state_dir(&config_path) {
-        let logs_dir = state_dir.join("logs");
-        let log_file = logs_dir.join("truncation-test.stdout.log");
-
-        assert!(
-            log_file.exists(),
-            "Log file should exist at {:?}",
-            log_file
-        );
-
-        // Check file size - should be around max_size (2KB) or less
-        let metadata = std::fs::metadata(&log_file)?;
-        let file_size = metadata.len();
-
-        // Max size is 2KB (2048 bytes), but with some margin for the last line
-        assert!(
-            file_size <= 4096,
-            "Log file should be truncated to around max_size. Got {} bytes",
-            file_size
-        );
-
-        // No rotation files should exist
-        let rotated_1 = logs_dir.join("truncation-test.stdout.log.1");
-        assert!(
-            !rotated_1.exists(),
-            "Rotation file .1 should NOT exist with truncation model"
-        );
-    }
 
     // Verify we can still read logs and they contain the DONE marker
     let logs = harness.get_logs(&config_path, Some("truncation-test"), 100).await?;

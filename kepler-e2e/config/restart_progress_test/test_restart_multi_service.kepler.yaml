@@ -1,7 +1,4 @@
 # Multiple services with dependency for testing restart progress ordering
-kepler:
-  logs:
-    buffer_size: 0
 
 services:
   db:

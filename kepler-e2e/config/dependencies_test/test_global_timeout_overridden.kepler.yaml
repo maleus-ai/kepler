@@ -4,8 +4,6 @@
 
 kepler:
   timeout: 30s
-  logs:
-    buffer_size: 0
 
 services:
   database:

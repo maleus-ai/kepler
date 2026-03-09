@@ -9,7 +9,7 @@ use kepler_daemon::env::{insert_env_entries, load_env_file};
 use kepler_daemon::hardening::HardeningLevel;
 use kepler_daemon::health::spawn_health_checker;
 use kepler_daemon::hooks::{ServiceHookParams, ServiceHookType, run_service_hook};
-use kepler_daemon::logs::{BufferedLogWriter, LogLine, LogReader, LogStream, LogWriterConfig};
+use kepler_daemon::logs::{LogLine, LogStoreHandle, LogWriter, SqliteLogReader};
 use kepler_daemon::process::{
     CommandSpec, ProcessExitEvent, SpawnServiceParams, spawn_service, stop_service,
 };
@@ -19,7 +19,7 @@ use kepler_daemon::watcher::{FileChangeEvent, spawn_file_watcher};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
 /// Mutex to synchronize environment variable setting and ConfigActor creation.
 /// This ensures that parallel tests don't interfere with each other's env vars.
@@ -412,7 +412,7 @@ impl TestDaemonHarness {
             env: &computed_env,
             kepler_env: &sys_env,
             env_file_vars: &env_file_vars,
-            log_config: Some(&ctx.log_config),
+            log_store: Some(&ctx.log_store),
             service_user: resolved.user.as_deref(),
             service_groups: &resolved.groups,
             service_log_config: resolved.logs.as_ref(),
@@ -483,14 +483,10 @@ impl TestDaemonHarness {
         // process initial output (e.g. kepler-exec warnings) before returning.
         // This mirrors the real daemon's behaviour where `kepler start` waits
         // for quiescence and log flushing before the CLI returns.
-        let flush_notify = Arc::new(Notify::new());
-        let mut log_config = ctx.log_config.clone();
-        log_config.log_notify = Some(flush_notify.clone());
-
         let spawn_params = SpawnServiceParams {
             service_name,
             spec,
-            log_config,
+            log_store: ctx.log_store.clone(),
             handle: self.handle.clone(),
             exit_tx: self.exit_tx.clone(),
             store_stdout,
@@ -530,15 +526,9 @@ impl TestDaemonHarness {
         )
         .await?;
 
-        // Wait for capture tasks to flush any initial output (e.g. kepler-exec
-        // stderr warnings on macOS). The notify fires when BufferedLogWriter
-        // flushes data. If the process produces no output, the timeout ensures
-        // we don't block forever.
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            flush_notify.notified(),
-        )
-        .await;
+        // Flush any initial output (e.g. kepler-exec stderr warnings on macOS).
+        // The SQLite log store batches writes, so we request a synchronous flush.
+        ctx.log_store.wait_flush_sync();
 
         // Start file watcher if configured
         if !resolved.restart.watch_patterns().is_empty() {
@@ -681,7 +671,7 @@ impl TestDaemonHarness {
             env: &ctx.env,
             kepler_env: &kepler_env,
             env_file_vars: &ctx.env_file_vars,
-            log_config: Some(&ctx.log_config),
+            log_store: Some(&ctx.log_store),
             service_user: resolved.user.as_deref(),
             service_groups: &resolved.groups,
             service_log_config: resolved.logs.as_ref(),
@@ -784,7 +774,7 @@ impl TestDaemonHarness {
             env: &ctx.env,
             kepler_env: &kepler_env,
             env_file_vars: &ctx.env_file_vars,
-            log_config: Some(&ctx.log_config),
+            log_store: Some(&ctx.log_store),
             service_user: resolved.user.as_deref(),
             service_groups: &resolved.groups,
             service_log_config: resolved.logs.as_ref(),
@@ -880,7 +870,7 @@ impl TestDaemonHarness {
 
     /// Get the logs helper for test operations
     pub async fn logs(&self) -> Option<TestLogHelper> {
-        self.handle.get_log_config().await.map(TestLogHelper::new)
+        self.handle.get_log_store().await.map(TestLogHelper::new)
     }
 
     /// Spawn a file change handler that restarts services on file changes
@@ -935,7 +925,7 @@ impl TestDaemonHarness {
                     env: &ctx.env,
                     kepler_env: &kepler_env,
                     env_file_vars: &ctx.env_file_vars,
-                    log_config: Some(&ctx.log_config),
+                    log_store: Some(&ctx.log_store),
                     service_user: resolved.user.as_deref(),
                     service_groups: &resolved.groups,
                     service_log_config: resolved.logs.as_ref(),
@@ -980,9 +970,8 @@ impl TestDaemonHarness {
                     let should_clear = retention == LogRetention::Clear;
 
                     if should_clear {
-                        let reader = LogReader::new(ctx.log_config.logs_dir.clone());
-                        reader.clear_service(&event.service_name);
-                        reader.clear_service_prefix(&format!("{}.", event.service_name));
+                        ctx.log_store.clear_service(&event.service_name);
+                        ctx.log_store.clear_service_prefix(&format!("{}.", event.service_name));
                     }
                 }
 
@@ -1018,7 +1007,7 @@ impl TestDaemonHarness {
                 let spawn_params = SpawnServiceParams {
                     service_name: &event.service_name,
                     spec,
-                    log_config: ctx.log_config.clone(),
+                    log_store: ctx.log_store.clone(),
                     handle: handle.clone(),
                     exit_tx: exit_tx.clone(),
                     store_stdout,
@@ -1106,7 +1095,7 @@ impl TestDaemonHarness {
                     env: &ctx.env,
                     kepler_env: &kepler_env,
                     env_file_vars: &ctx.env_file_vars,
-                    log_config: Some(&ctx.log_config),
+                    log_store: Some(&ctx.log_store),
                     service_user: resolved.user.as_deref(),
                     service_groups: &resolved.groups,
                     service_log_config: resolved.logs.as_ref(),
@@ -1151,9 +1140,8 @@ impl TestDaemonHarness {
                     let should_clear = retention == LogRetention::Clear;
 
                     if should_clear {
-                        let reader = LogReader::new(ctx.log_config.logs_dir.clone());
-                        reader.clear_service(&event.service_name);
-                        reader.clear_service_prefix(&format!("{}.", event.service_name));
+                        ctx.log_store.clear_service(&event.service_name);
+                        ctx.log_store.clear_service_prefix(&format!("{}.", event.service_name));
                     }
                 }
 
@@ -1216,9 +1204,8 @@ impl TestDaemonHarness {
                         let should_clear = retention == LogRetention::Clear;
 
                         if should_clear {
-                            let reader = LogReader::new(ctx.log_config.logs_dir.clone());
-                            reader.clear_service(&event.service_name);
-                            reader.clear_service_prefix(&format!("{}.", event.service_name));
+                            ctx.log_store.clear_service(&event.service_name);
+                            ctx.log_store.clear_service_prefix(&format!("{}.", event.service_name));
                         }
                     }
 
@@ -1238,7 +1225,7 @@ impl TestDaemonHarness {
                     let spawn_params = SpawnServiceParams {
                         service_name: &event.service_name,
                         spec,
-                        log_config: ctx.log_config.clone(),
+                        log_store: ctx.log_store.clone(),
                         handle: handle.clone(),
                         exit_tx: exit_tx.clone(),
                         store_stdout,
@@ -1291,50 +1278,50 @@ impl Drop for TestDaemonHarness {
 /// Test helper for log operations that provides the same interface as the old SharedLogBuffer.
 /// This allows tests to push log entries directly for testing purposes.
 pub struct TestLogHelper {
-    config: LogWriterConfig,
+    store: LogStoreHandle,
     sequence: std::sync::atomic::AtomicU64,
 }
 
 impl TestLogHelper {
-    pub fn new(config: LogWriterConfig) -> Self {
+    pub fn new(store: LogStoreHandle) -> Self {
         Self {
-            config,
+            store,
             sequence: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    /// Push a log entry to disk (creates a BufferedLogWriter, writes, and flushes)
-    pub fn push(&self, service: &str, line: String, stream: LogStream) {
-        let mut writer = BufferedLogWriter::from_config(&self.config, service, stream);
+    /// Push a log entry via SQLite store
+    pub fn push(&self, service: &str, line: String, level: &'static str) {
+        let writer = LogWriter::new(&self.store, service, level);
         writer.write(&line);
-        // writer.flush() is called by drop
+        self.store.wait_flush_sync();
         self.sequence
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Get the last N log entries, optionally filtered by service
     pub fn tail(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
-        let reader = LogReader::new(self.config.logs_dir.clone());
+        let reader = SqliteLogReader::new(self.store.db_path().to_path_buf(), self.store.storage_mode());
         reader.tail(count, service, false)
     }
 
     /// Clear all logs
     pub fn clear(&self) {
-        let reader = LogReader::new(self.config.logs_dir.clone());
-        reader.clear();
+        self.store.clear();
+        self.store.wait_flush_sync();
         self.sequence.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Clear logs for a specific service
     pub fn clear_service(&self, service: &str) {
-        let reader = LogReader::new(self.config.logs_dir.clone());
-        reader.clear_service(service);
+        self.store.clear_service(service);
+        self.store.wait_flush_sync();
     }
 
     /// Clear logs for services matching a prefix
     pub fn clear_service_prefix(&self, prefix: &str) {
-        let reader = LogReader::new(self.config.logs_dir.clone());
-        reader.clear_service_prefix(prefix);
+        self.store.clear_service_prefix(prefix);
+        self.store.wait_flush_sync();
     }
 
     /// Get current sequence number
@@ -1342,18 +1329,11 @@ impl TestLogHelper {
         self.sequence.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Get entries since a sequence number
+    /// Get entries since a sequence number (uses SQLite rowid-based cursor)
     pub fn entries_since(&self, since: u64, service: Option<&str>) -> Vec<LogLine> {
-        let reader = LogReader::new(self.config.logs_dir.clone());
-        // Get all entries and filter by index
-        // Note: this is less efficient than the old approach but maintains API compatibility
-        let all = reader.tail(10000, service, false);
-        let current = self.current_sequence();
-        if since >= current {
-            return Vec::new();
-        }
-        let skip = (since as usize).saturating_sub(all.len().saturating_sub(current as usize));
-        all.into_iter().skip(skip).collect()
+        let reader = SqliteLogReader::new(self.store.db_path().to_path_buf(), self.store.storage_mode());
+        let (entries, _has_more) = reader.after(since as i64, 10000, service, false, None).unwrap_or_default();
+        entries
     }
 }
 

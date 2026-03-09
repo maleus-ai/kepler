@@ -1,7 +1,4 @@
 # Service with healthcheck for testing restart reaches healthy
-kepler:
-  logs:
-    buffer_size: 0
 
 services:
   web:

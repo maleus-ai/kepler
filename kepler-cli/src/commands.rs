@@ -31,6 +31,9 @@ pub enum Commands {
         /// Refresh all system environment variables from the current shell
         #[arg(short = 'r', long)]
         refresh_env: bool,
+        /// Output raw log lines without formatting (no timestamp, level, service name, color)
+        #[arg(long, conflicts_with = "detach")]
+        raw: bool,
         /// Stop all services on unhandled failure (foreground mode)
         #[arg(long, conflicts_with = "detach")]
         abort_on_failure: bool,
@@ -63,6 +66,9 @@ pub enum Commands {
         /// Timeout for --wait mode (e.g. "30s", "5m")
         #[arg(long, requires = "wait")]
         timeout: Option<String>,
+        /// Output raw log lines without formatting (no timestamp, level, service name, color)
+        #[arg(long)]
+        raw: bool,
         /// Follow logs after restart (Ctrl+C exits log following, services keep running)
         #[arg(long, conflicts_with = "wait")]
         follow: bool,
@@ -102,6 +108,10 @@ pub enum Commands {
         /// Exclude hook logs (pre_start, post_stop, etc.)
         #[arg(long)]
         no_hook: bool,
+
+        /// Output raw log lines without formatting (no timestamp, level, service name, color)
+        #[arg(long)]
+        raw: bool,
     },
     /// List all services and their states
     PS {

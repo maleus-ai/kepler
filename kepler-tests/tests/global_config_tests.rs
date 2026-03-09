@@ -147,7 +147,7 @@ kepler:
     retention:
       on_stop: retain
       on_start: retain
-    max_size: 10M
+    flush_interval: "200ms"
 
 services:
   app:
@@ -171,8 +171,7 @@ services:
     // Verify logs
     assert!(kepler.logs.is_some(), "kepler.logs should exist");
     let logs = kepler.logs.as_ref().unwrap();
-    assert!(logs.max_size.as_static().unwrap().is_some(), "max_size config should exist");
-    assert_eq!(*logs.max_size.as_static().unwrap(), Some("10M".to_string()));
+    assert_eq!(logs.flush_interval(), Some(std::time::Duration::from_millis(200)));
 
     // Verify accessor methods work
     assert!(config.global_logs().is_some());
@@ -355,7 +354,7 @@ kepler:
   default_inherit_env: true
   timeout: 1m
   logs:
-    max_size: 10M
+    flush_interval: "100ms"
 
 services:
   app:

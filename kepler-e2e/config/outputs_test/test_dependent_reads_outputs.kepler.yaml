@@ -1,9 +1,5 @@
 # Test dependent service reads outputs: consumer reads producer's outputs via ${{ deps['producer'].outputs.port }}
 
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   producer:
     command: ["sh", "-c", "echo '::output::port=8080'; echo PRODUCER_DONE; exit 0"]

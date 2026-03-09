@@ -1,7 +1,5 @@
 # Test that stop respects reverse dependency order
 kepler:
-  logs:
-    buffer_size: 0
 services:
   db:
     command: ["sleep", "3600"]

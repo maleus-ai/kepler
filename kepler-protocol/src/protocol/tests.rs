@@ -104,36 +104,6 @@ fn roundtrip_envelope_restart() {
 }
 
 #[test]
-fn roundtrip_envelope_logs() {
-    let envelope = RequestEnvelope {
-        id: 10,
-        token: None,
-        request: Request::Logs {
-            config_path: PathBuf::from("/app/k.yaml"),
-            service: Some("worker".into()),
-            follow: true,
-            lines: 500,
-            max_bytes: Some(1024 * 1024),
-            mode: LogMode::Tail,
-            no_hooks: true,
-        },
-    };
-    let bytes = encode_envelope(&envelope).unwrap();
-    let decoded = decode_envelope(&bytes[4..]).unwrap();
-    match decoded.request {
-        Request::Logs { service, follow, lines, max_bytes, mode, no_hooks, .. } => {
-            assert_eq!(service, Some("worker".into()));
-            assert!(follow);
-            assert_eq!(lines, 500);
-            assert_eq!(max_bytes, Some(1024 * 1024));
-            assert_eq!(mode, LogMode::Tail);
-            assert!(no_hooks);
-        }
-        _ => panic!("Expected Logs request"),
-    }
-}
-
-#[test]
 fn roundtrip_envelope_status() {
     let envelope = RequestEnvelope {
         id: 99,
@@ -176,29 +146,33 @@ fn roundtrip_envelope_prune() {
 }
 
 #[test]
-fn roundtrip_envelope_logs_cursor() {
+fn roundtrip_envelope_logs_stream() {
     let envelope = RequestEnvelope {
         id: 50,
         token: None,
-        request: Request::LogsCursor {
+        request: Request::LogsStream {
             config_path: PathBuf::from("/app/k.yaml"),
             service: None,
-            cursor_id: Some("cursor-abc123".into()),
-            from_start: true,
+            after_id: Some(42),
+            from_end: false,
+            limit: 10000,
             no_hooks: false,
-            poll_timeout_ms: Some(2000),
+            filter: Some("level='err'".to_string()),
+            raw: false,
+            tail: true,
         },
     };
     let bytes = encode_envelope(&envelope).unwrap();
     let decoded = decode_envelope(&bytes[4..]).unwrap();
     match decoded.request {
-        Request::LogsCursor { cursor_id, from_start, no_hooks, poll_timeout_ms, .. } => {
-            assert_eq!(cursor_id, Some("cursor-abc123".into()));
-            assert!(from_start);
+        Request::LogsStream { after_id, from_end, limit, no_hooks, tail, .. } => {
+            assert_eq!(after_id, Some(42));
+            assert!(!from_end);
+            assert_eq!(limit, 10000);
             assert!(!no_hooks);
-            assert_eq!(poll_timeout_ms, Some(2000));
+            assert!(tail);
         }
-        _ => panic!("Expected LogsCursor request"),
+        _ => panic!("Expected LogsStream request"),
     }
 }
 
@@ -326,75 +300,46 @@ fn roundtrip_server_message_progress_event() {
 }
 
 #[test]
-fn roundtrip_log_entry() {
-    let entries = vec![
-        LogEntry {
-            service: Arc::from("web"),
-            line: "Server started on port 8080".into(),
-            timestamp: Some(1700000000000),
-            stream: StreamType::Stdout,
-        },
-        LogEntry {
-            service: Arc::from("web"),
-            line: "Warning: deprecated API".into(),
-            timestamp: Some(1700000001000),
-            stream: StreamType::Stderr,
-        },
-    ];
-    let msg = ServerMessage::Response {
-        id: 20,
-        response: Response::ok_with_data(ResponseData::Logs(entries)),
-    };
-    let bytes = encode_server_message(&msg).unwrap();
-    let decoded = decode_server_message(&bytes[4..]).unwrap();
-    match decoded {
-        ServerMessage::Response { response: Response::Ok { data: Some(ResponseData::Logs(logs)), .. }, .. } => {
-            assert_eq!(logs.len(), 2);
-            assert_eq!(&*logs[0].service, "web");
-            assert_eq!(logs[0].stream, StreamType::Stdout);
-            assert_eq!(logs[1].stream, StreamType::Stderr);
-        }
-        _ => panic!("Expected Logs response"),
-    }
-}
-
-#[test]
-fn roundtrip_cursor_log_entry() {
-    let data = LogCursorData {
+fn roundtrip_stream_log_entry() {
+    let data = LogStreamData {
         service_table: vec![Arc::from("web"), Arc::from("api")],
         entries: vec![
-            CursorLogEntry {
+            StreamLogEntry {
                 service_id: 0,
                 line: "hello from web".into(),
                 timestamp: 1700000000000,
-                stream: StreamType::Stdout,
+                level: Arc::from("out"),
+                hook: None,
+                attributes: None,
             },
-            CursorLogEntry {
+            StreamLogEntry {
                 service_id: 1,
                 line: "hello from api".into(),
                 timestamp: 1700000001000,
-                stream: StreamType::Stderr,
+                level: Arc::from("err"),
+                hook: None,
+                attributes: None,
             },
         ],
-        cursor_id: "cursor-xyz".into(),
+        last_id: 99,
         has_more: true,
     };
     let msg = ServerMessage::Response {
         id: 30,
-        response: Response::ok_with_data(ResponseData::LogCursor(data)),
+        response: Response::ok_with_data(ResponseData::LogStream(data)),
     };
     let bytes = encode_server_message(&msg).unwrap();
     let decoded = decode_server_message(&bytes[4..]).unwrap();
     match decoded {
-        ServerMessage::Response { response: Response::Ok { data: Some(ResponseData::LogCursor(d)), .. }, .. } => {
+        ServerMessage::Response { response: Response::Ok { data: Some(ResponseData::LogStream(d)), .. }, .. } => {
             assert_eq!(d.service_table.len(), 2);
             assert_eq!(&*d.service_table[0], "web");
             assert_eq!(d.entries.len(), 2);
             assert_eq!(d.entries[0].service_id, 0);
             assert!(d.has_more);
-            assert_eq!(d.cursor_id, "cursor-xyz");
+            assert_eq!(d.last_id, 99);
         }
-        _ => panic!("Expected LogCursor response"),
+        _ => panic!("Expected LogStream response"),
     }
 }
 
@@ -501,28 +446,6 @@ fn different_request_ids_produce_distinct_envelopes() {
     let dec1 = decode_envelope(&bytes1[4..]).unwrap();
     let dec2 = decode_envelope(&bytes2[4..]).unwrap();
     assert_ne!(dec1.id, dec2.id);
-}
-
-// ========================================================================
-// StreamType tests
-// ========================================================================
-
-#[test]
-fn stream_type_as_str() {
-    assert_eq!(StreamType::Stdout.as_str(), "stdout");
-    assert_eq!(StreamType::Stderr.as_str(), "stderr");
-}
-
-#[test]
-fn stream_type_is_stderr() {
-    assert!(!StreamType::Stdout.is_stderr());
-    assert!(StreamType::Stderr.is_stderr());
-}
-
-#[test]
-fn stream_type_display() {
-    assert_eq!(format!("{}", StreamType::Stdout), "stdout");
-    assert_eq!(format!("{}", StreamType::Stderr), "stderr");
 }
 
 // ========================================================================

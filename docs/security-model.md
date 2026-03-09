@@ -16,6 +16,7 @@ Kepler's security design: root requirement, group-based access, per-config ACLs,
 - [Hardening](#hardening)
 - [Environment Isolation](#environment-isolation)
 - [Lua Sandbox](#lua-sandbox)
+- [Log Query Security](#log-query-security)
 - [Privilege Dropping](#privilege-dropping)
 
 ---
@@ -156,8 +157,8 @@ ACL scopes use the same hierarchy as [service permissions](#service-permissions-
 | Wildcard | `*`, `service:*`                    | Grants everything at/below that level |
 
 **Implication rules:**
-- Category implies all descendants: `service` → `service:start`, `service:stop`, `service:restart`, `service:clean`, `service:logs`
-- Command-level implication: `service:clean` → `service:stop`
+- Category implies all descendants: `service` → `service:start`, `service:stop`, `service:restart`, `service:clean`; `logs` → `logs:read`, `logs:search`
+- Command-level implications: `service:clean` → `service:stop`; `logs:search` → `logs:read`
 
 ```
 *
@@ -165,14 +166,16 @@ ACL scopes use the same hierarchy as [service permissions](#service-permissions-
 │   ├── service:start
 │   ├── service:stop
 │   ├── service:restart
-│   ├── service:clean (implies service:stop)
-│   └── service:logs
-└── config
-    ├── config:status
-    ├── config:inspect
-    ├── config:recreate
-    ├── config:hardening
-    └── config:env
+│   └── service:clean (implies service:stop)
+├── config
+│   ├── config:status
+│   ├── config:inspect
+│   ├── config:recreate
+│   ├── config:hardening
+│   └── config:env
+└── logs
+    ├── logs:read
+    └── logs:search (implies logs:read)
 ```
 
 ### Available Scopes
@@ -184,13 +187,15 @@ ACL scopes use the same hierarchy as [service permissions](#service-permissions-
 | `service:stop`       | Stop services (including with custom signal)                          |
 | `service:restart`    | Restart services                                                      |
 | `service:clean`      | Stop with `--clean` (implies `service:stop`)                          |
-| `service:logs`       | View service logs                                                     |
 | `config`             | All config operations                                                 |
 | `config:status`      | View config/service status; filters `kepler list` and `kepler ps --all` results |
 | `config:inspect`     | Inspect config                                                        |
 | `config:recreate`    | Recreate config                                                       |
 | `config:hardening`   | Override hardening level (`--hardening` on start and recreate). Only required when the flag is used |
 | `config:env`         | Override environment (`-e` / `--refresh-env` on start and restart). Only required when the flag is used |
+| `logs`               | All log operations (`logs:read` + `logs:search`)                      |
+| `logs:read`          | View service logs                                                     |
+| `logs:search`        | Query logs with filter expressions (implies `logs:read`). See [Log Query Security](#log-query-security) |
 | `*`                  | Everything                                                            |
 
 ### Rule Matching
@@ -232,7 +237,7 @@ kepler:
   acl:
     groups:
       ops-team:
-        allow: [config:status, service:logs]
+        allow: [config:status, logs:read]
 ```
 
 Only the config owner can start/stop services. Members of `ops-team` can view status and logs. Other `kepler` group members are denied all scoped operations.
@@ -244,15 +249,15 @@ kepler:
   acl:
     users:
       alice:
-        allow: [service, config:status]  # Can start/stop + view status and logs (service category includes service:logs)
+        allow: [service, config:status, logs]  # Can start/stop + view status + read and search logs
       bob:
-        allow: [config:status]                          # Can only view status
+        allow: [config:status]                 # Can only view status
     groups:
       developers:
-        allow: [config:status, service:logs]            # Can view status and logs
+        allow: [config:status, logs:read]      # Can view status and read logs (no search)
 ```
 
-Alice gets full service control. Bob can only check status. All developers can read status and logs. The config owner has unrestricted access regardless.
+Alice gets full service control and log access (including search). Bob can only check status. All developers can read status and logs. The config owner has unrestricted access regardless.
 
 #### Grant full access to all group members
 
@@ -353,7 +358,7 @@ services:
         - service:start
         - service:stop
         - config:status
-        - service:logs
+        - logs:read
       hardening: no-root              # Hardening floor for configs spawned by this process
 ```
 
@@ -416,13 +421,13 @@ kepler:
   acl:
     users:
       bob:
-        allow: [config:status, service:logs]
+        allow: [config:status, logs:read]
 ```
 
 ```
-alice → "kepler stop web"   →  effective = *                             → allowed
-bob   → "kepler stop web"   →  effective = {config:status, service:logs} → denied (needs service:stop)
-bob   → "kepler ps"         →  effective = {config:status, service:logs} → allowed (needs config:status)
+alice → "kepler stop web"   →  effective = *                           → allowed
+bob   → "kepler stop web"   →  effective = {config:status, logs:read}  → denied (needs service:stop)
+bob   → "kepler ps"         →  effective = {config:status, logs:read}  → allowed (needs config:status)
 ```
 
 ### Process ∩ ACL
@@ -542,7 +547,7 @@ Permission computation at each level:
 
 ```
 orchestrator.allow = expand({service, config:status}) ∩ (no ceiling)
-                   = {service:start, service:stop, service:restart, service:clean, service:logs, config:status}
+                   = {service:start, service:stop, service:restart, service:clean, config:status}
 
 worker.allow       = expand({service:start, service:stop, config:status, config:inspect}) ∩ orchestrator.allow
                    = {service:start, service:stop, config:status}
@@ -610,10 +615,10 @@ kepler:
   acl:
     users:
       bob:
-        allow: [service, config:status]
+        allow: [service, config:status, logs]
     groups:
       ops-team:
-        allow: [config:status, service:logs]
+        allow: [config:status, logs:read]
 
 services:
   deployer:
@@ -988,6 +993,158 @@ Kepler's Lua scripting uses a sandboxed Luau runtime with restricted capabilitie
 Lua scripts are evaluated once during config baking -- they do not run at service runtime.
 
 See [Lua Scripting](lua-scripting.md) for details.
+
+---
+
+## Log Query Security
+
+The `logs:search` scope allows users to filter logs using SQL WHERE expressions that are injected directly into the query. This is a powerful feature -- and because it exposes raw SQL surface area, Kepler enforces multiple defense layers to prevent abuse.
+
+### Permission Scopes
+
+Log access is split into two scopes:
+
+| Scope | Required for | Description |
+|-------|-------------|-------------|
+| `logs:read` | `kepler logs`, `kepler logs --follow` | Read logs (no filtering) |
+| `logs:search` | `kepler logs --filter "..."` | Query logs with a SQL WHERE expression |
+
+`logs:search` implies `logs:read` -- granting search automatically grants read access. The `logs` category grants both.
+
+**Scope separation rationale:** Plain log reading (`logs:read`) is a read-only operation with no user-controlled SQL. Filtered queries (`logs:search`) inject user-provided expressions into SQL, creating a larger attack surface. Operators who only need to grant log viewing can use `logs:read` without exposing the query interface.
+
+### How Filters Work
+
+When a user provides a filter expression (e.g., `level = 'err' AND service = 'web'`), it is injected as a raw SQL WHERE fragment:
+
+```sql
+SELECT ... FROM logs WHERE (level = 'err' AND service = 'web') AND id > ?1 ...
+```
+
+Values are embedded directly in the SQL string -- filters are self-contained expressions, not parameterized queries. The `?` character is rejected in filters to prevent conflicts with internal bind parameters.
+
+### Defense Layers
+
+Safety is enforced by four independent defense layers. All four are active simultaneously -- an attacker must bypass all of them to cause harm.
+
+#### 1. Read-only connection
+
+Log queries run on a read-only SQLite connection (`SQLITE_OPEN_READONLY`). Even if all other defenses were bypassed, the connection cannot modify data.
+
+#### 2. SQLite authorizer (deny-by-default)
+
+The SQLite authorizer callback is set before the query is compiled. It validates every operation in the SQL statement at **compile time** (during `prepare()`), before any data is read:
+
+- **SELECT** on the `logs` table: allowed
+- **Column reads** on `logs`: allowed
+- **Whitelisted functions**: allowed (see [Allowed Functions](#allowed-functions))
+- **Everything else**: denied -- writes, DDL, ATTACH, PRAGMA, reads on other tables (`sqlite_master`, etc.), non-whitelisted functions
+
+If the authorizer denies any operation, the query fails at compile time with an error returned to the user.
+
+#### 3. Resource limits
+
+SQLite resource limits are tightened on the filter connection to prevent denial-of-service:
+
+| Limit | Value | Purpose |
+|-------|-------|---------|
+| Expression depth | 20 | Prevents deeply nested expressions |
+| LIKE pattern length | 100 bytes | Prevents expensive LIKE patterns |
+| SQL length | 10,000 bytes | Prevents oversized queries |
+| String length | 1,000,000 bytes | Caps result sizes |
+| Compound SELECT | 2 | Prevents UNION chains |
+| Function arguments | 8 | Limits function call complexity |
+| Attached databases | 0 | Blocks ATTACH entirely |
+
+Additionally, the filter string itself is validated before injection: empty filters and filters exceeding 4,096 bytes are rejected.
+
+#### 4. Progress handler timeout
+
+A progress handler aborts queries that run longer than 5 seconds. This is the last line of defense against queries that pass all other checks but are computationally expensive (e.g., a valid but slow `LIKE` pattern on a large dataset).
+
+### Allowed Functions
+
+The authorizer uses a **deny-by-default** policy for SQL functions. Only the following functions are permitted in filter expressions:
+
+| Category | Functions |
+|----------|-----------|
+| JSON | `json`, `json_extract`, `json_type`, `json_valid`, `json_array_length`, `json_each`, `json_tree`, `json_object`, `json_array`, `json_quote` |
+| String | `length`, `lower`, `upper`, `trim`, `ltrim`, `rtrim`, `substr`, `substring`, `replace`, `instr`, `like`, `glob` |
+| Comparison | `coalesce`, `ifnull`, `iif`, `nullif`, `typeof`, `min`, `max` |
+| Numeric | `abs`, `round` |
+| Aggregate | `count`, `sum`, `total`, `avg`, `group_concat` |
+
+All other functions are blocked. This prevents:
+- **`randomblob()`, `zeroblob()`**: memory allocation attacks
+- **`load_extension()`**: arbitrary code execution
+- **`printf()`**: format string abuse
+- **`readfile()`, `writefile()`**: filesystem access (if the `fileio` extension were loaded)
+
+### Known Attack Vectors and Mitigations
+
+Operators granting `logs:search` should be aware of the following residual risks and how they are mitigated:
+
+#### Information disclosure via log content
+
+**Risk:** A user with `logs:search` can write expressive queries against all columns of the `logs` table (`id`, `timestamp`, `service`, `hook`, `level`, `line`, `is_json`). They can extract substrings, filter by patterns, and use JSON functions to drill into structured log lines.
+
+**Mitigation:** This is by design -- `logs:search` is intended for ad-hoc log analysis. Grant `logs:read` (not `logs:search`) to users who should only view raw log output without query capabilities. The authorizer ensures queries cannot reach tables other than `logs`.
+
+#### CPU exhaustion via expensive queries
+
+**Risk:** A user can craft queries that are valid but computationally expensive -- for example, `LIKE` patterns with leading wildcards on large datasets, or deeply nested `coalesce()` calls.
+
+**Mitigation:** The 5-second progress handler timeout aborts runaway queries. Expression depth is capped at 20. LIKE patterns are limited to 100 bytes. Each query runs on a fresh read-only connection, so an aborted query cannot affect other connections or the log writer.
+
+#### Schema probing
+
+**Risk:** A user might attempt to discover table structure or other tables via `sqlite_master`, `PRAGMA`, or `ATTACH`.
+
+**Mitigation:** The authorizer denies reads on any table other than `logs`, denies all PRAGMA operations, and denies ATTACH. The attached databases limit is set to 0. Attempts to probe the schema fail at compile time.
+
+#### Statement injection via semicolons
+
+**Risk:** A user might attempt to inject additional SQL statements by including `;` in the filter (e.g., `1=1; DROP TABLE logs`).
+
+**Mitigation:** SQLite's `prepare()` only compiles the **first** statement in the input. Any text after a semicolon is silently ignored -- it is never compiled or executed. Combined with the read-only connection, even if a second statement were somehow executed, it could not modify data.
+
+#### Parameter placeholder interference
+
+**Risk:** A user might include `?` in the filter to interfere with internal bind parameters (e.g., `id = ?1` to read the service name bound at position 1).
+
+**Mitigation:** The `?` character is rejected during filter validation, before the filter reaches SQL. Filters are self-contained expressions with literal values only.
+
+### Configuration Examples
+
+#### Grant log viewing without search
+
+```yaml
+kepler:
+  acl:
+    groups:
+      viewers:
+        allow: [config:status, logs:read]    # Can view logs, cannot use --filter
+```
+
+#### Grant full log access including search
+
+```yaml
+kepler:
+  acl:
+    groups:
+      analysts:
+        allow: [config:status, logs:search]  # logs:search implies logs:read
+```
+
+#### Grant everything via the logs category
+
+```yaml
+kepler:
+  acl:
+    groups:
+      ops-team:
+        allow: [config:status, logs]         # Equivalent to logs:read + logs:search
+```
 
 ---
 

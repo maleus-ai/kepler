@@ -72,6 +72,8 @@ ServerMessage::Event {
 | `Recreate` | `config_path`, `sys_env?` | Stop, re-bake config snapshot, start |
 | `Status` | `config_path?` | Get service status (None = all configs) |
 | `Logs` | `config_path`, `service?`, `follow`, `lines`, `max_bytes?`, `mode`, `no_hooks` | Get logs (one-shot or follow) |
+| `LogsStream` | `config_path`, `service?`, `after_id?`, `from_end`, `limit`, `no_hooks`, `filter?`, `raw`, `tail` | Streaming log retrieval with cursor and optional SQL filter. Requires `logs:read`; `logs:search` when `filter` is set |
+| `SubscribeLogs` | `config_path` | Subscribe to log-available notifications. Pushes `LogsAvailable` events when new logs are flushed. Requires `logs:read` |
 | `LogsChunk` | `config_path`, `service?`, `offset`, `limit`, `no_hooks` | Get log entries with offset/limit pagination |
 | `LogsCursor` | `config_path`, `service?`, `cursor_id?`, `from_start`, `no_hooks` | Cursor-based log streaming |
 | `Subscribe` | `config_path`, `services?` | Subscribe to service state change events |

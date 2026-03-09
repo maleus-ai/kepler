@@ -24,7 +24,7 @@ The daemon uses an actor-based architecture:
 | `config_actor/` | Actor system: actor loop, commands, handle API, context |
 | `orchestrator/` | Service orchestration: startup ordering, events, lifecycle, error handling |
 | `process/` | Process spawning, command building, privilege dropping, validation |
-| `logs/` | Log writer (buffered, truncation), reader, iterators, config |
+| `logs/` | SQLite-backed log storage (single-writer actor), reader, log levels |
 | `deps.rs` | Dependency graph, topological sort, condition checking, startup cluster computation |
 | `cursor.rs` | Server-side log cursor management for streaming |
 | `events.rs` | Service event types and channel creation |

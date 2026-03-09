@@ -36,13 +36,12 @@ use crate::events::{RestartReason, ServiceEvent};
 /// Created once per `start_services` call and reused across all service starts,
 /// ensuring the `global` table persists between services.
 type SharedLuaEvaluator = Arc<tokio::sync::Mutex<LuaEvaluator>>;
-use crate::cursor::CursorManager;
 use crate::health::spawn_health_checker;
 use crate::hooks::{
     run_service_hook, ServiceHookParams, ServiceHookType,
 };
 use crate::lua_eval::DepInfo;
-use crate::logs::{BufferedLogWriter, LogStream};
+use crate::logs::LogWriter;
 use crate::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
 use crate::state::ServiceStatus;
 use crate::watcher::{spawn_file_watcher, FileChangeEvent};
@@ -69,12 +68,16 @@ struct StartupContext<'a> {
 /// - Applying log retention policies
 /// - Updating state
 /// - Spawning auxiliary tasks (health checks, file watchers)
+/// Shared registry of per-config log notification channels.
+/// The log store actor fires these after each flush to wake long-polling handlers.
+pub type LogNotifiers = Arc<dashmap::DashMap<PathBuf, Arc<tokio::sync::Notify>>>;
+
 #[derive(Clone)]
 pub struct ServiceOrchestrator {
     registry: SharedConfigRegistry,
     exit_tx: mpsc::Sender<ProcessExitEvent>,
     restart_tx: mpsc::Sender<FileChangeEvent>,
-    cursor_manager: Arc<CursorManager>,
+    log_notifiers: LogNotifiers,
     hardening: HardeningLevel,
     kepler_gid: Option<u32>,
     token_store: SharedTokenStore,
@@ -88,7 +91,7 @@ impl ServiceOrchestrator {
         registry: SharedConfigRegistry,
         exit_tx: mpsc::Sender<ProcessExitEvent>,
         restart_tx: mpsc::Sender<FileChangeEvent>,
-        cursor_manager: Arc<CursorManager>,
+        log_notifiers: LogNotifiers,
         hardening: HardeningLevel,
         kepler_gid: Option<u32>,
         token_store: SharedTokenStore,
@@ -98,7 +101,7 @@ impl ServiceOrchestrator {
             registry,
             exit_tx,
             restart_tx,
-            cursor_manager,
+            log_notifiers,
             hardening,
             kepler_gid,
             token_store,
@@ -160,6 +163,15 @@ impl ServiceOrchestrator {
             .registry
             .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening, permission_ceiling)
             .await?;
+
+        // Wire up log notification: when the log store flushes a batch,
+        // it fires this notify which wakes any long-polling stream handlers.
+        if let Some(log_store) = handle.get_log_store().await {
+            let notify = self.log_notifiers.entry(config_path.to_path_buf())
+                .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+                .clone();
+            log_store.set_log_notify(notify);
+        }
 
         // Merge override envs into stored kepler_env if provided
         if let Some(overrides) = override_envs {
@@ -385,9 +397,8 @@ impl ServiceOrchestrator {
                 // Write error to service stderr log so it's visible via `kepler logs`.
                 // Skip for hook errors — they already wrote to stderr in run_service_hook.
                 if !matches!(e, OrchestratorError::HookFailed(_))
-                    && let Some(mut log_config) = handle.get_log_config().await {
-                        log_config.log_notify = Some(self.cursor_manager.get_log_notify(handle.config_path()));
-                        let mut writer = BufferedLogWriter::from_config(&log_config, service_name, LogStream::Stderr);
+                    && let Some(ref log_store) = handle.get_log_store().await {
+                        let writer = LogWriter::new(log_store, service_name, "err");
                         writer.write(&e.to_string());
                     }
                 if let Err(err) = handle.set_service_status_with_reason(
@@ -1109,7 +1120,7 @@ impl ServiceOrchestrator {
                     ));
                     if let Ok(global_dir) = crate::global_state_dir() {
                         let state_dir = global_dir.join("configs").join(&config_hash);
-                        self.cursor_manager.invalidate_config_cursors(config_path);
+                        self.log_notifiers.remove(config_path);
                         if state_dir.exists() {
                             if let Err(e) = std::fs::remove_dir_all(&state_dir) {
                                 warn!("Failed to remove state directory {:?}: {}", state_dir, e);
@@ -1140,10 +1151,18 @@ impl ServiceOrchestrator {
             None => get_stop_order(&config.services)?,
         };
 
-        let log_config = handle.get_log_config().await.map(|mut cfg| {
-            cfg.log_notify = Some(self.cursor_manager.get_log_notify(config_path));
-            cfg
-        });
+        // When doing a full clean shutdown, set the discard flag on the log store
+        // immediately via the direct handle (bypasses config actor's message queue).
+        // This stops the actor from spending minutes writing queued entries to SQLite
+        // — entries that will be deleted along with the state directory.
+        // Also interrupts any running SQLite query (e.g. DELETE FROM logs triggered
+        // by a concurrent `stop` command's log retention).
+        if clean && service_filter.is_none() {
+            info!("stop_services: setting early discard flag on log store");
+            handle.shutdown_discard_log_store();
+        }
+
+        let log_store = handle.get_log_store().await;
         let global_log_config = config.global_logs().cloned();
 
         let mut stopped = Vec::new();
@@ -1281,42 +1300,42 @@ impl ServiceOrchestrator {
             }
         }
 
-        // Apply log retention using LogReader
-        if let Some(ref log_cfg) = log_config {
-            use crate::logs::LogReader;
-            let reader = LogReader::new(log_cfg.logs_dir.clone());
-
-            // When stopping all services, clear logs for ALL services (including
-            // already-exited ones like one-shot tasks), not just those we stopped now.
-            let services_to_clear = if service_filter.is_none() {
-                &services_to_stop
-            } else {
-                &stopped
-            };
-
-            for service_name in services_to_clear {
-                // When clean is true, always clear logs (no retention policy check)
-                let should_clear = if clean {
-                    true
+        // Apply log retention using LogStoreHandle.
+        // Skip when doing a full clean shutdown — the state directory (including
+        // the SQLite database) will be deleted, and the log store actor has
+        // already been shut down via the early discard flag.
+        if !(clean && service_filter.is_none()) {
+            if let Some(ref log_store) = log_store {
+                // When stopping all services, clear logs for ALL services (including
+                // already-exited ones like one-shot tasks), not just those we stopped now.
+                let services_to_clear = if service_filter.is_none() {
+                    &services_to_stop
                 } else {
-                    let service_logs = config
-                        .services
-                        .get(service_name)
-                        .and_then(|raw| raw.logs.as_static().cloned().flatten());
-                    resolve_log_retention(
-                        service_logs.as_ref(),
-                        global_log_config.as_ref(),
-                        |l| l.get_on_stop(),
-                        LogRetention::Clear,
-                    ) == LogRetention::Clear
+                    &stopped
                 };
 
-                if should_clear {
-                    reader.clear_service(service_name);
-                    reader.clear_service_prefix(&format!("{}.", service_name));
+                for service_name in services_to_clear {
+                    let should_clear = if clean {
+                        true
+                    } else {
+                        let service_logs = config
+                            .services
+                            .get(service_name)
+                            .and_then(|raw| raw.logs.as_static().cloned().flatten());
+                        resolve_log_retention(
+                            service_logs.as_ref(),
+                            global_log_config.as_ref(),
+                            |l| l.get_on_stop(),
+                            LogRetention::Clear,
+                        ) == LogRetention::Clear
+                    };
+
+                    if should_clear {
+                        log_store.clear_service(service_name);
+                        log_store.clear_service_prefix(&format!("{}.", service_name));
+                    }
                 }
             }
-
         }
 
         // When clean=true and stopping all services, remove entire state directory
@@ -1339,12 +1358,14 @@ impl ServiceOrchestrator {
             // Revoke all tokens for this config before unloading
             self.token_store.revoke_for_config(config_path).await;
 
-            // Drop all cursors holding file handles into this config's log directory
-            self.cursor_manager.invalidate_config_cursors(config_path);
+            // Remove log notifier for this config
+            self.log_notifiers.remove(config_path);
 
             // Unload config from registry — clean=true skips save_state since
             // the state directory is about to be removed
+            info!("stop_services: unloading config (clean=true), waiting for cleanup + log store exit");
             self.registry.unload(&config_path.to_path_buf(), true).await;
+            info!("stop_services: config unloaded");
 
             // Clean up config-level cgroup
             self.containment.cleanup_config(config_hash);
@@ -1352,6 +1373,7 @@ impl ServiceOrchestrator {
             // Remove entire state directory (logs, config snapshots, env_files, etc.)
             // Done AFTER unload so save_state in cleanup() doesn't fail
             if state_dir.exists() {
+                info!("stop_services: removing state directory {:?}", state_dir);
                 if let Err(e) = std::fs::remove_dir_all(&state_dir) {
                     warn!("Failed to remove state directory {:?}: {}", state_dir, e);
                 } else {
@@ -1359,8 +1381,7 @@ impl ServiceOrchestrator {
                 }
             }
 
-            // Purge allocator caches to return freed pages to the OS
-            crate::allocator::purge_caches();
+            info!("stop_services: done");
         }
 
         if let Some(fd_count) = crate::fd_count::count_open_fds() {
@@ -2315,7 +2336,7 @@ impl ServiceOrchestrator {
             env: &ctx.env,
             kepler_env: &kepler_env,
             env_file_vars: &ctx.env_file_vars,
-            log_config: Some(&ctx.log_config),
+            log_store: Some(&ctx.log_store),
             service_user: resolved.user.as_deref(),
             service_groups: &resolved.groups,
             service_log_config: resolved.logs.as_ref(),
@@ -2608,13 +2629,10 @@ impl ServiceOrchestrator {
             ctx.global_log_config.as_ref(),
         );
 
-        let mut log_config = ctx.log_config.clone();
-        log_config.log_notify = Some(self.cursor_manager.get_log_notify(handle.config_path()));
-
         let spawn_params = SpawnServiceParams {
             service_name,
             spec,
-            log_config,
+            log_store: ctx.log_store.clone(),
             handle: handle.clone(),
             exit_tx: self.exit_tx.clone(),
             store_stdout,

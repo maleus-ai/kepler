@@ -1,8 +1,5 @@
 # No user: field — service runs as the daemon user.
 # HOME/USER should come from the CLI caller's environment (inherited).
-kepler:
-  logs:
-    buffer_size: 0
 
 services:
   no-user-svc:

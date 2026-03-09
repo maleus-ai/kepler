@@ -37,8 +37,9 @@ kepler:
   timeout: 30s           # Global default timeout for dependency waits
   output_max_size: "1mb"   # Max output capture per step/process (default: 1mb)
   logs:
-    buffer_size: 16384   # 16KB buffer for better write throughput
-    max_size: "50MB"     # Truncate logs when they exceed this size
+    flush_interval: "100ms"   # How often batched writes are flushed to SQLite
+    retention_period: "7d"    # Delete logs older than 7 days on config load
+    batch_size: 4096          # Max entries buffered in memory before forcing a flush
   acl:                   # Restrict non-owner `kepler` group members
     users:
       alice:
@@ -160,8 +161,9 @@ Settings under the `kepler:` namespace apply to all services unless overridden.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `logs.max_size` | `string` | unbounded | Max log file size before truncation (e.g., `"50MB"`) |
-| `logs.buffer_size` | `int` | `0` | Bytes to buffer before flushing (0 = synchronous) |
+| `logs.flush_interval` | `duration` | `100ms` | How often the SQLite writer flushes batched inserts (e.g., `"100ms"`, `"1s"`) |
+| `logs.retention_period` | `duration` | none | Delete logs older than this on config load (e.g., `"7d"`, `"24h"`) |
+| `logs.batch_size` | `int` | `4096` | Max log entries buffered in memory before forcing a flush |
 
 See [Log Management](log-management.md) for full details.
 

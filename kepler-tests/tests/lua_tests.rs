@@ -558,25 +558,17 @@ services:
     assert!(service.environment.contains(&"BAZ=qux".to_string()));
 }
 
-/// Test: !lua tag works for global logs configuration (kepler.logs)
+/// Test: !lua tag works for global logs configuration fields (kepler.logs)
 #[test]
 fn test_lua_global_logs_config() {
     let _guard = ENV_LOCK.lock();
     let temp_dir = TempDir::new().unwrap();
 
-    // Set env vars for Lua scripts to use
-    unsafe {
-        std::env::set_var("KEPLER_LOG_MAX_SIZE", "50M");
-        std::env::set_var("KEPLER_LOG_BUFFER", "16384");
-    }
-
     let yaml = r#"
 kepler:
   logs:
-    max_size: !lua |
-      return service.env.KEPLER_LOG_MAX_SIZE or "10M"
-    buffer_size: !lua |
-      return tonumber(service.env.KEPLER_LOG_BUFFER) or 0
+    flush_interval: !lua return "200ms"
+    retention_period: !lua return "7d"
 
 services:
   test:
@@ -585,15 +577,35 @@ services:
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
 
-    // Cleanup
-    unsafe {
-        std::env::remove_var("KEPLER_LOG_MAX_SIZE");
-        std::env::remove_var("KEPLER_LOG_BUFFER");
-    }
-
     let logs = config.global_logs().expect("kepler.logs should exist");
-    assert_eq!(*logs.max_size.as_static().unwrap(), Some("50M".to_string()));
-    assert_eq!(*logs.buffer_size.as_static().unwrap(), Some(16384));
+    assert_eq!(logs.flush_interval(), Some(std::time::Duration::from_millis(200)));
+    assert_eq!(logs.retention_period(), Some(std::time::Duration::from_secs(7 * 24 * 3600)));
+}
+
+/// Test: service-level logs configuration parses correctly
+#[test]
+fn test_service_logs_config() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  test:
+    command: ["echo", "hello"]
+    logs:
+      store:
+        stdout: true
+        stderr: false
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
+
+    let logs = service.logs.as_ref().expect("service.logs should exist");
+    assert!(logs.store.is_some());
+    let store = logs.store.as_ref().unwrap();
+    assert!(store.store_stdout());
+    assert!(!store.store_stderr());
 }
 
 /// Test: !lua tag works for service-level logs configuration
@@ -602,9 +614,159 @@ fn test_lua_service_logs_config() {
     let _guard = ENV_LOCK.lock();
     let temp_dir = TempDir::new().unwrap();
 
-    // Set env vars for Lua scripts to use
     unsafe {
-        std::env::set_var("KEPLER_SERVICE_MAX_SIZE", "100M");
+        std::env::set_var("KEPLER_STORE_STDERR", "false");
+    }
+
+    let yaml = r#"
+services:
+  test:
+    command: ["echo", "hello"]
+    logs: !lua |
+      return {
+        store = {
+          stdout = true,
+          stderr = service.env.KEPLER_STORE_STDERR == "true",
+        },
+        retention = {
+          on_stop = "retain",
+        },
+      }
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
+
+    unsafe {
+        std::env::remove_var("KEPLER_STORE_STDERR");
+    }
+
+    let logs = service.logs.as_ref().expect("service.logs should exist");
+    let store = logs.store.as_ref().expect("store should exist");
+    assert!(store.store_stdout());
+    assert!(!store.store_stderr());
+    assert_eq!(
+        logs.get_on_stop(),
+        Some(kepler_daemon::config::LogRetention::Retain),
+    );
+}
+
+/// Test: ${{ }}$ expression works for entire service-level logs block
+#[test]
+fn test_expr_service_logs_block() {
+    let _guard = ENV_LOCK.lock();
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  test:
+    command: ["echo", "hello"]
+    logs: ${{ { store = false, retention = { on_stop = "retain" } } }}$
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
+
+    let logs = service.logs.as_ref().expect("service.logs should exist");
+    let store = logs.store.as_ref().expect("store should exist");
+    assert!(!store.store_stdout());
+    assert!(!store.store_stderr());
+    assert_eq!(
+        logs.get_on_stop(),
+        Some(kepler_daemon::config::LogRetention::Retain),
+    );
+}
+
+/// Test: !lua tag works for global logs fields (flush_interval, retention_period, batch_size)
+#[test]
+fn test_lua_global_logs_fields() {
+    let _guard = ENV_LOCK.lock();
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+lua: |
+  function get_flush() return "200ms" end
+  function get_retention() return "7d" end
+  function get_batch() return 2048 end
+
+kepler:
+  logs:
+    flush_interval: !lua return get_flush()
+    retention_period: !lua return get_retention()
+    batch_size: !lua return get_batch()
+
+services:
+  test:
+    command: ["echo", "hello"]
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+
+    let logs = config.global_logs().expect("kepler.logs should exist");
+    assert_eq!(logs.flush_interval(), Some(std::time::Duration::from_millis(200)));
+    assert_eq!(logs.retention_period(), Some(std::time::Duration::from_secs(7 * 24 * 3600)));
+    assert_eq!(logs.batch_size(), Some(2048));
+}
+
+/// Test: ${{ }}$ expressions work for global logs fields
+#[test]
+fn test_expr_global_logs_fields() {
+    let _guard = ENV_LOCK.lock();
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+kepler:
+  logs:
+    flush_interval: ${{ "500ms" }}$
+    retention_period: ${{ "1d" }}$
+    batch_size: ${{ 1024 }}$
+
+services:
+  test:
+    command: ["echo", "hello"]
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+
+    let logs = config.global_logs().expect("kepler.logs should exist");
+    assert_eq!(logs.flush_interval(), Some(std::time::Duration::from_millis(500)));
+    assert_eq!(logs.retention_period(), Some(std::time::Duration::from_secs(24 * 3600)));
+    assert_eq!(logs.batch_size(), Some(1024));
+}
+
+/// Test: !lua tag works for service-level logs inner fields
+#[test]
+fn test_lua_service_logs_inner_fields() {
+    let _guard = ENV_LOCK.lock();
+    let temp_dir = TempDir::new().unwrap();
+
+    let yaml = r#"
+services:
+  test:
+    command: ["echo", "hello"]
+    logs:
+      flush_interval: !lua return "300ms"
+      retention_period: !lua return "1d"
+      batch_size: !lua return 512
+"#;
+
+    let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
+    let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
+
+    let logs = service.logs.as_ref().expect("service.logs should exist");
+    assert_eq!(logs.flush_interval(), Some(std::time::Duration::from_millis(300)));
+    assert_eq!(logs.retention_period(), Some(std::time::Duration::from_secs(24 * 3600)));
+    assert_eq!(logs.batch_size(), Some(512));
+}
+
+/// Test: ${{ }}$ expressions work for service-level logs inner fields
+#[test]
+fn test_expr_service_logs_inner_fields() {
+    let _guard = ENV_LOCK.lock();
+    let temp_dir = TempDir::new().unwrap();
+
+    unsafe {
+        std::env::set_var("KEPLER_FLUSH_INTERVAL", "150ms");
     }
 
     let yaml = r#"
@@ -612,25 +774,20 @@ services:
   test:
     command: ["echo", "hello"]
     logs:
-      max_size: !lua |
-        return service.env.KEPLER_SERVICE_MAX_SIZE or "20M"
-      buffer_size: !lua |
-        return 0  -- sync writes for this service
+      flush_interval: ${{ service.env.KEPLER_FLUSH_INTERVAL }}$
+      batch_size: ${{ 256 }}$
 "#;
 
     let config = load_config_from_string(yaml, temp_dir.path()).unwrap();
-
-    // Resolve while env var is still set (lazy evaluation happens at resolve time)
     let service = resolve_svc(&config, "test", &temp_dir.path().join("kepler.yaml"));
 
-    // Cleanup after resolve since Lua runs at resolve time
     unsafe {
-        std::env::remove_var("KEPLER_SERVICE_MAX_SIZE");
+        std::env::remove_var("KEPLER_FLUSH_INTERVAL");
     }
 
     let logs = service.logs.as_ref().expect("service.logs should exist");
-    assert_eq!(*logs.max_size.as_static().unwrap(), Some("100M".to_string()));
-    assert_eq!(*logs.buffer_size.as_static().unwrap(), Some(0));
+    assert_eq!(logs.flush_interval(), Some(std::time::Duration::from_millis(150)));
+    assert_eq!(logs.batch_size(), Some(256));
 }
 
 /// Test: depends_on simple list with static service names
