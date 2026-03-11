@@ -1,278 +1,405 @@
-//! Permission scopes for the token-based authorization system.
+//! Rights-based permission system for the token and ACL authorization system.
 //!
-//! Scopes are CLI-level concepts that map to what users see and type.
-//! The daemon enforces them at the protocol level by mapping each incoming
-//! Request to its required scope(s).
+//! Rights are flat, explicit identifiers with no implications or hidden expansions.
 //!
-//! Scope hierarchy:
-//! - Category (level 1): `service`, `config`
-//! - Command (level 2): `service:start`, `service:stop`, `config:status`, etc.
+//! - **Base rights**: Each gates exactly one Request type.
+//! - **Sub-rights**: Gate optional features within a request. Use `base:feature` syntax.
+//!   A sub-right is meaningless without its base right.
+//! - **Aliases**: Named bundles expanded at config parse time. Only `all` is built-in.
 //!
-//! Implication rules:
-//! 1. Category implies all commands: `service` → `service:start`, `service:restart`, `service:clean`, etc.
-//! 2. Command-level implication: `service:clean` → `service:stop`
-//! 3. Wildcards: `service:*` = all service ops, `*` = everything
-//!
-//! Note: Daemon operations (shutdown, prune) are root-only and do not use scopes.
+//! Note: Daemon operations (shutdown, prune) are root-only and do not use rights.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use kepler_protocol::protocol::Request;
 
-/// Known category scopes (level 1).
-pub const CATEGORY_SCOPES: &[&str] = &["service", "config", "logs"];
+/// Base rights — each gates exactly one request type.
+pub const BASE_RIGHTS: &[&str] = &[
+    "start",
+    "stop",
+    "restart",
+    "recreate",
+    "status",
+    "inspect",
+    "logs",
+    "subscribe",
+    "quiescence",
+    "readiness",
+];
 
-/// Known command scopes (level 2).
-pub const COMMAND_SCOPES: &[&str] = &[
-    "service:start",
-    "service:stop",
-    "service:restart",
-    "service:clean",
-    "config:status",
-    "config:inspect",
-    "config:recreate",
-    "config:hardening",
-    "config:env",
-    "logs:read",
+/// Sub-rights — gate optional features within a request.
+/// Format: "base:feature"
+pub const SUB_RIGHTS: &[&str] = &[
+    "start:env-override",
+    "start:hardening",
+    "start:no-deps",
+    "stop:clean",
+    "stop:signal",
+    "restart:env-override",
+    "restart:no-deps",
+    "recreate:hardening",
     "logs:search",
 ];
 
-/// All known scopes (categories + commands), computed once.
-static ALL_KNOWN_SCOPES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+/// All known rights (base + sub), computed once.
+///
+/// Returns a reference to a lazily-initialized set of all base + sub rights.
+pub fn all_rights() -> &'static HashSet<&'static str> {
+    &ALL_RIGHTS
+}
+
+static ALL_RIGHTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     let mut set = HashSet::new();
-    for s in CATEGORY_SCOPES {
-        set.insert(*s);
+    for r in BASE_RIGHTS {
+        set.insert(*r);
     }
-    for s in COMMAND_SCOPES {
-        set.insert(*s);
+    for r in SUB_RIGHTS {
+        set.insert(*r);
     }
     set
 });
 
-/// Look up a scope string in the static scope tables, returning the
-/// `&'static str` reference if found. Returns `None` for unknown scopes.
-pub fn intern_scope(scope: &str) -> Option<&'static str> {
-    for s in CATEGORY_SCOPES {
-        if *s == scope {
-            return Some(s);
+/// Built-in aliases. Only `all` is built-in.
+static BUILTIN_ALIASES: LazyLock<HashMap<&'static str, Vec<&'static str>>> = LazyLock::new(|| {
+    let mut map = HashMap::new();
+    let mut all: Vec<&'static str> = Vec::new();
+    for r in BASE_RIGHTS {
+        all.push(r);
+    }
+    for r in SUB_RIGHTS {
+        all.push(r);
+    }
+    map.insert("all", all);
+    map
+});
+
+/// Look up a right string in the static rights tables, returning the
+/// `&'static str` reference if found. Returns `None` for unknown rights.
+pub fn intern_right(right: &str) -> Option<&'static str> {
+    for r in BASE_RIGHTS {
+        if *r == right {
+            return Some(r);
         }
     }
-    COMMAND_SCOPES.iter().find(|&s| *s == scope).copied()
+    SUB_RIGHTS.iter().find(|&&r| r == right).copied()
 }
 
-/// Validate scope strings.
-///
-/// Each scope must be either a known scope or a valid wildcard pattern.
-/// Accepts both `&[String]` and `&[&str]` via `AsRef<str>`.
-pub fn validate_scopes<S: AsRef<str>>(scopes: &[S]) -> Result<(), String> {
-    let known = &*ALL_KNOWN_SCOPES;
-    for scope in scopes {
-        let scope = scope.as_ref();
-        if scope == "*" {
-            continue;
-        }
-        if let Some(prefix) = scope.strip_suffix(":*") {
-            // Check that the prefix matches a known category or command
-            let valid_prefix = CATEGORY_SCOPES.contains(&prefix);
-            if !valid_prefix {
-                return Err(format!("unknown scope wildcard '{}': prefix '{}' is not a known category", scope, prefix));
-            }
-            continue;
-        }
-        if !known.contains(scope) {
-            return Err(format!("unknown scope '{}'. Valid scopes: {:?}", scope, known));
-        }
-    }
-    Ok(())
+/// Required rights for a request.
+pub struct RequiredRights {
+    /// Base right required for this request.
+    pub base: &'static str,
+    /// Sub-rights required based on request parameters.
+    pub sub_rights: Vec<&'static str>,
 }
 
-/// Expand scopes by applying implication rules.
+/// Map a protocol Request to its required rights.
 ///
-/// - `*` → all known scopes (the literal `"*"` is NOT preserved in the output)
-/// - Category → all its commands
-/// - `category:*` → same as category
-/// - Command stays as-is
-/// - `service:clean` → `service:stop` (command-level implication)
-///
-/// Wildcards (`"*"`, `"category:*"`) are always expanded into their concrete
-/// scopes and are never present as literals in the returned set. Both ACL
-/// scopes and token scopes are expanded before any intersection, so the
-/// literal `"*"` is never used in runtime checks.
-///
-/// Validates all scopes before expanding. Returns an error if any scope is unknown.
-pub fn expand_scopes<S: AsRef<str>>(scopes: &HashSet<S>) -> Result<HashSet<&'static str>, String> {
-    // Validate all scopes are known before expanding
-    let scope_list: Vec<&str> = scopes.iter().map(|s| s.as_ref()).collect();
-    validate_scopes(&scope_list)?;
-
-    Ok(expand_scopes_unchecked(scopes))
-}
-
-/// Internal: expand scopes without validation (for use in tests and pre-validated contexts).
-fn expand_scopes_unchecked<S: AsRef<str>>(scopes: &HashSet<S>) -> HashSet<&'static str> {
-    let mut expanded = HashSet::new();
-
-    for scope_s in scopes {
-        let scope = scope_s.as_ref();
-        if scope == "*" {
-            // Grant everything
-            for s in CATEGORY_SCOPES {
-                expanded.insert(*s);
-            }
-            for s in COMMAND_SCOPES {
-                expanded.insert(*s);
-            }
-            return expanded;
-        }
-
-        if let Some(prefix) = scope.strip_suffix(":*") {
-            // Expand wildcard: add prefix + all descendants
-            if let Some(interned) = intern_scope(prefix) {
-                expanded.insert(interned);
-            }
-            let prefix_colon = format!("{}:", prefix);
-            for s in COMMAND_SCOPES {
-                if s.starts_with(&prefix_colon) || *s == prefix {
-                    expanded.insert(*s);
-                }
-            }
-            continue;
-        }
-
-        if let Some(interned) = intern_scope(scope) {
-            expanded.insert(interned);
-        }
-
-        let parts: Vec<&str> = scope.split(':').collect();
-        match parts.len() {
-            1 => {
-                // Category → all descendants
-                let prefix = format!("{}:", scope);
-                for s in COMMAND_SCOPES {
-                    if s.starts_with(&prefix) {
-                        expanded.insert(*s);
-                    }
-                }
-            }
-            _ => {
-                // Command (level 2) — no extra expansion
-            }
-        }
-    }
-
-    // Command-level implications
-    if expanded.contains("service:clean") {
-        expanded.insert("service:stop");
-    }
-    if expanded.contains("logs:search") {
-        expanded.insert("logs:read");
-    }
-
-    expanded
-}
-
-/// Map a protocol Request to its required scope(s).
-///
-/// Returns a list of scope strings that the caller must have.
-/// Empty list means the request is always allowed.
-pub fn required_scopes(request: &Request) -> Vec<&'static str> {
+/// Returns `None` for requests that don't require any rights (Ping, ListConfigs, etc.).
+/// Returns `Some(RequiredRights)` with the base right and any sub-rights needed.
+pub fn required_rights(request: &Request) -> Option<RequiredRights> {
     match request {
         Request::Start {
-            hardening,
             override_envs,
+            hardening,
+            no_deps,
             ..
-        } => {
-            let mut scopes = vec!["service:start"];
-            if hardening.is_some() {
-                scopes.push("config:hardening");
-            }
-            if override_envs.is_some() {
-                scopes.push("config:env");
-            }
-            scopes
-        }
-        Request::Stop { clean, .. } => {
-            if *clean {
-                vec!["service:clean"]
+        } => Some(RequiredRights {
+            base: "start",
+            sub_rights: {
+                let mut s = vec![];
+                if override_envs.is_some() {
+                    s.push("start:env-override");
+                }
+                if hardening.is_some() {
+                    s.push("start:hardening");
+                }
+                if *no_deps {
+                    s.push("start:no-deps");
+                }
+                s
+            },
+        }),
+        Request::Stop {
+            clean, signal, ..
+        } => Some(RequiredRights {
+            base: "stop",
+            sub_rights: {
+                let mut s = vec![];
+                if *clean {
+                    s.push("stop:clean");
+                }
+                if signal.is_some() {
+                    s.push("stop:signal");
+                }
+                s
+            },
+        }),
+        Request::Restart {
+            override_envs,
+            no_deps,
+            ..
+        } => Some(RequiredRights {
+            base: "restart",
+            sub_rights: {
+                let mut s = vec![];
+                if override_envs.is_some() {
+                    s.push("restart:env-override");
+                }
+                if *no_deps {
+                    s.push("restart:no-deps");
+                }
+                s
+            },
+        }),
+        Request::Recreate { hardening, .. } => Some(RequiredRights {
+            base: "recreate",
+            sub_rights: if hardening.is_some() {
+                vec!["recreate:hardening"]
             } else {
-                vec!["service:stop"]
-            }
-        }
-        Request::Restart { override_envs, .. } => {
-            let mut scopes = vec!["service:restart"];
-            if override_envs.is_some() {
-                scopes.push("config:env");
-            }
-            scopes
-        }
-        Request::Recreate { hardening, .. } => {
-            let mut scopes = vec!["config:recreate"];
-            if hardening.is_some() {
-                scopes.push("config:hardening");
-            }
-            scopes
-        }
-        Request::Inspect { .. } => vec!["config:inspect"],
-        Request::Status { config_path } => {
-            if config_path.is_some() {
-                vec!["config:status"]
-            } else {
-                // Global status — always allowed, results filtered
                 vec![]
-            }
-        }
-        Request::LogsStream { filter, .. } => {
-            if filter.is_some() {
+            },
+        }),
+        Request::LogsStream { filter, .. } => Some(RequiredRights {
+            base: "logs",
+            sub_rights: if filter.is_some() {
                 vec!["logs:search"]
             } else {
-                vec!["logs:read"]
-            }
-        }
-        // Daemon operations are root-only (enforced in handler), not scope-gated
-        Request::Prune { .. } => vec![],
-        Request::Shutdown => vec![],
-        // Always allowed
-        Request::Ping => vec![],
-        Request::ListConfigs => vec![],
-        // SubscribeLogs: same scope as reading logs
-        Request::SubscribeLogs { .. } => vec!["logs:read"],
-        // Subscribe / Check*: allowed if caller has any service: scope
-        Request::Subscribe { .. }
-        | Request::CheckQuiescence { .. }
-        | Request::CheckReadiness { .. } => vec![],
+                vec![]
+            },
+        }),
+        // SubscribeLogs: same base right as logs, no sub-rights
+        Request::SubscribeLogs { .. } => Some(RequiredRights {
+            base: "logs",
+            sub_rights: vec![],
+        }),
+        // Simple requests: base right only, no sub-rights
+        Request::Subscribe { .. } => Some(RequiredRights {
+            base: "subscribe",
+            sub_rights: vec![],
+        }),
+        Request::CheckQuiescence { .. } => Some(RequiredRights {
+            base: "quiescence",
+            sub_rights: vec![],
+        }),
+        Request::CheckReadiness { .. } => Some(RequiredRights {
+            base: "readiness",
+            sub_rights: vec![],
+        }),
+        Request::Inspect { .. } => Some(RequiredRights {
+            base: "inspect",
+            sub_rights: vec![],
+        }),
+        Request::Status {
+            config_path: Some(_),
+        } => Some(RequiredRights {
+            base: "status",
+            sub_rights: vec![],
+        }),
+        // No rights required — explicit arms to ensure compile-time error on new variants
+        Request::Ping => None,
+        Request::ListConfigs => None,
+        Request::Shutdown => None,
+        Request::Prune { .. } => None,
+        Request::Status { config_path: None } => None,
+        // UserRights computes effective rights — requires FS read access but no ACL gate
+        Request::UserRights { .. } => None,
     }
 }
 
-/// Check if a Subscribe request should be allowed for the given granted scopes.
-pub fn check_subscribe_access(granted: &HashSet<&'static str>) -> bool {
-    granted.iter().any(|s| *s == "service" || s.starts_with("service:"))
-}
+/// Check if all required rights for a request are satisfied by the granted set.
+pub fn check_rights(granted: &HashSet<&'static str>, request: &Request) -> Result<(), String> {
+    let required = match required_rights(request) {
+        Some(r) => r,
+        None => return Ok(()),
+    };
 
-/// Check if all required scopes for a request are satisfied by the granted (expanded) set.
-pub fn check_scopes(granted: &HashSet<&'static str>, request: &Request) -> Result<(), String> {
-    // Subscribe / Check* have special logic: require any service: scope
-    if matches!(request, Request::Subscribe { .. } | Request::CheckQuiescence { .. } | Request::CheckReadiness { .. }) {
-        if !check_subscribe_access(granted) {
-            return Err("permission denied: requires at least one 'service:' scope".to_string());
-        }
-        return Ok(());
+    if !granted.contains(required.base) {
+        return Err(format!(
+            "permission denied: missing required right '{}'",
+            required.base
+        ));
     }
 
-    let required = required_scopes(request);
-    if required.is_empty() {
-        return Ok(());
-    }
-
-    for scope in &required {
-        if !granted.contains(*scope) {
+    for sub in &required.sub_rights {
+        if !granted.contains(*sub) {
             return Err(format!(
-                "permission denied: missing required scope '{}'",
-                scope
+                "permission denied: missing required sub-right '{}'",
+                sub
             ));
         }
     }
+
     Ok(())
+}
+
+/// Validate right and alias strings at config parse time.
+///
+/// Each entry must be either a known right (base or sub), a built-in alias,
+/// or a user-defined alias name.
+pub fn validate_rights<S: AsRef<str>>(
+    rights: &[S],
+    user_aliases: &HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    let known = &*ALL_RIGHTS;
+    let builtins = &*BUILTIN_ALIASES;
+
+    for right in rights {
+        let right = right.as_ref();
+        if known.contains(right) {
+            continue;
+        }
+        if builtins.contains_key(right) {
+            continue;
+        }
+        if user_aliases.contains_key(right) {
+            continue;
+        }
+        return Err(format!("unknown right or alias '{}'", right));
+    }
+    Ok(())
+}
+
+/// Resolve aliases recursively, expanding into a flat set of rights.
+///
+/// - Built-in aliases (`all`) are expanded.
+/// - User-defined aliases are expanded with a depth limit of 2.
+/// - Cycle detection rejects circular references at parse time.
+/// - Empty aliases expand to nothing.
+pub fn resolve_aliases(
+    allow: &[String],
+    user_aliases: &HashMap<String, Vec<String>>,
+) -> Result<HashSet<&'static str>, String> {
+    let mut result = HashSet::new();
+    for entry in allow {
+        resolve_alias_entry(entry, user_aliases, &mut result, 0, &mut vec![])?;
+    }
+    Ok(result)
+}
+
+fn resolve_alias_entry(
+    entry: &str,
+    user_aliases: &HashMap<String, Vec<String>>,
+    result: &mut HashSet<&'static str>,
+    depth: usize,
+    chain: &mut Vec<String>,
+) -> Result<(), String> {
+    // Direct right — intern and add
+    if let Some(interned) = intern_right(entry) {
+        result.insert(interned);
+        return Ok(());
+    }
+
+    // Built-in alias (e.g., "all")
+    let builtins = &*BUILTIN_ALIASES;
+    if let Some(expanded) = builtins.get(entry) {
+        for r in expanded {
+            result.insert(r);
+        }
+        return Ok(());
+    }
+
+    // User-defined alias
+    if let Some(entries) = user_aliases.get(entry) {
+        // Cycle detection
+        if chain.contains(&entry.to_string()) {
+            return Err(format!(
+                "recursive alias detected: {} -> {}",
+                chain.join(" -> "),
+                entry
+            ));
+        }
+
+        // Depth limit (2 levels of alias-to-alias)
+        if depth >= 2 {
+            return Err(format!(
+                "alias depth limit exceeded (max 2): {} -> {}",
+                chain.join(" -> "),
+                entry
+            ));
+        }
+
+        chain.push(entry.to_string());
+        for sub_entry in entries {
+            resolve_alias_entry(sub_entry, user_aliases, result, depth + 1, chain)?;
+        }
+        chain.pop();
+        return Ok(());
+    }
+
+    Err(format!("unknown right or alias '{}'", entry))
+}
+
+/// Validate user-defined aliases at config parse time.
+///
+/// Checks:
+/// - No shadowing of built-in aliases (`all`), base rights, or sub-rights
+/// - No cycles
+/// - Depth limit of 2
+/// - All referenced entries are valid
+pub fn validate_user_aliases(user_aliases: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    let known = &*ALL_RIGHTS;
+    let builtins = &*BUILTIN_ALIASES;
+
+    // Check for shadowing
+    for name in user_aliases.keys() {
+        if known.contains(name.as_str()) {
+            return Err(format!(
+                "alias '{}' shadows a built-in right",
+                name
+            ));
+        }
+        if builtins.contains_key(name.as_str()) {
+            return Err(format!(
+                "alias '{}' shadows a built-in alias",
+                name
+            ));
+        }
+    }
+
+    // Check for orphan sub-rights (warning-worthy, but not an error — just validate resolution)
+    // Validate all entries resolve correctly (catches cycles, depth limits, unknown references)
+    for (name, entries) in user_aliases {
+        let mut result = HashSet::new();
+        let mut chain = vec![name.clone()];
+        for entry in entries {
+            resolve_alias_entry(entry, user_aliases, &mut result, 1, &mut chain)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Check for orphan sub-rights (sub-right granted without its base right).
+/// Returns a list of warning messages.
+pub fn check_orphan_sub_rights(rights: &HashSet<&'static str>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for sub in SUB_RIGHTS {
+        if rights.contains(*sub) {
+            let base = sub.split(':').next().unwrap();
+            if !rights.contains(base) {
+                warnings.push(format!(
+                    "'{}' granted without '{}' — has no effect",
+                    sub, base
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+/// Expand an `allow` list into a set of resolved rights.
+///
+/// This is the main entry point for ACL resolution:
+/// 1. Validate all entries
+/// 2. Resolve aliases recursively
+/// 3. Return flat set of base rights + sub-rights
+pub fn expand_allow(
+    allow: &[String],
+    user_aliases: &HashMap<String, Vec<String>>,
+) -> Result<HashSet<&'static str>, String> {
+    validate_rights(allow, user_aliases)?;
+    resolve_aliases(allow, user_aliases)
 }
 
 #[cfg(test)]

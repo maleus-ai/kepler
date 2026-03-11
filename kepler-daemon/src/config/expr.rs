@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::config::lua::lua_to_yaml;
 use crate::errors::{DaemonError, Result};
-use crate::lua_eval::LuaEvaluator;
+use crate::lua::templating_runtime::LuaEvaluator;
 
 use super::expand::{
     ExprToken, extract_expr_from_standalone, is_standalone_tokens, lua_value_to_string,

@@ -1,0 +1,9 @@
+kepler:
+  acl:
+    users:
+      testuser2:
+        allow: [all]
+
+services:
+  all-svc:
+    command: ["sh", "-c", "echo ALL_SVC_RUNNING; sleep 300"]

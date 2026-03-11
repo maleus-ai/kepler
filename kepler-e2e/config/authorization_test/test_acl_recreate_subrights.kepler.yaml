@@ -1,0 +1,9 @@
+kepler:
+  acl:
+    users:
+      testuser2:
+        allow: [recreate, stop, status, start, subscribe, quiescence]
+
+services:
+  subrights-svc:
+    command: ["sh", "-c", "echo SUBRIGHTS_SVC_RUNNING; sleep 300"]

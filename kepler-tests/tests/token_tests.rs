@@ -34,7 +34,7 @@ async fn test_service_with_permissions_gets_kepler_token() {
                     marker_path.display()
                 ),
             ])
-            .with_permissions(vec!["service:start"])
+            .with_permissions(vec!["start"])
             .build(),
         )
         .build();
@@ -126,7 +126,7 @@ async fn test_kepler_token_is_valid_hex() {
                     marker_path.display()
                 ),
             ])
-            .with_permissions(vec!["service:start"])
+            .with_permissions(vec!["start"])
             .build(),
         )
         .build();
@@ -182,7 +182,7 @@ async fn test_pre_start_hook_gets_kepler_token() {
                 "3600".to_string(),
             ])
             .with_hooks(hooks)
-            .with_permissions(vec!["service:start"])
+            .with_permissions(vec!["start"])
             .build(),
         )
         .build();
@@ -231,7 +231,7 @@ async fn test_post_start_hook_gets_kepler_token() {
                 "3600".to_string(),
             ])
             .with_hooks(hooks)
-            .with_permissions(vec!["service:start"])
+            .with_permissions(vec!["start"])
             .build(),
         )
         .build();
@@ -333,7 +333,7 @@ async fn test_hook_and_service_share_same_token() {
                 ),
             ])
             .with_hooks(hooks)
-            .with_permissions(vec!["service:start"])
+            .with_permissions(vec!["start"])
             .build(),
         )
         .build();
@@ -453,7 +453,7 @@ async fn test_post_stop_hook_gets_kepler_token() {
                 "3600".to_string(),
             ])
             .with_hooks(hooks)
-            .with_permissions(vec!["service:start"])
+            .with_permissions(vec!["start"])
             .build(),
         )
         .build();

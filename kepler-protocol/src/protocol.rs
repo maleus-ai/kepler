@@ -118,7 +118,7 @@ pub enum Request {
         /// Whether to exclude hook log entries
         #[serde(default)]
         no_hooks: bool,
-        /// Optional filter expression (DSL). Requires `logs:search` scope.
+        /// Optional filter expression (DSL). Requires `logs:search` sub-right.
         /// Example: `level='err' AND (service='web' OR service='api')`
         #[serde(default)]
         filter: Option<String>,
@@ -159,6 +159,12 @@ pub enum Request {
         /// Path to the config file
         config_path: PathBuf,
     },
+    /// Query effective rights for the calling user on a config.
+    /// Returns the union of matching ACL rules (no authorizer evaluation).
+    UserRights {
+        /// Path to the config file
+        config_path: PathBuf,
+    },
 }
 
 impl Request {
@@ -180,6 +186,7 @@ impl Request {
             Request::Inspect { .. } => "Inspect",
             Request::CheckQuiescence { .. } => "CheckQuiescence",
             Request::CheckReadiness { .. } => "CheckReadiness",
+            Request::UserRights { .. } => "UserRights",
         }
     }
 }
@@ -197,6 +204,11 @@ pub enum Response {
     /// Error response
     Error {
         /// Error message
+        message: String,
+    },
+    /// Permission denied (ACL, filesystem, or authorization failure)
+    PermissionDenied {
+        /// Human-readable reason
         message: String,
     },
 }
@@ -245,6 +257,8 @@ pub enum ResponseData {
     Inspect(String),
     /// Boolean result for check commands (quiescence, readiness)
     CheckResult(bool),
+    /// Effective rights for the calling user on a config
+    UserRights(Vec<String>),
 }
 
 /// Information about a pruned config

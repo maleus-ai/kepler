@@ -1,0 +1,15 @@
+kepler:
+  acl:
+    lua: |
+      function deny_all()
+        return false
+      end
+    users:
+      testuser2:
+        allow: [start, stop, status, logs, subscribe, quiescence]
+        authorize: |
+          return deny_all()
+
+services:
+  lua-shared-svc:
+    command: ["sh", "-c", "echo LUA_SHARED_SVC_RUNNING; sleep 300"]

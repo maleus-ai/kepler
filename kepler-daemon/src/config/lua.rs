@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::errors::{DaemonError, Result};
-use crate::lua_eval::{EvalContext, LuaEvaluator};
+use crate::lua::templating_runtime::{EvalContext, LuaEvaluator};
 
 /// Process Lua scripts in the config value tree using the provided evaluator.
 ///
@@ -30,7 +30,7 @@ pub fn process_lua_scripts(
             // Process kepler.logs (with sys_env only, before services)
             if let Some(logs_value) = kepler_map.get_mut(Value::String("logs".to_string())) {
                 let ctx = EvalContext {
-                    service: Some(crate::lua_eval::ServiceEvalContext {
+                    service: Some(crate::lua::templating_runtime::ServiceEvalContext {
                         env: sys_env.clone(),
                         ..Default::default()
                     }),

@@ -200,7 +200,7 @@ Once baked, the snapshot is immutable. Services always run using the baked snaps
 
 | File | Description |
 |------|-------------|
-| `kepler-daemon/src/config_actor.rs` | Config initialization and snapshot management |
+| `kepler-daemon/src/config_actor/` | Config initialization and snapshot management |
 | `kepler-daemon/src/persistence.rs` | Snapshot persistence to disk |
 
 ---
@@ -259,8 +259,8 @@ flowchart LR
 | File | Description |
 |------|-------------|
 | `kepler-daemon/src/events.rs` | ServiceEvent types, channel creation |
-| `kepler-daemon/src/config_actor.rs` | Event channel management per service |
-| `kepler-daemon/src/orchestrator.rs` | ServiceEventHandler, event processing |
+| `kepler-daemon/src/config_actor/` | Event channel management per service |
+| `kepler-daemon/src/orchestrator/` | ServiceEventHandler, event processing |
 
 ---
 
@@ -456,7 +456,7 @@ Higher priority values override lower priority ones when keys conflict.
 
 | File | Description |
 |------|-------------|
-| `kepler-daemon/src/config.rs` | Two-stage shell expansion logic |
+| `kepler-daemon/src/config/expand.rs` | Two-stage shell expansion logic |
 | `kepler-daemon/src/env.rs` | Environment building and priority merging |
 
 ---
@@ -545,7 +545,7 @@ This ordering ensures that each stage has access to the variables it needs while
 
 | File | Description |
 |------|-------------|
-| `kepler-daemon/src/lua_eval.rs` | LuaEvaluator, frozen table pattern, sandbox setup |
+| `kepler-daemon/src/lua/` | LuaEvaluator, frozen table pattern, sandbox setup, ACL runtime |
 
 ---
 
@@ -591,7 +591,7 @@ Applied via `pre_exec` before process execution:
 | File | Description |
 |------|-------------|
 | `kepler-daemon/src/main.rs` | Root enforcement, umask, state directory setup |
-| `kepler-daemon/src/process.rs` | Process spawning, privilege dropping, resource limits |
+| `kepler-daemon/src/process/` | Process spawning, privilege dropping, resource limits |
 | `kepler-daemon/src/user.rs` | User/group resolution |
 
 ---
@@ -659,22 +659,19 @@ This design was chosen over a custom filter parser because it:
 
 See [Security Model — Log Query Security](security-model.md#log-query-security) for the full security design, allowed functions, and known attack vectors.
 
-### Cursor-Based Streaming
+### Streaming
 
-Log retrieval uses server-side cursors backed by SQLite rowid-based pagination:
+Log retrieval uses rowid-based pagination via the `LogsStream` protocol request. The client tracks its position by passing back `last_id` from the previous response as `after_id` in the next request.
 
 ```mermaid
 sequenceDiagram
-    CLI->>Daemon: LogsCursor(cursor_id: None)
-    Daemon-->>CLI: (entries, cursor_id, more)
-    CLI->>Daemon: LogsCursor(cursor_id: X)
-    Daemon-->>CLI: (entries, cursor_id, more)
+    CLI->>Daemon: LogsStream(after_id: None)
+    Daemon-->>CLI: LogStreamData(entries, last_id, has_more)
+    CLI->>Daemon: LogsStream(after_id: last_id)
+    Daemon-->>CLI: LogStreamData(entries, last_id, has_more)
 ```
 
-**Cursor features:**
-- **Rowid-based position tracking**: Each cursor stores the last seen rowid for efficient `WHERE id > ?` queries
-- **TTL cleanup**: Stale cursors are automatically cleaned up (default: 5 minutes)
-- **Follow mode notifications**: The store actor fires an `Arc<Notify>` after each batch flush, waking up long-polling cursor reads
+For follow mode, the client subscribes to `SubscribeLogs` notifications and issues `LogsStream` requests after each `LogsAvailable` event.
 
 **Modes:**
 | Mode | CLI Flag | Behavior |
@@ -692,7 +689,6 @@ sequenceDiagram
 | `kepler-daemon/src/logs/log_writer.rs` | Per-service LogWriter (thin wrapper) |
 | `kepler-daemon/src/logs/log_reader.rs` | SqliteLogReader (read-only queries, filter injection) |
 | `kepler-daemon/src/logs/filter.rs` | Filter validation, SQLite authorizer setup, resource limits |
-| `kepler-daemon/src/cursor.rs` | CursorManager for rowid-based streaming |
 
 ---
 
@@ -756,7 +752,7 @@ flowchart TD
     T1 -- Pass --> T2[Filesystem read check]
     T2 -- Fail --> DENY
     T2 -- Pass --> T3["Compute effective =<br/>token.allow ∩ ACL(uid, gid)"]
-    T3 --> T4[Check required scopes]
+    T3 --> T4[Check required rights]
     T4 -- Fail --> DENY
     T4 -- Pass --> ALLOW[Allowed]
 
@@ -768,7 +764,7 @@ flowchart TD
     E -- Yes --> ALLOW
     E -- No --> F{ACL present?}
     F -- No --> DENY
-    F -- Yes --> G[Check ACL scopes]
+    F -- Yes --> G[Check ACL rights]
     G -- Fail --> DENY
     G -- Pass --> ALLOW
 ```
@@ -780,7 +776,7 @@ For Token-authenticated requests specifically:
 2. Hardening floor check    → is --hardening ≥ process.hardening?
 3. Filesystem read check    → caller must have Unix read permission on the config file (Root bypasses)
 4. ACL gate                 → effective = Process.allow ∩ ACL(uid, gid)
-5. Scope check              → does effective contain the required scopes?
+5. Rights check             → does effective contain the required rights?
 ```
 
 If any step fails, the request is denied. Steps 2-5 also apply to Group auth (with the ACL as sole gate instead of intersection).
@@ -789,7 +785,7 @@ See [Security Model](security-model.md#effective-permissions) for the user-facin
 
 ### Sanitized Error Responses
 
-Authorization errors (ACL denial, invalid token, group membership rejection) return generic "permission denied" messages to the client. Detailed information (UID, GID, required scopes, `kepler` group GID) is logged server-side only. This prevents information leakage that could aid enumeration attacks.
+Authorization errors (ACL denial, invalid token, group membership rejection) return generic "permission denied" messages to the client. Detailed information (UID, GID, required rights, `kepler` group GID) is logged server-side only. This prevents information leakage that could aid enumeration attacks.
 
 Privilege escalation errors remain detailed since they are only returned to authenticated users who already know their own context.
 
@@ -798,12 +794,6 @@ Privilege escalation errors remain detailed since they are only returned to auth
 Instead of using `initgroups()` (which loads all supplementary groups including `kepler`), the daemon computes an explicit group list excluding the kepler GID and uses `setgroups()`. If computing the stripped group list fails, the service refuses to start (hard failure, not fallback to empty groups).
 
 See [Security Model](security-model.md#kepler-group-stripping) for user-facing documentation on when and why stripping occurs.
-
-### Subscribe / CheckQuiescence / CheckReadiness Authorization
-
-The internal `Subscribe`, `CheckQuiescence`, and `CheckReadiness` requests do not map to a specific permission scope. Instead, they require the caller to have at least one `service:*` scope (e.g., `service:start`, `service:stop`, or the `service` category). If the caller has no service-related scopes, the request is denied. When no ACL rules match at all, these requests are also denied.
-
-`CheckQuiescence` and `CheckReadiness` are read-only queries that ask the daemon whether all services have settled (quiescent) or reached their target state (ready). They respect the `startup_in_progress` fence — returning `false` while the fence is up — making the daemon the single source of truth for lifecycle state evaluation.
 
 ### Relevant Files
 
@@ -823,18 +813,17 @@ The internal `Subscribe`, `CheckQuiescence`, and `CheckReadiness` requests do no
 | Directory structure | `kepler-daemon/src/lib.rs` | State directory paths |
 | Secure file writing | `kepler-daemon/src/persistence.rs` | File permissions |
 | Socket security | `kepler-protocol/src/server.rs` | Group-based access control |
-| Config loading | `kepler-daemon/src/config_actor.rs` | Lifecycle management, event channels |
+| Config loading | `kepler-daemon/src/config_actor/` | Lifecycle management, event channels |
 | Env expansion | `kepler-daemon/src/config/expand.rs` | `${{ }}$` inline Lua expression evaluation |
 | Env building | `kepler-daemon/src/env.rs` | Priority merging |
-| Lua evaluation | `kepler-daemon/src/lua_eval.rs` | Sandbox implementation |
-| Process spawning | `kepler-daemon/src/process.rs` | Security controls |
+| Lua evaluation | `kepler-daemon/src/lua/` | Sandbox implementation, ACL runtime, templating |
+| Process spawning | `kepler-daemon/src/process/` | Security controls, privilege dropping |
 | Event system | `kepler-daemon/src/events.rs` | ServiceEvent types, event channels |
 | Dependency graph | `kepler-daemon/src/deps.rs` | Start/stop ordering, condition checking |
-| Service orchestration | `kepler-daemon/src/orchestrator.rs` | Event handling, restart propagation |
+| Service orchestration | `kepler-daemon/src/orchestrator/` | Event handling, restart propagation |
 | Health checking | `kepler-daemon/src/health.rs` | Health check loop, event emission |
-| Log writing | `kepler-daemon/src/logs/writer.rs` | Buffered log writer with truncation |
-| Log reading | `kepler-daemon/src/logs/reader.rs` | Log file reader with merged iterators |
-| Log cursors | `kepler-daemon/src/cursor.rs` | Server-side cursor management for streaming |
+| Log writing | `kepler-daemon/src/logs/log_writer.rs` | Per-service LogWriter |
+| Log reading | `kepler-daemon/src/logs/log_reader.rs` | SqliteLogReader (read-only queries, filter injection) |
 
 ---
 

@@ -8,9 +8,9 @@ Kepler's multiplexed IPC protocol for CLI-daemon communication.
 - [Message Types](#message-types)
 - [Request Types](#request-types)
 - [Response Types](#response-types)
-- [Progress Events](#progress-events)
+- [Server Events](#server-events)
 - [Wire Format](#wire-format)
-- [Cursor-Based Log Streaming](#cursor-based-log-streaming)
+- [Log Streaming](#log-streaming)
 - [Error Handling](#error-handling)
 
 ---
@@ -66,18 +66,18 @@ ServerMessage::Event {
 
 | Request | Fields | Description |
 |---------|--------|-------------|
-| `Start` | `config_path`, `service?`, `sys_env?` | Start service(s) for a config |
+| `Start` | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?`, `hardening?` | Start service(s) for a config |
 | `Stop` | `config_path`, `service?`, `clean`, `signal?` | Stop service(s) with optional signal |
-| `Restart` | `config_path`, `services[]`, `sys_env?` | Restart service(s) |
-| `Recreate` | `config_path`, `sys_env?` | Stop, re-bake config snapshot, start |
-| `Status` | `config_path?` | Get service status (None = all configs) |
-| `Logs` | `config_path`, `service?`, `follow`, `lines`, `max_bytes?`, `mode`, `no_hooks` | Get logs (one-shot or follow) |
-| `LogsStream` | `config_path`, `service?`, `after_id?`, `from_end`, `limit`, `no_hooks`, `filter?`, `raw`, `tail` | Streaming log retrieval with cursor and optional SQL filter. Requires `logs:read`; `logs:search` when `filter` is set |
-| `SubscribeLogs` | `config_path` | Subscribe to log-available notifications. Pushes `LogsAvailable` events when new logs are flushed. Requires `logs:read` |
-| `LogsChunk` | `config_path`, `service?`, `offset`, `limit`, `no_hooks` | Get log entries with offset/limit pagination |
-| `LogsCursor` | `config_path`, `service?`, `cursor_id?`, `from_start`, `no_hooks` | Cursor-based log streaming |
+| `Restart` | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?` | Restart service(s) |
+| `Recreate` | `config_path`, `sys_env?`, `hardening?` | Stop, re-bake config snapshot, start |
+| `Status` | `config_path?` | Get service status (`None` = all configs) |
+| `LogsStream` | `config_path`, `service?`, `after_id?`, `from_end`, `limit`, `no_hooks`, `filter?`, `raw`, `tail` | Streaming log retrieval. Requires `logs` right; `logs:search` sub-right when `filter` is set |
+| `SubscribeLogs` | `config_path` | Subscribe to log-available notifications. Pushes `LogsAvailable` events when new logs are flushed. Requires `logs` right |
 | `Subscribe` | `config_path`, `services?` | Subscribe to service state change events |
 | `Inspect` | `config_path` | Inspect config and runtime state (JSON output) |
+| `CheckQuiescence` | `config_path` | Check if all services are quiescent (settled) |
+| `CheckReadiness` | `config_path` | Check if all services are ready (reached target state) |
+| `UserRights` | `config_path` | Query effective rights for the calling user on a config |
 | `Shutdown` | *(none)* | Shutdown the daemon |
 | `Ping` | *(none)* | Check if daemon is alive |
 | `ListConfigs` | *(none)* | List all loaded configs |
@@ -87,9 +87,10 @@ ServerMessage::Event {
 
 ## Response Types
 
-Every request receives either:
+Every request receives one of:
 - **Ok** with optional message and/or `ResponseData`
 - **Error** with an error message
+- **PermissionDenied** with a reason
 
 ```
 Response::Ok {
@@ -98,6 +99,10 @@ Response::Ok {
 }
 
 Response::Error {
+    message: String,
+}
+
+Response::PermissionDenied {
     message: String,
 }
 ```
@@ -109,12 +114,12 @@ Response::Error {
 | `ServiceStatus` | `HashMap<String, ServiceInfo>` | `Status` (single config) |
 | `MultiConfigStatus` | `Vec<ConfigStatus>` | `Status` (all configs) |
 | `ConfigList` | `Vec<LoadedConfigInfo>` | `ListConfigs` |
-| `Logs` | `Vec<LogEntry>` | `Logs` |
-| `LogChunk` | `LogChunkData` | `LogsChunk` |
-| `LogCursor` | `LogCursorData` | `LogsCursor` |
+| `LogStream` | `LogStreamData` | `LogsStream` |
 | `DaemonInfo` | `DaemonInfo` | `Ping` |
 | `PrunedConfigs` | `Vec<PrunedConfigInfo>` | `Prune` |
 | `Inspect` | `String` | `Inspect` (pre-built JSON) |
+| `CheckResult` | `bool` | `CheckQuiescence`, `CheckReadiness` |
+| `UserRights` | `Vec<String>` | `UserRights` |
 
 ### Key Data Structures
 
@@ -129,21 +134,49 @@ Response::Error {
 | `health_check_failures` | `u32` | Health check failure count |
 | `exit_code` | `Option<i32>` | Exit code (for exited services) |
 | `signal` | `Option<i32>` | Signal that killed the process (e.g., 9 for SIGKILL) |
+| `initialized` | `bool` | Whether the service has completed its first start |
+| `skip_reason` | `Option<String>` | Reason for being skipped (when status is "skipped") |
+| `fail_reason` | `Option<String>` | Reason for failure (when status is "failed") |
 
-**LogEntry** -- A log line:
+**LogStreamData** -- A batch of log entries:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `service` | `String` | Service name |
+| `service_table` | `Vec<String>` | Service name lookup table |
+| `entries` | `Vec<StreamLogEntry>` | Compact log entries (service stored as u16 index into `service_table`) |
+| `last_id` | `i64` | Row ID of the last entry. Pass as `after_id` in the next request |
+| `has_more` | `bool` | Whether more entries are available |
+
+**StreamLogEntry** -- A compact log entry:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `service_id` | `u16` | Index into `LogStreamData.service_table` |
 | `line` | `String` | Log line content |
-| `timestamp` | `Option<i64>` | Timestamp (ms since Unix epoch) |
-| `stream` | `StreamType` | `Stdout` or `Stderr` |
+| `timestamp` | `i64` | Timestamp (ms since Unix epoch) |
+| `level` | `String` | Log level (`"out"`, `"err"`, `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`, `"fatal"`) |
+| `hook` | `Option<String>` | Hook name (`None` for service process logs) |
+| `attributes` | `Option<String>` | Remaining JSON attributes (`None` for non-JSON lines) |
 
 ---
 
-## Progress Events
+## Server Events
 
-Long-running operations (Start, Stop, Restart) send progress events to the client as `ServerMessage::Event` messages:
+The daemon pushes `ServerMessage::Event` messages for asynchronous notifications:
+
+### ServerEvent Variants
+
+| Event | Fields | Description |
+|-------|--------|-------------|
+| `Progress` | `request_id`, `event: ProgressEvent` | Progress update for a lifecycle operation |
+| `Ready` | `request_id` | All services reached their target state (for `--wait`) |
+| `Quiescent` | `request_id` | All services settled (for foreground mode exit) |
+| `LogsAvailable` | `request_id` | New logs flushed to SQLite. Client should issue `LogsStream` to fetch |
+| `UnhandledFailure` | `request_id`, `service`, `exit_code?` | A service failed with no handler (won't restart, no dependent watching) |
+
+### Progress Events
+
+Long-running operations (Start, Stop, Restart) send progress events:
 
 ```
 ServerEvent::Progress {
@@ -168,9 +201,14 @@ ProgressEvent {
 | `Healthy` | *(none)* | Health check is passing |
 | `Stopping` | *(none)* | Stop signal sent, waiting for exit |
 | `Stopped` | *(none)* | Process has stopped |
+| `Restarting` | *(none)* | Process is being restarted |
 | `Cleaning` | *(none)* | Cleanup hooks are running |
 | `Cleaned` | *(none)* | Cleanup hooks completed |
+| `Skipped` | `reason: String` | Service was skipped (with reason) |
 | `Failed` | `message: String` | Operation failed (with reason) |
+| `HookStarted` | `hook: String` | A lifecycle hook started execution |
+| `HookCompleted` | `hook: String` | A lifecycle hook completed successfully |
+| `HookFailed` | `hook: String`, `message: String` | A lifecycle hook failed |
 
 ---
 
@@ -191,33 +229,19 @@ Both `RequestEnvelope` and `ServerMessage` use this format. Maximum message size
 
 ---
 
-## Cursor-Based Log Streaming
+## Log Streaming
 
-Log retrieval uses server-side cursors for efficient streaming and pagination:
+Log retrieval uses rowid-based pagination via `LogsStream`. The client tracks its position by passing `last_id` from the previous response as `after_id` in the next request:
 
 ```mermaid
 sequenceDiagram
-    CLI->>Daemon: LogsCursor(cursor_id: None, from_start: true)
-    Daemon-->>CLI: LogCursorData(entries, cursor_id, has_more: true)
-    CLI->>Daemon: LogsCursor(cursor_id: X)
-    Daemon-->>CLI: LogCursorData(entries, cursor_id, has_more: true)
-    CLI->>Daemon: LogsCursor(cursor_id: X)
-    Daemon-->>CLI: LogCursorData(entries, cursor_id, has_more: false)
+    CLI->>Daemon: LogsStream(after_id: None)
+    Daemon-->>CLI: LogStreamData(entries, last_id, has_more: true)
+    CLI->>Daemon: LogsStream(after_id: last_id)
+    Daemon-->>CLI: LogStreamData(entries, last_id, has_more: false)
 ```
 
-**LogCursorData** contains:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `service_table` | `Vec<String>` | Service name lookup table |
-| `entries` | `Vec<CursorLogEntry>` | Compact log entries (service stored as u16 index into `service_table`) |
-| `cursor_id` | `String` | Opaque cursor ID for next request |
-| `has_more` | `bool` | Whether more entries are available |
-
-- **`from_start: true`**: Start cursor at beginning of log files (for reading all logs)
-- **`from_start: false`**: Start cursor at end of log files (for follow mode)
-- Cursors track byte offsets per log file and detect file truncation (resetting automatically)
-- Stale cursors are cleaned up after 5 minutes of inactivity
+For follow mode, the client subscribes via `SubscribeLogs` and issues `LogsStream` requests after each `LogsAvailable` event
 
 ---
 

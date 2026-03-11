@@ -19,6 +19,7 @@ Complete reference for the `kepler` command-line interface.
 |--------|-------------|
 | `-f, --file <FILE>` | Config file path (default: `kepler.yaml`, also accepts `kepler.yml`) |
 | `-v, --verbose` | Enable verbose output |
+| `-q, --quiet` | Suppress degraded mode warnings (when optional requests are denied) |
 | `--version` | Show version information |
 
 ---
@@ -103,8 +104,10 @@ kepler start --hardening strict          # Start with per-config hardening
 | `-d, --detach` | Return immediately, startup runs in background |
 | `--wait` | Block until startup cluster is ready (requires `-d`) |
 | `--timeout <DURATION>` | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait` |
+| `--no-deps` | Skip dependency waiting and `if:` conditions (requires specifying service names) |
 | `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services |
 | `-r, --refresh-env` | Re-capture the entire `kepler.env` from the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
+| `--raw` | Output raw log lines without formatting (foreground mode only, incompatible with `-d`) |
 | `--abort-on-failure` | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`) |
 | `--no-abort-on-failure` | Don't stop services on unhandled failure (requires `--wait`) |
 | `--hardening <LEVEL>` | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening) |
@@ -167,6 +170,7 @@ kepler restart --refresh-env             # Restart with refreshed shell env
 | `--wait` | Block until restart completes with progress bars (mutually exclusive with `--follow`) |
 | `--timeout <DURATION>` | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait` |
 | `--follow` | Follow logs after restart completes. Ctrl+C exits log following, services keep running (mutually exclusive with `--wait`) |
+| `--raw` | Output raw log lines without formatting |
 | `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services |
 | `-r, --refresh-env` | Re-capture the entire `kepler.env` from the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
 | `--no-deps` | Skip dependency ordering (requires specifying service names) |
@@ -292,6 +296,7 @@ kepler logs backend             # Logs for a specific service
 | `--head <N>` | Show first N lines |
 | `--tail <N>` | Show last N lines |
 | `--no-hook` | Exclude hook log output |
+| `--raw` | Output raw log lines without formatting (no timestamp, level, service name, color) |
 
 See [Log Management](log-management.md) for log storage and configuration details.
 
