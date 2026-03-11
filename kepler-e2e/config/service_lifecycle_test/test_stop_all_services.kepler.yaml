@@ -1,7 +1,3 @@
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   svc-one:
     command: ["sh", "-c", "echo One starting; sleep 300"]

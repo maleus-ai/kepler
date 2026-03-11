@@ -53,8 +53,6 @@ kepler:
   output_max_size: "2mb"
 
   logs:
-    max_size: "1M"
-    buffer_size: 4096
     retention:
       on_stop: clear
       on_start: clear
@@ -75,7 +73,6 @@ services:
         "echo 'PostgreSQL starting'; touch /tmp/pg_ready; while true; do sleep 5; done",
       ]
     restart: always
-    user: root
     groups: ["kepler"]
     healthcheck:
       run: "test -f /tmp/pg_ready"
@@ -88,8 +85,6 @@ services:
       cpu_time: 300
       max_fds: 1024
     logs:
-      max_size: "2M"
-      buffer_size: 8192
       retention:
         on_stop: retain
         on_start: clear
@@ -109,7 +104,6 @@ services:
         run: echo "postgres healthcheck FAILED"
       pre_cleanup:
         run: echo "postgres pre_cleanup — archiving WAL files"
-        user: root
 
   # 2. redis — With inherit_env override and hook environment
   redis:
@@ -781,9 +775,6 @@ services:
           condition: service_started
       - event-bus:
           condition: service_healthy
-    logs:
-      buffer_size: 16384
-      max_size: "500K"
 
   # 31. notification-worker — env_file
   notification-worker:

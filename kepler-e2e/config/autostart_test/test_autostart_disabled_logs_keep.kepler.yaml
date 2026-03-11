@@ -1,6 +1,5 @@
 kepler:
   logs:
-    buffer_size: 0
     retention:
       on_stop: retain
 

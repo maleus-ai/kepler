@@ -573,9 +573,9 @@ async fn test_autostart_disabled_start_works_after_restart() -> E2eResult<()> {
     Ok(())
 }
 
-/// Verify default `kepler logs` mode (LogsCursor streaming) works from disk fallback after restart.
-/// This is the most common code path: `kepler logs` without --head/--tail uses cursor-based
-/// streaming via Request::LogsCursor, which falls back to disk when config is not loaded.
+/// Verify default `kepler logs` mode (LogsStream) works from disk fallback after restart.
+/// This is the most common code path: `kepler logs` without --head/--tail uses streaming
+/// via Request::LogsStream, which falls back to disk when config is not loaded.
 #[tokio::test]
 async fn test_autostart_disabled_logs_default_mode_after_restart() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -595,7 +595,7 @@ async fn test_autostart_disabled_logs_default_mode_after_restart() -> E2eResult<
     harness.start_daemon().await?;
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // Use default mode (no --head/--tail) which triggers LogsCursor path
+    // Use default mode (no --head/--tail) which triggers LogsStream path
     let config_str = config_path.to_str().unwrap();
     let default_logs = harness
         .run_cli_with_timeout(

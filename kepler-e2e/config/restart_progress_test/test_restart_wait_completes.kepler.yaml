@@ -1,7 +1,4 @@
 # Simple service for testing restart --wait progress
-kepler:
-  logs:
-    buffer_size: 0
 
 services:
   web:

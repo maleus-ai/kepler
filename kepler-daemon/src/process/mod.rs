@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 use crate::config_actor::{ConfigActorHandle, TaskHandleType};
 use crate::containment::ContainmentManager;
 use crate::errors::{DaemonError, Result};
-use crate::logs::LogWriterConfig;
+use crate::logs::LogStoreHandle;
 use crate::state::{ProcessHandle, ServiceStatus, ShutdownRequest};
 
 /// Message for process exit events
@@ -41,7 +41,7 @@ pub struct ProcessExitEvent {
 pub struct SpawnServiceParams<'a> {
     pub service_name: &'a str,
     pub spec: CommandSpec,
-    pub log_config: LogWriterConfig,
+    pub log_store: LogStoreHandle,
     pub handle: ConfigActorHandle,
     pub exit_tx: mpsc::Sender<ProcessExitEvent>,
     pub store_stdout: bool,
@@ -57,7 +57,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
     let SpawnServiceParams {
         service_name,
         spec,
-        log_config,
+        log_store,
         handle,
         exit_tx,
         store_stdout,
@@ -88,7 +88,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
     // Spawn the command detached for monitoring
     let result = spawn_detached(
         spec,
-        log_config,
+        log_store,
         service_name.to_string(),
         store_stdout,
         store_stderr,

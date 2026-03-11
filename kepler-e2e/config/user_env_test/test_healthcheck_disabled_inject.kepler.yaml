@@ -3,9 +3,6 @@
 # Healthcheck also has user_identity: false — injection is disabled at both levels.
 # The healthcheck should see USER=custom_user from the service's computed_env.
 # The healthcheck asserts USER == custom_user -> passes only if injection is skipped.
-kepler:
-  logs:
-    buffer_size: 0
 
 services:
   user-env-svc:

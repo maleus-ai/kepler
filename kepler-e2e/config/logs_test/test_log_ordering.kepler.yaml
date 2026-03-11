@@ -1,10 +1,6 @@
 # Test config for verifying chronological log ordering
 # Multiple services writing concurrently with timestamps
 
-kepler:
-  logs:
-    buffer_size: 0     # Disable buffering for immediate writes
-
 services:
   ordering-svc-a:
     command: ["bash", "-c", "for i in $(seq 1 50); do echo \"ORDER_A_$i\"; sleep 0.05; done; echo ORDER_A_DONE; sleep 300"]

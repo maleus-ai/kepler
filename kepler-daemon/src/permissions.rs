@@ -21,7 +21,7 @@ use std::sync::LazyLock;
 use kepler_protocol::protocol::Request;
 
 /// Known category scopes (level 1).
-pub const CATEGORY_SCOPES: &[&str] = &["service", "config"];
+pub const CATEGORY_SCOPES: &[&str] = &["service", "config", "logs"];
 
 /// Known command scopes (level 2).
 pub const COMMAND_SCOPES: &[&str] = &[
@@ -29,12 +29,13 @@ pub const COMMAND_SCOPES: &[&str] = &[
     "service:stop",
     "service:restart",
     "service:clean",
-    "service:logs",
     "config:status",
     "config:inspect",
     "config:recreate",
     "config:hardening",
     "config:env",
+    "logs:read",
+    "logs:search",
 ];
 
 /// All known scopes (categories + commands), computed once.
@@ -160,9 +161,12 @@ fn expand_scopes_unchecked<S: AsRef<str>>(scopes: &HashSet<S>) -> HashSet<&'stat
         }
     }
 
-    // Command-level implication: service:clean → service:stop
+    // Command-level implications
     if expanded.contains("service:clean") {
         expanded.insert("service:stop");
+    }
+    if expanded.contains("logs:search") {
+        expanded.insert("logs:read");
     }
 
     expanded
@@ -218,8 +222,12 @@ pub fn required_scopes(request: &Request) -> Vec<&'static str> {
                 vec![]
             }
         }
-        Request::Logs { .. } | Request::LogsChunk { .. } | Request::LogsCursor { .. } => {
-            vec!["service:logs"]
+        Request::LogsStream { filter, .. } => {
+            if filter.is_some() {
+                vec!["logs:search"]
+            } else {
+                vec!["logs:read"]
+            }
         }
         // Daemon operations are root-only (enforced in handler), not scope-gated
         Request::Prune { .. } => vec![],
@@ -227,6 +235,8 @@ pub fn required_scopes(request: &Request) -> Vec<&'static str> {
         // Always allowed
         Request::Ping => vec![],
         Request::ListConfigs => vec![],
+        // SubscribeLogs: same scope as reading logs
+        Request::SubscribeLogs { .. } => vec!["logs:read"],
         // Subscribe / Check*: allowed if caller has any service: scope
         Request::Subscribe { .. }
         | Request::CheckQuiescence { .. }

@@ -68,6 +68,7 @@ impl TestConfigBuilder {
         }
         Some(KeplerGlobalConfig {
             default_inherit_env: self.default_inherit_env,
+            storage: Default::default(),
             logs: self.logs.clone(),
             timeout: None,
             output_max_size: None,

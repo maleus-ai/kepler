@@ -93,6 +93,18 @@ impl ProgressSender {
         }
     }
 
+    /// Send a LogsAvailable event to the client. Fire-and-forget: errors are silently ignored.
+    pub async fn send_logs_available(&self) {
+        let msg = ServerMessage::Event {
+            event: ServerEvent::LogsAvailable {
+                request_id: self.request_id,
+            },
+        };
+        if let Ok(bytes) = encode_server_message(&msg) {
+            let _ = self.write_tx.send(bytes).await;
+        }
+    }
+
     /// Check if the client has disconnected (the write channel is closed).
     pub fn is_closed(&self) -> bool {
         self.write_tx.is_closed()

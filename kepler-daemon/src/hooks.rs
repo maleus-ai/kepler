@@ -6,7 +6,7 @@ use crate::config::{resolve_log_store, ConfigValue, HookCommand, HookList, LogCo
 use crate::config_actor::ConfigActorHandle;
 use crate::errors::{DaemonError, Result};
 use crate::hardening::HardeningLevel;
-use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
+use crate::logs::{LogStoreHandle, LogWriter};
 use crate::lua_eval::{DepInfo, EvalContext, HookEvalContext, LuaEvaluator, OwnerEvalContext, ServiceEvalContext};
 use crate::process::{spawn_blocking, BlockingMode, OutputCaptureConfig};
 use kepler_protocol::protocol::{ProgressEvent, ServicePhase};
@@ -34,7 +34,7 @@ pub struct ServiceHookParams<'a> {
     pub kepler_env: &'a HashMap<String, String>,
     /// Service's env_file vars
     pub env_file_vars: &'a HashMap<String, String>,
-    pub log_config: Option<&'a LogWriterConfig>,
+    pub log_store: Option<&'a LogStoreHandle>,
     pub service_user: Option<&'a str>,
     pub service_groups: &'a [String],
     pub service_log_config: Option<&'a LogConfig>,
@@ -240,7 +240,7 @@ async fn run_hook_step(
         let log_name = format!("{}.{}.{}", service_name, hook_name, step_index);
         let (store_stdout, store_stderr) = resolve_log_store(params.service_log_config, params.global_log_config);
         let mode = BlockingMode::WithLogging {
-            log_config: params.log_config.cloned(),
+            log_store: params.log_store.cloned(),
             log_service_name: log_name,
             store_stdout,
             store_stderr,
@@ -461,8 +461,8 @@ pub async fn run_service_hook(
                     e
                 );
                 // Write error to service stderr log so it's visible via `kepler logs`
-                if let Some(log_config) = params.log_config {
-                    let mut writer = BufferedLogWriter::from_config(log_config, service_name, LogStream::Stderr);
+                if let Some(log_store) = params.log_store {
+                    let writer = LogWriter::new(log_store, service_name, "err");
                     writer.write(&format!("Hook {} failed: {}", hook_type.as_str(), e));
                 }
                 emit_hook_event(progress, service_name, ServicePhase::HookFailed { hook: hook_name, message: e.to_string() }).await;

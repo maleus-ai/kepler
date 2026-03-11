@@ -1,10 +1,6 @@
 # Test depends_on with timeout
 # Backend should fail to start because database never becomes healthy within timeout
 
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   database:
     command: ["sh", "-c", "echo DATABASE_STARTED; sleep 300"]

@@ -1,10 +1,6 @@
 # Test that hook steps in a later phase can access outputs from an earlier phase.
 # pre_start emits outputs, post_start reads them via ${{ }}$.
 
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   cross-phase:
     command: ["sh", "-c", "echo SERVICE_RUNNING && sleep 300"]

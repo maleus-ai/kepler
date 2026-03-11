@@ -311,7 +311,7 @@ async fn run_status_change_hook(
             env: &ctx.env,
             kepler_env: &kepler_env,
             env_file_vars: &ctx.env_file_vars,
-            log_config: Some(&ctx.log_config),
+            log_store: Some(&ctx.log_store),
             service_user: resolved.user.as_deref(),
             service_groups: &resolved.groups,
             service_log_config: resolved.logs.as_ref(),

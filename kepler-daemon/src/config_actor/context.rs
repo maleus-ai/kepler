@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::config::{LogConfig, RawServiceConfig, ServiceConfig};
-use crate::logs::LogWriterConfig;
+use crate::logs::LogStoreHandle;
 use crate::state::ServiceStatus;
 
 /// Type of task handle stored in state
@@ -30,7 +30,7 @@ pub struct ServiceContext {
     pub config_dir: PathBuf,
     /// State directory for daemon-managed data (outputs, logs, etc.)
     pub state_dir: PathBuf,
-    pub log_config: LogWriterConfig,
+    pub log_store: LogStoreHandle,
     pub global_log_config: Option<LogConfig>,
     /// Pre-computed environment variables from state
     pub env: HashMap<String, String>,

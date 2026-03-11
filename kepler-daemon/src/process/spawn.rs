@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 
 use super::CommandSpec;
 use crate::errors::{DaemonError, Result};
-use crate::logs::{BufferedLogWriter, LogStream, LogWriterConfig};
+use crate::logs::{LogStoreHandle, LogWriter};
 
 /// Cached result of kepler-exec binary lookup.
 /// `Some(path)` = found, `None` = not found (will fall back to fork).
@@ -118,7 +118,7 @@ pub enum BlockingMode {
     CaptureOutput,
     /// Wait for completion with logging to tracing and disk (for hooks)
     WithLogging {
-        log_config: Option<LogWriterConfig>,
+        log_store: Option<LogStoreHandle>,
         log_service_name: String,
         /// Whether to store stdout output
         store_stdout: bool,
@@ -324,9 +324,10 @@ fn spawn_collect_task(
 /// `None` otherwise.
 fn spawn_capture_task(
     stream: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
-    log_config: Option<LogWriterConfig>,
+    log_store: Option<LogStoreHandle>,
     service_name: String,
-    log_stream: LogStream,
+    level: &'static str,
+    hook: Option<String>,
     should_store: bool,
     log_to_tracing: bool,
     output_capture: Option<OutputCaptureConfig>,
@@ -338,9 +339,13 @@ fn spawn_capture_task(
         let mut capture_overflow = false;
 
         if let Some(stream) = stream {
-            let mut writer = if should_store {
-                log_config.map(|cfg| {
-                    BufferedLogWriter::from_config(&cfg, &service_name, log_stream)
+            let writer = if should_store {
+                log_store.map(|store| {
+                    if let Some(ref hook_name) = hook {
+                        LogWriter::with_hook(&store, &service_name, hook_name, level)
+                    } else {
+                        LogWriter::new(&store, &service_name, level)
+                    }
                 })
             } else {
                 None
@@ -379,11 +384,8 @@ fn spawn_capture_task(
                 if log_to_tracing {
                     info!(target: "hook", "[{}] {}", service_name, line);
                 }
-                if let Some(ref mut w) = writer {
+                if let Some(ref w) = writer {
                     w.write(&line);
-                    if lines.get_ref().buffer().is_empty() {
-                        w.flush();
-                    }
                 }
             }
         }
@@ -396,7 +398,7 @@ fn spawn_capture_task(
 ///
 /// The `mode` parameter determines behavior:
 /// - `Silent`: Wait for completion and return exit code
-/// - `WithLogging`: Wait with logging to tracing and BufferedLogWriter
+/// - `WithLogging`: Wait with logging to tracing and LogWriter
 pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<BlockingResult> {
     let (mut cmd, program) = build_command(&spec)?;
 
@@ -457,7 +459,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
             })
         }
         BlockingMode::WithLogging {
-            log_config,
+            log_store,
             log_service_name,
             store_stdout,
             store_stderr,
@@ -466,18 +468,20 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
             // Only capture output from stdout (not stderr)
             let stdout_handle = spawn_capture_task(
                 child.stdout.take(),
-                if store_stdout { log_config.clone() } else { None },
+                if store_stdout { log_store.clone() } else { None },
                 log_service_name.clone(),
-                LogStream::Stdout,
+                "out",
+                None,
                 store_stdout,
                 true,
                 output_capture,
             );
             let stderr_handle = spawn_capture_task(
                 child.stderr.take(),
-                if store_stderr { log_config } else { None },
+                if store_stderr { log_store } else { None },
                 log_service_name,
-                LogStream::Stderr,
+                "err",
+                None,
                 store_stderr,
                 true,
                 None, // No output capture on stderr
@@ -503,7 +507,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
 /// Spawn a detached command, returning the Child and output tasks for monitoring.
 pub async fn spawn_detached(
     spec: CommandSpec,
-    log_config: LogWriterConfig,
+    log_store: LogStoreHandle,
     log_service_name: String,
     store_stdout: bool,
     store_stderr: bool,
@@ -524,9 +528,10 @@ pub async fn spawn_detached(
     let stdout_task = child.stdout.take().map(|stdout| {
         spawn_capture_task(
             Some(stdout),
-            Some(log_config.clone()),
+            Some(log_store.clone()),
             log_service_name.clone(),
-            LogStream::Stdout,
+            "out",
+            None,
             store_stdout,
             false,
             output_capture,
@@ -536,9 +541,10 @@ pub async fn spawn_detached(
     let stderr_task = child.stderr.take().map(|stderr| {
         spawn_capture_task(
             Some(stderr),
-            Some(log_config),
+            Some(log_store),
             log_service_name,
-            LogStream::Stderr,
+            "err",
+            None,
             store_stderr,
             false,
             None, // No output capture on stderr

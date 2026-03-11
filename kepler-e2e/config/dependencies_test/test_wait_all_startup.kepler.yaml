@@ -1,10 +1,6 @@
 # Test effective_wait: all services use startup conditions
 # With --wait mode, the CLI should block until ALL services are running
 
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   database:
     command: ["sh", "-c", "echo DATABASE_STARTED; sleep 300"]
