@@ -262,6 +262,7 @@ mod hardening_floor {
             max_hardening,
             service: "test".to_string(),
             config_path: PathBuf::from("/test/config.yml"),
+            authorizer: None,
         }
     }
 
@@ -337,10 +338,11 @@ mod resolve_auth_tests {
 
     fn make_token_context() -> TokenContext {
         TokenContext {
-            allow: ["service:start"].into(),
+            allow: ["start"].into(),
             max_hardening: HardeningLevel::None,
             service: "web".to_string(),
             config_path: PathBuf::from("/test/config.yml"),
+            authorizer: None,
         }
     }
 
@@ -365,7 +367,7 @@ mod resolve_auth_tests {
                 assert_eq!(uid, 1000);
                 assert_eq!(gid, 1000);
                 assert_eq!(ctx.service, "web");
-                assert!(ctx.allow.contains("service:start"));
+                assert!(ctx.allow.contains("start"));
             }
             _ => panic!("expected Token auth context"),
         }
@@ -499,6 +501,7 @@ mod hardening_floor_edge_cases {
             max_hardening,
             service: "test".to_string(),
             config_path: PathBuf::from("/test/config.yml"),
+            authorizer: None,
         }
     }
 

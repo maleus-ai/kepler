@@ -3,7 +3,7 @@
 //! This module provides the `LuaEvaluator` struct which manages a Lua state
 //! and allows evaluation of `!lua` tagged values in configs.
 
-use mlua::{FromLua, Lua, LuaSerdeExt, Result as LuaResult, Table, Value};
+use mlua::{FromLua, Lua, Result as LuaResult, Table, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -169,68 +169,15 @@ pub struct LuaEvaluator {
 
 impl LuaEvaluator {
     /// Create a new Lua evaluator with a fresh Lua state.
+    ///
+    /// Uses the shared [`super::vm::create_lua_vm`] base, then adds
+    /// the config-specific `global` table for cross-block state sharing.
     pub fn new() -> LuaResult<Self> {
-        let lua = Lua::new();
+        let lua = super::vm::create_lua_vm()?;
 
         // Create the shared `global` table for cross-block state
         let global_table = lua.create_table()?;
         lua.globals().set("global", global_table)?;
-
-        // Remove `require` from globals to prevent loading external modules
-        lua.globals().set("require", Value::Nil)?;
-
-        // Register json stdlib
-        let json_table = lua.create_table()?;
-        json_table.set(
-            "parse",
-            lua.create_function(|lua, s: String| {
-                let v: serde_json::Value = serde_json::from_str(&s)
-                    .map_err(|e| mlua::Error::RuntimeError(format!("json.parse: {}", e)))?;
-                lua.to_value(&v)
-            })?,
-        )?;
-        json_table.set(
-            "stringify",
-            lua.create_function(|lua, (val, pretty): (Value, Option<bool>)| {
-                let v: serde_json::Value = lua.from_value(val)?;
-                if pretty.unwrap_or(false) {
-                    serde_json::to_string_pretty(&v)
-                } else {
-                    serde_json::to_string(&v)
-                }
-                .map_err(|e| mlua::Error::RuntimeError(format!("json.stringify: {}", e)))
-            })?,
-        )?;
-        json_table.set_readonly(true);
-        lua.globals().set("json", json_table)?;
-
-        // Register yaml stdlib
-        let yaml_table = lua.create_table()?;
-        yaml_table.set(
-            "parse",
-            lua.create_function(|lua, s: String| {
-                let v: serde_yaml::Value = serde_yaml::from_str(&s)
-                    .map_err(|e| mlua::Error::RuntimeError(format!("yaml.parse: {}", e)))?;
-                lua.to_value(&v)
-            })?,
-        )?;
-        yaml_table.set(
-            "stringify",
-            lua.create_function(|lua, val: Value| {
-                let v: serde_yaml::Value = lua.from_value(val)?;
-                serde_yaml::to_string(&v)
-                    .map_err(|e| mlua::Error::RuntimeError(format!("yaml.stringify: {}", e)))
-            })?,
-        )?;
-        yaml_table.set_readonly(true);
-        lua.globals().set("yaml", yaml_table)?;
-
-        // Freeze standard library tables to prevent tampering
-        for name in &["string", "math", "table", "coroutine", "bit32", "utf8", "buffer", "os"] {
-            if let Ok(tbl) = lua.globals().get::<Table>(*name) {
-                tbl.set_readonly(true);
-            }
-        }
 
         Ok(Self { lua })
     }

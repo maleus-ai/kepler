@@ -16,7 +16,7 @@ use kepler_daemon::process::{
 use kepler_daemon::state::ServiceStatus;
 use kepler_daemon::token_store::{ServiceTokenGuard, SharedTokenStore, TokenContext, TokenStore};
 use kepler_daemon::watcher::{FileChangeEvent, spawn_file_watcher};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -292,8 +292,8 @@ impl TestDaemonHarness {
         let mut full_env = sys_env.clone();
         full_env.extend(env_file_vars.clone());
 
-        let mut eval_ctx = kepler_daemon::lua_eval::EvalContext {
-            service: Some(kepler_daemon::lua_eval::ServiceEvalContext {
+        let mut eval_ctx = kepler_daemon::lua::templating_runtime::EvalContext {
+            service: Some(kepler_daemon::lua::templating_runtime::ServiceEvalContext {
                 name: service_name.to_string(),
                 env_file: env_file_vars.clone(),
                 env: full_env,
@@ -373,10 +373,9 @@ impl TestDaemonHarness {
 
         // Create token guard before pre_start hooks so hooks can use the token.
         let service_token = if let Some(permissions) = &resolved.permissions {
-            let allow_set: HashSet<String> = permissions.allow.iter().cloned().collect();
-            let expanded = kepler_daemon::permissions::expand_scopes(&allow_set).map_err(
+            let expanded = kepler_daemon::permissions::expand_allow(&permissions.allow, &std::collections::HashMap::new()).map_err(
                 |e| -> Box<dyn std::error::Error> {
-                    format!("invalid permission scopes: {}", e).into()
+                    format!("invalid permission rights: {}", e).into()
                 },
             )?;
             let token_ctx = TokenContext {
@@ -384,6 +383,7 @@ impl TestDaemonHarness {
                 max_hardening: HardeningLevel::None,
                 service: service_name.to_string(),
                 config_path: self.config_path.clone(),
+                authorizer: None,
             };
             let guard = ServiceTokenGuard::new(self.token_store.clone(), token_ctx)
                 .await

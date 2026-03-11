@@ -1,0 +1,12 @@
+kepler:
+  acl:
+    users:
+      testuser2:
+        allow: [start, stop, status, logs, subscribe, quiescence]
+        authorize: |
+          if request.action == 'stop' then return false end
+          return true
+
+services:
+  lua-svc:
+    command: ["sh", "-c", "echo LUA_SVC_RUNNING; sleep 300"]

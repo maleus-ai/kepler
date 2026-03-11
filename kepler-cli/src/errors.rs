@@ -29,6 +29,9 @@ pub enum CliError {
     #[error("{0}")]
     Server(String),
 
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

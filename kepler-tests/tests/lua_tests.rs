@@ -3,7 +3,7 @@
 //! Tests the !lua and !lua_file YAML tags for dynamic config generation.
 
 use kepler_daemon::config::KeplerConfig;
-use kepler_daemon::lua_eval::EvalContext;
+use kepler_daemon::lua::templating_runtime::EvalContext;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::Path;
@@ -38,7 +38,7 @@ fn resolve_svc_with_env(
     config_path: &Path,
     sys_env: &HashMap<String, String>,
 ) -> kepler_daemon::config::ServiceConfig {
-    use kepler_daemon::lua_eval::ServiceEvalContext;
+    use kepler_daemon::lua::templating_runtime::ServiceEvalContext;
     let mut ctx = EvalContext {
         service: Some(ServiceEvalContext {
             env: sys_env.clone(),
@@ -53,7 +53,7 @@ fn resolve_svc_with_env(
 
 /// Helper to attempt resolving a service config, returning an error string on failure.
 fn try_resolve_svc(config: &KeplerConfig, name: &str, config_path: &Path) -> Result<kepler_daemon::config::ServiceConfig, String> {
-    use kepler_daemon::lua_eval::ServiceEvalContext;
+    use kepler_daemon::lua::templating_runtime::ServiceEvalContext;
     let sys_env: HashMap<String, String> = std::env::vars().collect();
     let mut ctx = EvalContext {
         service: Some(ServiceEvalContext {

@@ -40,6 +40,10 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
+    /// Suppress degraded mode warnings (when optional requests are denied)
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -184,7 +188,7 @@ async fn run() -> Result<()> {
                         .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
                     let result = tokio::time::timeout(
                         timeout_duration,
-                        wait_until_ready_with_start(progress_rx, sub_future, start_future, !no_abort_on_failure, &client, &canonical_path),
+                        wait_until_ready_with_start(progress_rx, sub_future, start_future, !no_abort_on_failure, &client, &canonical_path, cli.quiet),
                     ).await;
                     match result {
                         Ok(Ok(())) => {}
@@ -195,7 +199,7 @@ async fn run() -> Result<()> {
                         }
                     }
                 } else {
-                    wait_until_ready_with_start(progress_rx, sub_future, start_future, !no_abort_on_failure, &client, &canonical_path).await?;
+                    wait_until_ready_with_start(progress_rx, sub_future, start_future, !no_abort_on_failure, &client, &canonical_path, cli.quiet).await?;
                 }
             } else if detach {
                 // -d: Fire start, exit immediately
@@ -228,7 +232,7 @@ async fn run() -> Result<()> {
                 };
                 foreground_with_logs(
                     wrapped_start,
-                    follow_logs_until_quiescent(&client, &canonical_path, log_service, abort_on_failure, start_acknowledged, raw_output),
+                    follow_logs_until_quiescent(&client, &canonical_path, log_service, abort_on_failure, start_acknowledged, raw_output, cli.quiet),
                 ).await?;
             }
         }
@@ -240,7 +244,7 @@ async fn run() -> Result<()> {
             let response = run_with_progress(progress_rx, response_future).await?;
             // Progress bars already show per-service stop/clean status;
             // only surface errors (suppress redundant summary message).
-            if let Response::Error { message } = response {
+            if let Response::Error { message } | Response::PermissionDenied { message } = response {
                 eprintln!("Error: {}", message);
                 std::process::exit(1);
             }
@@ -292,7 +296,15 @@ async fn run() -> Result<()> {
                 )?;
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);
-                handle_logs(&client, canonical_path, log_service, true, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, false, false, raw_output).await?;
+                match handle_logs(&client, canonical_path, log_service, true, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, false, false, raw_output).await {
+                    Ok(()) => {}
+                    Err(CliError::PermissionDenied(_)) => {
+                        if !cli.quiet {
+                            eprintln!("Warning: log following unavailable (permission denied)");
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
             } else {
                 // Default: Progress bars, exit when done
                 let (progress_rx, restart_future) = client.restart(
@@ -350,7 +362,7 @@ async fn run() -> Result<()> {
                 Response::Ok { data: Some(ResponseData::Inspect(json)), .. } => {
                     println!("{}", json);
                 }
-                Response::Error { message } => {
+                Response::Error { message } | Response::PermissionDenied { message } => {
                     eprintln!("Error: {}", message);
                     std::process::exit(1);
                 }
@@ -541,6 +553,9 @@ async fn foreground_with_logs(
             result = &mut request_future, if !request_done => {
                 request_done = true;
                 match result {
+                    Ok(Response::PermissionDenied { message }) => {
+                        return Err(CliError::PermissionDenied(message));
+                    }
                     Ok(Response::Error { message }) => {
                         // Request failed (e.g. config parse error).
                         // Return immediately — the log future will never
@@ -571,6 +586,7 @@ async fn wait_until_ready_with_start(
     abort_on_failure: bool,
     client: &Client,
     config_path: &Path,
+    quiet: bool,
 ) -> Result<()> {
     let mp = MultiProgress::new();
 
@@ -588,6 +604,7 @@ async fn wait_until_ready_with_start(
     let mut targets: HashMap<String, ServiceTarget> = HashMap::new();
     let mut finished: HashMap<String, bool> = HashMap::new();
     let mut has_unhandled_failure = false;
+    let mut received_any_event = false;
 
     tokio::pin!(sub_future);
     tokio::pin!(start_future);
@@ -598,6 +615,9 @@ async fn wait_until_ready_with_start(
         tokio::select! {
             biased;
             server_event = progress_rx.recv() => {
+                if server_event.is_some() {
+                    received_any_event = true;
+                }
                 match server_event {
                     Some(ServerEvent::Progress { event, .. }) => {
                         let pb = bars.entry(event.service.clone()).or_insert_with(|| {
@@ -723,6 +743,11 @@ async fn wait_until_ready_with_start(
                         }
                     }
                     None => {
+                        if !received_any_event && !quiet {
+                            // No events received — subscribe was likely denied (permission error).
+                            // Fall back to awaiting start response (like -d mode).
+                            eprintln!("Warning: event subscription unavailable (permission denied); falling back to detach mode");
+                        }
                         // Subscribe channel closed — wait for start response as fallback
                         if !start_done {
                             let result = start_future.await;
@@ -747,7 +772,7 @@ async fn wait_until_ready_with_start(
                 // Start request acknowledged by daemon.
                 // With spawn-all, this returns immediately — keep waiting for the Ready signal.
                 // If the response is an error, handle it and exit.
-                if let Ok(Response::Error { message }) = &result {
+                if let Ok(Response::Error { message } | Response::PermissionDenied { message }) = &result {
                     eprintln!("Error: {}", message);
                     std::process::exit(1);
                 }
@@ -783,7 +808,7 @@ fn handle_response(response: Response) {
                 println!("{}", msg);
             }
         }
-        Response::Error { message } => {
+        Response::Error { message } | Response::PermissionDenied { message } => {
             eprintln!("Error: {}", message);
             std::process::exit(1);
         }
@@ -990,7 +1015,7 @@ async fn handle_ps(client: &Client, config_path: PathBuf) -> Result<()> {
 
             print_service_table(&services);
         }
-        Response::Error { message } => {
+        Response::Error { message } | Response::PermissionDenied { message } => {
             eprintln!("Error: {}", message);
             std::process::exit(1);
         }
@@ -1022,6 +1047,9 @@ async fn handle_ps_all(client: &Client) -> Result<()> {
         Response::Ok { message, .. } => {
             println!("{}", message.unwrap_or_default());
             Ok(())
+        }
+        Response::PermissionDenied { message } => {
+            Err(CliError::PermissionDenied(message))
         }
         Response::Error { message } => {
             Err(CliError::Server(message))
@@ -1307,8 +1335,10 @@ enum StreamExitReason {
     Done,
     /// Shutdown signal received — caller should stop services.
     ShutdownRequested,
-    /// Server returned a fatal error (permission denied, etc.).
+    /// Server returned a fatal error.
     ServerError,
+    /// Server denied request due to insufficient permissions.
+    PermissionDenied,
 }
 
 /// Non-generic parameters for `stream_logs`.
@@ -1378,6 +1408,9 @@ async fn stream_logs(
                     if !entries.is_empty() {
                         on_batch(&service_table, &entries);
                     }
+                }
+                Response::PermissionDenied { .. } => {
+                    return Ok(StreamExitReason::PermissionDenied);
                 }
                 Response::Error { message } => {
                     if message == "Config not loaded" {
@@ -1534,6 +1567,8 @@ enum QuiescenceSignal {
     Quiescent,
     /// A service failed with no handler.
     UnhandledFailure { service: String, exit_code: Option<i32> },
+    /// Subscribe was denied (permission error) — no quiescence detection available.
+    SubscribeDenied,
 }
 
 /// Event-driven quiescence monitor.
@@ -1552,7 +1587,9 @@ async fn quiescence_monitor(
     seen_non_terminal: Arc<AtomicBool>,
     start_acknowledged: Arc<AtomicBool>,
 ) {
+    let mut received_any = false;
     while let Some(event) = progress_rx.recv().await {
+        received_any = true;
         match event {
             ServerEvent::UnhandledFailure { service, exit_code, .. } => {
                 let _ = signal_tx.send(QuiescenceSignal::UnhandledFailure { service, exit_code });
@@ -1591,8 +1628,14 @@ async fn quiescence_monitor(
             _ => {}
         }
     }
-    // Channel closed = subscription ended (config unloaded)
-    let _ = signal_tx.send(QuiescenceSignal::Quiescent);
+    // Channel closed: if we received events, subscription ended normally (config unloaded).
+    // If no events at all, the subscribe request was likely denied by ACL — the daemon
+    // returns an error response immediately which closes the progress channel.
+    if received_any {
+        let _ = signal_tx.send(QuiescenceSignal::Quiescent);
+    } else {
+        let _ = signal_tx.send(QuiescenceSignal::SubscribeDenied);
+    }
 }
 
 /// Follow logs until all services reach a terminal state (quiescent) or Ctrl+C.
@@ -1608,13 +1651,16 @@ async fn follow_logs_until_quiescent(
     abort_on_failure: bool,
     start_acknowledged: Arc<AtomicBool>,
     raw: bool,
+    quiet: bool,
 ) -> Result<()> {
     let use_color = !raw && colored::control::SHOULD_COLORIZE.should_colorize();
     let mut color_map: HashMap<String, Color> = HashMap::new();
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
 
-    // Set up quiescence detection via subscription
+    // Set up quiescence detection via subscription.
+    // If subscribe is denied by ACL, the progress channel closes immediately with
+    // no events; quiescence_monitor detects this and sends SubscribeDenied.
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<QuiescenceSignal>();
     let progress_rx = client.subscribe_events(
         config_path.to_path_buf(),
@@ -1655,6 +1701,14 @@ async fn follow_logs_until_quiescent(
                                     abort_triggered = true;
                                     return (has_unhandled_failure, abort_triggered);
                                 }
+                            }
+                            Some(QuiescenceSignal::SubscribeDenied) => {
+                                // Subscribe was denied by ACL — quiescence detection unavailable.
+                                // Print a warning and wait forever (Ctrl+C is the only exit).
+                                if !quiet {
+                                    eprintln!("Warning: event subscription unavailable (permission denied); quiescence detection disabled (Ctrl+C to stop)");
+                                }
+                                std::future::pending::<()>().await;
                             }
                             Some(QuiescenceSignal::Quiescent) | None => {
                                 return (has_unhandled_failure, abort_triggered);
@@ -1710,6 +1764,40 @@ async fn follow_logs_until_quiescent(
     )
     .await?;
 
+    if exit_reason == StreamExitReason::PermissionDenied {
+        // Log streaming denied — warn and wait for Ctrl+C (quiescence detection
+        // was consumed by stream_logs, so we fall back to simple Ctrl+C wait).
+        if !quiet {
+            eprintln!("Warning: log streaming unavailable (permission denied)");
+        }
+        let _ = tokio::signal::ctrl_c().await;
+        eprintln!("\nGracefully stopping...");
+        match client.stop(config_path.to_path_buf(), service.map(String::from), false, None) {
+            Ok((progress_rx, response_future)) => {
+                tokio::select! {
+                    biased;
+                    _ = tokio::signal::ctrl_c() => { std::process::exit(130); }
+                    result = run_with_progress(progress_rx, response_future) => {
+                        match result {
+                            Ok(Response::PermissionDenied { .. }) => {
+                                if !quiet {
+                                    eprintln!("Warning: stop denied (permission denied); detaching from services");
+                                }
+                                return Ok(());
+                            }
+                            Ok(Response::Error { message }) => {
+                                eprintln!("Error: {}", message);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Err(e) => { eprintln!("Error stopping services: {}", e); }
+        }
+        return Ok(());
+    }
+
     let (has_unhandled_failure, abort_triggered) = *quiescence_result.lock().unwrap();
 
     if exit_reason == StreamExitReason::ShutdownRequested || abort_triggered {
@@ -1732,8 +1820,21 @@ async fn follow_logs_until_quiescent(
                         std::process::exit(130);
                     }
                     result = run_with_progress(progress_rx, response_future) => {
-                        if let Ok(Response::Error { message }) = result {
-                            eprintln!("Error: {}", message);
+                        match result {
+                            Ok(Response::PermissionDenied { .. }) => {
+                                if !quiet {
+                                    eprintln!("Warning: stop denied (permission denied); detaching from services");
+                                }
+                                // Stop denied — just detach. Exit 0 unless abort was triggered.
+                                if abort_triggered {
+                                    std::process::exit(1);
+                                }
+                                return Ok(());
+                            }
+                            Ok(Response::Error { message }) => {
+                                eprintln!("Error: {}", message);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1803,8 +1904,12 @@ async fn handle_logs(
     )
     .await?;
 
-    if exit_reason == StreamExitReason::ServerError {
-        std::process::exit(1);
+    match exit_reason {
+        StreamExitReason::ServerError => std::process::exit(1),
+        StreamExitReason::PermissionDenied => {
+            return Err(CliError::PermissionDenied("log streaming denied".to_string()));
+        }
+        _ => {}
     }
 
     Ok(())
@@ -1927,7 +2032,7 @@ async fn handle_prune(client: &Client, force: bool, dry_run: bool) -> Result<()>
                 println!("Nothing to prune");
             }
         }
-        Response::Error { message } => {
+        Response::Error { message } | Response::PermissionDenied { message } => {
             eprintln!("Error: {}", message);
             std::process::exit(1);
         }

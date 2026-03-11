@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::errors::{DaemonError, Result};
-use crate::lua_eval::{EvalContext, LuaEvaluator};
+use crate::lua::templating_runtime::{EvalContext, LuaEvaluator};
 use crate::process::CommandSpec;
 
 use super::hooks::HookCommand;

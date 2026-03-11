@@ -136,112 +136,38 @@ fn parse_hardening_level() -> HardeningLevel {
 ///
 /// Returns `Err("permission denied")` with a generic message on failure
 /// (detailed information is logged server-side only to prevent information leakage).
-fn check_config_acl(
+///
+/// After static rights pass, Lua authorizers (if any) are evaluated.
+async fn check_config_acl(
     auth_ctx: &kepler_daemon::auth::AuthContext,
     handle: &kepler_daemon::config_actor::ConfigActorHandle,
     request: &Request,
 ) -> std::result::Result<(), String> {
-    match auth_ctx {
-        kepler_daemon::auth::AuthContext::Root { .. } => Ok(()),
-        kepler_daemon::auth::AuthContext::Group { uid, gid } => {
-            let uid = *uid;
-            let gid = *gid;
-            // Config owner has full access
-            if Some(uid) == handle.owner_uid() {
-                return Ok(());
-            }
-            // No ACL → deny all scoped operations for non-owners
-            let acl = match handle.acl() {
-                Some(acl) => acl,
-                None => {
-                    let required = kepler_daemon::permissions::required_scopes(request);
-                    if required.is_empty() && !matches!(request, Request::Subscribe { .. } | Request::CheckQuiescence { .. } | Request::CheckReadiness { .. }) {
-                        return Ok(());
-                    }
-                    warn!("ACL denied: UID {} attempted operation requiring scopes {:?} but is not config owner", uid, required);
-                    return Err("permission denied".to_string());
-                }
-            };
-            acl.check_access(uid, gid, request)
-        }
-        kepler_daemon::auth::AuthContext::Token { uid, gid, ctx } => {
-            // Compute effective scopes = token.allow ∩ ACL scopes
-            let acl_scopes = if *uid == 0 {
-                // Root has implicit * ACL — effective = token.allow
-                None // None means "use token.allow directly"
-            } else if Some(*uid) == handle.owner_uid() {
-                // Owner has implicit * ACL — effective = token.allow
-                None
-            } else {
-                // Look up ACL
-                match handle.acl() {
-                    None => {
-                        // No ACL and not owner/root → denied
-                        warn!("ACL denied: token bearer UID {} has no ACL access to this config", uid);
-                        return Err("permission denied".to_string());
-                    }
-                    Some(acl) => {
-                        match acl.collect_scopes(*uid, *gid) {
-                            Err(e) => {
-                                warn!("ACL denied: supplementary group lookup failed for token bearer UID {}: {}", uid, e);
-                                return Err("permission denied".to_string());
-                            }
-                            Ok(None) => {
-                                warn!("ACL denied: no ACL rules match token bearer UID {}", uid);
-                                return Err("permission denied".to_string());
-                            }
-                            Ok(Some(scopes)) => Some(scopes),
-                        }
-                    }
-                }
-            };
+    let effective = kepler_daemon::acl::effective_rights(auth_ctx, handle.owner_uid(), handle.acl())
+        .map_err(|e| { warn!("ACL denied: {}", e); "permission denied".to_string() })?
+        .ok_or_else(|| { warn!("ACL denied: no access for this caller"); "permission denied".to_string() })?;
+    kepler_daemon::permissions::check_rights(&effective, request)
+        .map_err(|e| format!("permission denied: {}", e))?;
 
-            // Compute effective scopes: token.allow ∩ ACL (or just token.allow if ACL is implicit *)
-            let effective_allow: std::collections::HashSet<&'static str>;
-            let effective = match acl_scopes {
-                None => &ctx.allow,
-                Some(ref acl) => {
-                    effective_allow = ctx.allow.intersection(acl).copied().collect();
-                    &effective_allow
-                }
-            };
-
-            kepler_daemon::permissions::check_scopes(effective, request)
-                .map_err(|e| format!("permission denied: {}", e))
-        }
+    // Run Lua authorizers (if any)
+    if let Some(acl) = handle.acl() {
+        run_authorizers(acl, auth_ctx, request).await?;
     }
+    Ok(())
 }
 
 /// Check if the caller can read a config (for global query filtering).
 ///
 /// Root and config owners always see everything.
-/// Group members need `config:status` access via ACL.
-/// Token bearers: check token.allow ∩ ACL for `config:status`.
-fn can_read_config(
+/// Group members need `status` right via ACL.
+/// Token bearers: check token.allow ∩ ACL for `status`.
+fn can_read_config_status(
     auth_ctx: &kepler_daemon::auth::AuthContext,
     handle: &kepler_daemon::config_actor::ConfigActorHandle,
 ) -> bool {
-    match auth_ctx {
-        kepler_daemon::auth::AuthContext::Root { .. } => true,
-        kepler_daemon::auth::AuthContext::Group { uid, gid } => {
-            if Some(*uid) == handle.owner_uid() {
-                return true;
-            }
-            match handle.acl() {
-                None => false,
-                Some(acl) => acl.has_read_access(*uid, *gid),
-            }
-        }
-        kepler_daemon::auth::AuthContext::Token { uid, gid, ctx } => {
-            // Root always has implicit * ACL
-            if *uid == 0 { return ctx.allow.contains("config:status"); }
-            if Some(*uid) == handle.owner_uid() { return ctx.allow.contains("config:status"); }
-            if !ctx.allow.contains("config:status") { return false; }
-            match handle.acl() {
-                None => false,
-                Some(acl) => acl.has_read_access(*uid, *gid),
-            }
-        }
+    match kepler_daemon::acl::effective_rights(auth_ctx, handle.owner_uid(), handle.acl()) {
+        Ok(Some(rights)) => rights.contains("status"),
+        _ => false,
     }
 }
 
@@ -270,7 +196,11 @@ fn get_unloaded_acl_entry(
             Ok(config) => {
                 config.kepler
                     .and_then(|k| k.acl)
-                    .map(|acl_config| kepler_daemon::acl::ResolvedAcl::from_config(&acl_config))
+                    .map(|acl_config| -> Result<_, String> {
+                        let mut acl = kepler_daemon::acl::ResolvedAcl::from_config(&acl_config)?;
+                        acl.init_authorizers()?;
+                        Ok(acl)
+                    })
                     .transpose()?
             }
             Err(e) => {
@@ -292,73 +222,84 @@ fn get_unloaded_acl_entry(
 /// When a config is not in the registry (e.g. autostart: false after restart),
 /// we read owner_uid from state.json and ACL from the copied config.yaml,
 /// caching the result to avoid repeated disk reads.
-fn check_unloaded_config_acl(
+async fn check_unloaded_config_acl(
     auth_ctx: &kepler_daemon::auth::AuthContext,
     state_dir: &Path,
     request: &Request,
     cache: &UnloadedAclCache,
 ) -> std::result::Result<(), String> {
     let entry = get_unloaded_acl_entry(state_dir, cache)?;
-    let owner_uid = entry.owner_uid;
+    let effective = kepler_daemon::acl::effective_rights(auth_ctx, entry.owner_uid, entry.acl.as_ref())
+        .map_err(|e| { warn!("ACL denied: {}", e); "permission denied".to_string() })?
+        .ok_or_else(|| { warn!("ACL denied: no access for this caller"); "permission denied".to_string() })?;
+    kepler_daemon::permissions::check_rights(&effective, request)
+        .map_err(|e| format!("permission denied: {}", e))?;
 
-    match auth_ctx {
-        kepler_daemon::auth::AuthContext::Root { .. } => Ok(()),
-        kepler_daemon::auth::AuthContext::Group { uid, gid } => {
-            // Config owner has full access
-            if let Some(owner) = owner_uid
-                && *uid == owner {
-                    return Ok(());
-                }
+    // Run Lua authorizers (if any)
+    if let Some(ref acl) = entry.acl {
+        run_authorizers(acl, auth_ctx, request).await?;
+    }
+    Ok(())
+}
 
-            match &entry.acl {
-                Some(resolved_acl) => resolved_acl.check_access(*uid, *gid, request),
-                None => {
-                    let required = kepler_daemon::permissions::required_scopes(request);
-                    if required.is_empty() && !matches!(request, Request::Subscribe { .. } | Request::CheckQuiescence { .. } | Request::CheckReadiness { .. }) {
-                        return Ok(());
-                    }
-                    warn!("ACL denied: UID {} attempted operation requiring scopes {:?} but is not config owner", uid, required);
-                    Err("permission denied".to_string())
-                }
-            }
-        }
+/// Run Lua authorizers from an ACL against a request.
+///
+/// Root and config owners bypass authorizers entirely.
+/// Resolves the caller's username from UID and supplementary groups.
+async fn run_authorizers(
+    acl: &kepler_daemon::acl::ResolvedAcl,
+    auth_ctx: &kepler_daemon::auth::AuthContext,
+    request: &Request,
+) -> std::result::Result<(), String> {
+    // Check if there are any authorizers to run (ACL or token)
+    let has_token_authorizer = matches!(
+        auth_ctx,
+        kepler_daemon::auth::AuthContext::Token { ctx, .. } if ctx.authorizer.is_some()
+    );
+    if !acl.has_authorizers() && !has_token_authorizer {
+        return Ok(());
+    }
+
+    // Root bypasses authorizers
+    if matches!(auth_ctx, kepler_daemon::auth::AuthContext::Root { .. }) {
+        return Ok(());
+    }
+
+    let (uid, gid, is_token, token_authorizer) = match auth_ctx {
+        kepler_daemon::auth::AuthContext::Root { uid, gid } => (*uid, *gid, false, None),
+        kepler_daemon::auth::AuthContext::Group { uid, gid } => (*uid, *gid, false, None),
         kepler_daemon::auth::AuthContext::Token { uid, gid, ctx } => {
-            // Root has implicit * ACL
-            if *uid == 0 {
-                return kepler_daemon::permissions::check_scopes(&ctx.allow, request)
-                    .map_err(|e| format!("permission denied: {}", e));
-            }
-            // Owner has implicit * ACL
-            if let Some(owner) = owner_uid
-                && *uid == owner {
-                    return kepler_daemon::permissions::check_scopes(&ctx.allow, request)
-                        .map_err(|e| format!("permission denied: {}", e));
-                }
-
-            let acl_scopes = match &entry.acl {
-                None => {
-                    warn!("ACL denied: token bearer UID {} has no ACL access to unloaded config", uid);
-                    return Err("permission denied".to_string());
-                }
-                Some(resolved_acl) => {
-                    match resolved_acl.collect_scopes(*uid, *gid) {
-                        Err(e) => {
-                            warn!("ACL denied: supplementary group lookup failed for token bearer UID {} on unloaded config: {}", uid, e);
-                            return Err("permission denied".to_string());
-                        }
-                        Ok(None) => {
-                            warn!("ACL denied: no ACL rules match token bearer UID {} on unloaded config", uid);
-                            return Err("permission denied".to_string());
-                        }
-                        Ok(Some(scopes)) => scopes,
-                    }
-                }
-            };
-
-            let effective: std::collections::HashSet<&'static str> = ctx.allow.intersection(&acl_scopes).copied().collect();
-            kepler_daemon::permissions::check_scopes(&effective, request)
-                .map_err(|_| "permission denied".to_string())
+            (*uid, *gid, true, ctx.authorizer.as_ref())
         }
+    };
+
+    // Build authorizer context from request
+    let groups = kepler_daemon::acl::get_all_gids(uid, gid).unwrap_or_else(|_| vec![gid]);
+    let username = resolve_username(uid);
+    let context = match kepler_daemon::lua::acl_runtime::build_authorizer_context(
+        request, uid, gid, username, groups, is_token,
+    ) {
+        Some(ctx) => ctx,
+        None => return Ok(()), // Rights-free request — no authorizer needed
+    };
+
+    acl.check_authorizers(uid, gid, token_authorizer, context).await
+        .map_err(|e| { warn!("Lua authorizer denied: {}", e); "permission denied".to_string() })
+}
+
+/// Resolve a UID to a username, returning None if not found.
+fn resolve_username(uid: u32) -> Option<String> {
+    #[cfg(unix)]
+    {
+        nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+            .ok()
+            .flatten()
+            .map(|u| u.name)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = uid;
+        None
     }
 }
 
@@ -735,7 +676,8 @@ fn extract_config_path(request: &Request) -> Option<&PathBuf> {
         | Request::SubscribeLogs { config_path, .. }
         | Request::Subscribe { config_path, .. }
         | Request::CheckQuiescence { config_path, .. }
-        | Request::CheckReadiness { config_path, .. } => Some(config_path),
+        | Request::CheckReadiness { config_path, .. }
+        | Request::UserRights { config_path, .. } => Some(config_path),
         Request::Inspect { config_path } => Some(config_path),
         Request::Status { config_path } => config_path.as_ref(),
         _ => None,
@@ -790,7 +732,7 @@ async fn handle_request(
             }
             Err(e) => {
                 warn!("Hardening floor denied for {}: {}", request.variant_name(), e);
-                return Response::error(e);
+                return Response::PermissionDenied { message: e };
             }
         }
     }
@@ -805,7 +747,7 @@ async fn handle_request(
             if let Some(raw_path) = extract_config_path(&request)
                 && let Err(e) = check_filesystem_read_access(raw_path, *uid, *gid) {
                     warn!("Filesystem access denied for UID {} on '{}': {}", uid, raw_path.display(), e);
-                    return Response::error(e);
+                    return Response::PermissionDenied { message: e };
                 }
         }
         kepler_daemon::auth::AuthContext::Root { .. } => {
@@ -820,14 +762,14 @@ async fn handle_request(
             match std::fs::canonicalize(raw_path) {
                 Ok(canonical) => {
                     if let Some(handle) = registry.get(&canonical) {
-                        if let Err(e) = check_config_acl(&auth_ctx, &handle, &request) {
+                        if let Err(e) = check_config_acl(&auth_ctx, &handle, &request).await {
                             warn!("ACL denied for UID {} on {}: {}", auth_ctx.uid(), request.variant_name(), e);
-                            return Response::error(e);
+                            return Response::PermissionDenied { message: e };
                         }
                     } else if let Some(state_dir) = compute_state_dir(&canonical)
-                        && let Err(e) = check_unloaded_config_acl(&auth_ctx, &state_dir, &request, &unloaded_acl_cache) {
+                        && let Err(e) = check_unloaded_config_acl(&auth_ctx, &state_dir, &request, &unloaded_acl_cache).await {
                             warn!("ACL denied for UID {} on unloaded {}: {}", auth_ctx.uid(), request.variant_name(), e);
-                            return Response::error(e);
+                            return Response::PermissionDenied { message: e };
                         }
                 }
                 Err(e) => {
@@ -845,9 +787,9 @@ async fn handle_request(
             // Daemon-level ops are root-only
             if !matches!(auth_ctx, kepler_daemon::auth::AuthContext::Root { .. }) {
                 warn!("Non-root user (UID {}) attempted daemon shutdown", auth_ctx.uid());
-                return Response::error(
-                    "Permission denied: only root can shut down the daemon".to_string()
-                );
+                return Response::PermissionDenied {
+                    message: "Permission denied: only root can shut down the daemon".to_string(),
+                };
             }
             info!("Shutdown requested");
 
@@ -1224,7 +1166,7 @@ async fn handle_request(
                 let handles = registry.all_handles();
                 // Filter by ACL read access
                 let visible_handles: Vec<_> = handles.iter()
-                    .filter(|h| can_read_config(&auth_ctx, h))
+                    .filter(|h| can_read_config_status(&auth_ctx, h))
                     .collect();
                 let configs = futures::future::join_all(visible_handles.iter().map(|h| async {
                     let services = h.get_service_status(None).await.unwrap_or_default();
@@ -1242,7 +1184,7 @@ async fn handle_request(
             let handles = registry.all_handles();
             // Filter by ACL read access
             let handles: Vec<_> = handles.iter()
-                .filter(|h| can_read_config(&auth_ctx, h))
+                .filter(|h| can_read_config_status(&auth_ctx, h))
                 .cloned()
                 .collect();
             let configs = futures::future::join_all(handles.iter().map(|h| async {
@@ -1266,9 +1208,9 @@ async fn handle_request(
             // Daemon-level ops are root-only
             if !matches!(auth_ctx, kepler_daemon::auth::AuthContext::Root { .. }) {
                 warn!("Non-root user (UID {}) attempted prune", auth_ctx.uid());
-                return Response::error(
-                    "Permission denied: only root can prune configs".to_string()
-                );
+                return Response::PermissionDenied {
+                    message: "Permission denied: only root can prune configs".to_string(),
+                };
             }
             match orchestrator.prune_all(force, dry_run).await {
                 Ok(results) => {
@@ -1635,6 +1577,24 @@ async fn handle_request(
             };
             let result = handle.check_readiness().await;
             Response::ok_with_data(ResponseData::CheckResult(result))
+        }
+
+        Request::UserRights { config_path } => {
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+
+            let (owner_uid, acl) = match registry.get(&config_path) {
+                Some(handle) => (handle.owner_uid(), handle.acl().cloned()),
+                None => (None, None),
+            };
+            let rights: Vec<String> = match kepler_daemon::acl::effective_rights(&auth_ctx, owner_uid, acl.as_ref()) {
+                Ok(Some(r)) => r.into_iter().map(|r| r.to_string()).collect(),
+                _ => vec![],
+            };
+
+            Response::ok_with_data(ResponseData::UserRights(rights))
         }
     }
 }
@@ -2568,8 +2528,8 @@ mod tests {
         std::fs::write(state_dir.join("config.yaml"), yaml).unwrap();
     }
 
-    #[test]
-    fn test_check_unloaded_config_acl_owner_bypass() {
+    #[tokio::test]
+    async fn test_check_unloaded_config_acl_owner_bypass() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
@@ -2578,11 +2538,11 @@ mod tests {
 
         let auth = kepler_daemon::auth::AuthContext::Group { uid: 1000, gid: 1000 };
         let req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_ok());
     }
 
-    #[test]
-    fn test_check_unloaded_config_acl_non_owner_no_acl_denied() {
+    #[tokio::test]
+    async fn test_check_unloaded_config_acl_non_owner_no_acl_denied() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
@@ -2591,11 +2551,11 @@ mod tests {
 
         let auth = kepler_daemon::auth::AuthContext::Group { uid: 2000, gid: 2000 };
         let req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_err());
     }
 
-    #[test]
-    fn test_check_unloaded_config_acl_non_owner_with_acl_allowed() {
+    #[tokio::test]
+    async fn test_check_unloaded_config_acl_non_owner_with_acl_allowed() {
         use kepler_daemon::config::{AclConfig, AclRule};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2604,9 +2564,11 @@ mod tests {
         save_state_with_owner(state_dir, Some(1000));
 
         let acl = AclConfig {
+            lua: None,
+            aliases: HashMap::new(),
             users: HashMap::from([(
                 "2000".to_string(),
-                AclRule { allow: vec!["config:status".to_string()] },
+                AclRule { allow: vec!["status".to_string()], authorize: None },
             )]),
             groups: HashMap::new(),
         };
@@ -2614,11 +2576,11 @@ mod tests {
 
         let auth = kepler_daemon::auth::AuthContext::Group { uid: 2000, gid: 2000 };
         let req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_ok());
     }
 
-    #[test]
-    fn test_check_unloaded_config_acl_non_owner_with_acl_denied() {
+    #[tokio::test]
+    async fn test_check_unloaded_config_acl_non_owner_with_acl_denied() {
         use kepler_daemon::config::{AclConfig, AclRule};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2626,11 +2588,13 @@ mod tests {
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
 
-        // ACL grants only config:status, but user needs service:start
+        // ACL grants only status, but user needs start
         let acl = AclConfig {
+            lua: None,
+            aliases: HashMap::new(),
             users: HashMap::from([(
                 "2000".to_string(),
-                AclRule { allow: vec!["config:status".to_string()] },
+                AclRule { allow: vec!["status".to_string()], authorize: None },
             )]),
             groups: HashMap::new(),
         };
@@ -2645,11 +2609,11 @@ mod tests {
             override_envs: None,
             hardening: None,
         };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_err());
     }
 
-    #[test]
-    fn test_check_unloaded_config_acl_root_bypass() {
+    #[tokio::test]
+    async fn test_check_unloaded_config_acl_root_bypass() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
@@ -2665,11 +2629,11 @@ mod tests {
             override_envs: None,
             hardening: None,
         };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_ok());
     }
 
-    #[test]
-    fn test_check_unloaded_config_acl_missing_config_yaml_denies_non_owner() {
+    #[tokio::test]
+    async fn test_check_unloaded_config_acl_missing_config_yaml_denies_non_owner() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
@@ -2678,7 +2642,7 @@ mod tests {
 
         let auth = kepler_daemon::auth::AuthContext::Group { uid: 2000, gid: 2000 };
         let req = Request::Status { config_path: Some("/test".into()) };
-        let result = check_unloaded_config_acl(&auth, state_dir, &req, &cache);
+        let result = check_unloaded_config_acl(&auth, state_dir, &req, &cache).await;
         assert!(result.is_err());
     }
 
@@ -2686,12 +2650,12 @@ mod tests {
     // Token ∩ ACL intersection tests (Issue #4)
     // =========================================================================
 
-    /// Helper to create a Token AuthContext with the given scopes.
-    fn make_token_auth(uid: u32, gid: u32, scopes: &[&str]) -> kepler_daemon::auth::AuthContext {
+    /// Helper to create a Token AuthContext with the given rights.
+    fn make_token_auth(uid: u32, gid: u32, rights: &[&str]) -> kepler_daemon::auth::AuthContext {
         use kepler_daemon::token_store::TokenContext;
         use kepler_daemon::hardening::HardeningLevel;
-        let allow: std::collections::HashSet<String> = scopes.iter().map(|s| s.to_string()).collect();
-        let expanded = kepler_daemon::permissions::expand_scopes(&allow).unwrap();
+        let allow: Vec<String> = rights.iter().map(|s| s.to_string()).collect();
+        let expanded = kepler_daemon::permissions::expand_allow(&allow, &std::collections::HashMap::new()).unwrap();
         kepler_daemon::auth::AuthContext::Token {
             uid,
             gid,
@@ -2700,12 +2664,13 @@ mod tests {
                 max_hardening: HardeningLevel::None,
                 service: "test".to_string(),
                 config_path: "/test".into(),
+                authorizer: None,
             }),
         }
     }
 
-    #[test]
-    fn token_acl_intersection_narrows_scopes() {
+    #[tokio::test]
+    async fn token_acl_intersection_narrows_scopes() {
         use kepler_daemon::config::{AclConfig, AclRule};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2713,20 +2678,22 @@ mod tests {
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
 
-        // ACL grants config:status + logs:read
+        // ACL grants status + logs
         let acl = AclConfig {
+            lua: None,
+            aliases: HashMap::new(),
             users: HashMap::from([(
                 "2000".to_string(),
-                AclRule { allow: vec!["config:status".to_string(), "logs:read".to_string()] },
+                AclRule { allow: vec!["status".to_string(), "logs".to_string()], authorize: None },
             )]),
             groups: HashMap::new(),
         };
         save_raw_config_with_acl(state_dir, Some(acl));
 
-        // Token has service:start + config:status
-        let auth = make_token_auth(2000, 2000, &["service:start", "config:status"]);
+        // Token has start + status
+        let auth = make_token_auth(2000, 2000, &["start", "status"]);
 
-        // Intersection = {config:status} → Start denied, Status allowed
+        // Intersection = {status} → Start denied, Status allowed
         let start_req = Request::Start {
             config_path: "/test".into(),
             services: vec![],
@@ -2735,14 +2702,14 @@ mod tests {
             override_envs: None,
             hardening: None,
         };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_err());
 
         let status_req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).await.is_ok());
     }
 
-    #[test]
-    fn token_acl_wildcard_acl_narrows_token() {
+    #[tokio::test]
+    async fn token_acl_wildcard_acl_narrows_token() {
         use kepler_daemon::config::{AclConfig, AclRule};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2750,18 +2717,20 @@ mod tests {
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
 
-        // ACL grants *
+        // ACL grants all
         let acl = AclConfig {
+            lua: None,
+            aliases: HashMap::new(),
             users: HashMap::from([(
                 "2000".to_string(),
-                AclRule { allow: vec!["*".to_string()] },
+                AclRule { allow: vec!["all".to_string()], authorize: None },
             )]),
             groups: HashMap::new(),
         };
         save_raw_config_with_acl(state_dir, Some(acl));
 
-        // Token has only service:start
-        let auth = make_token_auth(2000, 2000, &["service:start"]);
+        // Token has only start
+        let auth = make_token_auth(2000, 2000, &["start"]);
 
         // Start allowed (in intersection)
         let start_req = Request::Start {
@@ -2772,15 +2741,15 @@ mod tests {
             override_envs: None,
             hardening: None,
         };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_ok());
 
         // Status denied (not in token)
         let status_req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).await.is_err());
     }
 
-    #[test]
-    fn token_acl_wildcard_token_narrows_to_acl() {
+    #[tokio::test]
+    async fn token_acl_wildcard_token_narrows_to_acl() {
         use kepler_daemon::config::{AclConfig, AclRule};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2788,22 +2757,24 @@ mod tests {
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
 
-        // ACL grants only config:status
+        // ACL grants only status
         let acl = AclConfig {
+            lua: None,
+            aliases: HashMap::new(),
             users: HashMap::from([(
                 "2000".to_string(),
-                AclRule { allow: vec!["config:status".to_string()] },
+                AclRule { allow: vec!["status".to_string()], authorize: None },
             )]),
             groups: HashMap::new(),
         };
         save_raw_config_with_acl(state_dir, Some(acl));
 
-        // Token has * (everything)
-        let auth = make_token_auth(2000, 2000, &["*"]);
+        // Token has all (everything)
+        let auth = make_token_auth(2000, 2000, &["all"]);
 
         // Status allowed (in ACL)
         let status_req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).await.is_ok());
 
         // Start denied (not in ACL)
         let start_req = Request::Start {
@@ -2814,11 +2785,11 @@ mod tests {
             override_envs: None,
             hardening: None,
         };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_err());
     }
 
-    #[test]
-    fn token_acl_empty_intersection_denies() {
+    #[tokio::test]
+    async fn token_acl_empty_intersection_denies() {
         use kepler_daemon::config::{AclConfig, AclRule};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2826,18 +2797,20 @@ mod tests {
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
 
-        // ACL grants config:status
+        // ACL grants only status
         let acl = AclConfig {
+            lua: None,
+            aliases: HashMap::new(),
             users: HashMap::from([(
                 "2000".to_string(),
-                AclRule { allow: vec!["config:status".to_string()] },
+                AclRule { allow: vec!["status".to_string()], authorize: None },
             )]),
             groups: HashMap::new(),
         };
         save_raw_config_with_acl(state_dir, Some(acl));
 
-        // Token has only service:start → no overlap
-        let auth = make_token_auth(2000, 2000, &["service:start"]);
+        // Token has only start → no overlap
+        let auth = make_token_auth(2000, 2000, &["start"]);
 
         let start_req = Request::Start {
             config_path: "/test".into(),
@@ -2847,14 +2820,14 @@ mod tests {
             override_envs: None,
             hardening: None,
         };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_err());
 
         let status_req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).await.is_err());
     }
 
-    #[test]
-    fn token_root_uid_bypasses_acl() {
+    #[tokio::test]
+    async fn token_root_uid_bypasses_acl() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
@@ -2862,7 +2835,7 @@ mod tests {
         save_raw_config_with_acl(state_dir, None); // No ACL
 
         // Root (uid 0) with token → effective = token.allow (ACL implicit *)
-        let auth = make_token_auth(0, 0, &["service:start"]);
+        let auth = make_token_auth(0, 0, &["start"]);
 
         let start_req = Request::Start {
             config_path: "/test".into(),
@@ -2872,11 +2845,11 @@ mod tests {
             override_envs: None,
             hardening: None,
         };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_ok());
     }
 
-    #[test]
-    fn token_owner_uid_bypasses_acl() {
+    #[tokio::test]
+    async fn token_owner_uid_bypasses_acl() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
@@ -2884,7 +2857,7 @@ mod tests {
         save_raw_config_with_acl(state_dir, None); // No ACL
 
         // Owner (uid 1000) with token → effective = token.allow (ACL implicit *)
-        let auth = make_token_auth(1000, 1000, &["service:start", "config:status"]);
+        let auth = make_token_auth(1000, 1000, &["start", "status"]);
 
         let start_req = Request::Start {
             config_path: "/test".into(),
@@ -2894,10 +2867,10 @@ mod tests {
             override_envs: None,
             hardening: None,
         };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_ok());
 
         let status_req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &status_req, &cache).await.is_ok());
     }
 
     // =========================================================================
@@ -2905,36 +2878,36 @@ mod tests {
     // These test through check_unloaded_config_acl with Status requests.
     // =========================================================================
 
-    #[test]
-    fn can_read_config_token_owner_with_status_scope() {
+    #[tokio::test]
+    async fn can_read_config_token_owner_with_status_scope() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
         save_raw_config_with_acl(state_dir, None);
 
-        // Owner with config:status → allowed
-        let auth = make_token_auth(1000, 1000, &["config:status"]);
+        // Owner with status → allowed
+        let auth = make_token_auth(1000, 1000, &["status"]);
         let req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_ok());
     }
 
-    #[test]
-    fn can_read_config_token_owner_without_status_scope() {
+    #[tokio::test]
+    async fn can_read_config_token_owner_without_status_scope() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
         save_raw_config_with_acl(state_dir, None);
 
-        // Owner without config:status → denied (token restricts even owners)
-        let auth = make_token_auth(1000, 1000, &["service:start"]);
+        // Owner without status → denied (token restricts even owners)
+        let auth = make_token_auth(1000, 1000, &["start"]);
         let req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_err());
     }
 
-    #[test]
-    fn can_read_config_token_non_owner_with_acl() {
+    #[tokio::test]
+    async fn can_read_config_token_non_owner_with_acl() {
         use kepler_daemon::config::{AclConfig, AclRule};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2943,52 +2916,56 @@ mod tests {
         save_state_with_owner(state_dir, Some(1000));
 
         let acl = AclConfig {
+            lua: None,
+            aliases: HashMap::new(),
             users: HashMap::from([(
                 "2000".to_string(),
-                AclRule { allow: vec!["config:status".to_string()] },
+                AclRule { allow: vec!["status".to_string()], authorize: None },
             )]),
             groups: HashMap::new(),
         };
         save_raw_config_with_acl(state_dir, Some(acl));
 
-        // Non-owner with config:status in token and matching ACL → allowed
-        let auth = make_token_auth(2000, 2000, &["config:status"]);
+        // Non-owner with status in token and matching ACL → allowed
+        let auth = make_token_auth(2000, 2000, &["status"]);
         let req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_ok());
     }
 
-    #[test]
-    fn can_read_config_token_non_owner_no_acl() {
+    #[tokio::test]
+    async fn can_read_config_token_non_owner_no_acl() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
         save_raw_config_with_acl(state_dir, None); // No ACL
 
-        // Non-owner with config:status in token but no ACL → denied
-        let auth = make_token_auth(2000, 2000, &["config:status"]);
+        // Non-owner with status in token but no ACL → denied
+        let auth = make_token_auth(2000, 2000, &["status"]);
         let req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_err());
     }
 
     // =========================================================================
     // Missing tests from review (N-2 cross-config isolation, E-6, S-1)
     // =========================================================================
 
-    #[test]
-    fn token_cross_config_isolation() {
+    #[tokio::test]
+    async fn token_cross_config_isolation() {
         use kepler_daemon::config::{AclConfig, AclRule};
 
-        // Config A: owner 1000, ACL grants uid 2000 service:start
+        // Config A: owner 1000, ACL grants uid 2000 start
         let tmp_a = tempfile::tempdir().unwrap();
         let state_dir_a = tmp_a.path();
         let cache = new_acl_cache();
         save_state_with_owner(state_dir_a, Some(1000));
 
         let acl_a = AclConfig {
+            lua: None,
+            aliases: HashMap::new(),
             users: HashMap::from([(
                 "2000".to_string(),
-                AclRule { allow: vec!["service:start".to_string()] },
+                AclRule { allow: vec!["start".to_string()], authorize: None },
             )]),
             groups: HashMap::new(),
         };
@@ -3001,7 +2978,7 @@ mod tests {
         save_raw_config_with_acl(state_dir_b, None);
 
         // Token registered for config A's path
-        let auth = make_token_auth(2000, 2000, &["service:start"]);
+        let auth = make_token_auth(2000, 2000, &["start"]);
 
         let start_req = Request::Start {
             config_path: "/test".into(),
@@ -3013,14 +2990,14 @@ mod tests {
         };
 
         // Token with ACL for config A → allowed
-        assert!(check_unloaded_config_acl(&auth, state_dir_a, &start_req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir_a, &start_req, &cache).await.is_ok());
 
         // Same token against config B → denied (no ACL match, not owner)
-        assert!(check_unloaded_config_acl(&auth, state_dir_b, &start_req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir_b, &start_req, &cache).await.is_err());
     }
 
-    #[test]
-    fn token_global_status_denied_without_acl() {
+    #[tokio::test]
+    async fn token_global_status_denied_without_acl() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
@@ -3030,13 +3007,13 @@ mod tests {
         // Non-owner token without ACL: even scope-less requests are denied
         // because the Token path requires ACL for non-root non-owner users.
         // Filtering for global status happens in can_read_config, not here.
-        let auth = make_token_auth(2000, 2000, &["service:start"]);
+        let auth = make_token_auth(2000, 2000, &["start"]);
         let req = Request::Status { config_path: None };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_err());
     }
 
-    #[test]
-    fn group_global_status_always_allowed() {
+    #[tokio::test]
+    async fn group_global_status_always_allowed() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
@@ -3046,27 +3023,27 @@ mod tests {
         // Group auth: global status (scope-less) is allowed even for non-owners
         let auth = kepler_daemon::auth::AuthContext::Group { uid: 2000, gid: 2000 };
         let req = Request::Status { config_path: None };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_ok());
     }
 
-    #[test]
-    fn token_per_config_status_denied_without_scope() {
+    #[tokio::test]
+    async fn token_per_config_status_denied_without_scope() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path();
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
         save_raw_config_with_acl(state_dir, None);
 
-        // Non-owner token without config:status scope
-        let auth = make_token_auth(2000, 2000, &["service:start"]);
+        // Non-owner token without status right
+        let auth = make_token_auth(2000, 2000, &["start"]);
 
-        // Per-config status requires config:status
+        // Per-config status requires status right
         let req = Request::Status { config_path: Some("/test".into()) };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_err());
     }
 
-    #[test]
-    fn token_subscribe_requires_service_scope() {
+    #[tokio::test]
+    async fn token_subscribe_requires_subscribe_right() {
         use kepler_daemon::config::{AclConfig, AclRule};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3074,27 +3051,29 @@ mod tests {
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
 
-        // ACL gives config:status only
+        // ACL gives status only
         let acl = AclConfig {
+            lua: None,
+            aliases: HashMap::new(),
             users: HashMap::from([(
                 "2000".to_string(),
-                AclRule { allow: vec!["config:status".to_string()] },
+                AclRule { allow: vec!["status".to_string()], authorize: None },
             )]),
             groups: HashMap::new(),
         };
         save_raw_config_with_acl(state_dir, Some(acl));
 
-        // Token with config:status only → Subscribe denied
-        let auth = make_token_auth(2000, 2000, &["config:status"]);
+        // Token with status only → Subscribe denied (requires "subscribe" right)
+        let auth = make_token_auth(2000, 2000, &["status"]);
         let req = Request::Subscribe {
             config_path: "/test".into(),
             services: None,
         };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_err());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_err());
     }
 
-    #[test]
-    fn token_subscribe_allowed_with_service_scope() {
+    #[tokio::test]
+    async fn token_subscribe_allowed_with_subscribe_right() {
         use kepler_daemon::config::{AclConfig, AclRule};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3102,23 +3081,25 @@ mod tests {
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
 
-        // ACL gives service:start
+        // ACL gives subscribe right
         let acl = AclConfig {
+            lua: None,
+            aliases: HashMap::new(),
             users: HashMap::from([(
                 "2000".to_string(),
-                AclRule { allow: vec!["service:start".to_string()] },
+                AclRule { allow: vec!["subscribe".to_string()], authorize: None },
             )]),
             groups: HashMap::new(),
         };
         save_raw_config_with_acl(state_dir, Some(acl));
 
-        // Token with service:start → Subscribe allowed
-        let auth = make_token_auth(2000, 2000, &["service:start"]);
+        // Token with subscribe right → Subscribe allowed
+        let auth = make_token_auth(2000, 2000, &["subscribe"]);
         let req = Request::Subscribe {
             config_path: "/test".into(),
             services: None,
         };
-        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).is_ok());
+        assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_ok());
     }
 }
 

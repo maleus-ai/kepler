@@ -41,12 +41,18 @@ kepler:
     retention_period: "7d"    # Delete logs older than 7 days on config load
     batch_size: 4096          # Max entries buffered in memory before forcing a flush
   acl:                   # Restrict non-owner `kepler` group members
+    aliases:               # User-defined right bundles
+      viewer: [status, logs]
+    lua: |                 # Shared Lua code for authorizers
+      allowed = { web = true }
     users:
       alice:
-        allow: [service, config:status]
+        allow: [start, stop, restart, status]
+        authorize: |       # Optional Lua authorizer (can only deny)
+          return true
     groups:
       ops-team:
-        allow: [config:status]
+        allow: [viewer]    # Expands alias
 
 services:
   database:
@@ -155,7 +161,7 @@ Settings under the `kepler:` namespace apply to all services unless overridden.
 | `logs` | `object` | - | Global log settings. See [Log Management](log-management.md) |
 | `autostart` | `bool\|object` | `false` | Enable automatic service restart on daemon restart. Accepts `true` (no declared env), `false`, or `{ environment: [...] }`. See [Environment Variables](environment-variables.md#kepler-environment-declaration) |
 | `output_max_size` | `string` | `1mb` | Max output capture size per step/process (e.g., `"2mb"`, `"512kb"`). See [Outputs](outputs.md) |
-| `acl` | `object` | - | Per-config ACL restricting non-owner `kepler` group members. See [Security Model](security-model.md#per-config-acl) |
+| `acl` | `object` | - | Per-config ACL restricting non-owner `kepler` group members. Supports `users`, `groups`, `aliases`, `lua`, and per-rule `authorize` Lua authorizers. See [Security Model](security-model.md#per-config-acl) |
 
 ### Global Log Settings
 
@@ -190,7 +196,7 @@ See [Log Management](log-management.md) for full details.
 | `no_new_privileges` | `bool` | `true` | When `true`, sets `PR_SET_NO_NEW_PRIVS` on the spawned process to prevent privilege escalation via setuid/setgid binaries (e.g. `sudo`, `su`). Inherited by hooks and healthchecks. See [Privilege Dropping](privilege-dropping.md#no-new-privileges) |
 | `output` | `bool` | `false` | Enable `::output::KEY=VALUE` capture from process stdout. Requires `restart: no`. See [Outputs](outputs.md) |
 | `outputs` | `object` | - | Named output declarations (expressions referencing hook/dep outputs). Requires `restart: no`. See [Outputs](outputs.md) |
-| `permissions` | `string[]\|object` | - | Token-based permissions for the spawned process. When present, the daemon generates a CSPRNG bearer token, registers it with the granted scopes, and passes it via `KEPLER_TOKEN` env var. Accepts a list shorthand (`permissions: ["scope1", "scope2"]`) or object form (`permissions: { allow: [...], hardening: "strict" }`) where `allow` is required. Alias: `security` (backward compat). See [Security Model](security-model.md#service-permissions-token-based) |
+| `permissions` | `string[]\|object` | - | Token-based permissions for the spawned process. When present, the daemon generates a CSPRNG bearer token, registers it with the granted rights, and passes it via `KEPLER_TOKEN` env var. Accepts a list shorthand (`permissions: ["start", "stop"]`) or object form (`permissions: { allow: [...], hardening: "strict", authorize: "..." }`) where `allow` is required. The optional `authorize` field is a Lua authorizer that can deny requests within the token's rights. Alias: `security` (backward compat). See [Security Model](security-model.md#service-permissions-token-based) |
 
 ### User Format
 
@@ -371,5 +377,6 @@ The `recreate` command:
 - [File Watching](file-watching.md) -- Auto-restart on changes
 - [Privilege Dropping](privilege-dropping.md) -- User/group and limits
 - [Security Model](security-model.md) -- ACL, service permissions, hardening
+- [Lua Authorizers](lua-authorizers.md) -- Authorizer API reference (function signature, params, sandbox)
 - [Platform Compatibility](platform-compatibility.md) -- OS-specific feature support matrix
 - [Outputs](outputs.md) -- Output capture and cross-service output passing

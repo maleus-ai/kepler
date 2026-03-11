@@ -1,0 +1,11 @@
+kepler:
+  acl:
+    aliases:
+      viewer: [status, logs, inspect]
+    users:
+      testuser2:
+        allow: [viewer]
+
+services:
+  alias-svc:
+    command: ["sh", "-c", "echo ALIAS_SVC_RUNNING; sleep 300"]

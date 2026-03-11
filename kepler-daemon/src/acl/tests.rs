@@ -7,24 +7,28 @@ fn make_acl(
     groups: Vec<(u32, Vec<&str>)>,
 ) -> AclConfig {
     AclConfig {
+        lua: None,
+        aliases: HashMap::new(),
         users: users
             .into_iter()
-            .map(|(uid, scopes)| {
+            .map(|(uid, rights)| {
                 (
                     uid.to_string(),
                     AclRule {
-                        allow: scopes.into_iter().map(String::from).collect(),
+                        allow: rights.into_iter().map(String::from).collect(),
+                        authorize: None,
                     },
                 )
             })
             .collect(),
         groups: groups
             .into_iter()
-            .map(|(gid, scopes)| {
+            .map(|(gid, rights)| {
                 (
                     gid.to_string(),
                     AclRule {
-                        allow: scopes.into_iter().map(String::from).collect(),
+                        allow: rights.into_iter().map(String::from).collect(),
+                        authorize: None,
                     },
                 )
             })
@@ -48,30 +52,51 @@ fn resolve_numeric_gid() {
 #[test]
 fn from_config_numeric_ids() {
     let acl = make_acl(
-        vec![(1000, vec!["service:start", "config"])],
-        vec![(2000, vec!["config:status"])],
+        vec![(1000, vec!["start", "status"])],
+        vec![(2000, vec!["status"])],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
 
-    // User 1000 should have expanded scopes
+    // User 1000 should have expanded rights
     assert!(resolved.user_rules.contains_key(&1000));
-    let user_scopes = &resolved.user_rules[&1000];
-    assert!(user_scopes.contains("service:start"));
-    assert!(user_scopes.contains("config"));
-    // "config" as a category expands to all config descendants
-    assert!(user_scopes.contains("config:status"));
-    assert!(user_scopes.contains("config:inspect"));
+    let user_rights = &resolved.user_rules[&1000];
+    assert!(user_rights.contains("start"));
+    assert!(user_rights.contains("status"));
 
-    // Group 2000 should have expanded scopes
+    // Group 2000 should have expanded rights
     assert!(resolved.group_rules.contains_key(&2000));
-    let group_scopes = &resolved.group_rules[&2000];
-    assert!(group_scopes.contains("config:status"));
+    let group_rights = &resolved.group_rules[&2000];
+    assert!(group_rights.contains("status"));
+}
+
+#[test]
+fn from_config_all_alias_expands() {
+    let acl = make_acl(
+        vec![(1000, vec!["all"])],
+        vec![],
+    );
+    let resolved = ResolvedAcl::from_config(&acl).unwrap();
+
+    let user_rights = &resolved.user_rules[&1000];
+    // "all" should expand to every base right and sub-right
+    assert!(user_rights.contains("start"));
+    assert!(user_rights.contains("stop"));
+    assert!(user_rights.contains("restart"));
+    assert!(user_rights.contains("recreate"));
+    assert!(user_rights.contains("status"));
+    assert!(user_rights.contains("inspect"));
+    assert!(user_rights.contains("logs"));
+    assert!(user_rights.contains("subscribe"));
+    assert!(user_rights.contains("quiescence"));
+    assert!(user_rights.contains("readiness"));
+    assert!(user_rights.contains("start:env-override"));
+    assert!(user_rights.contains("logs:search"));
 }
 
 #[test]
 fn check_access_uid_match_allows() {
     let acl = make_acl(
-        vec![(1000, vec!["service:start", "config:status"])],
+        vec![(1000, vec!["start", "status"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
@@ -88,9 +113,9 @@ fn check_access_uid_match_allows() {
 }
 
 #[test]
-fn check_access_uid_match_denies_missing_scope() {
+fn check_access_uid_match_denies_missing_right() {
     let acl = make_acl(
-        vec![(1000, vec!["config:status"])],
+        vec![(1000, vec!["status"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
@@ -107,9 +132,9 @@ fn check_access_uid_match_denies_missing_scope() {
 }
 
 #[test]
-fn check_access_no_match_denies_scoped() {
+fn check_access_no_match_denies_gated() {
     let acl = make_acl(
-        vec![(1000, vec!["service"])],
+        vec![(1000, vec!["start"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
@@ -127,14 +152,14 @@ fn check_access_no_match_denies_scoped() {
 }
 
 #[test]
-fn check_access_no_match_allows_scopeless() {
+fn check_access_no_match_allows_rights_free() {
     let acl = make_acl(
-        vec![(1000, vec!["service"])],
+        vec![(1000, vec!["start"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
 
-    // Ping is scope-less — always allowed
+    // Ping is rights-free — always allowed
     assert!(resolved.check_access(2000, 2000, &Request::Ping).is_ok());
 }
 
@@ -142,7 +167,7 @@ fn check_access_no_match_allows_scopeless() {
 fn check_access_gid_match() {
     let acl = make_acl(
         vec![],
-        vec![(5000, vec!["service:start", "config:status"])],
+        vec![(5000, vec!["start", "status"])],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
 
@@ -161,12 +186,12 @@ fn check_access_gid_match() {
 #[test]
 fn union_of_user_and_group_rules() {
     let acl = make_acl(
-        vec![(1000, vec!["service:start"])],
-        vec![(5000, vec!["config:status"])],
+        vec![(1000, vec!["start"])],
+        vec![(5000, vec!["status"])],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
 
-    // UID 1000 with primary GID 5000: union of service:start + config:status
+    // UID 1000 with primary GID 5000: union of start + status
     let start_req = Request::Start {
         config_path: "/test".into(),
         services: vec![],
@@ -184,9 +209,9 @@ fn union_of_user_and_group_rules() {
 }
 
 #[test]
-fn has_read_access_with_config_scope() {
+fn has_read_access_with_status_right() {
     let acl = make_acl(
-        vec![(1000, vec!["config"])],
+        vec![(1000, vec!["status"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
@@ -194,19 +219,9 @@ fn has_read_access_with_config_scope() {
 }
 
 #[test]
-fn has_read_access_with_config_status() {
+fn has_read_access_without_status_right() {
     let acl = make_acl(
-        vec![(1000, vec!["config:status"])],
-        vec![],
-    );
-    let resolved = ResolvedAcl::from_config(&acl).unwrap();
-    assert!(resolved.has_read_access(1000, 1000));
-}
-
-#[test]
-fn has_read_access_without_config_status() {
-    let acl = make_acl(
-        vec![(1000, vec!["service:start"])],
+        vec![(1000, vec!["start"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
@@ -216,7 +231,7 @@ fn has_read_access_without_config_status() {
 #[test]
 fn has_read_access_no_match() {
     let acl = make_acl(
-        vec![(1000, vec!["config:status"])],
+        vec![(1000, vec!["status"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
@@ -225,9 +240,9 @@ fn has_read_access_no_match() {
 }
 
 #[test]
-fn wildcard_scope_grants_everything() {
+fn all_alias_grants_everything() {
     let acl = make_acl(
-        vec![(1000, vec!["*"])],
+        vec![(1000, vec!["all"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
@@ -245,7 +260,7 @@ fn wildcard_scope_grants_everything() {
 }
 
 #[test]
-fn empty_acl_denies_all_scoped() {
+fn empty_acl_denies_all_gated() {
     let acl = make_acl(vec![], vec![]);
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
 
@@ -262,9 +277,9 @@ fn empty_acl_denies_all_scoped() {
 }
 
 #[test]
-fn subscribe_denied_without_service_scope() {
+fn subscribe_denied_without_subscribe_right() {
     let acl = make_acl(
-        vec![(1000, vec!["config:status"])],
+        vec![(1000, vec!["status"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
@@ -277,9 +292,9 @@ fn subscribe_denied_without_service_scope() {
 }
 
 #[test]
-fn subscribe_allowed_with_service_scope() {
+fn subscribe_allowed_with_subscribe_right() {
     let acl = make_acl(
-        vec![(1000, vec!["service:start"])],
+        vec![(1000, vec!["subscribe"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
@@ -292,14 +307,13 @@ fn subscribe_allowed_with_service_scope() {
 }
 
 #[test]
-fn category_scope_expansion() {
+fn multiple_base_rights_grant_respective_operations() {
     let acl = make_acl(
-        vec![(1000, vec!["service"])],
+        vec![(1000, vec!["start", "stop", "status"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
 
-    // "service" category should grant service:start, service:stop, etc.
     let start = Request::Start {
         config_path: "/test".into(),
         services: vec![],
@@ -320,22 +334,22 @@ fn category_scope_expansion() {
 }
 
 #[test]
-fn has_read_access_with_config_inspect_but_not_status() {
+fn has_read_access_with_inspect_but_not_status() {
     let acl = make_acl(
-        vec![(1000, vec!["config:inspect"])],
+        vec![(1000, vec!["inspect"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
-    // config:inspect alone does NOT grant config:status → no read access
+    // inspect alone does NOT grant status → no read access
     assert!(!resolved.has_read_access(1000, 1000));
 }
 
 // =========================================================================
-// Missing tests from review (M-ACL-2, M-ACL-4, M-ACL-5, E-1, E-3)
+// Validation and edge case tests
 // =========================================================================
 
 #[test]
-fn from_config_rejects_invalid_scopes() {
+fn from_config_rejects_invalid_rights() {
     let acl = make_acl(
         vec![(1000, vec!["invalid:scope"])],
         vec![],
@@ -344,7 +358,7 @@ fn from_config_rejects_invalid_scopes() {
 }
 
 #[test]
-fn from_config_rejects_invalid_group_scopes() {
+fn from_config_rejects_invalid_group_rights() {
     let acl = make_acl(
         vec![],
         vec![(2000, vec!["unknown"])],
@@ -353,14 +367,14 @@ fn from_config_rejects_invalid_group_scopes() {
 }
 
 #[test]
-fn check_access_prune_scopeless_allowed_for_unmatched_user() {
+fn check_access_prune_rights_free_allowed_for_unmatched_user() {
     let acl = make_acl(
-        vec![(1000, vec!["service:start"])],
+        vec![(1000, vec!["start"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
 
-    // UID 2000 has no rules, but Prune is scope-less → allowed
+    // UID 2000 has no rules, but Prune is rights-free → allowed
     let req = Request::Prune {
         force: false,
         dry_run: false,
@@ -369,26 +383,26 @@ fn check_access_prune_scopeless_allowed_for_unmatched_user() {
 }
 
 #[test]
-fn check_access_shutdown_scopeless_allowed_for_unmatched_user() {
+fn check_access_shutdown_rights_free_allowed_for_unmatched_user() {
     let acl = make_acl(
-        vec![(1000, vec!["service:start"])],
+        vec![(1000, vec!["start"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
 
-    // UID 2000 has no rules, but Shutdown is scope-less → allowed
+    // UID 2000 has no rules, but Shutdown is rights-free → allowed
     assert!(resolved.check_access(2000, 2000, &Request::Shutdown).is_ok());
 }
 
 #[test]
-fn check_access_prune_scopeless_allowed_for_matched_user() {
+fn check_access_prune_rights_free_allowed_for_matched_user() {
     let acl = make_acl(
-        vec![(1000, vec!["config:status"])],
+        vec![(1000, vec!["status"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
 
-    // Matched user: Prune is scope-less → always allowed
+    // Matched user: Prune is rights-free → always allowed
     let req = Request::Prune {
         force: true,
         dry_run: false,
@@ -402,7 +416,7 @@ fn uid_zero_in_acl_rules_is_dead_code() {
     // through the normal ACL check path. However, from_config should
     // still accept it without error, and the rule should be present.
     let acl = make_acl(
-        vec![(0, vec!["service:start"])],
+        vec![(0, vec!["start"])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
@@ -412,20 +426,20 @@ fn uid_zero_in_acl_rules_is_dead_code() {
 }
 
 #[test]
-fn empty_allow_list_matches_but_denies_scoped() {
+fn empty_allow_list_matches_but_denies_gated() {
     let acl = make_acl(
         vec![(1000, vec![])],
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
 
-    // User matches (matched=true) but has zero scopes → denied for scoped requests
+    // User matches (matched=true) but has zero rights → denied for gated requests
     let req = Request::Status {
         config_path: Some("/test".into()),
     };
     assert!(resolved.check_access(1000, 1000, &req).is_err());
 
-    // But scope-less requests should still pass
+    // But rights-free requests should still pass
     assert!(resolved.check_access(1000, 1000, &Request::Ping).is_ok());
 }
 
@@ -436,18 +450,77 @@ fn empty_allow_list_no_read_access() {
         vec![],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
-    // Empty allow → no config:status scope → no read access
+    // Empty allow → no status right → no read access
     assert!(!resolved.has_read_access(1000, 1000));
 }
 
 #[test]
 fn max_uid_gid_values() {
     let acl = make_acl(
-        vec![(u32::MAX, vec!["config:status"])],
-        vec![(u32::MAX, vec!["service:start"])],
+        vec![(u32::MAX, vec!["status"])],
+        vec![(u32::MAX, vec!["start"])],
     );
     let resolved = ResolvedAcl::from_config(&acl).unwrap();
 
     assert!(resolved.user_rules.contains_key(&u32::MAX));
     assert!(resolved.group_rules.contains_key(&u32::MAX));
+}
+
+#[test]
+fn sub_right_requires_base_right() {
+    // Having start:env-override without start should deny Start requests
+    let acl = make_acl(
+        vec![(1000, vec!["start:env-override"])],
+        vec![],
+    );
+    let resolved = ResolvedAcl::from_config(&acl).unwrap();
+
+    let req = Request::Start {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: Some(HashMap::new()),
+        hardening: None,
+    };
+    assert!(resolved.check_access(1000, 1000, &req).is_err());
+}
+
+#[test]
+fn base_right_without_sub_right_denies_feature() {
+    // Having start without start:env-override should deny when override_envs is set
+    let acl = make_acl(
+        vec![(1000, vec!["start"])],
+        vec![],
+    );
+    let resolved = ResolvedAcl::from_config(&acl).unwrap();
+
+    let req = Request::Start {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: Some(HashMap::new()),
+        hardening: None,
+    };
+    assert!(resolved.check_access(1000, 1000, &req).is_err());
+}
+
+#[test]
+fn base_and_sub_right_together_allows_feature() {
+    let acl = make_acl(
+        vec![(1000, vec!["start", "start:env-override"])],
+        vec![],
+    );
+    let resolved = ResolvedAcl::from_config(&acl).unwrap();
+
+    let req = Request::Start {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: Some(HashMap::new()),
+        hardening: None,
+    };
+    assert!(resolved.check_access(1000, 1000, &req).is_ok());
 }

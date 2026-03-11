@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn make_evaluator_and_ctx() -> (LuaEvaluator, EvalContext) {
-    use crate::lua_eval::ServiceEvalContext;
+    use crate::lua::templating_runtime::ServiceEvalContext;
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("HOME".to_string(), "/home/user".to_string());
@@ -194,7 +194,7 @@ fn test_deps_status() {
     let mut deps = HashMap::new();
     deps.insert(
         "db".to_string(),
-        crate::lua_eval::DepInfo {
+        crate::lua::templating_runtime::DepInfo {
             status: "healthy".to_string(),
             exit_code: None,
             initialized: true,
@@ -244,7 +244,7 @@ fn test_deps_env_var() {
     let mut deps = HashMap::new();
     deps.insert(
         "setup".to_string(),
-        crate::lua_eval::DepInfo {
+        crate::lua::templating_runtime::DepInfo {
             env: dep_env,
             ..Default::default()
         },
@@ -377,7 +377,7 @@ fn test_standalone_expression_type_preservation() {
 
 #[test]
 fn test_lua_tag_in_tree() {
-    use crate::lua_eval::ServiceEvalContext;
+    use crate::lua::templating_runtime::ServiceEvalContext;
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("PORT".to_string(), "8080".to_string());
@@ -403,7 +403,7 @@ command: !lua 'return {"echo", service.env.PORT}'
 
 #[test]
 fn test_bare_var_in_inline_resolves_to_nil() {
-    use crate::lua_eval::ServiceEvalContext;
+    use crate::lua::templating_runtime::ServiceEvalContext;
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("HOME".to_string(), "/home/user".to_string());
@@ -478,7 +478,7 @@ fn test_evaluate_value_tree_with_env_shared_cache() {
 
 #[test]
 fn test_evaluate_value_tree_with_env_lua_tag_uses_cache() {
-    use crate::lua_eval::ServiceEvalContext;
+    use crate::lua::templating_runtime::ServiceEvalContext;
     let eval = LuaEvaluator::new().unwrap();
     let mut env = HashMap::new();
     env.insert("PORT".to_string(), "8080".to_string());

@@ -15,7 +15,7 @@ use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, Serv
 use crate::errors::{DaemonError, Result};
 use crate::events::{ServiceEvent, ServiceEventReceiver};
 use crate::hardening::HardeningLevel;
-use crate::lua_eval::{ConditionResult, EvalContext};
+use crate::lua::templating_runtime::{ConditionResult, EvalContext};
 use crate::logs::LogStoreHandle;
 use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
 use crate::watcher::FileWatcherHandle;
