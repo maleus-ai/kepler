@@ -222,13 +222,13 @@ impl Client {
     pub fn stop(
         &self,
         config_path: PathBuf,
-        service: Option<String>,
+        services: Vec<String>,
         clean: bool,
         signal: Option<String>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Stop {
             config_path,
-            service,
+            services,
             clean,
             signal,
         })

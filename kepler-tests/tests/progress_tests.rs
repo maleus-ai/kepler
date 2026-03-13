@@ -195,7 +195,7 @@ async fn test_start_transitions_starting_to_running() {
 
     // Cleanup
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
 }
@@ -242,7 +242,7 @@ async fn test_start_multiple_services() {
 
     // Cleanup
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
 }
@@ -283,7 +283,7 @@ async fn test_stop_transitions() {
     let mut rx = subscribe_to_config(&orchestrator, &config_path).await.unwrap();
 
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
 
@@ -323,7 +323,7 @@ async fn test_stop_already_stopped_is_noop() {
         .await
         .unwrap();
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
 
@@ -332,7 +332,7 @@ async fn test_stop_already_stopped_is_noop() {
     // Subscribe and stop again
     let mut rx = subscribe_to_config(&orchestrator, &config_path).await.unwrap();
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
 
@@ -344,6 +344,79 @@ async fn test_stop_already_stopped_is_noop() {
         "Expected no events for already-stopped services, got: {:?}",
         web_events
     );
+}
+
+/// stop_services with multiple specific services stops only those, leaves others running
+#[tokio::test]
+async fn test_stop_multiple_specific_services() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "web",
+            TestServiceBuilder::long_running()
+                .with_restart(RestartPolicy::no())
+                .build(),
+        )
+        .add_service(
+            "worker",
+            TestServiceBuilder::long_running()
+                .with_restart(RestartPolicy::no())
+                .build(),
+        )
+        .add_service(
+            "scheduler",
+            TestServiceBuilder::long_running()
+                .with_restart(RestartPolicy::no())
+                .build(),
+        )
+        .build();
+
+    let config_yaml = serde_yaml::to_string(&config).unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, config_yaml).unwrap();
+
+    let (orchestrator, _, _, _) = setup_orchestrator(&temp_dir).await;
+
+    let sys_env: HashMap<String, String> = std::env::vars().collect();
+    orchestrator
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None, None)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let canonical = std::fs::canonicalize(&config_path).unwrap();
+    let handle = orchestrator.registry().get(&canonical).unwrap();
+
+    // All three should be running
+    assert_eq!(handle.get_service_state("web").await.unwrap().status, ServiceStatus::Running);
+    assert_eq!(handle.get_service_state("worker").await.unwrap().status, ServiceStatus::Running);
+    assert_eq!(handle.get_service_state("scheduler").await.unwrap().status, ServiceStatus::Running);
+
+    // Stop only web and worker, leave scheduler running
+    orchestrator
+        .stop_services(
+            &config_path,
+            &["web".to_string(), "worker".to_string()],
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // web and worker should be stopped, scheduler still running
+    assert_eq!(handle.get_service_state("web").await.unwrap().status, ServiceStatus::Stopped);
+    assert_eq!(handle.get_service_state("worker").await.unwrap().status, ServiceStatus::Stopped);
+    assert_eq!(handle.get_service_state("scheduler").await.unwrap().status, ServiceStatus::Running);
+
+    // Cleanup
+    orchestrator
+        .stop_services(&config_path, &[], false, None)
+        .await
+        .unwrap();
 }
 
 // ============================================================================
@@ -412,7 +485,7 @@ async fn test_restart_full_lifecycle() {
 
     // Cleanup
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
 }
@@ -467,7 +540,7 @@ async fn test_start_healthcheck_transitions_to_healthy() {
 
     // Cleanup
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
 }
@@ -528,7 +601,7 @@ async fn test_start_mixed_services_correct_final_states() {
 
     // Cleanup
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
 }
@@ -569,7 +642,7 @@ async fn test_broadcast_emits_stop_transitions() {
     let mut rx = subscribe_to_config(&orchestrator, &config_path).await.unwrap();
 
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
 
@@ -679,7 +752,7 @@ async fn test_start_deps_no_false_quiescence() {
 
     // Cleanup
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
     exit_handler.abort();
@@ -783,7 +856,7 @@ async fn test_dependency_waiting_reacts_via_broadcast() {
 
     // Cleanup
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
     exit_handler.abort();
@@ -885,7 +958,7 @@ async fn test_restart_broadcasts_full_lifecycle_with_healthcheck() {
 
     // Cleanup
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
 }
@@ -972,7 +1045,7 @@ async fn test_handle_exit_respawns_health_checker() {
 
     // Cleanup
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
     exit_handler.abort();

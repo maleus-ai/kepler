@@ -67,7 +67,7 @@ ServerMessage::Event {
 | Request | Fields | Description |
 |---------|--------|-------------|
 | `Start` | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?`, `hardening?` | Start service(s) for a config |
-| `Stop` | `config_path`, `service?`, `clean`, `signal?` | Stop service(s) with optional signal |
+| `Stop` | `config_path`, `services[]`, `clean`, `signal?` | Stop service(s) with optional signal |
 | `Restart` | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?` | Restart service(s) |
 | `Recreate` | `config_path`, `sys_env?`, `hardening?` | Stop, re-bake config snapshot, start |
 | `Status` | `config_path?` | Get service status (`None` = all configs) |
