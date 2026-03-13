@@ -38,6 +38,11 @@ pub enum Request {
         /// Per-config hardening level (e.g. "none", "no-root", "strict")
         #[serde(default)]
         hardening: Option<String>,
+        /// When true, the handler streams inline progress events (state changes,
+        /// Ready, Quiescent, UnhandledFailure) until all services settle — no
+        /// separate Subscribe request needed.
+        #[serde(default)]
+        follow: bool,
     },
     /// Stop service(s)
     Stop {

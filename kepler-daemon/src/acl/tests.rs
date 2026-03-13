@@ -108,6 +108,8 @@ fn check_access_uid_match_allows() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+
+        follow: false,
     };
     assert!(resolved.check_access(1000, 1000, &req).is_ok());
 }
@@ -127,6 +129,8 @@ fn check_access_uid_match_denies_missing_right() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+
+        follow: false,
     };
     assert!(resolved.check_access(1000, 1000, &req).is_err());
 }
@@ -147,6 +151,8 @@ fn check_access_no_match_denies_gated() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+
+        follow: false,
     };
     assert!(resolved.check_access(2000, 2000, &req).is_err());
 }
@@ -179,6 +185,8 @@ fn check_access_gid_match() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+
+        follow: false,
     };
     assert!(resolved.check_access(9999, 5000, &req).is_ok());
 }
@@ -199,6 +207,8 @@ fn union_of_user_and_group_rules() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+
+        follow: false,
     };
     assert!(resolved.check_access(1000, 5000, &start_req).is_ok());
 
@@ -254,6 +264,8 @@ fn all_alias_grants_everything() {
         no_deps: false,
         override_envs: None,
         hardening: Some("strict".to_string()),
+
+        follow: false,
     };
     assert!(resolved.check_access(1000, 1000, &req).is_ok());
     assert!(resolved.has_read_access(1000, 1000));
@@ -272,6 +284,8 @@ fn empty_acl_denies_all_gated() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+
+        follow: false,
     };
     assert!(resolved.check_access(1000, 1000, &req).is_err());
 }
@@ -321,6 +335,8 @@ fn multiple_base_rights_grant_respective_operations() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+
+        follow: false,
     };
     assert!(resolved.check_access(1000, 1000, &start).is_ok());
 
@@ -482,6 +498,8 @@ fn sub_right_requires_base_right() {
         no_deps: false,
         override_envs: Some(HashMap::new()),
         hardening: None,
+
+        follow: false,
     };
     assert!(resolved.check_access(1000, 1000, &req).is_err());
 }
@@ -502,6 +520,8 @@ fn base_right_without_sub_right_denies_feature() {
         no_deps: false,
         override_envs: Some(HashMap::new()),
         hardening: None,
+
+        follow: false,
     };
     assert!(resolved.check_access(1000, 1000, &req).is_err());
 }
@@ -521,6 +541,8 @@ fn base_and_sub_right_together_allows_feature() {
         no_deps: false,
         override_envs: Some(HashMap::new()),
         hardening: None,
+
+        follow: false,
     };
     assert!(resolved.check_access(1000, 1000, &req).is_ok());
 }

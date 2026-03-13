@@ -66,7 +66,7 @@ ServerMessage::Event {
 
 | Request | Fields | Description |
 |---------|--------|-------------|
-| `Start` | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?`, `hardening?` | Start service(s) for a config |
+| `Start` | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?`, `hardening?`, `follow` | Start service(s) for a config. When `follow` is true, inline progress events (state changes, Ready, Quiescent, UnhandledFailure) are streamed until all services settle — no separate `Subscribe` needed |
 | `Stop` | `config_path`, `services[]`, `clean`, `signal?` | Stop service(s) with optional signal |
 | `Restart` | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?` | Restart service(s) |
 | `Recreate` | `config_path`, `sys_env?`, `hardening?` | Stop, re-bake config snapshot, start |
