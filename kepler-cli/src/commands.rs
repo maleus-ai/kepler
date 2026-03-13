@@ -120,6 +120,10 @@ pub enum Commands {
         /// Show status for all loaded configs
         #[arg(short, long)]
         all: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Inspect config and service state (JSON output)
     Inspect,

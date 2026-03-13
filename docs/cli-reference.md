@@ -232,7 +232,13 @@ List services and their status.
 ```bash
 kepler ps          # Services for the current config
 kepler ps --all    # Services across all loaded configs
+kepler ps --json   # Output as JSON
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--all`, `-a` | Show status for all loaded configs |
+| `--json` | Output as JSON instead of a table |
 
 Output columns: **NAME**, **STATUS**, **PID**
 
