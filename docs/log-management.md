@@ -12,6 +12,16 @@ How Kepler stores, retains, and streams service logs.
 - [Log Store Configuration](#log-store-configuration)
 - [Viewing Logs](#viewing-logs)
 - [Log Filtering](#log-filtering)
+  - [Full-Text Search](#full-text-search)
+  - [Field Matching](#field-matching)
+  - [Attribute Search](#attribute-search)
+  - [Boolean Operators](#boolean-operators)
+  - [Negation](#negation)
+  - [Grouping](#grouping)
+  - [Wildcards](#wildcards)
+  - [Numeric Comparisons](#numeric-comparisons)
+  - [Complex Examples](#complex-examples)
+  - [Raw SQL Filters](#raw-sql-filters)
 - [Cursor-Based Streaming](#cursor-based-streaming)
 
 ---
@@ -170,9 +180,144 @@ Logs from multiple services are merged chronologically and displayed with servic
 
 ## Log Filtering
 
-Log queries support SQL WHERE expressions for filtering. The filter is injected directly into the SQL query, allowing full use of SQLite's expression syntax against the `logs` table columns.
+Kepler provides a search DSL for filtering logs, inspired by Datadog's log search syntax. The DSL is converted into SQL internally — users don't need to know SQL.
 
-### Available Columns
+```bash
+kepler logs --filter '@service:web AND @level:error'
+kepler logs -F '@service:web @level:error'          # short form, implicit AND
+```
+
+Filtering requires the `logs:search` sub-right in addition to the `logs` base right. Plain log viewing only requires `logs`.
+
+### Full-Text Search
+
+Bare words and quoted strings search log line content:
+
+```bash
+kepler logs -F 'error'                    # lines containing "error"
+kepler logs -F '"connection timeout"'     # exact phrase match
+kepler logs -F 'error timeout'            # lines containing both words (implicit AND)
+```
+
+Quoted vs unquoted matters: `"started port"` matches the exact substring, while `started port` matches lines where both words appear anywhere.
+
+Both single and double quotes work. Use one to embed the other:
+
+```bash
+kepler logs -F '"it'\''s alive"'          # shell: use double quotes in DSL
+kepler logs -F "'say \"hello\"'"          # shell: use single quotes in DSL
+```
+
+Inside the DSL itself (ignoring shell escaping):
+
+| DSL expression | Matches |
+|----------------|---------|
+| `"it's alive"` | Lines containing `it's alive` |
+| `'say "hello"'` | Lines containing `say "hello"` |
+| `'it\'s me'` | Backslash escapes the quote inside |
+
+### Field Matching
+
+All field matching requires the `@` prefix. Reserved field names map directly to database columns; unknown fields are treated as JSON attributes.
+
+| Field | Column | Example |
+|-------|--------|---------|
+| `@service` | `service` | `@service:web` |
+| `@level` | `level` | `@level:error` |
+| `@message` | `line` | `@message:hello` |
+| `@hook` | `hook` | `@hook:pre_start` |
+
+Field names are case-insensitive (`@Service:web` and `@SERVICE:web` both work).
+
+```bash
+kepler logs -F '@service:web'               # logs from the "web" service
+kepler logs -F '@level:err'                 # stderr logs only
+kepler logs -F '@hook:pre_start'            # logs from the pre_start hook
+```
+
+### Attribute Search
+
+The `@` prefix also searches JSON attributes stored in the `attributes` column:
+
+```bash
+kepler logs -F '@http.status:200'          # attribute exact match
+kepler logs -F '@user.name:john'           # nested attribute
+kepler logs -F '@host:prod-*'              # attribute with wildcard
+```
+
+Numeric attribute values are matched as both string and number to handle JSON type differences.
+
+### Boolean Operators
+
+| Operator | Syntax | Example |
+|----------|--------|---------|
+| AND (explicit) | `AND` | `@service:web AND @level:error` |
+| AND (implicit) | space | `@service:web @level:error` |
+| OR | `OR` | `@level:error OR @level:warn` |
+
+AND has higher precedence than OR: `@level:info OR @service:web AND @level:error` is parsed as `@level:info OR (@service:web AND @level:error)`.
+
+### Negation
+
+Three equivalent syntaxes:
+
+```bash
+kepler logs -F 'NOT @level:info'            # exclude info level
+kepler logs -F '-@service:worker'           # exclude worker service
+kepler logs -F '!@level:debug'             # exclude debug level
+kepler logs -F 'NOT (@service:web OR @service:api)'  # negate a group
+```
+
+### Grouping
+
+Use parentheses to override precedence:
+
+```bash
+kepler logs -F '(@service:web OR @service:api) AND @level:error'
+```
+
+### Wildcards
+
+| Wildcard | Meaning | Example |
+|----------|---------|---------|
+| `*` | Any number of characters | `@service:web*`, `err*` |
+| `?` | Exactly one character | `@level:e?r` (matches `err`) |
+
+Wildcards inside quoted strings are treated as literal characters.
+
+### Numeric Comparisons
+
+Compare JSON attribute values numerically:
+
+```bash
+kepler logs -F '@response_time:>300'       # greater than
+kepler logs -F '@count:>=10'               # greater or equal
+kepler logs -F '@latency:<50'              # less than
+kepler logs -F '@score:<=100'              # less or equal
+```
+
+### Complex Examples
+
+```bash
+# Error logs from web or api services with slow responses
+kepler logs -F '(@service:web OR @service:api) AND @level:error @latency:>100'
+
+# All logs except from bot users
+kepler logs -F '@service:api -@user:bot*'
+
+# Exact phrase search combined with field filter
+kepler logs -F '"connection refused" @service:api'
+```
+
+### Raw SQL Filters
+
+For advanced queries, use the `--sql` flag to pass a raw SQL WHERE clause instead of DSL. This requires the additional `logs:search:sql` sub-right.
+
+```bash
+kepler logs -F "level = 'err' AND line LIKE '%timeout%'" --sql
+```
+
+#### Available Columns
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -182,30 +327,7 @@ Log queries support SQL WHERE expressions for filtering. The filter is injected 
 | `hook` | TEXT | Hook name (NULL for service process logs) |
 | `level` | TEXT | `"out"` (stdout) or `"err"` (stderr) |
 | `line` | TEXT | Log line content |
-| `is_json` | INTEGER | 1 if the line is valid JSON, 0 otherwise |
-
-### Filter Expressions
-
-The `LogsStream` protocol request supports a `filter` field that accepts SQL WHERE expressions against the `logs` table. This is gated by the `logs:search` sub-right (in addition to the `logs` base right). Plain log viewing only requires the `logs` right.
-
-**Example filter expressions:**
-
-```sql
--- Filter by log level
-level = 'err'
-
--- Filter by service and level
-service = 'web' AND level = 'err'
-
--- Search log content
-line LIKE '%error%'
-
--- JSON field extraction (guard with json_valid for mixed-format logs)
-json_valid(line) AND json_extract(line, '$.status') >= 500
-
--- Time range (timestamp is ms since epoch)
-timestamp > 1709913600000
-```
+| `attributes` | TEXT | JSON attributes (if detected) |
 
 See [Security Model -- Log Query Security](security-model.md#log-query-security) for the full security design, allowed functions, and known attack vectors.
 

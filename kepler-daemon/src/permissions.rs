@@ -41,6 +41,7 @@ pub const SUB_RIGHTS: &[&str] = &[
     "restart:no-deps",
     "recreate:hardening",
     "logs:search",
+    "logs:search:sql",
 ];
 
 /// All known rights (base + sub), computed once.
@@ -161,12 +162,12 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
                 vec![]
             },
         }),
-        Request::LogsStream { filter, .. } => Some(RequiredRights {
+        Request::LogsStream { filter, sql, .. } => Some(RequiredRights {
             base: "logs",
-            sub_rights: if filter.is_some() {
-                vec!["logs:search"]
-            } else {
-                vec![]
+            sub_rights: match (filter.is_some(), *sql) {
+                (true, true) => vec!["logs:search", "logs:search:sql"],
+                (true, false) => vec!["logs:search"],
+                _ => vec![],
             },
         }),
         // SubscribeLogs: same base right as logs, no sub-rights

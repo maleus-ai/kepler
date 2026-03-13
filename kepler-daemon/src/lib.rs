@@ -26,6 +26,7 @@ pub mod outputs;
 pub mod permissions;
 pub mod persistence;
 pub mod process;
+pub mod query_dsl;
 pub mod state;
 pub mod token_store;
 #[cfg(unix)]

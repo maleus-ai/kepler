@@ -1067,6 +1067,40 @@ impl E2eHarness {
         self.run_cli(&args).await
     }
 
+    /// Get logs with a DSL filter expression (--filter flag)
+    pub async fn get_logs_with_filter(
+        &self,
+        config_path: &Path,
+        filter: &str,
+        lines: usize,
+    ) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+
+        let lines_str = lines.to_string();
+        let args = vec!["-f", config_str, "logs", "--tail", &lines_str, "--filter", filter];
+
+        self.run_cli(&args).await
+    }
+
+    /// Get logs with a raw SQL filter expression (--filter --sql flags)
+    pub async fn get_logs_with_sql_filter(
+        &self,
+        config_path: &Path,
+        filter: &str,
+        lines: usize,
+    ) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+
+        let lines_str = lines.to_string();
+        let args = vec!["-f", config_str, "logs", "--tail", &lines_str, "--filter", filter, "--sql"];
+
+        self.run_cli(&args).await
+    }
+
     /// Prune orphaned config state
     pub async fn prune(&self, force: bool) -> E2eResult<CommandOutput> {
         let mut args = vec!["prune"];
