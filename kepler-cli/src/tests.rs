@@ -731,16 +731,13 @@ async fn test_follow_exits_on_quiescence() {
 // Quiescence monitor unit tests
 // ========================================================================
 
-/// Quiescence monitor fires Quiescent signal when it receives ServerEvent::Quiescent
-/// and start has been acknowledged.
+/// Quiescence monitor fires Quiescent signal when it receives ServerEvent::Quiescent.
 #[tokio::test]
 async fn test_quiescence_monitor_fires_on_quiescent_event() {
     let (tx, rx) = mpsc::unbounded_channel();
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
-    let seen_nt = Arc::new(AtomicBool::new(false));
-    let start_ack = Arc::new(AtomicBool::new(true)); // start acknowledged
 
-    let handle = tokio::spawn(quiescence_monitor(rx, signal_tx, seen_nt, start_ack));
+    let handle = tokio::spawn(quiescence_monitor(rx, signal_tx));
 
     // Send some progress events (should be ignored)
     tx.send(ServerEvent::Progress {
@@ -760,70 +757,31 @@ async fn test_quiescence_monitor_fires_on_quiescent_event() {
     handle.await.unwrap();
 }
 
-/// Quiescence monitor suppresses premature Quiescent when neither start_acknowledged
-/// nor seen_non_terminal is set, then forwards the real one after non-terminal phase.
+/// Channel close fires Quiescent (start handler returned — quiescence already reached).
 #[tokio::test]
-async fn test_quiescence_monitor_suppresses_premature_quiescent() {
+async fn test_quiescence_monitor_channel_close_fires_quiescent() {
     let (tx, rx) = mpsc::unbounded_channel();
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
-    let seen_nt = Arc::new(AtomicBool::new(false));
-    let start_ack = Arc::new(AtomicBool::new(false)); // NOT yet acknowledged
 
-    tokio::spawn(quiescence_monitor(rx, signal_tx, seen_nt, start_ack));
+    tokio::spawn(quiescence_monitor(rx, signal_tx));
 
-    // Send premature Quiescent (from recheck before Start processed)
-    tx.send(ServerEvent::Quiescent { request_id: 1 }).unwrap();
-
-    // Should NOT be forwarded
-    let result = tokio::time::timeout(Duration::from_millis(100), signal_rx.recv()).await;
-    assert!(result.is_err(), "premature Quiescent should be suppressed");
-
-    // Now a service transitions to Waiting (non-terminal)
-    tx.send(ServerEvent::Progress {
-        request_id: 1,
-        event: ProgressEvent { service: "svc".to_string(), phase: ServicePhase::Waiting },
-    }).unwrap();
-
-    // Send real Quiescent after services settled
-    tx.send(ServerEvent::Quiescent { request_id: 1 }).unwrap();
-
-    // Should be forwarded now
-    let signal = tokio::time::timeout(Duration::from_secs(1), signal_rx.recv())
-        .await
-        .expect("real quiescence should fire within 1s")
-        .expect("channel should not be closed");
-    assert!(matches!(signal, QuiescenceSignal::Quiescent));
-}
-
-/// Channel close without any events fires SubscribeDenied (subscribe was likely denied).
-#[tokio::test]
-async fn test_quiescence_monitor_channel_close_no_events_fires_subscribe_denied() {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
-    let seen_nt = Arc::new(AtomicBool::new(false));
-    let start_ack = Arc::new(AtomicBool::new(false));
-
-    tokio::spawn(quiescence_monitor(rx, signal_tx, seen_nt, start_ack));
-
-    // Send nothing, just close
+    // Send nothing, just close (simulates start handler returning)
     drop(tx);
 
     let signal = tokio::time::timeout(Duration::from_secs(1), signal_rx.recv())
         .await
         .expect("signal should fire on channel close")
         .expect("channel should not be closed");
-    assert!(matches!(signal, QuiescenceSignal::SubscribeDenied));
+    assert!(matches!(signal, QuiescenceSignal::Quiescent));
 }
 
-/// Channel close after receiving events fires Quiescent (subscription ended normally).
+/// Channel close after receiving events fires Quiescent.
 #[tokio::test]
 async fn test_quiescence_monitor_channel_close_after_events_fires_quiescent() {
     let (tx, rx) = mpsc::unbounded_channel();
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
-    let seen_nt = Arc::new(AtomicBool::new(false));
-    let start_ack = Arc::new(AtomicBool::new(true));
 
-    tokio::spawn(quiescence_monitor(rx, signal_tx, seen_nt, start_ack));
+    tokio::spawn(quiescence_monitor(rx, signal_tx));
 
     // Send a progress event, then close
     let _ = tx.send(ServerEvent::Progress {
@@ -847,10 +805,8 @@ async fn test_quiescence_monitor_channel_close_after_events_fires_quiescent() {
 async fn test_quiescence_monitor_ignores_ready() {
     let (tx, rx) = mpsc::unbounded_channel();
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
-    let seen_nt = Arc::new(AtomicBool::new(false));
-    let start_ack = Arc::new(AtomicBool::new(true));
 
-    tokio::spawn(quiescence_monitor(rx, signal_tx, seen_nt, start_ack));
+    tokio::spawn(quiescence_monitor(rx, signal_tx));
 
     // Send Ready (should not trigger quiescence)
     tx.send(ServerEvent::Ready { request_id: 1 }).unwrap();
@@ -868,10 +824,8 @@ async fn test_quiescence_monitor_ignores_ready() {
 async fn test_quiescence_monitor_sends_unhandled_failure() {
     let (tx, rx) = mpsc::unbounded_channel();
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
-    let seen_nt = Arc::new(AtomicBool::new(true));
-    let start_ack = Arc::new(AtomicBool::new(false));
 
-    tokio::spawn(quiescence_monitor(rx, signal_tx, seen_nt, start_ack));
+    tokio::spawn(quiescence_monitor(rx, signal_tx));
 
     // Send UnhandledFailure event
     tx.send(ServerEvent::UnhandledFailure {
