@@ -769,6 +769,7 @@ dependencies = [
  "kepler-daemon",
  "kepler-protocol",
  "libc",
+ "serde_json",
  "tabled",
  "thiserror",
  "tokio",

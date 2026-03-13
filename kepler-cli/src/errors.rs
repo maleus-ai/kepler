@@ -37,6 +37,9 @@ pub enum CliError {
 
     #[error("Protocol error: {0}")]
     Protocol(#[from] kepler_protocol::errors::ClientError),
+
+    #[error("JSON serialization error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 pub type Result<T> = std::result::Result<T, CliError>;
