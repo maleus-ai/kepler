@@ -366,6 +366,18 @@ The monitor starts automatically when the first service starts and stops when th
 **Querying metrics:**
 
 ```bash
+kepler top                              # Interactive TUI
+kepler top --json                       # JSON output
+kepler top --json --history 1h          # Last hour as JSON
+kepler top -F '@cpu_percent:>50'        # Filter high CPU services
+kepler top -F '@service:web AND @memory_rss:>1000000'  # Combined filter
+```
+
+Available filter fields: `@service` (text), `@timestamp` (integer), `@cpu_percent` (real), `@memory_rss` (integer), `@memory_vss` (integer). See the [CLI Reference](cli-reference.md#kepler-top) for all options.
+
+Direct database access is also possible:
+
+```bash
 sqlite3 <state_dir>/monitor.db "SELECT * FROM metrics WHERE service='web' ORDER BY timestamp DESC LIMIT 5"
 ```
 

@@ -141,6 +141,12 @@ pub enum Request {
         /// Ignores `after_id` and `from_end`.
         #[serde(default)]
         tail: bool,
+        /// Lower-bound timestamp (ms, inclusive). No `logs:search` right required.
+        #[serde(default)]
+        after_ts: Option<i64>,
+        /// Upper-bound timestamp (ms, inclusive). No `logs:search` right required.
+        #[serde(default)]
+        before_ts: Option<i64>,
     },
     /// Subscribe to log-available notifications for a config.
     /// The server pushes LogsAvailable events when new logs are flushed to SQLite.
@@ -197,6 +203,16 @@ pub enum Request {
         /// If false (default), `filter` is a DSL expression.
         #[serde(default)]
         sql: bool,
+        /// If set, aggregate metrics into time buckets of this size (ms).
+        /// Uses AVG(cpu_percent), MAX(memory_rss), MAX(memory_vss).
+        #[serde(default)]
+        bucket_ms: Option<i64>,
+        /// Lower-bound timestamp (ms, inclusive). No `monitor:search` right required.
+        #[serde(default)]
+        after_ts: Option<i64>,
+        /// Upper-bound timestamp (ms, inclusive). No `monitor:search` right required.
+        #[serde(default)]
+        before_ts: Option<i64>,
     },
 }
 
@@ -325,6 +341,9 @@ pub struct PrunedConfigInfo {
 /// Uses a u16 service index into the service_table instead of a full service name per entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamLogEntry {
+    /// Database row ID (monotonically increasing, unique per entry)
+    #[serde(default)]
+    pub id: i64,
     /// Index into LogStreamData::service_table
     pub service_id: u16,
     /// Log line content
@@ -542,12 +561,11 @@ pub fn decode_envelope(bytes: &[u8]) -> Result<RequestEnvelope> {
     bincode::deserialize(bytes).map_err(ProtocolError::Decode)
 }
 
-/// Encode a server message to length-prefixed bincode bytes
+/// Encode a server message to length-prefixed bincode bytes.
+/// No size limit — the server controls its own responses. Size limits are
+/// only enforced on incoming client requests to prevent DoS.
 pub fn encode_server_message(msg: &ServerMessage) -> Result<Vec<u8>> {
     let size = bincode::serialized_size(msg).map_err(ProtocolError::Encode)?;
-    if size > MAX_MESSAGE_SIZE as u64 {
-        return Err(ProtocolError::MessageTooLarge);
-    }
     let len = size as u32;
     let mut frame = Vec::with_capacity(4 + size as usize);
     frame.extend_from_slice(&len.to_be_bytes());

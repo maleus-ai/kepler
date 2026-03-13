@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod errors;
+mod ui;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -374,6 +375,24 @@ async fn run() -> Result<()> {
                     eprintln!("Unexpected response");
                     std::process::exit(1);
                 }
+            }
+        }
+
+        Commands::Top { service, json, history, interval, filter, sql } => {
+            if json {
+                handle_top_json(&client, canonical_path, service, history, filter, sql).await?;
+            } else {
+                let interval = match interval.as_deref() {
+                    Some(s) => kepler_daemon::config::parse_duration(s)
+                        .map_err(|_| CliError::Server(format!("Invalid interval: {}", s)))?,
+                    None => Duration::from_secs(2),
+                };
+                let history_duration = match history.as_deref() {
+                    Some(s) => Some(kepler_daemon::config::parse_duration(s)
+                        .map_err(|_| CliError::Server(format!("Invalid history duration: {}", s)))?),
+                    None => None,
+                };
+                ui::pages::top::run(&client, canonical_path, service, history_duration, interval, filter, sql).await?;
             }
         }
 
@@ -1289,6 +1308,8 @@ trait FollowClient {
         sql: bool,
         raw: bool,
         tail: bool,
+        after_ts: Option<i64>,
+        before_ts: Option<i64>,
     ) -> std::result::Result<Response, ClientError>;
 }
 
@@ -1305,8 +1326,10 @@ impl FollowClient for Client {
         sql: bool,
         raw: bool,
         tail: bool,
+        after_ts: Option<i64>,
+        before_ts: Option<i64>,
     ) -> std::result::Result<Response, ClientError> {
-        let (_rx, fut) = Client::logs_stream(self, config_path, services, after_id, from_end, limit, no_hooks, filter, sql, raw, tail)?;
+        let (_rx, fut) = Client::logs_stream(self, config_path, services, after_id, from_end, limit, no_hooks, filter, sql, raw, tail, after_ts, before_ts)?;
         fut.await
     }
 }
@@ -1391,6 +1414,7 @@ async fn stream_logs(
                 params.config_path, params.services, last_id,
                 from_end && last_id.is_none(), params.limit, params.no_hooks,
                 params.filter, params.sql, params.raw, params.tail,
+                None, None,
             ) => result,
         };
 
@@ -1961,6 +1985,75 @@ async fn handle_prune(client: &Client, force: bool, dry_run: bool) -> Result<()>
         }
         Response::Error { message } | Response::PermissionDenied { message } => {
             eprintln!("Error: {}", message);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_top_json(
+    client: &Client,
+    config_path: PathBuf,
+    service: Option<String>,
+    history: Option<String>,
+    filter: Option<String>,
+    sql: bool,
+) -> Result<()> {
+    let since = match history.as_deref() {
+        Some(s) => {
+            let duration = kepler_daemon::config::parse_duration(s)
+                .map_err(|_| CliError::Server(format!("Invalid history duration: {}", s)))?;
+            Some(chrono::Utc::now().timestamp_millis() - duration.as_millis() as i64)
+        }
+        None => None,
+    };
+
+    let (_progress_rx, response_future) = client.monitor_metrics(
+        config_path, service, since, None, filter, sql, None, None, None,
+    )?;
+    let response = response_future.await?;
+
+    match response {
+        Response::Ok { data: Some(ResponseData::MonitorMetrics(entries)), .. } => {
+            if since.is_some() {
+                // History mode: group by service as Vec
+                let mut map: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+                    std::collections::BTreeMap::new();
+                for e in entries {
+                    let val = serde_json::json!({
+                        "timestamp": e.timestamp,
+                        "cpu_percent": e.cpu_percent,
+                        "memory_rss": e.memory_rss,
+                        "memory_vss": e.memory_vss,
+                        "pids": e.pids,
+                    });
+                    map.entry(e.service).or_default().push(val);
+                }
+                println!("{}", serde_json::to_string_pretty(&map).unwrap());
+            } else {
+                // Snapshot mode: latest per service
+                let mut map: std::collections::BTreeMap<String, serde_json::Value> =
+                    std::collections::BTreeMap::new();
+                for e in entries {
+                    let val = serde_json::json!({
+                        "timestamp": e.timestamp,
+                        "cpu_percent": e.cpu_percent,
+                        "memory_rss": e.memory_rss,
+                        "memory_vss": e.memory_vss,
+                        "pids": e.pids,
+                    });
+                    map.insert(e.service, val);
+                }
+                println!("{}", serde_json::to_string_pretty(&map).unwrap());
+            }
+        }
+        Response::Error { message } => {
+            eprintln!("Error: {}", message);
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("Unexpected response");
             std::process::exit(1);
         }
     }

@@ -16,7 +16,7 @@ use tracing::debug;
 use crate::{
     errors::ClientError,
     protocol::{
-        MAX_MESSAGE_SIZE, Request, RequestEnvelope, Response,
+        Request, RequestEnvelope, Response,
         ServerEvent, ServerMessage, decode_server_message, encode_envelope,
     },
 };
@@ -92,13 +92,6 @@ impl Client {
                     return;
                 }
                 let msg_len = u32::from_be_bytes(len_buf) as usize;
-
-                if msg_len > MAX_MESSAGE_SIZE {
-                    debug!("Server message exceeds maximum size");
-                    reader_connected.store(false, Ordering::Release);
-                    reader_pending.clear();
-                    return;
-                }
 
                 // Read payload
                 let mut payload = vec![0u8; msg_len];
@@ -330,6 +323,8 @@ impl Client {
         sql: bool,
         raw: bool,
         tail: bool,
+        after_ts: Option<i64>,
+        before_ts: Option<i64>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::LogsStream {
             config_path: config_path.to_path_buf(),
@@ -342,6 +337,8 @@ impl Client {
             sql,
             raw,
             tail,
+            after_ts,
+            before_ts,
         })
     }
 
@@ -385,8 +382,19 @@ impl Client {
         limit: Option<usize>,
         filter: Option<String>,
         sql: bool,
+        bucket_ms: Option<i64>,
+        after_ts: Option<i64>,
+        before_ts: Option<i64>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
-        self.send_request(Request::MonitorMetrics { config_path, service, since, limit, filter, sql })
+        self.send_request(Request::MonitorMetrics { config_path, service, since, limit, filter, sql, bucket_ms, after_ts, before_ts })
+    }
+
+    /// Query effective rights for the calling user on a config.
+    pub fn user_rights(
+        &self,
+        config_path: PathBuf,
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::UserRights { config_path })
     }
 
     /// Check if all services are ready (reached target state)

@@ -189,6 +189,8 @@ fn roundtrip_envelope_logs_stream() {
             sql: false,
             raw: false,
             tail: true,
+            after_ts: None,
+            before_ts: None,
         },
     };
     let bytes = encode_envelope(&envelope).unwrap();
@@ -334,6 +336,7 @@ fn roundtrip_stream_log_entry() {
         service_table: vec![Arc::from("web"), Arc::from("api")],
         entries: vec![
             StreamLogEntry {
+                id: 0,
                 service_id: 0,
                 line: "hello from web".into(),
                 timestamp: 1700000000000,
@@ -342,6 +345,7 @@ fn roundtrip_stream_log_entry() {
                 attributes: None,
             },
             StreamLogEntry {
+                id: 0,
                 service_id: 1,
                 line: "hello from api".into(),
                 timestamp: 1700000001000,

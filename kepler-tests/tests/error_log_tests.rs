@@ -119,7 +119,7 @@ services:
     let log_store = handle.get_log_store().await.expect("Log store should exist");
     log_store.wait_flush_sync();
     let reader = SqliteLogReader::new(log_store.db_path().to_path_buf(), log_store.storage_mode());
-    let entries = reader.tail(100, &["test".to_string()], true, None);
+    let entries = reader.tail(100, &["test".to_string()], true, None, None, None);
     let stderr_entries: Vec<_> = entries
         .iter()
         .filter(|e| &*e.level == "err")
@@ -191,7 +191,7 @@ async fn test_hook_failure_logged_to_stderr() {
     let log_store = handle.get_log_store().await.expect("Log store should exist");
     log_store.wait_flush_sync();
     let reader = SqliteLogReader::new(log_store.db_path().to_path_buf(), log_store.storage_mode());
-    let entries = reader.tail(100, &["test".to_string()], true, None);
+    let entries = reader.tail(100, &["test".to_string()], true, None, None, None);
     let stderr_entries: Vec<_> = entries
         .iter()
         .filter(|e| &*e.level == "err")
@@ -258,7 +258,7 @@ services:
     let log_store = handle.get_log_store().await.expect("Log store should exist");
     log_store.wait_flush_sync();
     let reader = SqliteLogReader::new(log_store.db_path().to_path_buf(), log_store.storage_mode());
-    let entries = reader.tail(100, &["test".to_string()], true, None);
+    let entries = reader.tail(100, &["test".to_string()], true, None, None, None);
     let stderr_entries: Vec<_> = entries
         .iter()
         .filter(|e| &*e.level == "err")

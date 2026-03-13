@@ -206,6 +206,8 @@ Rights are flat, explicit identifiers — there are no categories, no implicit c
 | `recreate:hardening`   | `recreate`| Allow `--hardening` flag on recreate                                  |
 | `logs:search`          | `logs`    | Allow log filter expressions (DSL). See [Log Query Security](#log-query-security) |
 | `logs:search:sql`      | `logs`    | Allow raw SQL filter expressions. Requires `logs:search`. See [Log Query Security](#log-query-security) |
+| `monitor:search`       | `monitor` | Allow monitor metric filter expressions (DSL). Same security model as `logs:search` |
+| `monitor:search:sql`   | `monitor` | Allow raw SQL filter expressions on metrics. Requires `monitor:search` |
 
 **Built-in alias:**
 
@@ -1080,6 +1082,16 @@ Log access uses a base right and two sub-rights:
 | `logs:search:sql` | `kepler logs --filter "..." --sql` | Filter logs using raw SQL WHERE clauses. Requires `logs:search`. |
 
 **Right separation rationale:** Plain log reading (`logs`) is a read-only operation with no user-controlled SQL. DSL filtering (`logs:search`) uses a parser that only produces safe SQL fragments — users cannot write arbitrary queries. Raw SQL filtering (`logs:search:sql`) exposes the full SQL surface area and should only be granted to trusted users.
+
+Monitor metric access follows the same pattern:
+
+| Right | Required for | Description |
+|-------|-------------|-------------|
+| `monitor` | `kepler top` | View metrics (no filtering) |
+| `monitor:search` | `kepler top --filter "..."` | Filter metrics using the search DSL. Requires `monitor` base right. |
+| `monitor:search:sql` | `kepler top --filter "..." --sql` | Filter metrics using raw SQL WHERE clauses. Requires `monitor:search`. |
+
+The same defense layers (authorizer, resource limits, timeout) apply to monitor filters, with the authorizer restricting reads to the `metrics` table instead of `logs`.
 
 ### How Filters Work
 

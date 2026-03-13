@@ -34,6 +34,8 @@ impl FollowClient for MockClient {
         _sql: bool,
         _raw: bool,
         _tail: bool,
+        _after_ts: Option<i64>,
+        _before_ts: Option<i64>,
     ) -> std::result::Result<Response, ClientError> {
         self.responses
             .lock()
@@ -64,6 +66,7 @@ fn stream_response(entries: &[(&str, &str)], has_more: bool) -> ClientResult {
                 }
             };
             StreamLogEntry {
+                id: 0,
                 service_id,
                 line: line.to_string(),
                 timestamp: 1000,
