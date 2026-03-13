@@ -1,0 +1,12 @@
+# Config for testing `kepler top --json` snapshot output.
+# Two simple long-running services with monitoring enabled.
+kepler:
+  monitor:
+    interval: 1s
+
+services:
+  alpha:
+    command: ["sh", "-c", "while true; do echo alpha; sleep 1; done"]
+
+  beta:
+    command: ["sh", "-c", "while true; do echo beta; sleep 1; done"]

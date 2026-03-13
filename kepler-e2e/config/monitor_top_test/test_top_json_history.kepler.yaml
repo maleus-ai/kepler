@@ -1,0 +1,9 @@
+# Config for testing `kepler top --json --history` output.
+# Single service with fast monitor interval for quick data accumulation.
+kepler:
+  monitor:
+    interval: 1s
+
+services:
+  worker:
+    command: ["sh", "-c", "while true; do echo working; sleep 1; done"]

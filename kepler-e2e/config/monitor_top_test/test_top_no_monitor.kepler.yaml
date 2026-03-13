@@ -1,0 +1,4 @@
+# Config without monitoring enabled — `kepler top` should return an error.
+services:
+  simple:
+    command: ["sh", "-c", "echo hello; sleep 300"]
