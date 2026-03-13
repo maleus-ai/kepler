@@ -326,7 +326,7 @@ fn multiple_base_rights_grant_respective_operations() {
 
     let stop = Request::Stop {
         config_path: "/test".into(),
-        service: None,
+        services: vec![],
         clean: false,
         signal: None,
     };

@@ -46,8 +46,9 @@ pub enum Commands {
     },
     /// Stop services (requires daemon to be running)
     Stop {
-        /// Specific service to stop (stops all if not specified)
-        service: Option<String>,
+        /// Services to stop (stops all if none specified)
+        #[arg(value_name = "SERVICE")]
+        services: Vec<String>,
         /// Run cleanup hooks after stopping
         #[arg(long)]
         clean: bool,

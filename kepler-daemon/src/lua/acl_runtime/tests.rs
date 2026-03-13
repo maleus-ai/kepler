@@ -336,7 +336,7 @@ fn context_from_start_request() {
 fn context_from_stop_request() {
     let req = Request::Stop {
         config_path: "/test".into(),
-        service: Some("web".into()),
+        services: vec!["web".into()],
         clean: true,
         signal: Some("SIGKILL".into()),
     };
@@ -346,6 +346,40 @@ fn context_from_stop_request() {
     assert!(ctx.is_token);
     assert!(matches!(ctx.params.get("clean"), Some(ParamValue::Bool(true))));
     assert!(matches!(ctx.params.get("signal"), Some(ParamValue::String(s)) if s == "SIGKILL"));
+}
+
+#[test]
+fn context_from_stop_request_multiple_services() {
+    let req = Request::Stop {
+        config_path: "/test".into(),
+        services: vec!["web".into(), "worker".into(), "scheduler".into()],
+        clean: false,
+        signal: None,
+    };
+    let ctx = build_authorizer_context(&req, 1000, 1000, None, vec![1000], false).unwrap();
+    assert_eq!(ctx.action, "stop");
+    assert!(matches!(
+        ctx.params.get("services"),
+        Some(ParamValue::StringList(s)) if s == &vec!["web".to_string(), "worker".to_string(), "scheduler".to_string()]
+    ));
+    assert!(matches!(ctx.params.get("clean"), Some(ParamValue::Bool(false))));
+    assert!(!ctx.params.contains_key("signal"));
+}
+
+#[test]
+fn context_from_stop_request_empty_services() {
+    let req = Request::Stop {
+        config_path: "/test".into(),
+        services: vec![],
+        clean: false,
+        signal: None,
+    };
+    let ctx = build_authorizer_context(&req, 1000, 1000, None, vec![1000], false).unwrap();
+    assert_eq!(ctx.action, "stop");
+    assert!(matches!(
+        ctx.params.get("services"),
+        Some(ParamValue::StringList(s)) if s.is_empty()
+    ));
 }
 
 #[test]
