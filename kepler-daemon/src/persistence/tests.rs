@@ -83,13 +83,13 @@ config_dir: /tmp
 snapshot_time: 1700000000
 kepler_env: {}
 permission_ceiling:
-  - service:start
-  - config:status
+  - start
+  - status
 "#;
     let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(
         snapshot.permission_ceiling,
-        Some(vec!["service:start".to_string(), "config:status".to_string()])
+        Some(vec!["start".to_string(), "status".to_string()])
     );
 
     let reserialized = serde_yaml::to_string(&snapshot).unwrap();

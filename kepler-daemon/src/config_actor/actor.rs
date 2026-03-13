@@ -19,7 +19,7 @@ use crate::errors::{DaemonError, Result};
 use crate::events::{ServiceEventMessage, ServiceEventSender, service_event_channel};
 use crate::hardening::HardeningLevel;
 use crate::logs::LogStoreHandle;
-use crate::lua_eval::{ConditionResult, EvalContext, LuaEvaluator};
+use crate::lua::templating_runtime::{ConditionResult, EvalContext, LuaEvaluator};
 use crate::persistence::{ConfigPersistence, ExpandedConfigSnapshot};
 use crate::state::{
     PersistedConfigState, PersistedServiceState, ProcessHandle, ServiceState, ServiceStatus,
@@ -96,7 +96,7 @@ pub struct ConfigActor {
 
     /// Lua evaluator owned by this actor. Created in create(), used for kepler.environment
     /// resolution, then moved to the spawn_blocking Lua worker thread on first runtime eval.
-    evaluator: Option<crate::lua_eval::LuaEvaluator>,
+    evaluator: Option<crate::lua::templating_runtime::LuaEvaluator>,
 
     /// Channel to the dedicated Lua worker thread (lazily spawned)
     lua_eval_tx: Option<mpsc::UnboundedSender<LuaEvalRequest>>,
@@ -275,7 +275,7 @@ impl ConfigActor {
             let restored_permission_ceiling: Option<std::collections::HashSet<&'static str>> =
                 snapshot.permission_ceiling.map(|v| {
                     v.into_iter()
-                        .filter_map(|s| crate::permissions::intern_scope(&s))
+                        .filter_map(|s| crate::permissions::intern_right(&s))
                         .collect()
                 });
 
@@ -472,14 +472,18 @@ impl ConfigActor {
                 .map(|u| u.name)
         });
 
-        // Resolve ACL from config (if kepler.acl is present)
-        let resolved_acl = config
-            .kepler
-            .as_ref()
-            .and_then(|k| k.acl.as_ref())
-            .map(crate::acl::ResolvedAcl::from_config)
-            .transpose()
-            .map_err(|e| DaemonError::Config(format!("ACL resolution failed: {}", e)))?;
+        // Resolve ACL from config, or create an empty ACL so the Lua VM is
+        // always available for token authorizer compilation.
+        let resolved_acl = {
+            let mut acl = match config.kepler.as_ref().and_then(|k| k.acl.as_ref()) {
+                Some(acl_config) => crate::acl::ResolvedAcl::from_config(acl_config)
+                    .map_err(|e| DaemonError::Config(format!("ACL resolution failed: {}", e)))?,
+                None => crate::acl::ResolvedAcl::empty(),
+            };
+            acl.init_authorizers()
+                .map_err(|e| DaemonError::Config(format!("ACL initialization failed: {}", e)))?;
+            Some(acl)
+        };
 
         let handle = ConfigActorHandle::new(
             canonical_path.clone(),

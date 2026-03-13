@@ -1,0 +1,11 @@
+kepler:
+  acl:
+    users:
+      testuser2:
+        allow: [start, stop, status, logs, subscribe, quiescence]
+        authorize: |
+          error("not allowed during maintenance")
+
+services:
+  lua-error-svc:
+    command: ["sh", "-c", "echo LUA_ERROR_SVC_RUNNING; sleep 300"]

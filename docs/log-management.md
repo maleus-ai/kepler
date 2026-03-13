@@ -24,7 +24,7 @@ All logs are stored in a single SQLite database per config:
 /var/lib/kepler/configs/<config-hash>/logs/logs.db
 ```
 
-Logs from all services (stdout, stderr, hooks) are stored in a single `logs` table with metadata columns for service name, log level, timestamp, and JSON detection. This replaces the previous flat-file approach with separate `.stdout.log` / `.stderr.log` files per service.
+Logs from all services (stdout, stderr, hooks) are stored in a single `logs` table with metadata columns for service name, log level, timestamp, and JSON detection.
 
 **Storage modes:**
 
@@ -184,31 +184,30 @@ Log queries support SQL WHERE expressions for filtering. The filter is injected 
 | `line` | TEXT | Log line content |
 | `is_json` | INTEGER | 1 if the line is valid JSON, 0 otherwise |
 
-### Filter Examples
+### Filter Expressions
 
-```bash
-# Filter by log level
-kepler logs --filter "level = 'err'"
+The `LogsStream` protocol request supports a `filter` field that accepts SQL WHERE expressions against the `logs` table. This is gated by the `logs:search` sub-right (in addition to the `logs` base right). Plain log viewing only requires the `logs` right.
 
-# Filter by service and level
-kepler logs --filter "service = 'web' AND level = 'err'"
+**Example filter expressions:**
 
-# Search log content
-kepler logs --filter "line LIKE '%error%'"
+```sql
+-- Filter by log level
+level = 'err'
 
-# JSON field extraction (guard with json_valid for mixed-format logs)
-kepler logs --filter "json_valid(line) AND json_extract(line, '$.status') >= 500"
+-- Filter by service and level
+service = 'web' AND level = 'err'
 
-# Time range (timestamp is ms since epoch)
-kepler logs --filter "timestamp > 1709913600000"
+-- Search log content
+line LIKE '%error%'
 
-# Combine with --follow for live filtered streaming
-kepler logs --follow --filter "service = 'api' AND level = 'err'"
+-- JSON field extraction (guard with json_valid for mixed-format logs)
+json_valid(line) AND json_extract(line, '$.status') >= 500
+
+-- Time range (timestamp is ms since epoch)
+timestamp > 1709913600000
 ```
 
-### Permissions
-
-Filtering requires the `logs:search` scope. Plain log viewing (`kepler logs` without `--filter`) only requires `logs:read`. See [Security Model -- Log Query Security](security-model.md#log-query-security) for the full security design, allowed functions, and known attack vectors.
+See [Security Model -- Log Query Security](security-model.md#log-query-security) for the full security design, allowed functions, and known attack vectors.
 
 ---
 

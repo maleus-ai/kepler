@@ -43,16 +43,17 @@ async fn register_and_get() {
     let store = TokenStore::new();
     let token = Token::generate().unwrap();
     let ctx = TokenContext {
-        allow: ["service:start"].into(),
+        allow: ["start"].into(),
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     store.register(token, ctx).await;
 
     let retrieved = store.get(&token).await.unwrap();
     assert_eq!(retrieved.service, "web");
-    assert!(retrieved.allow.contains("service:start"));
+    assert!(retrieved.allow.contains("start"));
 }
 
 #[tokio::test]
@@ -72,12 +73,14 @@ async fn revoke_for_service_removes_matching() {
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let ctx2 = TokenContext {
         allow: HashSet::new(),
         max_hardening: HardeningLevel::None,
         service: "worker".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     store.register(t1, ctx1).await;
     store.register(t2, ctx2).await;
@@ -101,18 +104,21 @@ async fn revoke_for_config_removes_all_matching() {
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let ctx2 = TokenContext {
         allow: HashSet::new(),
         max_hardening: HardeningLevel::None,
         service: "worker".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let ctx3 = TokenContext {
         allow: HashSet::new(),
         max_hardening: HardeningLevel::None,
         service: "other".to_string(),
         config_path: "/other/kepler.yaml".into(),
+        authorizer: None,
     };
     store.register(t1, ctx1).await;
     store.register(t2, ctx2).await;
@@ -143,6 +149,7 @@ async fn concurrent_registration() {
                 max_hardening: HardeningLevel::None,
                 service: format!("svc-{}", i),
                 config_path: "/test/kepler.yaml".into(),
+                authorizer: None,
             };
             store.register(token, ctx).await;
         }));
@@ -172,6 +179,7 @@ async fn concurrent_register_and_get() {
                 max_hardening: HardeningLevel::None,
                 service: format!("svc-{}", i),
                 config_path: "/test/kepler.yaml".into(),
+                authorizer: None,
             };
             store.register(token, ctx).await;
             // Immediately read it back
@@ -196,6 +204,7 @@ async fn concurrent_revoke_for_service_during_reads() {
             max_hardening: HardeningLevel::None,
             service: format!("svc-{}", i),
             config_path: "/test/kepler.yaml".into(),
+            authorizer: None,
         };
         store.register(Token::generate().unwrap(), ctx).await;
     }
@@ -233,10 +242,11 @@ async fn concurrent_revoke_for_service_during_reads() {
 async fn guard_new_registers_token() {
     let store: SharedTokenStore = Arc::new(TokenStore::new());
     let ctx = TokenContext {
-        allow: ["service:start"].into(),
+        allow: ["start"].into(),
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let guard = ServiceTokenGuard::new(store.clone(), ctx).await.unwrap();
 
@@ -258,6 +268,7 @@ async fn guard_revoke_removes_token() {
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let guard = ServiceTokenGuard::new(store.clone(), ctx).await.unwrap();
     let token = guard.token().unwrap();
@@ -278,6 +289,7 @@ async fn guard_token_hex_returns_valid_hex() {
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let guard = ServiceTokenGuard::new(store.clone(), ctx).await.unwrap();
 
@@ -300,6 +312,7 @@ async fn guard_drop_cleans_up_token() {
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let guard = ServiceTokenGuard::new(store.clone(), ctx).await.unwrap();
     let token = guard.token().unwrap();
@@ -325,12 +338,14 @@ async fn guard_generates_unique_tokens() {
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let ctx2 = TokenContext {
         allow: HashSet::new(),
         max_hardening: HardeningLevel::None,
         service: "worker".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let guard1 = ServiceTokenGuard::new(store.clone(), ctx1).await.unwrap();
     let guard2 = ServiceTokenGuard::new(store.clone(), ctx2).await.unwrap();
@@ -350,12 +365,14 @@ async fn guard_revoke_does_not_affect_other_tokens() {
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let ctx2 = TokenContext {
         allow: HashSet::new(),
         max_hardening: HardeningLevel::None,
         service: "worker".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let guard1 = ServiceTokenGuard::new(store.clone(), ctx1).await.unwrap();
     let guard2 = ServiceTokenGuard::new(store.clone(), ctx2).await.unwrap();
@@ -371,13 +388,14 @@ async fn guard_revoke_does_not_affect_other_tokens() {
 #[tokio::test]
 async fn guard_preserves_token_context_scopes() {
     let store: SharedTokenStore = Arc::new(TokenStore::new());
-    let allow: HashSet<&'static str> = ["service:start", "service:stop", "config:status"]
+    let allow: HashSet<&'static str> = ["start", "stop", "status"]
         .into();
     let ctx = TokenContext {
         allow: allow.clone(),
         max_hardening: HardeningLevel::NoRoot,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let guard = ServiceTokenGuard::new(store.clone(), ctx).await.unwrap();
 
@@ -398,16 +416,18 @@ async fn register_same_token_twice_returns_first() {
     let store = TokenStore::new();
     let token = Token::from_bytes([0xAA; 32]);
     let ctx1 = TokenContext {
-        allow: ["service:start"].into(),
+        allow: ["start"].into(),
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     let ctx2 = TokenContext {
-        allow: ["config:status"].into(),
+        allow: ["status"].into(),
         max_hardening: HardeningLevel::Strict,
         service: "worker".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     store.register(token, ctx1).await;
     store.register(token, ctx2).await;
@@ -426,6 +446,7 @@ async fn revoke_for_service_non_matching_config_path() {
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     store.register(token, ctx).await;
 
@@ -450,6 +471,7 @@ async fn len_and_is_empty() {
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     store.register(t1, ctx).await;
 
@@ -462,6 +484,7 @@ async fn len_and_is_empty() {
         max_hardening: HardeningLevel::None,
         service: "worker".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     store.register(t2, ctx2).await;
     assert_eq!(store.len().await, 2);
@@ -485,10 +508,11 @@ async fn revoked_token_no_longer_resolves() {
     let store = TokenStore::new();
     let token = Token::generate().unwrap();
     let ctx = TokenContext {
-        allow: ["service:start"].into(),
+        allow: ["start"].into(),
         max_hardening: HardeningLevel::None,
         service: "web".to_string(),
         config_path: "/test/kepler.yaml".into(),
+        authorizer: None,
     };
     store.register(token, ctx).await;
 

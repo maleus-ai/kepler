@@ -1,0 +1,9 @@
+kepler:
+  acl:
+    users:
+      testuser2:
+        allow: [start, stop, subscribe, quiescence, status]
+
+services:
+  degraded-svc:
+    command: ["sh", "-c", "echo DEGRADED_SVC_RUNNING; sleep 300"]

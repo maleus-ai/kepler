@@ -7,7 +7,7 @@ use crate::config_actor::ConfigActorHandle;
 use crate::errors::{DaemonError, Result};
 use crate::hardening::HardeningLevel;
 use crate::logs::{LogStoreHandle, LogWriter};
-use crate::lua_eval::{DepInfo, EvalContext, HookEvalContext, LuaEvaluator, OwnerEvalContext, ServiceEvalContext};
+use crate::lua::templating_runtime::{DepInfo, EvalContext, HookEvalContext, LuaEvaluator, OwnerEvalContext, ServiceEvalContext};
 use crate::process::{spawn_blocking, BlockingMode, OutputCaptureConfig};
 use kepler_protocol::protocol::{ProgressEvent, ServicePhase};
 use kepler_protocol::server::ProgressSender;

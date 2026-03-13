@@ -111,6 +111,11 @@ impl E2eHarness {
         self.temp_dir.path()
     }
 
+    /// Path to the kepler CLI binary
+    pub fn kepler_bin(&self) -> &Path {
+        &self.kepler_bin
+    }
+
     /// Get a reference to the temp directory
     pub fn temp_dir(&self) -> &TempDir {
         &self.temp_dir
@@ -440,6 +445,15 @@ impl E2eHarness {
     /// Run the kepler CLI as a specific OS user via `sudo -u <user>`.
     /// Tests run as root, so no sudoers entry is needed — root can always switch users.
     pub async fn run_cli_as_user(&self, user: &str, args: &[&str]) -> E2eResult<CommandOutput> {
+        self.run_cli_as_user_with_timeout(user, args, Duration::from_secs(30)).await
+    }
+
+    pub async fn run_cli_as_user_with_timeout(
+        &self,
+        user: &str,
+        args: &[&str],
+        timeout_duration: Duration,
+    ) -> E2eResult<CommandOutput> {
         // TempDir creates directories with 0o700, but non-root users need to
         // traverse the temp dir to reach the daemon socket and config files.
         // Make it world-traversable (auth is handled at the protocol level).
@@ -483,7 +497,7 @@ impl E2eHarness {
             buf
         });
 
-        let result = timeout(Duration::from_secs(30), child.wait()).await;
+        let result = timeout(timeout_duration, child.wait()).await;
 
         match result {
             Ok(Ok(status)) => {
@@ -506,6 +520,112 @@ impl E2eHarness {
                     user,
                     args.join(" ")
                 )))
+            }
+        }
+    }
+
+    /// Run CLI as a specific user, kill after timeout and return captured output.
+    /// Unlike `run_cli_as_user_with_timeout`, this does NOT return an error on timeout —
+    /// it returns the captured stdout/stderr with exit_code = -1.
+    /// Uses SIGTERM on the process group to ensure all child processes are terminated.
+    pub async fn run_cli_as_user_kill_after(
+        &self,
+        user: &str,
+        args: &[&str],
+        timeout_duration: Duration,
+    ) -> E2eResult<CommandOutput> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                self.temp_dir.path(),
+                std::fs::Permissions::from_mode(0o755),
+            )?;
+        }
+
+        let daemon_path_env = format!("KEPLER_DAEMON_PATH={}", self.temp_dir.path().display());
+        let kepler_bin_str = self.kepler_bin.to_string_lossy().to_string();
+
+        let mut sudo_args = vec!["-u", user, "env", &daemon_path_env, &kepler_bin_str];
+        sudo_args.extend(args);
+
+        let mut child = Command::new("sudo")
+            .args(&sudo_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let pid = child.id().expect("child should have pid");
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut out) = stdout_pipe {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
+            }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut err) = stderr_pipe {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
+            }
+            buf
+        });
+
+        let result = timeout(timeout_duration, child.wait()).await;
+
+        match result {
+            Ok(Ok(status)) => {
+                let stdout = stdout_task.await.unwrap_or_default();
+                let stderr = stderr_task.await.unwrap_or_default();
+                Ok(CommandOutput {
+                    stdout: String::from_utf8_lossy(&stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&stderr).to_string(),
+                    exit_code: status.code().unwrap_or(-1),
+                })
+            }
+            Ok(Err(e)) => Err(E2eError::SpawnFailed(e)),
+            Err(_) => {
+                // Timeout: find all descendant processes and kill them.
+                // sudo spawns kepler as a child process — we need to kill kepler too
+                // for the pipes to close properly.
+                let pid_str = pid.to_string();
+
+                // Kill all descendants first (kepler running under sudo)
+                let _ = std::process::Command::new("pkill")
+                    .args(["-TERM", "-P", &pid_str])
+                    .status();
+                // Then kill sudo itself
+                let _ = std::process::Command::new("kill")
+                    .args(["-TERM", &pid_str])
+                    .status();
+
+                // Wait briefly for graceful shutdown
+                let wait_result = timeout(Duration::from_secs(3), child.wait()).await;
+                if wait_result.is_err() {
+                    // Force kill everything
+                    let _ = std::process::Command::new("pkill")
+                        .args(["-KILL", "-P", &pid_str])
+                        .status();
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
+
+                let stdout = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    stdout_task,
+                ).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+                let stderr = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    stderr_task,
+                ).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+                Ok(CommandOutput {
+                    stdout: String::from_utf8_lossy(&stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&stderr).to_string(),
+                    exit_code: -1, // Killed
+                })
             }
         }
     }

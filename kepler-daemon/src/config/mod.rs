@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use crate::errors::{DaemonError, Result};
-use crate::lua_eval::{EvalContext, LuaEvaluator};
+use crate::lua::templating_runtime::{EvalContext, LuaEvaluator};
 
 pub use expr::DynamicExpr;
 
@@ -466,7 +466,7 @@ pub struct RawServiceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_new_privileges: Option<bool>,
     /// Permissions configuration for token-based access control.
-    /// When present, the daemon generates a CSPRNG bearer token with scoped permissions.
+    /// When present, the daemon generates a CSPRNG bearer token with granted rights.
     /// When absent, the service gets no daemon access.
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "security")]
     pub permissions: Option<ServicePermissions>,
@@ -475,11 +475,25 @@ pub struct RawServiceConfig {
 /// Per-config ACL section for restricting kepler group members.
 ///
 /// Defined under `kepler.acl` in `kepler.yaml`. When present, non-owner group
-/// members are restricted to the scopes listed in matching user/group rules.
+/// members are restricted to the rights listed in matching user/group rules.
 /// When absent, only the config owner and root have access.
+///
+/// Optional fields:
+/// - `lua`: Inline Lua code evaluated in the ACL Lua VM (separate from config's main VM).
+///   Used to define shared pure functions for authorizers. No `_G.global`, no `kepler.environment`.
+/// - `aliases`: User-defined named bundles of rights, expanded at config parse time.
+///   Cannot shadow built-in aliases (`all`) or known rights.
 #[derive(Debug, Clone, Deserialize, serde::Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AclConfig {
+    /// Inline Lua code for the ACL Lua VM.
+    /// Evaluated once when the ACL is loaded. Defines shared functions for authorizers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lua: Option<String>,
+    /// User-defined aliases mapping names to lists of rights.
+    /// Expanded at config parse time. Max depth: 2 levels.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub aliases: HashMap<String, Vec<String>>,
     /// User rules keyed by UID or username.
     #[serde(default)]
     pub users: HashMap<String, AclRule>,
@@ -488,12 +502,17 @@ pub struct AclConfig {
     pub groups: HashMap<String, AclRule>,
 }
 
-/// A single ACL rule granting a set of scopes.
+/// A single ACL rule granting a set of rights.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AclRule {
-    /// Scope strings (same syntax as `permissions.allow`).
+    /// Right strings (same syntax as `permissions.allow`).
     pub allow: Vec<String>,
+    /// Optional Lua authorizer source code.
+    /// Compiled in the ACL Lua VM and called after static rights check.
+    /// Must return a truthy value to allow the request, or false/nil to deny.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorize: Option<String>,
 }
 
 /// Permissions configuration for a service's token-based permissions.
@@ -501,17 +520,22 @@ pub struct AclRule {
 /// Controls what daemon operations a spawned service process can perform
 /// via token-based auth (bearer token in `KEPLER_TOKEN`). Supports two YAML forms:
 ///
-/// Short form (list): `permissions: ["config:status", "service:start"]`
-/// Object form: `permissions: { allow: ["config:status"], hardening: "strict" }`
+/// Short form (list): `permissions: ["status", "start"]`
+/// Object form: `permissions: { allow: ["status"], hardening: "strict" }`
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ServicePermissions {
-    /// Capability scopes granted to this service's token.
+    /// Rights granted to this service's token.
     pub allow: Vec<String>,
     /// Hardening floor for configs spawned by this process.
     /// Inherits the config's effective hardening if absent.
     /// Cannot exceed the parent config's hardening level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardening: Option<String>,
+    /// Optional Lua authorizer source for this service's token.
+    /// Compiled in the ACL Lua VM at service start time.
+    /// Runs before ACL authorizers — can reject requests within the token's rights.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorize: Option<String>,
 }
 // Custom deserializer to support both list and object forms
 impl<'de> serde::Deserialize<'de> for ServicePermissions {
@@ -527,6 +551,8 @@ impl<'de> serde::Deserialize<'de> for ServicePermissions {
                 allow: Vec<String>,
                 #[serde(default)]
                 hardening: Option<String>,
+                #[serde(default)]
+                authorize: Option<String>,
             },
         }
 
@@ -534,10 +560,12 @@ impl<'de> serde::Deserialize<'de> for ServicePermissions {
             PermissionsHelper::List(allow) => Ok(ServicePermissions {
                 allow,
                 hardening: None,
+                authorize: None,
             }),
-            PermissionsHelper::Object { allow, hardening } => Ok(ServicePermissions {
+            PermissionsHelper::Object { allow, hardening, authorize } => Ok(ServicePermissions {
                 allow,
                 hardening,
+                authorize,
             }),
         }
     }
@@ -580,7 +608,7 @@ impl RawServiceConfig {
         &self,
         evaluator: &LuaEvaluator,
         ctx: &mut EvalContext,
-        prepared: &crate::lua_eval::PreparedEnv,
+        prepared: &crate::lua::templating_runtime::PreparedEnv,
         config_path: &Path,
         name: &str,
     ) -> Result<Vec<String>> {
@@ -1183,7 +1211,7 @@ impl KeplerConfig {
         // can call user-defined functions. depends_on must be static for the dep
         // graph, so we evaluate it eagerly here (before RawServiceConfig parsing).
         let sys_env_ctx = EvalContext {
-            service: Some(crate::lua_eval::ServiceEvalContext {
+            service: Some(crate::lua::templating_runtime::ServiceEvalContext {
                 env: sys_env.clone(),
                 ..Default::default()
             }),
@@ -1239,7 +1267,7 @@ impl KeplerConfig {
                     }
 
                     let ctx = EvalContext {
-                        service: Some(crate::lua_eval::ServiceEvalContext {
+                        service: Some(crate::lua::templating_runtime::ServiceEvalContext {
                             name: name.to_string(),
                             env: sys_env.clone(),
                             ..Default::default()
@@ -1567,9 +1595,9 @@ impl KeplerConfig {
                     ));
                 }
 
-            // Validate permissions scopes
+            // Validate permissions rights
             if let Some(permissions) = &raw.permissions {
-                if let Err(e) = crate::permissions::validate_scopes(&permissions.allow) {
+                if let Err(e) = crate::permissions::validate_rights(&permissions.allow, &std::collections::HashMap::new()) {
                     errors.push(format!("Service '{}': permissions.allow: {}", name, e));
                 }
                 if let Some(hardening) = &permissions.hardening
@@ -1602,16 +1630,21 @@ impl KeplerConfig {
             }
         }
 
-        // Validate ACL scopes
+        // Validate ACL aliases and rights
         if let Some(ref kepler) = self.kepler
             && let Some(ref acl) = kepler.acl {
+                // Validate user-defined aliases first (checks shadowing, cycles, depth)
+                if let Err(e) = crate::permissions::validate_user_aliases(&acl.aliases) {
+                    errors.push(format!("kepler.acl.aliases: {}", e));
+                }
+                // Validate user/group rules using the defined aliases
                 for (key, rule) in &acl.users {
-                    if let Err(e) = crate::permissions::validate_scopes(&rule.allow) {
+                    if let Err(e) = crate::permissions::validate_rights(&rule.allow, &acl.aliases) {
                         errors.push(format!("kepler.acl.users.{}: {}", key, e));
                     }
                 }
                 for (key, rule) in &acl.groups {
-                    if let Err(e) = crate::permissions::validate_scopes(&rule.allow) {
+                    if let Err(e) = crate::permissions::validate_rights(&rule.allow, &acl.aliases) {
                         errors.push(format!("kepler.acl.groups.{}: {}", key, e));
                     }
                 }

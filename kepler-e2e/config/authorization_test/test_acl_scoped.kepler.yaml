@@ -2,7 +2,7 @@ kepler:
   acl:
     users:
       testuser2:
-        allow: [config:status, logs:read]
+        allow: [status, logs]
 
 services:
   acl-svc:

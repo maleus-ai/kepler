@@ -16,7 +16,7 @@ use std::path::Path;
 
 use crate::config::lua::lua_to_yaml;
 use crate::errors::{DaemonError, Result};
-use crate::lua_eval::{EvalContext, LuaEvaluator};
+use crate::lua::templating_runtime::{EvalContext, LuaEvaluator};
 
 /// Resolve inherit_env for a service/hook/healthcheck.
 /// Priority: local > service > global > default (true)

@@ -1224,7 +1224,7 @@ services:
 /// `run` field resolves to ["sh", "-c", "<script>"] via resolve_service
 #[test]
 fn test_run_field_resolves_to_sh_c_via_file_load() {
-    use kepler_daemon::lua_eval::EvalContext;
+    use kepler_daemon::lua::templating_runtime::EvalContext;
 
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("kepler.yaml");
@@ -1251,7 +1251,7 @@ services:
 /// Dynamic `run` field with ${{ }}$ resolves correctly
 #[test]
 fn test_run_field_dynamic_resolves() {
-    use kepler_daemon::lua_eval::{EvalContext, ServiceEvalContext};
+    use kepler_daemon::lua::templating_runtime::{EvalContext, ServiceEvalContext};
     use std::collections::HashMap;
 
     let temp_dir = TempDir::new().unwrap();
