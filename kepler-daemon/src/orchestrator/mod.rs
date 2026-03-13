@@ -1092,7 +1092,7 @@ impl ServiceOrchestrator {
 
     /// Stop services for a config
     ///
-    /// If `service_filter` is provided, only stops that service.
+    /// If `services` is non-empty, only stops those services.
     /// Otherwise stops all services in reverse dependency order.
     ///
     /// If `clean` is true, also runs pre_cleanup hooks and retention.
@@ -1100,7 +1100,7 @@ impl ServiceOrchestrator {
     pub async fn stop_services(
         &self,
         config_path: &Path,
-        service_filter: Option<&str>,
+        services: &[String],
         clean: bool,
         signal: Option<i32>,
     ) -> Result<String, OrchestratorError> {
@@ -1141,14 +1141,15 @@ impl ServiceOrchestrator {
             None => return Ok("Config not loaded".to_string()),
         };
 
-        let services_to_stop = match service_filter {
-            Some(name) => {
+        let services_to_stop = if services.is_empty() {
+            get_stop_order(&config.services)?
+        } else {
+            for name in services {
                 if !config.services.contains_key(name) {
                     return Err(OrchestratorError::ServiceNotFound(name.to_string()));
                 }
-                vec![name.to_string()]
             }
-            None => get_stop_order(&config.services)?,
+            services.to_vec()
         };
 
         // When doing a full clean shutdown, set the discard flag on the log store
@@ -1157,7 +1158,7 @@ impl ServiceOrchestrator {
         // — entries that will be deleted along with the state directory.
         // Also interrupts any running SQLite query (e.g. DELETE FROM logs triggered
         // by a concurrent `stop` command's log retention).
-        if clean && service_filter.is_none() {
+        if clean && services.is_empty() {
             info!("stop_services: setting early discard flag on log store");
             handle.shutdown_discard_log_store();
         }
@@ -1270,7 +1271,7 @@ impl ServiceOrchestrator {
         }
 
         // Run pre_cleanup if requested
-        if service_filter.is_none() && clean {
+        if services.is_empty() && clean {
             info!("Running cleanup hooks");
 
             // Filter out services that never ran (Skipped/Waiting)
@@ -1304,11 +1305,11 @@ impl ServiceOrchestrator {
         // Skip when doing a full clean shutdown — the state directory (including
         // the SQLite database) will be deleted, and the log store actor has
         // already been shut down via the early discard flag.
-        if !(clean && service_filter.is_none()) {
+        if !(clean && services.is_empty()) {
             if let Some(ref log_store) = log_store {
                 // When stopping all services, clear logs for ALL services (including
                 // already-exited ones like one-shot tasks), not just those we stopped now.
-                let services_to_clear = if service_filter.is_none() {
+                let services_to_clear = if services.is_empty() {
                     &services_to_stop
                 } else {
                     &stopped
@@ -1340,7 +1341,7 @@ impl ServiceOrchestrator {
 
         // When clean=true and stopping all services, remove entire state directory
         // This makes `stop --clean` behave like `prune` - complete cleanup
-        if service_filter.is_none() && clean {
+        if services.is_empty() && clean {
             let config_hash = handle.config_hash();
             let state_dir = match crate::global_state_dir() {
                 Ok(dir) => dir.join("configs").join(config_hash),
@@ -1650,7 +1651,7 @@ impl ServiceOrchestrator {
         if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
             if !handle.all_services_stopped().await {
                 info!("Stopping all services before recreate for {:?}", config_path);
-                self.stop_services(config_path, None, true, None).await?;
+                self.stop_services(config_path, &[], true, None).await?;
             }
 
             // Clear snapshot to force re-expansion with new env

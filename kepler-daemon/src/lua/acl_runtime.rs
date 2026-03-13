@@ -475,14 +475,13 @@ pub fn build_authorizer_context(
             ("start", params)
         }
         Request::Stop {
-            service,
+            services,
             clean,
             signal,
             ..
         } => {
             let mut params = HashMap::new();
-            let services: Vec<String> = service.iter().cloned().collect();
-            params.insert("services".into(), ParamValue::StringList(services));
+            params.insert("services".into(), ParamValue::StringList(services.clone()));
             params.insert("clean".into(), ParamValue::Bool(*clean));
             if let Some(sig) = signal {
                 params.insert("signal".into(), ParamValue::String(sig.clone()));
