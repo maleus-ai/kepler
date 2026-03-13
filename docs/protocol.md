@@ -71,7 +71,7 @@ ServerMessage::Event {
 | `Restart` | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?` | Restart service(s) |
 | `Recreate` | `config_path`, `sys_env?`, `hardening?` | Stop, re-bake config snapshot, start |
 | `Status` | `config_path?` | Get service status (`None` = all configs) |
-| `LogsStream` | `config_path`, `service?`, `after_id?`, `from_end`, `limit`, `no_hooks`, `filter?`, `raw`, `tail` | Streaming log retrieval. Requires `logs` right; `logs:search` sub-right when `filter` is set |
+| `LogsStream` | `config_path`, `services[]`, `after_id?`, `from_end`, `limit`, `no_hooks`, `filter?`, `raw`, `tail` | Streaming log retrieval. Requires `logs` right; `logs:search` sub-right when `filter` is set |
 | `SubscribeLogs` | `config_path` | Subscribe to log-available notifications. Pushes `LogsAvailable` events when new logs are flushed. Requires `logs` right |
 | `Subscribe` | `config_path`, `services?` | Subscribe to service state change events |
 | `Inspect` | `config_path` | Inspect config and runtime state (JSON output) |

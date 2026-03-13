@@ -1302,7 +1302,8 @@ impl TestLogHelper {
     /// Get the last N log entries, optionally filtered by service
     pub fn tail(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
         let reader = SqliteLogReader::new(self.store.db_path().to_path_buf(), self.store.storage_mode());
-        reader.tail(count, service, false)
+        let services: Vec<String> = service.into_iter().map(String::from).collect();
+        reader.tail(count, &services, false)
     }
 
     /// Clear all logs
@@ -1332,7 +1333,8 @@ impl TestLogHelper {
     /// Get entries since a sequence number (uses SQLite rowid-based cursor)
     pub fn entries_since(&self, since: u64, service: Option<&str>) -> Vec<LogLine> {
         let reader = SqliteLogReader::new(self.store.db_path().to_path_buf(), self.store.storage_mode());
-        let (entries, _has_more) = reader.after(since as i64, 10000, service, false, None).unwrap_or_default();
+        let services: Vec<String> = service.into_iter().map(String::from).collect();
+        let (entries, _has_more) = reader.after(since as i64, 10000, &services, false, None).unwrap_or_default();
         entries
     }
 }

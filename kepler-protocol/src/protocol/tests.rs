@@ -178,7 +178,7 @@ fn roundtrip_envelope_logs_stream() {
         token: None,
         request: Request::LogsStream {
             config_path: PathBuf::from("/app/k.yaml"),
-            service: None,
+            services: vec![],
             after_id: Some(42),
             from_end: false,
             limit: 10000,
