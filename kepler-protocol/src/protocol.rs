@@ -172,6 +172,18 @@ pub enum Request {
         /// Path to the config file
         config_path: PathBuf,
     },
+    /// Query monitoring metrics (CPU, memory) for services
+    MonitorMetrics {
+        /// Path to the config file
+        config_path: PathBuf,
+        /// Service name (None = all services)
+        service: Option<String>,
+        /// None = latest per service, Some = history since timestamp (ms)
+        since: Option<i64>,
+        /// Maximum number of entries to return
+        #[serde(default)]
+        limit: Option<usize>,
+    },
 }
 
 impl Request {
@@ -194,6 +206,7 @@ impl Request {
             Request::CheckQuiescence { .. } => "CheckQuiescence",
             Request::CheckReadiness { .. } => "CheckReadiness",
             Request::UserRights { .. } => "UserRights",
+            Request::MonitorMetrics { .. } => "MonitorMetrics",
         }
     }
 }
@@ -266,6 +279,19 @@ pub enum ResponseData {
     CheckResult(bool),
     /// Effective rights for the calling user on a config
     UserRights(Vec<String>),
+    /// Monitoring metrics entries
+    MonitorMetrics(Vec<MonitorMetricEntry>),
+}
+
+/// A single monitoring metrics sample for one service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorMetricEntry {
+    pub timestamp: i64,
+    pub service: String,
+    pub cpu_percent: f32,
+    pub memory_rss: u64,
+    pub memory_vss: u64,
+    pub pids: Vec<u32>,
 }
 
 /// Information about a pruned config

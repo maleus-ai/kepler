@@ -1087,6 +1087,34 @@ impl ConfigActorHandle {
         let _ = reply_rx.await;
     }
 
+    // === Monitor Methods ===
+
+    /// Store (or clear) the monitor task handle
+    pub async fn set_monitor_task(&self, handle: Option<JoinHandle<()>>) {
+        if self
+            .tx
+            .send(ConfigCommand::SetMonitorTask { handle })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send SetMonitorTask");
+        }
+    }
+
+    /// Check if a monitor task is running
+    pub async fn has_monitor_task(&self) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ConfigCommand::HasMonitorTask { reply: reply_tx })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send HasMonitorTask");
+        }
+        reply_rx.await.unwrap_or(false)
+    }
+
     // === Lua Evaluation ===
 
     /// Evaluate a runtime `if` condition using the Lua evaluator.

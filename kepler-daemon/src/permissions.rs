@@ -26,6 +26,7 @@ pub const BASE_RIGHTS: &[&str] = &[
     "subscribe",
     "quiescence",
     "readiness",
+    "monitor",
 ];
 
 /// Sub-rights — gate optional features within a request.
@@ -188,6 +189,10 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
         }),
         Request::Inspect { .. } => Some(RequiredRights {
             base: "inspect",
+            sub_rights: vec![],
+        }),
+        Request::MonitorMetrics { .. } => Some(RequiredRights {
+            base: "monitor",
             sub_rights: vec![],
         }),
         Request::Status {

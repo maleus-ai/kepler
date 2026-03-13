@@ -374,6 +374,17 @@ impl Client {
         self.send_request(Request::CheckQuiescence { config_path })
     }
 
+    /// Query monitoring metrics for services
+    pub fn monitor_metrics(
+        &self,
+        config_path: PathBuf,
+        service: Option<String>,
+        since: Option<i64>,
+        limit: Option<usize>,
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::MonitorMetrics { config_path, service, since, limit })
+    }
+
     /// Check if all services are ready (reached target state)
     pub fn check_readiness(
         &self,

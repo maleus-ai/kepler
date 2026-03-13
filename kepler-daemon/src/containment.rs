@@ -66,6 +66,18 @@ impl ContainmentManager {
         matches!(self.inner.strategy, ContainmentStrategy::CgroupV2 { .. })
     }
 
+    /// Enumerate all PIDs in a service's cgroup (for resource monitoring).
+    /// Returns an empty vec if cgroup v2 is not active.
+    pub fn enumerate_service_pids(&self, config_hash: &str, service_name: &str) -> Vec<u32> {
+        if let ContainmentStrategy::CgroupV2 { ref kepler_root } = self.inner.strategy {
+            let cgroup_path =
+                kepler_unix::cgroup::service_cgroup_path(kepler_root, config_hash, service_name);
+            kepler_unix::cgroup::enumerate_cgroup_pids(&cgroup_path)
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Prepare for spawning a service (creates cgroup directory if applicable).
     pub fn prepare_spawn(&self, config_hash: &str, service_name: &str) {
         if let ContainmentStrategy::CgroupV2 { ref kepler_root } = self.inner.strategy {

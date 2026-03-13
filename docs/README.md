@@ -28,6 +28,10 @@ For a quick overview of the project, see the [main README](../README.md).
 - **[Log Management](log-management.md)** -- Storage, buffering, retention, and streaming
 - **[File Watching](file-watching.md)** -- Auto-restart on file changes
 
+## Monitoring & Operations
+
+- **[Resource Monitoring](configuration.md#resource-monitoring)** -- CPU/memory metrics collection to SQLite
+
 ## Security & Operations
 
 - **[Security Model](security-model.md)** -- ACL, permissions, hardening -- how to configure security

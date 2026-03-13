@@ -123,6 +123,9 @@ pub struct ConfigActor {
     /// so the caller knows the log store Connection is closed.
     shutdown_reply: Option<oneshot::Sender<()>>,
 
+    /// JoinHandle for the resource monitor task (for cleanup)
+    monitor_task: Option<JoinHandle<()>>,
+
     rx: mpsc::Receiver<ConfigCommand>,
 }
 
@@ -535,6 +538,7 @@ impl ConfigActor {
             cached_topo_order: None,
             clean_shutdown: false,
             shutdown_reply: None,
+            monitor_task: None,
             rx,
         };
 
@@ -1225,6 +1229,16 @@ impl ConfigActor {
                 self.resolved_configs.clear();
 
                 let _ = reply.send(());
+            }
+            // === Monitor Commands ===
+            ConfigCommand::SetMonitorTask { handle } => {
+                if let Some(old) = self.monitor_task.take() {
+                    old.abort();
+                }
+                self.monitor_task = handle;
+            }
+            ConfigCommand::HasMonitorTask { reply } => {
+                let _ = reply.send(self.monitor_task.is_some());
             }
         }
         false
@@ -1989,6 +2003,11 @@ impl ConfigActor {
         // Drop Lua worker channel sender so the spawn_blocking thread exits promptly
         // (otherwise it only exits when the entire ConfigActor struct drops)
         self.lua_eval_tx = None;
+
+        // Abort monitor task
+        if let Some(task) = self.monitor_task.take() {
+            task.abort();
+        }
 
         // Abort event handler and forwarder tasks
         if let Some(handler) = self.event_handler_task.take() {

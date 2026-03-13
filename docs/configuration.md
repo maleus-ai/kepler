@@ -9,6 +9,7 @@ Complete reference for Kepler's YAML configuration format.
 - [Top-Level Structure](#top-level-structure)
 - [Global Settings](#global-settings)
 - [Service Options](#service-options)
+- [Resource Monitoring](#resource-monitoring)
 - [Service Name Validation](#service-name-validation)
 - [Config Immutability](#config-immutability)
 
@@ -53,6 +54,9 @@ kepler:
     groups:
       ops-team:
         allow: [viewer]    # Expands alias
+  monitor:               # Resource monitoring (CPU/memory metrics to SQLite)
+    interval: 5s         # How often to sample metrics
+    retention: 24h       # Optional — how long to keep metrics (omit for fresh-start)
 
 services:
   database:
@@ -162,6 +166,7 @@ Settings under the `kepler:` namespace apply to all services unless overridden.
 | `autostart` | `bool\|object` | `false` | Enable automatic service restart on daemon restart. Accepts `true` (no declared env), `false`, or `{ environment: [...] }`. See [Environment Variables](environment-variables.md#kepler-environment-declaration) |
 | `output_max_size` | `string` | `1mb` | Max output capture size per step/process (e.g., `"2mb"`, `"512kb"`). See [Outputs](outputs.md) |
 | `acl` | `object` | - | Per-config ACL restricting non-owner `kepler` group members. Supports `users`, `groups`, `aliases`, `lua`, and per-rule `authorize` Lua authorizers. See [Security Model](security-model.md#per-config-acl) |
+| `monitor` | `object` | - | Resource monitoring configuration. See [Resource Monitoring](#resource-monitoring) |
 
 ### Global Log Settings
 
@@ -333,6 +338,38 @@ restart:
 Duration units: `ms` (milliseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days).
 
 See [File Watching](file-watching.md) for details on watch patterns.
+
+### Resource Monitoring
+
+Kepler can periodically collect CPU and memory metrics for all running services and store them in a SQLite database. This is configured globally under `kepler.monitor`.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `monitor.interval` | `duration` | *(required)* | How often to sample metrics (e.g., `5s`, `10s`) |
+| `monitor.retention` | `duration` | none | How long to keep metrics. When omitted, the database is cleared on daemon restart. When set, rows older than the retention period are deleted on startup |
+
+Metrics are stored in `<state_dir>/monitor.db` (SQLite with WAL mode). Each row contains a timestamp, service name, CPU percentage, RSS memory, virtual memory, and a JSON array of PIDs in the process tree.
+
+```yaml
+kepler:
+  monitor:
+    interval: 5s        # Sample every 5 seconds
+    retention: 24h       # Keep 24 hours of history
+```
+
+**Retention behavior:**
+- **No `retention`** (default): The metrics database is cleared each time the monitor starts (fresh-start behavior)
+- **With `retention`**: Only rows older than the retention period are deleted on startup; existing data within the window is preserved
+
+The monitor starts automatically when the first service starts and stops when the config is unloaded. The database file is removed automatically by `stop --clean` (since it lives inside the state directory).
+
+**Querying metrics:**
+
+```bash
+sqlite3 <state_dir>/monitor.db "SELECT * FROM metrics WHERE service='web' ORDER BY timestamp DESC LIMIT 5"
+```
+
+Duration units: `ms` (milliseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days).
 
 ---
 
