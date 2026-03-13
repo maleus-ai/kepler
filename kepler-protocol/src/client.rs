@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use tokio::{
@@ -37,6 +37,9 @@ pub struct Client {
     next_id: Arc<AtomicU64>,
     /// Bearer token from `KEPLER_TOKEN` env var (hex-decoded).
     process_token: Option<[u8; 32]>,
+    /// Set to `false` by the reader task when it exits (EOF or error).
+    /// Checked by `send_request` to fail fast instead of hanging forever.
+    connected: Arc<AtomicBool>,
     _reader_handle: JoinHandle<()>,
     _writer_handle: JoinHandle<()>,
 }
@@ -67,7 +70,9 @@ impl Client {
         });
 
         // Reader task: reads length-prefixed frames from stream, dispatches to pending map
+        let connected = Arc::new(AtomicBool::new(true));
         let reader_pending = pending.clone();
+        let reader_connected = connected.clone();
         let reader_handle = tokio::spawn(async move {
             let mut reader = read_half;
 
@@ -80,6 +85,8 @@ impl Client {
                     } else {
                         debug!("Client reader error: {}", e);
                     }
+                    // Mark disconnected before clearing so new send_request calls fail fast
+                    reader_connected.store(false, Ordering::Release);
                     // Drop all pending senders so waiters get RecvError → Disconnected
                     reader_pending.clear();
                     return;
@@ -88,6 +95,7 @@ impl Client {
 
                 if msg_len > MAX_MESSAGE_SIZE {
                     debug!("Server message exceeds maximum size");
+                    reader_connected.store(false, Ordering::Release);
                     reader_pending.clear();
                     return;
                 }
@@ -96,6 +104,7 @@ impl Client {
                 let mut payload = vec![0u8; msg_len];
                 if let Err(e) = reader.read_exact(&mut payload).await {
                     debug!("Client reader error: {}", e);
+                    reader_connected.store(false, Ordering::Release);
                     reader_pending.clear();
                     return;
                 }
@@ -142,6 +151,7 @@ impl Client {
             pending,
             next_id: Arc::new(AtomicU64::new(1)),
             process_token,
+            connected,
             _reader_handle: reader_handle,
             _writer_handle: writer_handle,
         })
@@ -173,6 +183,13 @@ impl Client {
         &self,
         request: Request,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        // Fail fast if the reader task has exited (daemon disconnected).
+        // Without this check, new requests would hang forever waiting for
+        // a response that will never arrive.
+        if !self.connected.load(Ordering::Acquire) {
+            return Err(ClientError::Disconnected);
+        }
+
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let (response_tx, response_rx) = oneshot::channel();
