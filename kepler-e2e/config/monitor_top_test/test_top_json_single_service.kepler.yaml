@@ -1,0 +1,11 @@
+# Config for testing `kepler top <service> --json` (single-service filter).
+kepler:
+  monitor:
+    interval: 1s
+
+services:
+  frontend:
+    command: ["sh", "-c", "while true; do echo frontend; sleep 1; done"]
+
+  backend:
+    command: ["sh", "-c", "while true; do echo backend; sleep 1; done"]

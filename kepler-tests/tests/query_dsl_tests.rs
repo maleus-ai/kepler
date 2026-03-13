@@ -44,7 +44,7 @@ fn write_json_log(store: &LogStoreHandle, service: &str, json: &str, level: &'st
 fn query_with_dsl(reader: &SqliteLogReader, dsl: &str) -> Vec<String> {
     let frag = log_query_dsl().parse(dsl, 0).expect("DSL parse failed");
     let (entries, _) = reader
-        .after(0, 10000, &[], false, Some(&frag))
+        .after(0, 10000, &[], false, Some(&frag), None, None)
         .expect("query failed");
     entries.into_iter().map(|e| e.line).collect()
 }
@@ -53,7 +53,7 @@ fn query_with_dsl(reader: &SqliteLogReader, dsl: &str) -> Vec<String> {
 fn query_services(reader: &SqliteLogReader, dsl: &str) -> Vec<String> {
     let frag = log_query_dsl().parse(dsl, 0).expect("DSL parse failed");
     let (entries, _) = reader
-        .after(0, 10000, &[], false, Some(&frag))
+        .after(0, 10000, &[], false, Some(&frag), None, None)
         .expect("query failed");
     entries.into_iter().map(|e| e.service.to_string()).collect()
 }
@@ -455,7 +455,7 @@ fn dsl_generated_sql_passes_authorizer() {
     let dsl = log_query_dsl();
     for query in &dsl_queries {
         let frag = dsl.parse(query, 0).unwrap();
-        let result = reader.after(0, 100, &[], false, Some(&frag));
+        let result = reader.after(0, 100, &[], false, Some(&frag), None, None);
         assert!(
             result.is_ok(),
             "DSL '{}' generated SQL that failed authorizer: {:?}",

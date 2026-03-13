@@ -1247,6 +1247,8 @@ async fn handle_request(
             sql,
             raw,
             tail,
+            after_ts,
+            before_ts,
         } => {
             use kepler_protocol::protocol::{StreamLogEntry, LogStreamData};
 
@@ -1285,7 +1287,7 @@ async fn handle_request(
 
             let (entries, has_more, last_id) = if tail {
                 // Tail mode: return last `limit` entries in chronological order
-                let entries = reader.tail(limit, &services, no_hooks, filter.as_ref());
+                let entries = reader.tail(limit, &services, no_hooks, filter.as_ref(), after_ts, before_ts);
                 let last_id = entries.last().map(|e| e.id).unwrap_or(0);
                 (entries, has_pending, last_id)
             } else {
@@ -1297,7 +1299,7 @@ async fn handle_request(
                 };
 
                 // Read entries
-                let (entries, has_more) = match reader.after(effective_after_id, limit, &services, no_hooks, filter.as_ref()) {
+                let (entries, has_more) = match reader.after(effective_after_id, limit, &services, no_hooks, filter.as_ref(), after_ts, before_ts) {
                     Ok(r) => r,
                     Err(e) => return Response::error(format!("invalid filter: {}", e)),
                 };
@@ -1315,6 +1317,7 @@ async fn handle_request(
                 let empty_level: Arc<str> = Arc::from("");
                 for log_line in entries {
                     compact_entries.push(StreamLogEntry {
+                        id: log_line.id,
                         service_id: 0,
                         line: log_line.line,
                         timestamp: 0,
@@ -1343,6 +1346,7 @@ async fn handle_request(
                         }
                     };
                     compact_entries.push(StreamLogEntry {
+                        id: log_line.id,
                         service_id,
                         line: log_line.line,
                         timestamp: log_line.timestamp,
@@ -1542,7 +1546,7 @@ async fn handle_request(
             Response::ok_with_data(ResponseData::UserRights(rights))
         }
 
-        Request::MonitorMetrics { config_path, service, since, limit, filter, sql } => {
+        Request::MonitorMetrics { config_path, service, since, limit, filter, sql, bucket_ms, after_ts, before_ts } => {
             // Convert filter to SqlFragment: parse DSL or wrap raw SQL
             let filter = match filter {
                 Some(f) if !sql => {
@@ -1570,13 +1574,19 @@ async fn handle_request(
                 let conn = kepler_daemon::monitor::open_monitor_db_readonly(&state_dir)?;
                 match filter {
                     Some(frag) => kepler_daemon::monitor::query_filtered(
-                        &conn, service.as_deref(), since, limit, &frag,
+                        &conn, service.as_deref(), since, limit, &frag, bucket_ms, after_ts, before_ts,
                     ),
-                    None => match since {
-                        Some(since_ts) => kepler_daemon::monitor::query_history(
-                            &conn, service.as_deref(), since_ts, limit,
+                    None => match (since, after_ts, before_ts) {
+                        (Some(since_ts), _, _) => kepler_daemon::monitor::query_history(
+                            &conn, service.as_deref(), since_ts, limit, bucket_ms, before_ts,
                         ),
-                        None => kepler_daemon::monitor::query_latest(
+                        (None, Some(after_ts_val), _) => kepler_daemon::monitor::query_history(
+                            &conn, service.as_deref(), after_ts_val, limit, bucket_ms, before_ts,
+                        ),
+                        (None, None, Some(_)) => kepler_daemon::monitor::query_history(
+                            &conn, service.as_deref(), 0, limit, bucket_ms, before_ts,
+                        ),
+                        _ => kepler_daemon::monitor::query_latest(
                             &conn, service.as_deref(),
                         ),
                     },

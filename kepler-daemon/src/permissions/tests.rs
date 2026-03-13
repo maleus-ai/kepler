@@ -166,6 +166,8 @@ fn required_rights_logs_with_dsl_filter() {
         sql: false,
         raw: false,
         tail: false,
+        after_ts: None,
+        before_ts: None,
     };
     let rr = required_rights(&req).unwrap();
     assert_eq!(rr.base, "logs");
@@ -186,6 +188,8 @@ fn required_rights_logs_with_sql_filter() {
         sql: true,
         raw: false,
         tail: false,
+        after_ts: None,
+        before_ts: None,
     };
     let rr = required_rights(&req).unwrap();
     assert_eq!(rr.base, "logs");
@@ -206,6 +210,8 @@ fn required_rights_logs_without_filter() {
         sql: false,
         raw: false,
         tail: false,
+        after_ts: None,
+        before_ts: None,
     };
     let rr = required_rights(&req).unwrap();
     assert_eq!(rr.base, "logs");
@@ -428,6 +434,8 @@ fn check_rights_logs_dsl_filter_allowed_with_logs_search() {
         sql: false,
         raw: false,
         tail: false,
+        after_ts: None,
+        before_ts: None,
     };
     assert!(check_rights(&granted, &req).is_ok());
 }
@@ -446,6 +454,8 @@ fn check_rights_logs_dsl_filter_denied_without_logs_search() {
         sql: false,
         raw: false,
         tail: false,
+        after_ts: None,
+        before_ts: None,
     };
     let err = check_rights(&granted, &req).unwrap_err();
     assert!(err.contains("logs:search"), "expected logs:search denial, got: {}", err);
@@ -465,6 +475,8 @@ fn check_rights_logs_sql_filter_allowed_with_both_sub_rights() {
         sql: true,
         raw: false,
         tail: false,
+        after_ts: None,
+        before_ts: None,
     };
     assert!(check_rights(&granted, &req).is_ok());
 }
@@ -484,6 +496,8 @@ fn check_rights_logs_sql_filter_denied_without_sql_sub_right() {
         sql: true,
         raw: false,
         tail: false,
+        after_ts: None,
+        before_ts: None,
     };
     let err = check_rights(&granted, &req).unwrap_err();
     assert!(err.contains("logs:search:sql"), "expected logs:search:sql denial, got: {}", err);
@@ -504,6 +518,8 @@ fn check_rights_logs_sql_filter_denied_without_any_search_right() {
         sql: true,
         raw: false,
         tail: false,
+        after_ts: None,
+        before_ts: None,
     };
     let err = check_rights(&granted, &req).unwrap_err();
     assert!(err.contains("logs:search"), "expected logs:search denial, got: {}", err);
@@ -524,6 +540,8 @@ fn check_rights_logs_sql_sub_right_without_search_still_denied() {
         sql: true,
         raw: false,
         tail: false,
+        after_ts: None,
+        before_ts: None,
     };
     let err = check_rights(&granted, &req).unwrap_err();
     assert!(err.contains("logs:search"), "expected logs:search denial, got: {}", err);
@@ -544,6 +562,8 @@ fn check_rights_logs_no_filter_allowed_with_base_only() {
         sql: false,
         raw: false,
         tail: false,
+        after_ts: None,
+        before_ts: None,
     };
     assert!(check_rights(&granted, &req).is_ok());
 }
@@ -563,6 +583,8 @@ fn check_rights_logs_sql_flag_without_filter_no_extra_rights() {
         sql: true,
         raw: false,
         tail: false,
+        after_ts: None,
+        before_ts: None,
     };
     assert!(check_rights(&granted, &req).is_ok());
 }
@@ -579,6 +601,9 @@ fn monitor_req(filter: Option<&str>, sql: bool) -> Request {
         limit: None,
         filter: filter.map(|s| s.to_string()),
         sql,
+        bucket_ms: None,
+        after_ts: None,
+        before_ts: None,
     }
 }
 
