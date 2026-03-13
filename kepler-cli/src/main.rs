@@ -8,7 +8,6 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::{commands::Commands, commands::DaemonCommands, config::Config, errors::{CliError, Result}};
@@ -165,30 +164,22 @@ async fn run() -> Result<()> {
                 std::process::exit(1);
             }
             if detach && wait {
-                // -d --wait: Fire start, subscribe for progress, exit when all ready
-                let (progress_rx, sub_future) = client.subscribe(
+                // -d --wait: Start with follow — inline progress events until ready
+                let (progress_rx, start_future) = client.start(
                     canonical_path.clone(),
-                    if services.is_empty() { None } else { Some(services.clone()) },
-                )?;
-                // Fire off start (don't await — daemon runs to completion on its own).
-                // send_request_with_progress enqueues immediately; we drive the future
-                // alongside the subscription but don't care about its result.
-                let (_start_progress_rx, start_future) = client.send_request(
-                    kepler_protocol::protocol::Request::Start {
-                        config_path: canonical_path.clone(),
-                        services,
-                        sys_env: Some(sys_env),
-                        no_deps,
-                        override_envs: override_envs.clone(),
-                        hardening: hardening.clone(),
-                    },
+                    services,
+                    Some(sys_env),
+                    no_deps,
+                    override_envs,
+                    hardening,
+                    true, // follow: inline events until quiescence
                 )?;
                 if let Some(timeout_str) = &timeout {
                     let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
                         .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
                     let result = tokio::time::timeout(
                         timeout_duration,
-                        wait_until_ready_with_start(progress_rx, sub_future, start_future, !no_abort_on_failure, &client, &canonical_path, cli.quiet),
+                        wait_until_ready(progress_rx, start_future, !no_abort_on_failure, &client, &canonical_path, cli.quiet),
                     ).await;
                     match result {
                         Ok(Ok(())) => {}
@@ -199,39 +190,27 @@ async fn run() -> Result<()> {
                         }
                     }
                 } else {
-                    wait_until_ready_with_start(progress_rx, sub_future, start_future, !no_abort_on_failure, &client, &canonical_path, cli.quiet).await?;
+                    wait_until_ready(progress_rx, start_future, !no_abort_on_failure, &client, &canonical_path, cli.quiet).await?;
                 }
             } else if detach {
                 // -d: Fire start, exit immediately
-                let (_progress_rx, response_future) = client.start(canonical_path, services, Some(sys_env), no_deps, override_envs.clone(), hardening.clone())?;
+                let (_progress_rx, response_future) = client.start(canonical_path, services, Some(sys_env), no_deps, override_envs, hardening, false)?;
                 let response = response_future.await?;
                 handle_response(response);
             } else {
-                // Foreground: fire start (don't await response), follow logs until quiescent.
-                // send_request enqueues the request; we race the response against log following.
-                let (_start_progress_rx, start_future) = client.send_request(
-                    kepler_protocol::protocol::Request::Start {
-                        config_path: canonical_path.clone(),
-                        services: services.clone(),
-                        sys_env: Some(sys_env),
-                        no_deps,
-                        override_envs,
-                        hardening,
-                    },
+                // Foreground: start with follow — inline quiescence detection + log streaming.
+                let (progress_rx, start_future) = client.start(
+                    canonical_path.clone(),
+                    services.clone(),
+                    Some(sys_env),
+                    no_deps,
+                    override_envs,
+                    hardening,
+                    true, // follow: inline events until quiescence
                 )?;
-                // Signal shared between start request and quiescence detection:
-                // prevents premature exit when the daemon's Subscribe recheck
-                // emits Quiescent before the Start request is processed.
-                let start_acknowledged = Arc::new(AtomicBool::new(false));
-                let start_ack_clone = Arc::clone(&start_acknowledged);
-                let wrapped_start = async move {
-                    let result = start_future.await;
-                    start_ack_clone.store(true, Ordering::Release);
-                    result
-                };
                 foreground_with_logs(
-                    wrapped_start,
-                    follow_logs_until_quiescent(&client, &canonical_path, &services, abort_on_failure, start_acknowledged, raw_output, cli.quiet),
+                    start_future,
+                    follow_logs_until_quiescent(&client, &canonical_path, &services, abort_on_failure, progress_rx, raw_output, cli.quiet),
                 ).await?;
             }
         }
@@ -541,11 +520,7 @@ async fn foreground_with_logs(
     tokio::pin!(log_future);
     let mut request_done = false;
     loop {
-        // biased: poll log_future first so its internal subscribe_events() call
-        // queues the Subscribe request before request_future queues Start.
-        // This ensures the daemon sets up event forwarding before services begin.
         tokio::select! {
-            biased;
             result = &mut log_future => {
                 return result;
             }
@@ -573,14 +548,13 @@ async fn foreground_with_logs(
     }
 }
 
-/// Wait for all services to reach their target state (Started or Healthy) using Subscribe events.
+/// Wait for all services to reach their target state (Started or Healthy) using
+/// inline progress events from `Start { follow: true }`.
 ///
-/// Shows progress bars for each service. Also drives the start/restart future concurrently
-/// so the daemon processes the request while we watch for status changes.
+/// Shows progress bars for each service. Also drives the start future concurrently.
 /// Exits when all services have reached their target state or a terminal state (Failed/Stopped).
-async fn wait_until_ready_with_start(
+async fn wait_until_ready(
     mut progress_rx: mpsc::UnboundedReceiver<ServerEvent>,
-    sub_future: impl Future<Output = std::result::Result<Response, ClientError>>,
     start_future: impl Future<Output = std::result::Result<Response, ClientError>>,
     abort_on_failure: bool,
     client: &Client,
@@ -603,20 +577,14 @@ async fn wait_until_ready_with_start(
     let mut targets: HashMap<String, ServiceTarget> = HashMap::new();
     let mut finished: HashMap<String, bool> = HashMap::new();
     let mut has_unhandled_failure = false;
-    let mut received_any_event = false;
 
-    tokio::pin!(sub_future);
     tokio::pin!(start_future);
-    let mut sub_done = false;
     let mut start_done = false;
 
     loop {
         tokio::select! {
             biased;
             server_event = progress_rx.recv() => {
-                if server_event.is_some() {
-                    received_any_event = true;
-                }
                 match server_event {
                     Some(ServerEvent::Progress { event, .. }) => {
                         let pb = bars.entry(event.service.clone()).or_insert_with(|| {
@@ -742,46 +710,28 @@ async fn wait_until_ready_with_start(
                         }
                     }
                     None => {
-                        if !received_any_event && !quiet {
-                            // No events received — subscribe was likely denied (permission error).
-                            // Fall back to awaiting start response (like -d mode).
-                            eprintln!("Warning: event subscription unavailable (permission denied); falling back to detach mode");
-                        }
-                        // Subscribe channel closed — wait for start response as fallback
-                        if !start_done {
-                            let result = start_future.await;
-                            if let Ok(response) = result {
-                                handle_response(response);
-                            }
-                        }
+                        // Channel closed — start handler returned the response
                         break;
                     }
                 }
             }
-            // Poll Subscribe before Start to ensure the subscription is set up
-            // on the daemon side before services begin starting — otherwise,
-            // events like UnhandledFailure can be emitted before the subscriber
-            // is registered and get lost.
-            _ = &mut sub_future, if !sub_done => {
-                sub_done = true;
-                // Subscription ended; drain remaining events
-            }
             result = &mut start_future, if !start_done => {
                 start_done = true;
-                // Start request acknowledged by daemon.
-                // With spawn-all, this returns immediately — keep waiting for the Ready signal.
+                // Start+follow request completed (quiescence reached on daemon side).
                 // If the response is an error, handle it and exit.
                 if let Ok(Response::Error { message } | Response::PermissionDenied { message }) = &result {
                     eprintln!("Error: {}", message);
                     std::process::exit(1);
                 }
-                // Continue listening for Ready signal or progress events
+                // Drain remaining buffered events
             }
         }
     }
 
     if abort_on_failure && has_unhandled_failure {
-        eprintln!("Stopping all services due to unhandled failure...");
+        if !quiet {
+            eprintln!("Stopping all services due to unhandled failure...");
+        }
         if let Ok((progress_rx, response_future)) = client.stop(
             config_path.to_path_buf(),
             vec![],
@@ -1574,75 +1524,32 @@ enum QuiescenceSignal {
     Quiescent,
     /// A service failed with no handler.
     UnhandledFailure { service: String, exit_code: Option<i32> },
-    /// Subscribe was denied (permission error) — no quiescence detection available.
-    SubscribeDenied,
 }
 
 /// Event-driven quiescence monitor.
 ///
-/// Consumes progress events and sends signals when quiescence is reached
-/// or unhandled failures are detected. Requires at least one non-terminal
-/// observation (Waiting, Starting, etc.) before forwarding Quiescent, to
-/// prevent false positives when the daemon's `recheck_ready_quiescent()`
-/// fires during subscription setup before the Start request is processed.
-/// Without this guard, a second `kepler start` on an already-exited service
-/// would receive an immediate premature Quiescent and exit before the service
-/// even re-runs.
+/// Consumes inline progress events from `Start { follow: true }` and sends
+/// signals when quiescence is reached or unhandled failures are detected.
+/// With inline follow, the daemon's subscribe loop starts AFTER start_services()
+/// completes, so premature Quiescent is impossible — no guards needed.
 async fn quiescence_monitor(
     mut progress_rx: mpsc::UnboundedReceiver<ServerEvent>,
     signal_tx: mpsc::UnboundedSender<QuiescenceSignal>,
-    seen_non_terminal: Arc<AtomicBool>,
-    start_acknowledged: Arc<AtomicBool>,
 ) {
-    let mut received_any = false;
     while let Some(event) = progress_rx.recv().await {
-        received_any = true;
         match event {
             ServerEvent::UnhandledFailure { service, exit_code, .. } => {
                 let _ = signal_tx.send(QuiescenceSignal::UnhandledFailure { service, exit_code });
             }
             ServerEvent::Quiescent { .. } => {
-                // Forward Quiescent only when we're confident it's genuine:
-                // - start_acknowledged: the daemon processed the Start request,
-                //   so services have actually been started (even if they exited
-                //   before the subscription was set up).
-                // - seen_non_terminal: we observed a service transition through
-                //   Waiting/Starting/etc., confirming real activity.
-                // Without either, this is a premature Quiescent from the daemon's
-                // recheck_ready_quiescent() during subscription setup, which fires
-                // before the Start request is processed.
-                if start_acknowledged.load(Ordering::Acquire)
-                    || seen_non_terminal.load(Ordering::Relaxed)
-                {
-                    let _ = signal_tx.send(QuiescenceSignal::Quiescent);
-                    return;
-                }
-                // Premature — ignore and wait for the real one.
-            }
-            ServerEvent::Progress { event: ref pe, .. } => {
-                if matches!(pe.phase,
-                    ServicePhase::Waiting
-                    | ServicePhase::Starting
-                    | ServicePhase::Restarting
-                    | ServicePhase::Stopping
-                    | ServicePhase::Cleaning
-                    | ServicePhase::Pending { .. }
-                    | ServicePhase::HookStarted { .. }
-                ) {
-                    seen_non_terminal.store(true, Ordering::Relaxed);
-                }
+                let _ = signal_tx.send(QuiescenceSignal::Quiescent);
+                return;
             }
             _ => {}
         }
     }
-    // Channel closed: if we received events, subscription ended normally (config unloaded).
-    // If no events at all, the subscribe request was likely denied by ACL — the daemon
-    // returns an error response immediately which closes the progress channel.
-    if received_any {
-        let _ = signal_tx.send(QuiescenceSignal::Quiescent);
-    } else {
-        let _ = signal_tx.send(QuiescenceSignal::SubscribeDenied);
-    }
+    // Channel closed — start handler returned (quiescence already reached on daemon side)
+    let _ = signal_tx.send(QuiescenceSignal::Quiescent);
 }
 
 /// Follow logs until all services reach a terminal state (quiescent) or Ctrl+C.
@@ -1656,7 +1563,7 @@ async fn follow_logs_until_quiescent(
     config_path: &Path,
     services: &[String],
     abort_on_failure: bool,
-    start_acknowledged: Arc<AtomicBool>,
+    progress_rx: mpsc::UnboundedReceiver<ServerEvent>,
     raw: bool,
     quiet: bool,
 ) -> Result<()> {
@@ -1665,23 +1572,10 @@ async fn follow_logs_until_quiescent(
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
 
-    // Set up quiescence detection via subscription.
-    // If subscribe is denied by ACL, the progress channel closes immediately with
-    // no events; quiescence_monitor detects this and sends SubscribeDenied.
+    // Set up quiescence detection from inline progress events (Start { follow: true }).
+    // No separate Subscribe request needed — events arrive on the Start response stream.
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<QuiescenceSignal>();
-    let progress_rx = client.subscribe_events(
-        config_path.to_path_buf(),
-        if services.is_empty() { None } else { Some(services.to_vec()) },
-    ).await?;
-
-    // Shared flag: set by the quiescence monitor when it observes any service
-    // transition to a non-terminal phase (Waiting, Starting, …). Both the monitor
-    // and the fallback poll use this to avoid acting on premature quiescence that
-    // fires before the Start request is processed.
-    let seen_non_terminal = Arc::new(AtomicBool::new(false));
-
-    // Spawn quiescence monitor task
-    tokio::spawn(quiescence_monitor(progress_rx, signal_tx, Arc::clone(&seen_non_terminal), Arc::clone(&start_acknowledged)));
+    tokio::spawn(quiescence_monitor(progress_rx, signal_tx));
 
     // Subscribe to log-available notifications
     let log_notify_rx = client.subscribe_logs(config_path.to_path_buf()).await.ok();
@@ -1690,47 +1584,21 @@ async fn follow_logs_until_quiescent(
     let mut has_unhandled_failure = false;
     let mut abort_triggered = false;
 
-    // Wrap quiescence signal with a 2s fallback status poll for edge cases
-    // (all services already terminal at snapshot time, daemon bugs, empty config)
     let quiescence_future = {
-        let config_path = config_path.to_path_buf();
         async move {
             loop {
-                tokio::select! {
-                    biased;
-                    signal = signal_rx.recv() => {
-                        match signal {
-                            Some(QuiescenceSignal::UnhandledFailure { service, exit_code }) => {
-                                let code_str = exit_code.map(|c| format!(" (exit code {})", c)).unwrap_or_default();
-                                eprintln!("Unhandled failure: service '{}' failed{}", service, code_str);
-                                has_unhandled_failure = true;
-                                if abort_on_failure {
-                                    abort_triggered = true;
-                                    return (has_unhandled_failure, abort_triggered);
-                                }
-                            }
-                            Some(QuiescenceSignal::SubscribeDenied) => {
-                                // Subscribe was denied by ACL — quiescence detection unavailable.
-                                // Print a warning and wait forever (Ctrl+C is the only exit).
-                                if !quiet {
-                                    eprintln!("Warning: event subscription unavailable (permission denied); quiescence detection disabled (Ctrl+C to stop)");
-                                }
-                                std::future::pending::<()>().await;
-                            }
-                            Some(QuiescenceSignal::Quiescent) | None => {
-                                return (has_unhandled_failure, abort_triggered);
-                            }
-                        }
-                    }
-                    _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                        // Fallback: ask the daemon directly if all services are settled.
-                        // The daemon's startup_in_progress fence ensures this returns false
-                        // before services have begun starting — no CLI-side guards needed.
-                        if let Ok((_, resp_future)) = client.check_quiescence(config_path.clone())
-                            && let Ok(Response::Ok { data: Some(ResponseData::CheckResult(true)), .. }) = resp_future.await
-                        {
+                match signal_rx.recv().await {
+                    Some(QuiescenceSignal::UnhandledFailure { service, exit_code }) => {
+                        let code_str = exit_code.map(|c| format!(" (exit code {})", c)).unwrap_or_default();
+                        eprintln!("Unhandled failure: service '{}' failed{}", service, code_str);
+                        has_unhandled_failure = true;
+                        if abort_on_failure {
+                            abort_triggered = true;
                             return (has_unhandled_failure, abort_triggered);
                         }
+                    }
+                    Some(QuiescenceSignal::Quiescent) | None => {
+                        return (has_unhandled_failure, abort_triggered);
                     }
                 }
             }

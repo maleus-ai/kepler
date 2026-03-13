@@ -1058,7 +1058,7 @@ async fn test_degraded_mode_foreground_start_without_logs() -> E2eResult<()> {
     output.assert_success();
     harness.wait_for_service_status(&config_path, "degraded-svc", "stopped", Duration::from_secs(10)).await?;
 
-    // testuser2 starts foreground (no -d) — has start+subscribe+quiescence but NOT logs.
+    // testuser2 starts foreground (no -d) — has start+stop+status but NOT logs.
     // The CLI will hang in Ctrl+C wait after printing the warning, so we redirect
     // stderr to a temp file and poll it, then kill the background process.
     use std::os::unix::fs::PermissionsExt;
@@ -1194,9 +1194,9 @@ async fn test_degraded_mode_restart_follow_without_logs() -> E2eResult<()> {
     Ok(())
 }
 
-/// `start -d --wait` without `subscribe` right falls back to detach mode
+/// `start -d --wait` works without `subscribe` right (uses inline follow events)
 #[tokio::test]
-async fn test_degraded_mode_detach_wait_without_subscribe() -> E2eResult<()> {
+async fn test_detach_wait_without_subscribe() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_acl_degraded_nosubscribe")?;
 
@@ -1209,17 +1209,12 @@ async fn test_degraded_mode_detach_wait_without_subscribe() -> E2eResult<()> {
     output.assert_success();
     harness.wait_for_service_status(&config_path, "degraded-svc", "stopped", Duration::from_secs(10)).await?;
 
-    // testuser2 starts with -d --wait — has start+stop+status but NOT subscribe
+    // testuser2 starts with -d --wait — has start+stop+status but NOT subscribe.
+    // With inline follow, this should succeed without needing subscribe permission.
     let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "start", "-d", "--wait"]).await?;
 
-    // Should succeed (falls back to detach-only)
+    // Should succeed with progress bars (no subscribe needed)
     output.assert_success();
-
-    // Should contain warning about subscribe unavailable
-    assert!(
-        output.stderr_contains("event subscription unavailable") || output.stderr_contains("subscribe") && output.stderr_contains("unavailable"),
-        "Should warn about event subscription. stderr: {}", output.stderr
-    );
 
     harness.stop_daemon().await?;
     Ok(())

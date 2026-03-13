@@ -36,6 +36,8 @@ fn roundtrip_envelope_start() {
             no_deps: true,
             override_envs: None,
             hardening: None,
+
+            follow: false,
         },
     };
     let bytes = encode_envelope(&envelope).unwrap();
@@ -452,6 +454,8 @@ fn request_variant_names() {
             no_deps: false,
             override_envs: None,
             hardening: None,
+
+            follow: false,
         }.variant_name(),
         "Start"
     );
