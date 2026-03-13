@@ -1303,7 +1303,7 @@ impl TestLogHelper {
     pub fn tail(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
         let reader = SqliteLogReader::new(self.store.db_path().to_path_buf(), self.store.storage_mode());
         let services: Vec<String> = service.into_iter().map(String::from).collect();
-        reader.tail(count, &services, false)
+        reader.tail(count, &services, false, None)
     }
 
     /// Clear all logs

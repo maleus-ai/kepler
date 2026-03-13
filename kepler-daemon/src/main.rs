@@ -1244,10 +1244,23 @@ async fn handle_request(
             limit,
             no_hooks,
             filter,
+            sql,
             raw,
             tail,
         } => {
             use kepler_protocol::protocol::{StreamLogEntry, LogStreamData};
+
+            // Convert filter to SqlFragment: parse DSL or wrap raw SQL
+            let filter = match filter {
+                Some(f) if !sql => {
+                    match kepler_daemon::logs::log_query_dsl().parse(&f, 0) {
+                        Ok(frag) => Some(frag),
+                        Err(e) => return Response::error(format!("invalid filter: {}", e)),
+                    }
+                }
+                Some(f) => Some(kepler_daemon::query_dsl::SqlFragment::raw(f)),
+                None => None,
+            };
 
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -1272,7 +1285,7 @@ async fn handle_request(
 
             let (entries, has_more, last_id) = if tail {
                 // Tail mode: return last `limit` entries in chronological order
-                let entries = reader.tail(limit, &services, no_hooks);
+                let entries = reader.tail(limit, &services, no_hooks, filter.as_ref());
                 let last_id = entries.last().map(|e| e.id).unwrap_or(0);
                 (entries, has_pending, last_id)
             } else {
@@ -1284,7 +1297,7 @@ async fn handle_request(
                 };
 
                 // Read entries
-                let (entries, has_more) = match reader.after(effective_after_id, limit, &services, no_hooks, filter.as_deref()) {
+                let (entries, has_more) = match reader.after(effective_after_id, limit, &services, no_hooks, filter.as_ref()) {
                     Ok(r) => r,
                     Err(e) => return Response::error(format!("invalid filter: {}", e)),
                 };

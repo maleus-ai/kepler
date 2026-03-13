@@ -204,7 +204,8 @@ Rights are flat, explicit identifiers — there are no categories, no implicit c
 | `restart:env-override` | `restart` | Allow environment variable overrides on restart                       |
 | `restart:no-deps`      | `restart` | Allow `--no-deps` flag on restart                                     |
 | `recreate:hardening`   | `recreate`| Allow `--hardening` flag on recreate                                  |
-| `logs:search`          | `logs`    | Allow log filter expressions. See [Log Query Security](#log-query-security) |
+| `logs:search`          | `logs`    | Allow log filter expressions (DSL). See [Log Query Security](#log-query-security) |
+| `logs:search:sql`      | `logs`    | Allow raw SQL filter expressions. Requires `logs:search`. See [Log Query Security](#log-query-security) |
 
 **Built-in alias:**
 
@@ -265,7 +266,7 @@ kepler:
   acl:
     users:
       alice:
-        allow: [start, stop, restart, status, logs, logs:search]  # Service control + status + logs with search
+        allow: [start, stop, restart, status, logs, logs:search]  # Service control + status + logs with DSL search
       bob:
         allow: [status]                                            # Can only view status
     groups:
@@ -1066,28 +1067,39 @@ See [Lua Scripting](lua-scripting.md) for details.
 
 ## Log Query Security
 
-The `logs:search` sub-right allows users to filter logs using SQL WHERE expressions that are injected directly into the query. This is a powerful feature -- and because it exposes raw SQL surface area, Kepler enforces multiple defense layers to prevent abuse.
+Log filtering is gated by two sub-rights that control the query surface area available to users.
 
 ### Permission Rights
 
-Log access uses a base right and a sub-right:
+Log access uses a base right and two sub-rights:
 
 | Right | Required for | Description |
 |-------|-------------|-------------|
 | `logs` | `kepler logs`, `kepler logs --follow` | Read and stream logs (no filtering) |
-| `logs:search` | `kepler logs --filter "..."` | Query logs with a SQL WHERE expression. Requires `logs` base right. |
+| `logs:search` | `kepler logs --filter "..."` | Filter logs using the search DSL. Requires `logs` base right. |
+| `logs:search:sql` | `kepler logs --filter "..." --sql` | Filter logs using raw SQL WHERE clauses. Requires `logs:search`. |
 
-**Right separation rationale:** Plain log reading (`logs`) is a read-only operation with no user-controlled SQL. Filtered queries (`logs:search`) inject user-provided expressions into SQL, creating a larger attack surface. Operators who only need to grant log viewing can use `logs` without exposing the query interface.
+**Right separation rationale:** Plain log reading (`logs`) is a read-only operation with no user-controlled SQL. DSL filtering (`logs:search`) uses a parser that only produces safe SQL fragments — users cannot write arbitrary queries. Raw SQL filtering (`logs:search:sql`) exposes the full SQL surface area and should only be granted to trusted users.
 
 ### How Filters Work
 
-When a user provides a filter expression (e.g., `level = 'err' AND service = 'web'`), it is injected as a raw SQL WHERE fragment:
+#### DSL mode (default)
+
+When a user provides a DSL filter expression (e.g., `@service:web AND @level:error`), it is parsed by a recursive descent parser and converted to a safe SQL WHERE fragment. The parser only produces `=`, `LIKE`, `AND`, `OR`, `NOT`, `CAST`, and `json_extract` operations — users cannot inject arbitrary SQL.
+
+See [Log Management -- Log Filtering](log-management.md#log-filtering) for the full DSL syntax reference.
+
+#### Raw SQL mode (`--sql`)
+
+When a user passes the `--sql` flag, the filter expression is injected as a raw SQL WHERE fragment:
 
 ```sql
 SELECT ... FROM logs WHERE (level = 'err' AND service = 'web') AND id > ?1 ...
 ```
 
 Values are embedded directly in the SQL string -- filters are self-contained expressions, not parameterized queries. The `?` character is rejected in filters to prevent conflicts with internal bind parameters.
+
+Raw SQL mode requires both `logs:search` and `logs:search:sql` sub-rights.
 
 ### Defense Layers
 
@@ -1148,13 +1160,21 @@ All other functions are blocked. This prevents:
 
 ### Known Attack Vectors and Mitigations
 
-Operators granting `logs:search` should be aware of the following residual risks and how they are mitigated:
+#### DSL mode (`logs:search`)
+
+The DSL parser converts user queries into a restricted set of SQL operations. Users cannot inject arbitrary SQL through the DSL — the parser only produces `=`, `LIKE`, `AND`, `OR`, `NOT`, `CAST`, and `json_extract` calls. All user-provided values are properly quoted and escaped.
+
+**Residual risk:** Users can filter on any column in the `logs` table and search log content. This is by design. Grant `logs` without `logs:search` to users who should only view raw log output without query capabilities.
+
+#### Raw SQL mode (`logs:search:sql`)
+
+Operators granting `logs:search:sql` should be aware of the following residual risks and how they are mitigated:
 
 #### Information disclosure via log content
 
-**Risk:** A user with `logs:search` can write expressive queries against all columns of the `logs` table (`id`, `timestamp`, `service`, `hook`, `level`, `line`, `is_json`). They can extract substrings, filter by patterns, and use JSON functions to drill into structured log lines.
+**Risk:** A user with `logs:search:sql` can write expressive queries against all columns of the `logs` table (`id`, `timestamp`, `service`, `hook`, `level`, `line`, `attributes`). They can extract substrings, filter by patterns, and use JSON functions to drill into structured log lines.
 
-**Mitigation:** This is by design -- `logs:search` is intended for ad-hoc log analysis. Grant `logs` without `logs:search` to users who should only view raw log output without query capabilities. The authorizer ensures queries cannot reach tables other than `logs`.
+**Mitigation:** This is by design -- `logs:search:sql` is intended for advanced ad-hoc log analysis. Grant `logs:search` (without `logs:search:sql`) for DSL-only filtering, or grant `logs` alone to users who should only view raw log output. The authorizer ensures queries cannot reach tables other than `logs`.
 
 #### CPU exhaustion via expensive queries
 
@@ -1192,14 +1212,24 @@ kepler:
         allow: [status, logs]              # Can view status and logs, cannot use --filter
 ```
 
-#### Grant full log access including search
+#### Grant DSL log search (recommended for most users)
 
 ```yaml
 kepler:
   acl:
     groups:
       analysts:
-        allow: [status, logs, logs:search] # logs:search requires logs base right
+        allow: [status, logs, logs:search] # DSL filtering only, no raw SQL
+```
+
+#### Grant full log access including raw SQL
+
+```yaml
+kepler:
+  acl:
+    groups:
+      power-users:
+        allow: [status, logs, logs:search, logs:search:sql]  # DSL + raw SQL filtering
 ```
 
 #### Grant everything via the all alias
@@ -1209,7 +1239,7 @@ kepler:
   acl:
     groups:
       ops-team:
-        allow: [all]                       # Every right including logs:search
+        allow: [all]                       # Every right including logs:search:sql
 ```
 
 ---

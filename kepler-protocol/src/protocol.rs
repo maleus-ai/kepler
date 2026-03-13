@@ -125,10 +125,15 @@ pub enum Request {
         /// Whether to exclude hook log entries
         #[serde(default)]
         no_hooks: bool,
-        /// Optional filter expression (DSL). Requires `logs:search` sub-right.
-        /// Example: `level='err' AND (service='web' OR service='api')`
+        /// Optional filter expression. Requires `logs:search` sub-right.
+        /// By default, this is a DSL expression (e.g. `service:web AND level:error`).
+        /// Set `sql` to true to pass a raw SQL WHERE fragment instead.
         #[serde(default)]
         filter: Option<String>,
+        /// If true, `filter` is a raw SQL WHERE fragment (legacy mode).
+        /// If false (default), `filter` is a DSL expression.
+        #[serde(default)]
+        sql: bool,
         /// Raw mode: only return log line content, skip metadata
         #[serde(default)]
         raw: bool,
