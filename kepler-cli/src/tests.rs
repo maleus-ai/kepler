@@ -220,7 +220,7 @@ async fn test_follow_shutdown_stops_reads() {
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
-    // Shutdown resolves immediately — the biased select picks it up after first read
+    // Shutdown resolves immediately — the biased select picks it up before the first read
     let exit_reason = stream_logs(
         &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, async {},
         never_quiescent(),
@@ -229,8 +229,7 @@ async fn test_follow_shutdown_stops_reads() {
     ).await.unwrap();
 
     assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
-    assert_eq!(collected.len(), 1, "Only one batch before shutdown");
-    assert_eq!(collected[0], "line-0");
+    assert!(collected.is_empty(), "No batches consumed — shutdown fires before first read");
 
 }
 
@@ -683,12 +682,13 @@ async fn test_follow_config_not_loaded_shutdown() {
 #[tokio::test(start_paused = true)]
 async fn test_follow_shutdown_handles_starting_services() {
     let mock = MockClient::new();
-    // One batch then shutdown fires
+    // One batch queued but shutdown fires first
     mock.push_response(stream_response(&[("svc", "init")], true));
 
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
+    // Shutdown resolves immediately — biased select picks it up before any read
     let exit_reason = stream_logs(
         &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, async {},
         never_quiescent(),
@@ -697,7 +697,7 @@ async fn test_follow_shutdown_handles_starting_services() {
     ).await.unwrap();
 
     assert_eq!(exit_reason, StreamExitReason::ShutdownRequested);
-    assert_eq!(collected, vec!["init"]);
+    assert!(collected.is_empty(), "No batches consumed — shutdown fires before first read");
 }
 
 /// Quiescence fires after logs are received — exits cleanly after draining.
