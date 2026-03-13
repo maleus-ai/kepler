@@ -1224,7 +1224,7 @@ async fn handle_request(
 
         Request::LogsStream {
             config_path,
-            service,
+            services,
             after_id,
             from_end,
             limit,
@@ -1258,7 +1258,7 @@ async fn handle_request(
 
             let (entries, has_more, last_id) = if tail {
                 // Tail mode: return last `limit` entries in chronological order
-                let entries = reader.tail(limit, service.as_deref(), no_hooks);
+                let entries = reader.tail(limit, &services, no_hooks);
                 let last_id = entries.last().map(|e| e.id).unwrap_or(0);
                 (entries, has_pending, last_id)
             } else {
@@ -1270,7 +1270,7 @@ async fn handle_request(
                 };
 
                 // Read entries
-                let (entries, has_more) = match reader.after(effective_after_id, limit, service.as_deref(), no_hooks, filter.as_deref()) {
+                let (entries, has_more) = match reader.after(effective_after_id, limit, &services, no_hooks, filter.as_deref()) {
                     Ok(r) => r,
                     Err(e) => return Response::error(format!("invalid filter: {}", e)),
                 };

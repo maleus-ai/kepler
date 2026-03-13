@@ -152,7 +152,7 @@ fn required_rights_recreate_without_hardening() {
 fn required_rights_logs_with_filter() {
     let req = Request::LogsStream {
         config_path: "/test".into(),
-        service: None,
+        services: vec![],
         after_id: None,
         from_end: false,
         limit: 1000,
@@ -170,7 +170,7 @@ fn required_rights_logs_with_filter() {
 fn required_rights_logs_without_filter() {
     let req = Request::LogsStream {
         config_path: "/test".into(),
-        service: None,
+        services: vec![],
         after_id: None,
         from_end: false,
         limit: 1000,

@@ -209,7 +209,6 @@ async fn run() -> Result<()> {
             } else {
                 // Foreground: fire start (don't await response), follow logs until quiescent.
                 // send_request enqueues the request; we race the response against log following.
-                let log_service = if services.len() == 1 { Some(services[0].as_str()) } else { None };
                 let (_start_progress_rx, start_future) = client.send_request(
                     kepler_protocol::protocol::Request::Start {
                         config_path: canonical_path.clone(),
@@ -232,7 +231,7 @@ async fn run() -> Result<()> {
                 };
                 foreground_with_logs(
                     wrapped_start,
-                    follow_logs_until_quiescent(&client, &canonical_path, log_service, abort_on_failure, start_acknowledged, raw_output, cli.quiet),
+                    follow_logs_until_quiescent(&client, &canonical_path, &services, abort_on_failure, start_acknowledged, raw_output, cli.quiet),
                 ).await?;
             }
         }
@@ -286,7 +285,7 @@ async fn run() -> Result<()> {
                 }
             } else if follow {
                 // --follow: Progress bars then log following (Ctrl+C just exits, services keep running)
-                let log_service = if services.len() == 1 { Some(services[0].clone()) } else { None };
+                let log_services = services.clone();
                 let (progress_rx, restart_future) = client.restart(
                     canonical_path.clone(),
                     services,
@@ -296,7 +295,7 @@ async fn run() -> Result<()> {
                 )?;
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);
-                match handle_logs(&client, canonical_path, log_service, true, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, false, false, raw_output).await {
+                match handle_logs(&client, canonical_path, log_services, true, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, false, false, raw_output).await {
                     Ok(()) => {}
                     Err(CliError::PermissionDenied(_)) => {
                         if !cli.quiet {
@@ -326,7 +325,7 @@ async fn run() -> Result<()> {
         }
 
         Commands::Logs {
-            service,
+            services,
             follow,
             head,
             tail,
@@ -340,7 +339,7 @@ async fn run() -> Result<()> {
             } else {
                 (false, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE)
             };
-            handle_logs(&client, canonical_path, service, follow, lines, is_tail, no_hook, raw_output).await?;
+            handle_logs(&client, canonical_path, services, follow, lines, is_tail, no_hook, raw_output).await?;
         }
 
         Commands::PS { .. } => {
@@ -1287,7 +1286,7 @@ trait FollowClient {
     async fn logs_stream(
         &self,
         config_path: &Path,
-        service: Option<&str>,
+        services: &[String],
         after_id: Option<i64>,
         from_end: bool,
         limit: usize,
@@ -1302,7 +1301,7 @@ impl FollowClient for Client {
     async fn logs_stream(
         &self,
         config_path: &Path,
-        service: Option<&str>,
+        services: &[String],
         after_id: Option<i64>,
         from_end: bool,
         limit: usize,
@@ -1311,7 +1310,7 @@ impl FollowClient for Client {
         raw: bool,
         tail: bool,
     ) -> std::result::Result<Response, ClientError> {
-        let (_rx, fut) = Client::logs_stream(self, config_path, service, after_id, from_end, limit, no_hooks, filter, raw, tail)?;
+        let (_rx, fut) = Client::logs_stream(self, config_path, services, after_id, from_end, limit, no_hooks, filter, raw, tail)?;
         fut.await
     }
 }
@@ -1344,7 +1343,7 @@ enum StreamExitReason {
 /// Non-generic parameters for `stream_logs`.
 struct StreamParams<'a> {
     config_path: &'a Path,
-    service: Option<&'a str>,
+    services: &'a [String],
     no_hooks: bool,
     mode: StreamMode,
     /// Maximum entries per batch.
@@ -1384,7 +1383,7 @@ async fn stream_logs(
 
     loop {
         let log_response = client.logs_stream(
-            params.config_path, params.service, last_id,
+            params.config_path, params.services, last_id,
             from_end && last_id.is_none(), params.limit, params.no_hooks,
             params.filter, params.raw, params.tail,
         ).await;
@@ -1647,7 +1646,7 @@ async fn quiescence_monitor(
 async fn follow_logs_until_quiescent(
     client: &Client,
     config_path: &Path,
-    service: Option<&str>,
+    services: &[String],
     abort_on_failure: bool,
     start_acknowledged: Arc<AtomicBool>,
     raw: bool,
@@ -1664,7 +1663,7 @@ async fn follow_logs_until_quiescent(
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<QuiescenceSignal>();
     let progress_rx = client.subscribe_events(
         config_path.to_path_buf(),
-        service.map(|s| vec![s.to_string()]),
+        if services.is_empty() { None } else { Some(services.to_vec()) },
     ).await?;
 
     // Shared flag: set by the quiescence monitor when it observes any service
@@ -1743,7 +1742,7 @@ async fn follow_logs_until_quiescent(
         client,
         StreamParams {
             config_path,
-            service,
+            services,
             no_hooks: false,
             mode: StreamMode::UntilQuiescent,
             limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE,
@@ -1772,7 +1771,7 @@ async fn follow_logs_until_quiescent(
         }
         let _ = tokio::signal::ctrl_c().await;
         eprintln!("\nGracefully stopping...");
-        match client.stop(config_path.to_path_buf(), service.iter().map(|s| s.to_string()).collect(), false, None) {
+        match client.stop(config_path.to_path_buf(), services.to_vec(), false, None) {
             Ok((progress_rx, response_future)) => {
                 tokio::select! {
                     biased;
@@ -1808,7 +1807,7 @@ async fn follow_logs_until_quiescent(
         }
         match client.stop(
             config_path.to_path_buf(),
-            service.iter().map(|s| s.to_string()).collect(),
+            services.to_vec(),
             false,
             None,
         ) {
@@ -1858,7 +1857,7 @@ async fn follow_logs_until_quiescent(
 async fn handle_logs(
     client: &Client,
     config_path: PathBuf,
-    service: Option<String>,
+    services: Vec<String>,
     follow: bool,
     lines: usize,
     tail: bool,
@@ -1883,7 +1882,7 @@ async fn handle_logs(
         client,
         StreamParams {
             config_path: &config_path,
-            service: service.as_deref(),
+            services: &services,
             no_hooks,
             mode: stream_mode,
             limit: lines,

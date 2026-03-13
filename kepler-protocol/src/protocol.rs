@@ -103,8 +103,9 @@ pub enum Request {
     LogsStream {
         /// Path to the config file
         config_path: PathBuf,
-        /// Service name (None = all services)
-        service: Option<String>,
+        /// Services to show logs for (empty = all services)
+        #[serde(default)]
+        services: Vec<String>,
         /// Read entries after this row ID (None = from start).
         /// The client passes back `last_id` from the previous response.
         #[serde(default)]
