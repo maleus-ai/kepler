@@ -104,8 +104,8 @@ async fn run() -> Result<()> {
     };
 
     // Handle PS with --all flag (doesn't require config)
-    if let Commands::PS { all: true } = &cli.command {
-        return handle_ps_all(&client).await;
+    if let Commands::PS { all: true, json } = &cli.command {
+        return handle_ps_all(&client, *json).await;
     }
 
     // Handle prune command (doesn't require config)
@@ -321,8 +321,8 @@ async fn run() -> Result<()> {
             handle_logs(&client, canonical_path, services, follow, lines, is_tail, no_hook, raw_output).await?;
         }
 
-        Commands::PS { .. } => {
-            handle_ps(&client, canonical_path).await?;
+        Commands::PS { json, .. } => {
+            handle_ps(&client, canonical_path, json).await?;
         }
 
         Commands::Daemon { .. } => {
@@ -948,7 +948,7 @@ fn start_daemon_detached(daemon_path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn handle_ps(client: &Client, config_path: PathBuf) -> Result<()> {
+async fn handle_ps(client: &Client, config_path: PathBuf, json: bool) -> Result<()> {
     let (_progress_rx, response_future) = client.status(Some(config_path.clone()))?;
     let response = response_future.await?;
 
@@ -957,6 +957,11 @@ async fn handle_ps(client: &Client, config_path: PathBuf) -> Result<()> {
             data: Some(ResponseData::ServiceStatus(services)),
             ..
         } => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&services)?);
+                return Ok(());
+            }
+
             if services.is_empty() {
                 println!("No services found in {}", config_path.display());
                 return Ok(());
@@ -969,6 +974,10 @@ async fn handle_ps(client: &Client, config_path: PathBuf) -> Result<()> {
             std::process::exit(1);
         }
         _ => {
+            if json {
+                println!("{{}}");
+                return Ok(());
+            }
             println!("No services found");
         }
     }
@@ -976,7 +985,7 @@ async fn handle_ps(client: &Client, config_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn handle_ps_all(client: &Client) -> Result<()> {
+async fn handle_ps_all(client: &Client, json: bool) -> Result<()> {
     let (_progress_rx, response_future) = client.status(None)?;
     let response = response_future.await?;
 
@@ -985,6 +994,11 @@ async fn handle_ps_all(client: &Client) -> Result<()> {
             data: Some(ResponseData::MultiConfigStatus(configs)),
             ..
         } => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&configs)?);
+                return Ok(());
+            }
+
             if configs.is_empty() {
                 println!("No configs loaded");
                 return Ok(());
@@ -994,6 +1008,10 @@ async fn handle_ps_all(client: &Client) -> Result<()> {
             Ok(())
         }
         Response::Ok { message, .. } => {
+            if json {
+                println!("[]");
+                return Ok(());
+            }
             println!("{}", message.unwrap_or_default());
             Ok(())
         }
