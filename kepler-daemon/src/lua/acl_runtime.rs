@@ -532,7 +532,16 @@ pub fn build_authorizer_context(
         Request::SubscribeLogs { .. } => ("logs", HashMap::new()),
         Request::CheckQuiescence { .. } => ("quiescence", HashMap::new()),
         Request::CheckReadiness { .. } => ("readiness", HashMap::new()),
-        Request::MonitorMetrics { .. } => ("monitor", HashMap::new()),
+        Request::MonitorMetrics { service, filter, .. } => {
+            let mut params = HashMap::new();
+            if let Some(s) = service {
+                params.insert("service".into(), ParamValue::String(s.clone()));
+            }
+            if let Some(f) = filter {
+                params.insert("filter".into(), ParamValue::String(f.clone()));
+            }
+            ("monitor", params)
+        }
         // Rights-free requests — no authorizer evaluation
         Request::Ping
         | Request::ListConfigs

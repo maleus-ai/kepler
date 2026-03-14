@@ -5,7 +5,6 @@
 //! - `LogWriter` - Per-service writer that sends entries through the store
 //! - `SqliteLogReader` - Read-only reader (opens a new connection per query)
 
-pub mod filter;
 pub mod store;
 mod log_reader;
 mod log_writer;
@@ -17,7 +16,7 @@ pub use store::{DEFAULT_BATCH_SIZE, LogStoreHandle};
 
 use std::sync::Arc;
 
-use crate::query_dsl::{QueryDsl, Field};
+use crate::query::{QueryDsl, Field};
 
 /// Build the log-specific query DSL schema.
 pub fn log_query_dsl() -> QueryDsl {
