@@ -16,6 +16,8 @@ use tracing::{debug, warn};
 use crate::config::{MonitorConfig, StorageMode};
 use crate::config_actor::ConfigActorHandle;
 use crate::containment::ContainmentManager;
+use crate::query::{QueryDsl, Field, SqlFragment, SqlValue};
+use crate::query::filter;
 use kepler_protocol::protocol::MonitorMetricEntry;
 
 /// A single metrics sample for one service.
@@ -289,6 +291,80 @@ pub fn query_history(
                 .collect()
         }
     };
+    Ok(entries)
+}
+
+/// Build the monitor-specific query DSL schema.
+pub fn monitor_query_dsl() -> QueryDsl {
+    QueryDsl::builder()
+        .field(Field::text("service"))
+        .field(Field::int("timestamp"))
+        .field(Field::real("cpu_percent"))
+        .field(Field::int("memory_rss"))
+        .field(Field::int("memory_vss"))
+        .build()
+}
+
+/// Query metrics with a DSL or raw SQL filter.
+///
+/// Builds a WHERE clause combining optional `service`, optional `since`,
+/// and the user-provided filter fragment. Applies safety safeguards
+/// (authorizer, resource limits, timeout) before execution.
+pub fn query_filtered(
+    conn: &Connection,
+    service: Option<&str>,
+    since: Option<i64>,
+    limit: Option<usize>,
+    frag: &SqlFragment,
+) -> anyhow::Result<Vec<MonitorMetricEntry>> {
+    let limit = limit.unwrap_or(10_000);
+    let mut conditions = Vec::new();
+    let mut bind: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(svc) = service {
+        bind.push(Box::new(svc.to_string()));
+        conditions.push(format!("service = ?{}", bind.len()));
+    }
+    if let Some(since_ts) = since {
+        bind.push(Box::new(since_ts));
+        conditions.push(format!("timestamp >= ?{}", bind.len()));
+    }
+
+    // Integrate filter fragment with shifted bind params
+    let shifted_sql = frag.sql_with_offset(bind.len());
+    conditions.push(format!("({})", shifted_sql));
+    for param in &frag.params {
+        match param {
+            SqlValue::Text(s) => bind.push(Box::new(s.clone())),
+            SqlValue::Integer(i) => bind.push(Box::new(*i)),
+            SqlValue::Real(f) => bind.push(Box::new(*f)),
+        }
+    }
+
+    bind.push(Box::new(limit as i64));
+    let limit_param = bind.len();
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+
+    let sql = format!(
+        "SELECT timestamp, service, cpu_percent, memory_rss, memory_vss, pids \
+         FROM metrics {} ORDER BY timestamp ASC LIMIT ?{}",
+        where_clause, limit_param,
+    );
+
+    // Apply safety safeguards for the user-provided filter
+    filter::apply_filter_safeguards(conn, filter::FILTER_QUERY_TIMEOUT, &["metrics"]);
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|p| p.as_ref()).collect();
+    let entries: Vec<MonitorMetricEntry> = stmt
+        .query_map(params_refs.as_slice(), parse_metric_row)?
+        .filter_map(|r| r.ok())
+        .collect();
     Ok(entries)
 }
 
