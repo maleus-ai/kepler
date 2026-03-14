@@ -17,6 +17,20 @@ pub use store::{DEFAULT_BATCH_SIZE, LogStoreHandle};
 
 use std::sync::Arc;
 
+use crate::query_dsl::{QueryDsl, Field};
+
+/// Build the log-specific query DSL schema.
+pub fn log_query_dsl() -> QueryDsl {
+    QueryDsl::builder()
+        .field(Field::text("service"))
+        .field(Field::text("level"))
+        .field(Field::text("message").alias("line").fts())
+        .field(Field::text("hook"))
+        .field(Field::int("timestamp"))
+        .attributes("attributes")
+        .build()
+}
+
 /// A single log line with metadata
 #[derive(Debug, Clone)]
 pub struct LogLine {

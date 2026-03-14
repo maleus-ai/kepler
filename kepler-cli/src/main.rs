@@ -274,7 +274,7 @@ async fn run() -> Result<()> {
                 )?;
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);
-                match handle_logs(&client, canonical_path, log_services, true, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, false, false, raw_output).await {
+                match handle_logs(&client, canonical_path, log_services, true, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, false, false, raw_output, None, false).await {
                     Ok(()) => {}
                     Err(CliError::PermissionDenied(_)) => {
                         if !cli.quiet {
@@ -310,6 +310,8 @@ async fn run() -> Result<()> {
             tail,
             no_hook,
             raw: raw_output,
+            filter,
+            sql,
         } => {
             let (is_tail, lines) = if let Some(n) = head {
                 (false, n)
@@ -318,7 +320,7 @@ async fn run() -> Result<()> {
             } else {
                 (false, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE)
             };
-            handle_logs(&client, canonical_path, services, follow, lines, is_tail, no_hook, raw_output).await?;
+            handle_logs(&client, canonical_path, services, follow, lines, is_tail, no_hook, raw_output, filter, sql).await?;
         }
 
         Commands::PS { json, .. } => {
@@ -1260,6 +1262,7 @@ trait FollowClient {
         limit: usize,
         no_hooks: bool,
         filter: Option<&str>,
+        sql: bool,
         raw: bool,
         tail: bool,
     ) -> std::result::Result<Response, ClientError>;
@@ -1275,10 +1278,11 @@ impl FollowClient for Client {
         limit: usize,
         no_hooks: bool,
         filter: Option<&str>,
+        sql: bool,
         raw: bool,
         tail: bool,
     ) -> std::result::Result<Response, ClientError> {
-        let (_rx, fut) = Client::logs_stream(self, config_path, services, after_id, from_end, limit, no_hooks, filter, raw, tail)?;
+        let (_rx, fut) = Client::logs_stream(self, config_path, services, after_id, from_end, limit, no_hooks, filter, sql, raw, tail)?;
         fut.await
     }
 }
@@ -1316,8 +1320,10 @@ struct StreamParams<'a> {
     mode: StreamMode,
     /// Maximum entries per batch.
     limit: usize,
-    /// Optional filter DSL expression (requires `logs:search` scope).
+    /// Optional filter expression (requires `logs:search` scope).
     filter: Option<&'a str>,
+    /// If true, `filter` is a raw SQL WHERE fragment instead of DSL.
+    sql: bool,
     /// Raw mode: only fetch and output log line content.
     raw: bool,
     /// Tail mode: return last `limit` entries (one-shot).
@@ -1360,7 +1366,7 @@ async fn stream_logs(
             result = client.logs_stream(
                 params.config_path, params.services, last_id,
                 from_end && last_id.is_none(), params.limit, params.no_hooks,
-                params.filter, params.raw, params.tail,
+                params.filter, params.sql, params.raw, params.tail,
             ) => result,
         };
 
@@ -1641,6 +1647,7 @@ async fn follow_logs_until_quiescent(
             mode: StreamMode::UntilQuiescent,
             limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE,
             filter: None,
+            sql: false,
             raw,
             tail: false,
         },
@@ -1757,6 +1764,8 @@ async fn handle_logs(
     tail: bool,
     no_hooks: bool,
     raw: bool,
+    filter: Option<String>,
+    sql: bool,
 ) -> Result<()> {
     let use_color = !raw && colored::control::SHOULD_COLORIZE.should_colorize();
     let mut color_map: HashMap<String, Color> = HashMap::new();
@@ -1780,7 +1789,8 @@ async fn handle_logs(
             no_hooks,
             mode: stream_mode,
             limit: lines,
-            filter: None, // TODO: wire --filter CLI flag
+            filter: filter.as_deref(),
+            sql,
             raw,
             tail,
         },

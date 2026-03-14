@@ -297,6 +297,9 @@ kepler logs --tail 20           # Last 20 lines
 kepler logs --no-hook           # Exclude hook output
 kepler logs backend             # Logs for a specific service
 kepler logs web api             # Logs for multiple services
+kepler logs -F '@level:error'    # Filter with search DSL
+kepler logs -F '@service:web AND @latency:>100'
+kepler logs -F "level = 'err'" --sql   # Raw SQL filter
 ```
 
 | Flag | Description |
@@ -306,8 +309,10 @@ kepler logs web api             # Logs for multiple services
 | `--tail <N>` | Show last N lines |
 | `--no-hook` | Exclude hook log output |
 | `--raw` | Output raw log lines without formatting (no timestamp, level, service name, color) |
+| `-F, --filter <EXPR>` | Filter logs using a [search expression](log-management.md#log-filtering) |
+| `--sql` | Treat `--filter` as a raw SQL WHERE clause (requires `logs:search:sql` right) |
 
-See [Log Management](log-management.md) for log storage and configuration details.
+See [Log Management -- Log Filtering](log-management.md#log-filtering) for the full search DSL reference.
 
 ### `kepler prune`
 

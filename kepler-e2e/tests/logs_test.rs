@@ -480,3 +480,197 @@ async fn test_logs_no_hook_filter() -> E2eResult<()> {
 
     Ok(())
 }
+
+/// Test DSL filter via --filter CLI flag
+///
+/// This test verifies that:
+/// 1. The --filter flag with DSL syntax filters logs correctly
+/// 2. Service filter (service:name) works
+/// 3. Level filter (level:err) works
+/// 4. Full-text search works
+/// 5. Combined filters with AND/OR work
+/// 6. Negation (-) works
+/// 7. Wildcard search works
+/// 8. Raw SQL filter with --sql flag works
+#[tokio::test]
+async fn test_logs_dsl_filter() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_logs_dsl_filter")?;
+
+    harness.start_daemon().await?;
+
+    // Start the services
+    let output = harness.start_services(&config_path).await?;
+    output.assert_success();
+
+    // Wait for all services to produce logs
+    for service in ["dsl-web", "dsl-api", "dsl-worker"] {
+        harness
+            .wait_for_service_status(&config_path, service, "running", Duration::from_secs(10))
+            .await?;
+    }
+
+    // Wait for log content from all services
+    harness.wait_for_log_content(&config_path, "DSL_WEB_STDOUT", Duration::from_secs(5)).await?;
+    harness.wait_for_log_content(&config_path, "DSL_API_STDOUT", Duration::from_secs(5)).await?;
+    harness.wait_for_log_content(&config_path, "DSL_WORKER_MSG", Duration::from_secs(5)).await?;
+
+    // Small sleep to ensure stderr messages are flushed
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Test 1: Filter by service name using DSL
+    let logs = harness.get_logs_with_filter(&config_path, "@service:dsl-api", 100).await?;
+    logs.assert_success();
+    assert!(
+        logs.stdout_contains("DSL_API_STDOUT"),
+        "Filter by service should show api stdout. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        logs.stdout_contains("DSL_API_ERROR"),
+        "Filter by service should show api stderr. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        !logs.stdout_contains("DSL_WEB_"),
+        "Filter by service should NOT show web logs. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        !logs.stdout_contains("DSL_WORKER_"),
+        "Filter by service should NOT show worker logs. stdout: {}",
+        logs.stdout
+    );
+
+    // Test 2: Filter by level (err = stderr)
+    let logs = harness.get_logs_with_filter(&config_path, "@level:err", 100).await?;
+    logs.assert_success();
+    assert!(
+        logs.stdout_contains("DSL_WEB_ERROR"),
+        "Level:err should show web error. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        logs.stdout_contains("DSL_API_ERROR"),
+        "Level:err should show api error. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        !logs.stdout_contains("DSL_WORKER_MSG"),
+        "Level:err should NOT show worker stdout. stdout: {}",
+        logs.stdout
+    );
+
+    // Test 3: Full-text search
+    let logs = harness.get_logs_with_filter(&config_path, "DSL_WORKER_MSG", 100).await?;
+    logs.assert_success();
+    assert!(
+        logs.stdout_contains("DSL_WORKER_MSG"),
+        "Full-text search should find worker message. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        !logs.stdout_contains("DSL_WEB_"),
+        "Full-text search should NOT match other services. stdout: {}",
+        logs.stdout
+    );
+
+    // Test 4: Combined filter with AND
+    let logs = harness.get_logs_with_filter(&config_path, "@service:dsl-web AND @level:err", 100).await?;
+    logs.assert_success();
+    assert!(
+        logs.stdout_contains("DSL_WEB_ERROR"),
+        "Combined AND filter should show web error. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        !logs.stdout_contains("DSL_WEB_STDOUT"),
+        "Combined AND filter should NOT show web stdout. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        !logs.stdout_contains("DSL_API_"),
+        "Combined AND filter should NOT show api logs. stdout: {}",
+        logs.stdout
+    );
+
+    // Test 5: OR filter
+    let logs = harness.get_logs_with_filter(&config_path, "@service:dsl-web OR @service:dsl-api", 100).await?;
+    logs.assert_success();
+    assert!(
+        logs.stdout_contains("DSL_WEB_"),
+        "OR filter should show web logs. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        logs.stdout_contains("DSL_API_"),
+        "OR filter should show api logs. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        !logs.stdout_contains("DSL_WORKER_"),
+        "OR filter should NOT show worker logs. stdout: {}",
+        logs.stdout
+    );
+
+    // Test 6: Negation filter
+    let logs = harness.get_logs_with_filter(&config_path, "NOT @service:dsl-worker", 100).await?;
+    logs.assert_success();
+    assert!(
+        logs.stdout_contains("DSL_WEB_"),
+        "Negation should show web logs. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        logs.stdout_contains("DSL_API_"),
+        "Negation should show api logs. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        !logs.stdout_contains("DSL_WORKER_"),
+        "Negation should NOT show worker logs. stdout: {}",
+        logs.stdout
+    );
+
+    // Test 7: Wildcard full-text search
+    let logs = harness.get_logs_with_filter(&config_path, "DSL_*_ERROR", 100).await?;
+    logs.assert_success();
+    assert!(
+        logs.stdout_contains("DSL_WEB_ERROR"),
+        "Wildcard should match web error. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        logs.stdout_contains("DSL_API_ERROR"),
+        "Wildcard should match api error. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        !logs.stdout_contains("DSL_WORKER_MSG"),
+        "Wildcard should NOT match worker message. stdout: {}",
+        logs.stdout
+    );
+
+    // Test 8: Raw SQL filter with --sql flag
+    let logs = harness.get_logs_with_sql_filter(&config_path, "level = 'err'", 100).await?;
+    logs.assert_success();
+    assert!(
+        logs.stdout_contains("DSL_WEB_ERROR"),
+        "SQL filter should show web error. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        logs.stdout_contains("DSL_API_ERROR"),
+        "SQL filter should show api error. stdout: {}",
+        logs.stdout
+    );
+    assert!(
+        !logs.stdout_contains("DSL_WORKER_MSG"),
+        "SQL filter should NOT show worker stdout. stdout: {}",
+        logs.stdout
+    );
+
+    harness.stop_daemon().await?;
+
+    Ok(())
+}

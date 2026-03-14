@@ -1,0 +1,7 @@
+services:
+  dsl-web:
+    command: ["sh", "-c", "echo DSL_WEB_STDOUT; echo DSL_WEB_ERROR >&2; sleep 300"]
+  dsl-api:
+    command: ["sh", "-c", "echo DSL_API_STDOUT; echo DSL_API_ERROR >&2; sleep 300"]
+  dsl-worker:
+    command: ["sh", "-c", "echo DSL_WORKER_MSG; sleep 300"]
