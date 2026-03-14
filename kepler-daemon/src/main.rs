@@ -1315,6 +1315,7 @@ async fn handle_request(
                 let empty_level: Arc<str> = Arc::from("");
                 for log_line in entries {
                     compact_entries.push(StreamLogEntry {
+                        id: log_line.id,
                         service_id: 0,
                         line: log_line.line,
                         timestamp: 0,
@@ -1343,6 +1344,7 @@ async fn handle_request(
                         }
                     };
                     compact_entries.push(StreamLogEntry {
+                        id: log_line.id,
                         service_id,
                         line: log_line.line,
                         timestamp: log_line.timestamp,

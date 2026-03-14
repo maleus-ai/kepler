@@ -325,6 +325,9 @@ pub struct PrunedConfigInfo {
 /// Uses a u16 service index into the service_table instead of a full service name per entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamLogEntry {
+    /// Database row ID (monotonically increasing, unique per entry)
+    #[serde(default)]
+    pub id: i64,
     /// Index into LogStreamData::service_table
     pub service_id: u16,
     /// Log line content

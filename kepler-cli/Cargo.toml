@@ -14,7 +14,6 @@ clap = { version = "4.5.54", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-serde_json = "1.0"
 kepler-protocol = { path = "../kepler-protocol" }
 kepler-daemon = { path = "../kepler-daemon" }
 thiserror = "2.0"
@@ -25,6 +24,12 @@ colored = "2"
 indicatif = "0.17"
 tabled = "0.17"
 libc = "0.2"
+ratatui = "0.29"
+crossterm = "0.28"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+ctrlc = "3.4"
+arboard = "3"
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["full", "process", "test-util"] }
