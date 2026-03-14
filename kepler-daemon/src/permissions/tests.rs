@@ -568,6 +568,66 @@ fn check_rights_logs_sql_flag_without_filter_no_extra_rights() {
 }
 
 // =========================================================================
+// MonitorMetrics sub-rights (search, search:sql)
+// =========================================================================
+
+fn monitor_req(filter: Option<&str>, sql: bool) -> Request {
+    Request::MonitorMetrics {
+        config_path: "/test".into(),
+        service: None,
+        since: None,
+        limit: None,
+        filter: filter.map(|s| s.to_string()),
+        sql,
+    }
+}
+
+#[test]
+fn check_rights_monitor_no_filter_allowed_with_base_only() {
+    let granted: HashSet<&'static str> = ["monitor"].into();
+    assert!(check_rights(&granted, &monitor_req(None, false)).is_ok());
+}
+
+#[test]
+fn check_rights_monitor_dsl_filter_allowed_with_monitor_search() {
+    let granted: HashSet<&'static str> = ["monitor", "monitor:search"].into();
+    assert!(check_rights(&granted, &monitor_req(Some("@cpu_percent:>50"), false)).is_ok());
+}
+
+#[test]
+fn check_rights_monitor_dsl_filter_denied_without_monitor_search() {
+    let granted: HashSet<&'static str> = ["monitor"].into();
+    let err = check_rights(&granted, &monitor_req(Some("@cpu_percent:>50"), false)).unwrap_err();
+    assert!(err.contains("monitor:search"), "expected monitor:search denial, got: {}", err);
+}
+
+#[test]
+fn check_rights_monitor_sql_filter_allowed_with_both_sub_rights() {
+    let granted: HashSet<&'static str> = ["monitor", "monitor:search", "monitor:search:sql"].into();
+    assert!(check_rights(&granted, &monitor_req(Some("cpu_percent > 50"), true)).is_ok());
+}
+
+#[test]
+fn check_rights_monitor_sql_filter_denied_without_sql_sub_right() {
+    let granted: HashSet<&'static str> = ["monitor", "monitor:search"].into();
+    let err = check_rights(&granted, &monitor_req(Some("cpu_percent > 50"), true)).unwrap_err();
+    assert!(err.contains("monitor:search:sql"), "expected monitor:search:sql denial, got: {}", err);
+}
+
+#[test]
+fn check_rights_monitor_sql_filter_denied_without_any_search_right() {
+    let granted: HashSet<&'static str> = ["monitor"].into();
+    let err = check_rights(&granted, &monitor_req(Some("cpu_percent > 50"), true)).unwrap_err();
+    assert!(err.contains("monitor:search"), "expected monitor:search denial, got: {}", err);
+}
+
+#[test]
+fn check_rights_monitor_sql_flag_without_filter_no_extra_rights() {
+    let granted: HashSet<&'static str> = ["monitor"].into();
+    assert!(check_rights(&granted, &monitor_req(None, true)).is_ok());
+}
+
+// =========================================================================
 // Alias validation
 // =========================================================================
 

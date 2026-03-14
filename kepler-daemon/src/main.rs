@@ -1258,7 +1258,7 @@ async fn handle_request(
                         Err(e) => return Response::error(format!("invalid filter: {}", e)),
                     }
                 }
-                Some(f) => Some(kepler_daemon::query_dsl::SqlFragment::raw(f)),
+                Some(f) => Some(kepler_daemon::query::SqlFragment::raw(f)),
                 None => None,
             };
 
@@ -1536,7 +1536,19 @@ async fn handle_request(
             Response::ok_with_data(ResponseData::UserRights(rights))
         }
 
-        Request::MonitorMetrics { config_path, service, since, limit } => {
+        Request::MonitorMetrics { config_path, service, since, limit, filter, sql } => {
+            // Convert filter to SqlFragment: parse DSL or wrap raw SQL
+            let filter = match filter {
+                Some(f) if !sql => {
+                    match kepler_daemon::monitor::monitor_query_dsl().parse(&f, 0) {
+                        Ok(frag) => Some(frag),
+                        Err(e) => return Response::error(format!("invalid filter: {}", e)),
+                    }
+                }
+                Some(f) => Some(kepler_daemon::query::SqlFragment::raw(f)),
+                None => None,
+            };
+
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
@@ -1550,9 +1562,18 @@ async fn handle_request(
             };
             match tokio::task::spawn_blocking(move || {
                 let conn = kepler_daemon::monitor::open_monitor_db_readonly(&state_dir)?;
-                match since {
-                    Some(since_ts) => kepler_daemon::monitor::query_history(&conn, service.as_deref(), since_ts, limit),
-                    None => kepler_daemon::monitor::query_latest(&conn, service.as_deref()),
+                match filter {
+                    Some(frag) => kepler_daemon::monitor::query_filtered(
+                        &conn, service.as_deref(), since, limit, &frag,
+                    ),
+                    None => match since {
+                        Some(since_ts) => kepler_daemon::monitor::query_history(
+                            &conn, service.as_deref(), since_ts, limit,
+                        ),
+                        None => kepler_daemon::monitor::query_latest(
+                            &conn, service.as_deref(),
+                        ),
+                    },
                 }
             }).await {
                 Ok(Ok(entries)) => Response::ok_with_data(ResponseData::MonitorMetrics(entries)),

@@ -6,7 +6,8 @@ use std::sync::Arc;
 use super::store::open_readonly;
 use super::LogLine;
 use crate::config::StorageMode;
-use crate::query_dsl::{SqlFragment, SqlValue};
+use crate::query::{SqlFragment, SqlValue};
+use crate::query::filter;
 
 /// SQL-based log reader. Creates a fresh read-only connection per query
 /// (required for NFS correctness, cheap on local WAL).
@@ -25,7 +26,7 @@ impl LogReader {
         // Validate raw SQL filters before doing any I/O (DSL-generated ones are safe)
         if let Some(frag) = filter {
             if frag.params.is_empty() {
-                if super::filter::validate_filter(&frag.sql).is_err() {
+                if filter::validate_filter(&frag.sql).is_err() {
                     return Vec::new();
                 }
             }
@@ -38,7 +39,7 @@ impl LogReader {
 
         // Apply authorizer + resource limits when user filter is present
         if filter.is_some() {
-            super::filter::apply_filter_safeguards(&conn, super::filter::FILTER_QUERY_TIMEOUT);
+            filter::apply_filter_safeguards(&conn, filter::FILTER_QUERY_TIMEOUT, &["logs"]);
         }
 
         let (where_clause, bind) = build_filter(services, no_hooks, filter);
@@ -57,7 +58,7 @@ impl LogReader {
         // Validate raw SQL filters before doing any I/O (DSL-generated ones are safe)
         if let Some(frag) = filter {
             if frag.params.is_empty() {
-                if super::filter::validate_filter(&frag.sql).is_err() {
+                if filter::validate_filter(&frag.sql).is_err() {
                     return Vec::new();
                 }
             }
@@ -70,7 +71,7 @@ impl LogReader {
 
         // Apply authorizer + resource limits when user filter is present
         if filter.is_some() {
-            super::filter::apply_filter_safeguards(&conn, super::filter::FILTER_QUERY_TIMEOUT);
+            filter::apply_filter_safeguards(&conn, filter::FILTER_QUERY_TIMEOUT, &["logs"]);
         }
 
         let (where_clause, bind) = build_filter(services, no_hooks, filter);
@@ -101,7 +102,7 @@ impl LogReader {
         // Validate raw SQL filters before doing any I/O (DSL-generated ones are safe)
         if let Some(frag) = filter {
             if frag.params.is_empty() {
-                super::filter::validate_filter(&frag.sql)?;
+                filter::validate_filter(&frag.sql)?;
             }
         }
 
@@ -112,7 +113,7 @@ impl LogReader {
 
         // Apply authorizer + resource limits when user filter is present
         if filter.is_some() {
-            super::filter::apply_filter_safeguards(&conn, super::filter::FILTER_QUERY_TIMEOUT);
+            filter::apply_filter_safeguards(&conn, filter::FILTER_QUERY_TIMEOUT, &["logs"]);
         }
 
         let (filter_clause, mut bind) = build_filter(services, no_hooks, filter);
