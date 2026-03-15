@@ -92,9 +92,33 @@ async fn run() -> Result<()> {
             eprintln!("Then log out and back in for the change to take effect.");
             std::process::exit(2);
         }
-        Err(kepler_protocol::errors::ClientError::Connect(_)) => {
-            eprintln!("Daemon is not running. Start it with: kepler daemon start");
+        Err(kepler_protocol::errors::ClientError::Connect(ref e))
+            if e.kind() == std::io::ErrorKind::NotFound =>
+        {
+            eprintln!("Cannot connect to daemon socket: {}", daemon_socket.display());
+            eprintln!("The socket file does not exist. The daemon is likely not running.");
+            eprintln!("Start it with: kepler daemon start");
             eprintln!("Or use: kepler daemon start -d (to run in background)");
+            if std::env::var("KEPLER_SOCKET_PATH").is_ok() {
+                eprintln!("\nNote: KEPLER_SOCKET_PATH is set. Make sure it matches the path used by the daemon.");
+            }
+            std::process::exit(2);
+        }
+        Err(kepler_protocol::errors::ClientError::Connect(ref e))
+            if e.kind() == std::io::ErrorKind::ConnectionRefused =>
+        {
+            eprintln!("Cannot connect to daemon socket: {}", daemon_socket.display());
+            eprintln!("The socket exists but the connection was refused. The daemon may have crashed.");
+            eprintln!("Try restarting it with: kepler daemon start -d");
+            std::process::exit(2);
+        }
+        Err(kepler_protocol::errors::ClientError::Connect(_)) => {
+            eprintln!("Cannot connect to daemon socket: {}", daemon_socket.display());
+            eprintln!("The daemon may not be running, or the socket path may be incorrect.");
+            eprintln!("Start it with: kepler daemon start -d");
+            if std::env::var("KEPLER_SOCKET_PATH").is_ok() {
+                eprintln!("\nNote: KEPLER_SOCKET_PATH is set. Make sure it matches the path used by the daemon.");
+            }
             std::process::exit(2);
         }
         Err(e) => return Err(e.into()),
