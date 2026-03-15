@@ -1526,7 +1526,13 @@ async fn handle_request(
 
             let (owner_uid, acl) = match registry.get(&config_path) {
                 Some(handle) => (handle.owner_uid(), handle.acl().cloned()),
-                None => (None, None),
+                None => match compute_state_dir(&config_path) {
+                    Some(state_dir) => match get_unloaded_acl_entry(&state_dir, &unloaded_acl_cache) {
+                        Ok(entry) => (entry.owner_uid, entry.acl),
+                        Err(_) => (None, None),
+                    },
+                    None => (None, None),
+                },
             };
             let rights: Vec<String> = match kepler_daemon::acl::effective_rights(&auth_ctx, owner_uid, acl.as_ref()) {
                 Ok(Some(r)) => r.into_iter().map(|r| r.to_string()).collect(),
