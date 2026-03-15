@@ -564,7 +564,7 @@ async fn fetch_logs(client: &Client, config_path: &PathBuf, app: &mut TopApp) {
             cursor,
             false,
             chunk_limit,
-            true,
+            false,
             user_filter.as_deref(),
             user_is_sql,
             false,
