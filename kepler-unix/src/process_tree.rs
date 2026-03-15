@@ -46,7 +46,27 @@ pub fn force_kill_process_tree(pid: u32) -> Result<(), nix::Error> {
 /// Check whether a process is still alive (signal 0 existence check).
 #[cfg(unix)]
 pub fn process_is_alive(pid: u32) -> bool {
-    nix::sys::signal::kill(Pid::from_raw(pid as i32), None).is_ok()
+    match nix::sys::signal::kill(Pid::from_raw(pid as i32), None) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::EPERM) => true, // process exists, caller lacks permission
+        Err(_) => false,                        // ESRCH or other: process gone
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alive_for_current_process() {
+        let pid = std::process::id();
+        assert!(process_is_alive(pid));
+    }
+
+    #[test]
+    fn not_alive_for_nonexistent_pid() {
+        assert!(!process_is_alive(i32::MAX as u32));
+    }
 }
 
 /// Query process UID and start time via sysinfo.
