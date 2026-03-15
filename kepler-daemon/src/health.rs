@@ -94,7 +94,7 @@ async fn health_check_loop(
                 handle.owner_uid(),
                 &context,
             ) {
-                error!("Health check for {} blocked: {}", service_name, e);
+                debug!("Health check for {} blocked: {}", service_name, e);
                 // Skip this health check iteration — don't crash the loop
                 sleep(config.interval).await;
                 continue;
@@ -206,7 +206,7 @@ async fn health_check_loop(
                     }
                 } else {
                     // Still counting toward threshold
-                    warn!(
+                    debug!(
                         "Health check failed for {} ({}/{})",
                         service_name, update.failures, config.retries
                     );
@@ -388,7 +388,7 @@ async fn run_health_check(
             Ok(result) => {
                 let passed = result.exit_code == Some(0);
                 if !passed {
-                    warn!(
+                    debug!(
                         "Health check exited with code {:?}{}",
                         result.exit_code,
                         match &result.combined_output {
@@ -400,7 +400,7 @@ async fn run_health_check(
                 passed
             }
             Err(e) => {
-                warn!("Health check command failed to execute: {}", e);
+                debug!("Health check command failed to execute: {}", e);
                 false
             }
         }
@@ -410,7 +410,7 @@ async fn run_health_check(
     match result {
         Ok(passed) => passed,
         Err(_) => {
-            warn!("Health check timed out");
+            debug!("Health check timed out");
             false
         }
     }
