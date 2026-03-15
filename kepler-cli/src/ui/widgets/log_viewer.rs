@@ -127,17 +127,17 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut TopApp) {
         let display_level = match entry.level.as_str() {
             "trace" => "TRACE",
             "debug" => "DEBUG",
-            "info" | "out" => "INFO",
+            "info" => "INFO",
             "warn" => "WARN",
-            "error" | "err" => "ERROR",
+            "error" => "ERROR",
             "fatal" => "FATAL",
             _ => "INFO",
         };
 
         let level_color = match entry.level.as_str() {
-            "err" | "error" | "fatal" => theme.error,
+            "error" | "fatal" => theme.error,
             "warn" | "warning" => theme.warning,
-            "info" | "out" => theme.accent,
+            "info" => theme.accent,
             "debug" => theme.teal,
             "trace" => theme.fg_dim,
             _ => theme.fg_dim,

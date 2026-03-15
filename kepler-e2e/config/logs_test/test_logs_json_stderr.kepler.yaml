@@ -1,0 +1,3 @@
+services:
+  json-stderr:
+    command: ["sh", "-c", "echo JSON_STDOUT_MSG; echo JSON_STDERR_MSG >&2; sleep 300"]

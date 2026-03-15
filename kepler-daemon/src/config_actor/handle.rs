@@ -682,17 +682,17 @@ impl ConfigActorHandle {
         }
     }
 
-    /// Clear logs by prefix
-    pub async fn clear_service_logs_prefix(&self, prefix: &str) {
+    /// Clear hook logs for a service
+    pub async fn clear_service_hook_logs(&self, service: &str) {
         if self
             .tx
-            .send(ConfigCommand::ClearServiceLogsPrefix {
-                prefix: prefix.to_string(),
+            .send(ConfigCommand::ClearServiceHookLogs {
+                service: service.to_string(),
             })
             .await
             .is_err()
         {
-            warn!("Config actor closed, cannot send ClearServiceLogsPrefix");
+            warn!("Config actor closed, cannot send ClearServiceHookLogs");
         }
     }
 

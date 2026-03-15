@@ -1000,9 +1000,9 @@ impl TopApp {
                 continue;
             }
             let cat = match entry.level.as_str() {
-                "err" | "error" | "fatal" => 0,
+                "error" | "fatal" => 0,
                 "warn" | "warning" => 1,
-                "info" | "out" => 2,
+                "info" => 2,
                 "debug" => 3,
                 "trace" => 4,
                 _ => 2,

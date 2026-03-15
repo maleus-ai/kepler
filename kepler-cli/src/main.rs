@@ -182,7 +182,7 @@ async fn run() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Start { services, detach, wait, timeout, no_deps, override_envs, refresh_env, raw: raw_output, abort_on_failure, no_abort_on_failure, hardening } => {
+        Commands::Start { services, detach, wait, timeout, no_deps, override_envs, refresh_env, raw: raw_output, json: json_output, abort_on_failure, no_abort_on_failure, hardening } => {
             let override_envs = build_override_envs(override_envs, refresh_env, &sys_env);
             if no_deps && services.is_empty() {
                 eprintln!("Error: --no-deps requires specifying at least one service");
@@ -235,7 +235,7 @@ async fn run() -> Result<()> {
                 )?;
                 foreground_with_logs(
                     start_future,
-                    follow_logs_until_quiescent(&client, &canonical_path, &services, abort_on_failure, progress_rx, raw_output, cli.quiet),
+                    follow_logs_until_quiescent(&client, &canonical_path, &services, abort_on_failure, progress_rx, raw_output, json_output, cli.quiet),
                 ).await?;
             }
         }
@@ -299,7 +299,7 @@ async fn run() -> Result<()> {
                 )?;
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);
-                match handle_logs(&client, canonical_path, log_services, true, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, false, false, raw_output, None, false).await {
+                match handle_logs(&client, canonical_path, log_services, true, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, false, false, raw_output, false, None, false).await {
                     Ok(()) => {}
                     Err(CliError::PermissionDenied(_)) => {
                         if !cli.quiet {
@@ -335,6 +335,7 @@ async fn run() -> Result<()> {
             tail,
             no_hook,
             raw: raw_output,
+            json: json_output,
             filter,
             sql,
         } => {
@@ -345,7 +346,7 @@ async fn run() -> Result<()> {
             } else {
                 (false, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE)
             };
-            handle_logs(&client, canonical_path, services, follow, lines, is_tail, no_hook, raw_output, filter, sql).await?;
+            handle_logs(&client, canonical_path, services, follow, lines, is_tail, no_hook, raw_output, json_output, filter, sql).await?;
         }
 
         Commands::PS { json, .. } => {
@@ -1590,6 +1591,36 @@ fn write_log_batch_raw(entries: &[StreamLogEntry]) {
     }
 }
 
+/// Write log entries as JSONL (one JSON object per line, OTEL/Datadog compatible).
+fn write_log_batch_json(service_table: &[Arc<str>], entries: &[StreamLogEntry]) {
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
+    for entry in entries {
+        let service_name = &service_table[entry.service_id as usize];
+        let mut obj = serde_json::Map::new();
+        if let Some(dt) = DateTime::<Utc>::from_timestamp_millis(entry.timestamp) {
+            obj.insert("timestamp".into(), serde_json::Value::String(
+                dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ));
+        }
+        obj.insert("level".into(), serde_json::Value::String(entry.level.to_string()));
+        obj.insert("msg".into(), serde_json::Value::String(entry.line.clone()));
+        obj.insert("service".into(), serde_json::Value::String(service_name.to_string()));
+        if let Some(ref hook) = entry.hook {
+            obj.insert("hook".into(), serde_json::Value::String(hook.to_string()));
+        }
+        if let Some(ref attrs) = entry.attributes {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(attrs.as_ref()) {
+                for (k, v) in map {
+                    obj.entry(k).or_insert(v);
+                }
+            }
+        }
+        let _ = serde_json::to_writer(&mut out, &serde_json::Value::Object(obj));
+        let _ = writeln!(out);
+    }
+}
+
 /// Signal sent by the quiescence monitor.
 enum QuiescenceSignal {
     /// All services settled — nothing more will change.
@@ -1637,9 +1668,10 @@ async fn follow_logs_until_quiescent(
     abort_on_failure: bool,
     progress_rx: mpsc::UnboundedReceiver<ServerEvent>,
     raw: bool,
+    json: bool,
     quiet: bool,
 ) -> Result<()> {
-    let use_color = !raw && colored::control::SHOULD_COLORIZE.should_colorize();
+    let use_color = !raw && !json && colored::control::SHOULD_COLORIZE.should_colorize();
     let mut color_map: HashMap<String, Color> = HashMap::new();
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
@@ -1703,7 +1735,9 @@ async fn follow_logs_until_quiescent(
         quiescence_wrapper,
         log_notify_rx,
         |service_table, entries| {
-            if raw {
+            if json {
+                write_log_batch_json(service_table, entries);
+            } else if raw {
                 write_log_batch_raw(entries);
             } else {
                 write_log_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
@@ -1812,10 +1846,11 @@ async fn handle_logs(
     tail: bool,
     no_hooks: bool,
     raw: bool,
+    json: bool,
     filter: Option<String>,
     sql: bool,
 ) -> Result<()> {
-    let use_color = !raw && colored::control::SHOULD_COLORIZE.should_colorize();
+    let use_color = !raw && !json && colored::control::SHOULD_COLORIZE.should_colorize();
     let mut color_map: HashMap<String, Color> = HashMap::new();
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
@@ -1846,7 +1881,9 @@ async fn handle_logs(
         std::future::pending(),
         log_notify_rx,
         |service_table, entries| {
-            if raw {
+            if json {
+                write_log_batch_json(service_table, entries);
+            } else if raw {
                 write_log_batch_raw(entries);
             } else {
                 write_log_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
@@ -1918,9 +1955,9 @@ fn format_log_level(level: &str) -> &'static str {
     match level {
         "trace" => "TRACE",
         "debug" => "DEBUG",
-        "info" | "out" => "INFO",
+        "info" => "INFO",
         "warn" => "WARN",
-        "error" | "err" => "ERROR",
+        "error" => "ERROR",
         "fatal" => "FATAL",
         _ => "INFO",
     }
@@ -1931,9 +1968,9 @@ fn level_color(level: &str) -> Color {
     match level {
         "trace" => Color::BrightBlack,   // gray
         "debug" => Color::Blue,          // blue
-        "info" | "out" => Color::Green,  // green
+        "info" => Color::Green,          // green
         "warn" => Color::Yellow,         // yellow
-        "error" | "err" => Color::Red,   // red
+        "error" => Color::Red,           // red
         "fatal" => Color::BrightRed,     // bright red
         _ => Color::Green,
     }

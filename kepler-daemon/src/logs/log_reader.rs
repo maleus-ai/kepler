@@ -192,9 +192,9 @@ impl LogReader {
         store.clear_service(service);
     }
 
-    /// Clear hook logs for a service prefix.
-    pub fn clear_service_prefix(&self, store: &super::store::LogStoreHandle, prefix: &str) {
-        store.clear_service_prefix(prefix);
+    /// Clear hook logs for a service.
+    pub fn clear_service_hooks(&self, store: &super::store::LogStoreHandle, service: &str) {
+        store.clear_service_hooks(service);
     }
 
     /// Get the database path.
@@ -250,8 +250,7 @@ fn build_filter(
     }
 
     if no_hooks {
-        // Hook logs use dotted service names like "web.pre_start.0"
-        conditions.push("service NOT LIKE '%.%'".to_string());
+        conditions.push("hook IS NULL".to_string());
     }
 
     // Timestamp bounds — injected server-side, no `logs:search` right required.

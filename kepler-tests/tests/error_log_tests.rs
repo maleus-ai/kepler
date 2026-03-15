@@ -122,7 +122,7 @@ services:
     let entries = reader.tail(100, &["test".to_string()], true, None, None, None);
     let stderr_entries: Vec<_> = entries
         .iter()
-        .filter(|e| &*e.level == "err")
+        .filter(|e| &*e.level == "error")
         .collect();
 
     assert!(
@@ -194,7 +194,7 @@ async fn test_hook_failure_logged_to_stderr() {
     let entries = reader.tail(100, &["test".to_string()], true, None, None, None);
     let stderr_entries: Vec<_> = entries
         .iter()
-        .filter(|e| &*e.level == "err")
+        .filter(|e| &*e.level == "error")
         .collect();
 
     assert!(
@@ -261,7 +261,7 @@ services:
     let entries = reader.tail(100, &["test".to_string()], true, None, None, None);
     let stderr_entries: Vec<_> = entries
         .iter()
-        .filter(|e| &*e.level == "err")
+        .filter(|e| &*e.level == "error")
         .collect();
 
     assert!(

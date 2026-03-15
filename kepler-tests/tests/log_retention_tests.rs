@@ -34,8 +34,8 @@ async fn test_default_clears_logs_on_stop() {
     logs.clear();
 
     // Add some log entries
-    logs.push("default_clear_test", "log line 1".to_string(), "out");
-    logs.push("default_clear_test", "log line 2".to_string(), "out");
+    logs.push("default_clear_test", "log line 1".to_string(), "info");
+    logs.push("default_clear_test", "log line 2".to_string(), "info");
 
     // Verify logs exist
     let entries = logs.tail(10, Some("default_clear_test"));
@@ -82,8 +82,8 @@ async fn test_retain_logs_on_stop() {
     logs.clear();
 
     // Add some log entries
-    logs.push("retain_test", "log line 1".to_string(), "out");
-    logs.push("retain_test", "log line 2".to_string(), "out");
+    logs.push("retain_test", "log line 1".to_string(), "info");
+    logs.push("retain_test", "log line 2".to_string(), "info");
 
     // Verify logs exist
     let entries = logs.tail(10, Some("retain_test"));
@@ -228,11 +228,11 @@ let logs = harness.logs().await.unwrap();
 
     // Push some logs with small delays to ensure distinct timestamps
     // (new architecture writes stdout/stderr to separate files, merged by timestamp)
-    logs.push("buffer_ops_test", "line 1".to_string(), "out");
+    logs.push("buffer_ops_test", "line 1".to_string(), "info");
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    logs.push("buffer_ops_test", "line 2".to_string(), "err");
+    logs.push("buffer_ops_test", "line 2".to_string(), "error");
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    logs.push("buffer_ops_test", "line 3".to_string(), "out");
+    logs.push("buffer_ops_test", "line 3".to_string(), "info");
 
     // Test tail
     let entries = logs.tail(10, Some("buffer_ops_test"));
@@ -274,14 +274,14 @@ let logs = harness.logs().await.unwrap();
 
     // Add delay between writes to ensure distinct timestamps
     // (new architecture writes stdout/stderr to separate files, merged by timestamp)
-    logs.push("stream_types_test", "stdout line".to_string(), "out");
+    logs.push("stream_types_test", "stdout line".to_string(), "info");
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    logs.push("stream_types_test", "stderr line".to_string(), "err");
+    logs.push("stream_types_test", "stderr line".to_string(), "error");
 
     let entries = logs.tail(10, Some("stream_types_test"));
     assert_eq!(entries.len(), 2);
-    assert_eq!(&*entries[0].level, "out");
-    assert_eq!(&*entries[1].level, "err");
+    assert_eq!(&*entries[0].level, "info");
+    assert_eq!(&*entries[1].level, "error");
 
     harness.stop_service("stream_types_test").await.unwrap();
 }
@@ -309,9 +309,9 @@ let logs = harness.logs().await.unwrap();
     logs.clear();
 
     // Add logs for each service
-    logs.push("multi_svc1", "s1 line 1".to_string(), "out");
-    logs.push("multi_svc2", "s2 line 1".to_string(), "out");
-    logs.push("multi_svc1", "s1 line 2".to_string(), "out");
+    logs.push("multi_svc1", "s1 line 1".to_string(), "info");
+    logs.push("multi_svc2", "s2 line 1".to_string(), "info");
+    logs.push("multi_svc1", "s1 line 2".to_string(), "info");
 
     // Check service1 logs
     let s1_entries = logs.tail(10, Some("multi_svc1"));
@@ -335,13 +335,13 @@ let logs = harness.logs().await.unwrap();
     harness.stop_all().await.unwrap();
 }
 
-/// clear_service_prefix clears hook logs
+/// clear_service_hooks clears hook logs
 #[tokio::test]
-async fn test_clear_service_prefix() {
+async fn test_clear_service_hooks() {
     let temp_dir = TempDir::new().unwrap();
 
     let config = TestConfigBuilder::new()
-        .add_service("prefix_svc", TestServiceBuilder::long_running().build())  // Unique name
+        .add_service("prefix_svc", TestServiceBuilder::long_running().build())
         .build();
 
     let harness = TestDaemonHarness::new(config, temp_dir.path())
@@ -350,33 +350,29 @@ async fn test_clear_service_prefix() {
 
     harness.start_service("prefix_svc").await.unwrap();
 
-let logs = harness.logs().await.unwrap();
+    let logs = harness.logs().await.unwrap();
 
     // Clear any existing logs first
     logs.clear();
 
     // Add regular service logs
-    logs.push("prefix_svc", "service log".to_string(), "out");
+    logs.push("prefix_svc", "service log".to_string(), "info");
 
-    // Add hook logs (using the format from hooks.rs)
-    logs.push("prefix_svc.pre_start", "hook log 1".to_string(), "out");
-    logs.push("prefix_svc.pre_stop", "hook log 2".to_string(), "out");
+    // Add hook logs (service name + hook column)
+    logs.push_hook("prefix_svc", "pre_start", "hook log 1".to_string(), "info");
+    logs.push_hook("prefix_svc", "pre_stop", "hook log 2".to_string(), "info");
 
     // Verify all logs exist
     let all_entries = logs.tail(10, None);
     assert_eq!(all_entries.len(), 3, "Should have 3 log entries: 1 service + 2 hooks");
 
-    // Clear hook logs using prefix
-    logs.clear_service_prefix("prefix_svc.");
+    // Clear hook logs
+    logs.clear_service_hooks("prefix_svc");
 
     // Service logs should remain
     let service_entries = logs.tail(10, Some("prefix_svc"));
     assert_eq!(service_entries.len(), 1, "Service log should remain");
     assert_eq!(service_entries[0].line, "service log");
-
-    // Hook logs should be cleared
-    let hook_entries = logs.tail(10, Some("prefix_svc.pre_start"));
-    assert_eq!(hook_entries.len(), 0, "Hook logs should be cleared");
 
     harness.stop_service("prefix_svc").await.unwrap();
 }
@@ -406,8 +402,8 @@ let logs = harness.logs().await.unwrap();
     assert_eq!(seq1, 0);
 
     // Add some logs
-    logs.push("entries_since_test", "line 1".to_string(), "out");
-    logs.push("entries_since_test", "line 2".to_string(), "out");
+    logs.push("entries_since_test", "line 1".to_string(), "info");
+    logs.push("entries_since_test", "line 2".to_string(), "info");
 
     let seq2 = logs.current_sequence();
     assert_eq!(seq2, seq1 + 2);
@@ -417,7 +413,7 @@ let logs = harness.logs().await.unwrap();
     assert_eq!(entries.len(), 2);
 
     // Add more logs
-    logs.push("entries_since_test", "line 3".to_string(), "out");
+    logs.push("entries_since_test", "line 3".to_string(), "info");
 
     // Get entries since seq2
     let entries = logs.entries_since(seq2, Some("entries_since_test"));
@@ -450,8 +446,8 @@ let logs = harness.logs().await.unwrap();
     logs.clear();
 
     // Add logs for both services
-    logs.push("clearall_svc1", "s1 log".to_string(), "out");
-    logs.push("clearall_svc2", "s2 log".to_string(), "out");
+    logs.push("clearall_svc1", "s1 log".to_string(), "info");
+    logs.push("clearall_svc2", "s2 log".to_string(), "info");
 
     // Verify logs exist
     let all_entries = logs.tail(10, None);
