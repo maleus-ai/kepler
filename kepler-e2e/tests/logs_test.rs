@@ -542,8 +542,8 @@ async fn test_logs_dsl_filter() -> E2eResult<()> {
         logs.stdout
     );
 
-    // Test 2: Filter by level (err = stderr)
-    let logs = harness.get_logs_with_filter(&config_path, "@level:err", 100).await?;
+    // Test 2: Filter by level (error = stderr)
+    let logs = harness.get_logs_with_filter(&config_path, "@level:error", 100).await?;
     logs.assert_success();
     assert!(
         logs.stdout_contains("DSL_WEB_ERROR"),
@@ -576,7 +576,7 @@ async fn test_logs_dsl_filter() -> E2eResult<()> {
     );
 
     // Test 4: Combined filter with AND
-    let logs = harness.get_logs_with_filter(&config_path, "@service:dsl-web AND @level:err", 100).await?;
+    let logs = harness.get_logs_with_filter(&config_path, "@service:dsl-web AND @level:error", 100).await?;
     logs.assert_success();
     assert!(
         logs.stdout_contains("DSL_WEB_ERROR"),
@@ -652,7 +652,7 @@ async fn test_logs_dsl_filter() -> E2eResult<()> {
     );
 
     // Test 8: Raw SQL filter with --sql flag
-    let logs = harness.get_logs_with_sql_filter(&config_path, "level = 'err'", 100).await?;
+    let logs = harness.get_logs_with_sql_filter(&config_path, "level = 'error'", 100).await?;
     logs.assert_success();
     assert!(
         logs.stdout_contains("DSL_WEB_ERROR"),

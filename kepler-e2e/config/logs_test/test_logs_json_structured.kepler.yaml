@@ -1,0 +1,3 @@
+services:
+  json-structured:
+    command: ["sh", "-c", "echo '{\"msg\":\"structured log\",\"level\":\"warn\",\"request_id\":\"abc-123\",\"http.status\":200}'; sleep 300"]

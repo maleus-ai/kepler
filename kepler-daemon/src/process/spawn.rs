@@ -120,6 +120,8 @@ pub enum BlockingMode {
     WithLogging {
         log_store: Option<LogStoreHandle>,
         log_service_name: String,
+        /// Hook name (set for lifecycle hooks, None for regular commands)
+        hook: Option<String>,
         /// Whether to store stdout output
         store_stdout: bool,
         /// Whether to store stderr output
@@ -461,6 +463,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
         BlockingMode::WithLogging {
             log_store,
             log_service_name,
+            hook,
             store_stdout,
             store_stderr,
             output_capture,
@@ -470,8 +473,8 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
                 child.stdout.take(),
                 if store_stdout { log_store.clone() } else { None },
                 log_service_name.clone(),
-                "out",
-                None,
+                "info",
+                hook.clone(),
                 store_stdout,
                 true,
                 output_capture,
@@ -480,8 +483,8 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
                 child.stderr.take(),
                 if store_stderr { log_store } else { None },
                 log_service_name,
-                "err",
-                None,
+                "error",
+                hook,
                 store_stderr,
                 true,
                 None, // No output capture on stderr
@@ -530,7 +533,7 @@ pub async fn spawn_detached(
             Some(stdout),
             Some(log_store.clone()),
             log_service_name.clone(),
-            "out",
+            "info",
             None,
             store_stdout,
             false,
@@ -543,7 +546,7 @@ pub async fn spawn_detached(
             Some(stderr),
             Some(log_store),
             log_service_name,
-            "err",
+            "error",
             None,
             store_stderr,
             false,

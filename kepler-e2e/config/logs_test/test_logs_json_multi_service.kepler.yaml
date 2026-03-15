@@ -1,0 +1,5 @@
+services:
+  json-svc-a:
+    command: ["sh", "-c", "echo JSON_SVC_A_MSG; sleep 300"]
+  json-svc-b:
+    command: ["sh", "-c", "echo JSON_SVC_B_MSG; sleep 300"]

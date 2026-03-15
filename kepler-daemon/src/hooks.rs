@@ -140,7 +140,6 @@ async fn run_hook_step(
     params: &ServiceHookParams<'_>,
     service_name: &str,
     hook_name: &str,
-    step_index: usize,
     eval_ctx: &mut EvalContext,
     output_capture: Option<OutputCaptureConfig>,
 ) -> Result<Option<Vec<String>>> {
@@ -237,11 +236,11 @@ async fn run_hook_step(
         );
 
         // Spawn using blocking mode with logging
-        let log_name = format!("{}.{}.{}", service_name, hook_name, step_index);
         let (store_stdout, store_stderr) = resolve_log_store(params.service_log_config, params.global_log_config);
         let mode = BlockingMode::WithLogging {
             log_store: params.log_store.cloned(),
-            log_service_name: log_name,
+            log_service_name: service_name.to_string(),
+            hook: Some(hook_name.to_string()),
             store_stdout,
             store_stderr,
             output_capture,
@@ -307,7 +306,7 @@ pub async fn run_service_hook(
     let mut hook_outputs: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut failure_checked = false;
 
-    for (step_idx, hook) in hook_list.0.iter().enumerate() {
+    for hook in hook_list.0.iter() {
         // Build EvalContext once per hook step — reused for both condition and execution.
         let state = if let Some(h) = handle {
             h.get_service_state(service_name).await
@@ -430,7 +429,7 @@ pub async fn run_service_hook(
             max_size: params.output_max_size,
         });
 
-        match run_hook_step(hook, params, service_name, hook_type.as_str(), step_idx + 1, &mut eval_ctx, output_capture).await {
+        match run_hook_step(hook, params, service_name, hook_type.as_str(), &mut eval_ctx, output_capture).await {
             Ok(captured) => {
                 // If this step succeeded after a previous failure and `failure()` was
                 // called in the `if:` condition, the failure is considered "handled" —
@@ -462,7 +461,7 @@ pub async fn run_service_hook(
                 );
                 // Write error to service stderr log so it's visible via `kepler logs`
                 if let Some(log_store) = params.log_store {
-                    let writer = LogWriter::new(log_store, service_name, "err");
+                    let writer = LogWriter::new(log_store, service_name, "error");
                     writer.write(&format!("Hook {} failed: {}", hook_type.as_str(), e));
                 }
                 emit_hook_event(progress, service_name, ServicePhase::HookFailed { hook: hook_name, message: e.to_string() }).await;

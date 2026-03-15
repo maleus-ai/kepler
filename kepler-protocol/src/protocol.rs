@@ -350,7 +350,7 @@ pub struct StreamLogEntry {
     pub line: String,
     /// Timestamp in milliseconds since Unix epoch
     pub timestamp: i64,
-    /// Log level ("out", "err", "trace", "debug", "info", "warn", "error", "fatal")
+    /// Log level ("trace", "debug", "info", "warn", "error", "fatal")
     pub level: Arc<str>,
     /// Hook name (None for service process logs)
     pub hook: Option<Arc<str>>,

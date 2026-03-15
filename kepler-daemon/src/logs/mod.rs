@@ -41,7 +41,7 @@ pub struct LogLine {
     pub line: String,
     /// Timestamp in milliseconds since Unix epoch
     pub timestamp: i64,
-    /// Log level string ("out", "err", "trace", "debug", "info", "warn", "error", "fatal")
+    /// Log level string ("trace", "debug", "info", "warn", "error", "fatal")
     pub level: Arc<str>,
     /// Hook name (None for service process logs)
     pub hook: Option<Arc<str>>,
@@ -56,18 +56,16 @@ pub struct LogLine {
 /// - "informational" → "info"
 /// - "critical", "emergency", "emerg", "alert" → "fatal"
 ///
-/// For non-JSON lines, "out" (stdout) and "err" (stderr) are used as-is.
+/// For non-JSON lines, "info" (stdout) and "error" (stderr) are used as defaults.
 /// Unknown level strings are stored as-is (lowercase).
 pub fn normalize_level(s: &str) -> &'static str {
     match s.to_ascii_lowercase().as_str() {
         "trace" => "trace",
         "debug" => "debug",
-        "info" | "informational" => "info",
+        "info" | "informational" | "out" => "info",
         "warn" | "warning" => "warn",
-        "error" => "error",
+        "error" | "err" => "error",
         "fatal" | "critical" | "emergency" | "emerg" | "alert" => "fatal",
-        "out" => "out",
-        "err" => "err",
         _ => "info", // unknown → default to info
     }
 }
@@ -77,9 +75,9 @@ pub fn format_level(level: &str) -> &'static str {
     match level {
         "trace" => "TRACE",
         "debug" => "DEBUG",
-        "info" | "out" => "INFO",
+        "info" => "INFO",
         "warn" => "WARN",
-        "error" | "err" => "ERROR",
+        "error" => "ERROR",
         "fatal" => "FATAL",
         _ => "INFO",
     }

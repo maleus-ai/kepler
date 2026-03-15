@@ -1,0 +1,6 @@
+services:
+  json-hook-svc:
+    command: ["sh", "-c", "echo JSON_HOOK_SVC_MSG; sleep 300"]
+    hooks:
+      pre_start:
+        run: echo JSON_HOOK_PRE_START

@@ -67,9 +67,9 @@ fn dsl_fulltext_single_word() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "server started successfully", "out");
-    write_log(&store, "web", "connection error occurred", "err");
-    write_log(&store, "api", "request processed", "out");
+    write_log(&store, "web", "server started successfully", "info");
+    write_log(&store, "web", "connection error occurred", "error");
+    write_log(&store, "api", "request processed", "info");
 
     let results = query_with_dsl(&reader, "error");
     assert_eq!(results.len(), 1);
@@ -81,8 +81,8 @@ fn dsl_fulltext_quoted_phrase() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "connection error occurred", "err");
-    write_log(&store, "web", "error in connection pool", "err");
+    write_log(&store, "web", "connection error occurred", "error");
+    write_log(&store, "web", "error in connection pool", "error");
 
     let results = query_with_dsl(&reader, r#""connection error""#);
     assert_eq!(results.len(), 1);
@@ -94,9 +94,9 @@ fn dsl_fulltext_wildcard() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "processing request", "out");
-    write_log(&store, "web", "process completed", "out");
-    write_log(&store, "web", "other message", "out");
+    write_log(&store, "web", "processing request", "info");
+    write_log(&store, "web", "process completed", "info");
+    write_log(&store, "web", "other message", "info");
 
     let results = query_with_dsl(&reader, "process*");
     assert_eq!(results.len(), 2);
@@ -111,9 +111,9 @@ fn dsl_service_filter() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "web message", "out");
-    write_log(&store, "api", "api message", "out");
-    write_log(&store, "worker", "worker message", "out");
+    write_log(&store, "web", "web message", "info");
+    write_log(&store, "api", "api message", "info");
+    write_log(&store, "worker", "worker message", "info");
 
     let services = query_services(&reader, "@service:api");
     assert_eq!(services, vec!["api"]);
@@ -124,9 +124,9 @@ fn dsl_service_wildcard_filter() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web-frontend", "fe message", "out");
-    write_log(&store, "web-backend", "be message", "out");
-    write_log(&store, "api", "api message", "out");
+    write_log(&store, "web-frontend", "fe message", "info");
+    write_log(&store, "web-backend", "be message", "info");
+    write_log(&store, "api", "api message", "info");
 
     let services = query_services(&reader, "@service:web*");
     assert_eq!(services, vec!["web-frontend", "web-backend"]);
@@ -137,11 +137,11 @@ fn dsl_level_filter() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "info message", "out");
-    write_log(&store, "web", "error message", "err");
-    write_log(&store, "web", "another info", "out");
+    write_log(&store, "web", "info message", "info");
+    write_log(&store, "web", "error message", "error");
+    write_log(&store, "web", "another info", "info");
 
-    let results = query_with_dsl(&reader, "@level:err");
+    let results = query_with_dsl(&reader, "@level:error");
     assert_eq!(results.len(), 1);
     assert!(results[0].contains("error"));
 }
@@ -155,11 +155,11 @@ fn dsl_and_operator() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "web error", "err");
-    write_log(&store, "api", "api error", "err");
-    write_log(&store, "web", "web info", "out");
+    write_log(&store, "web", "web error", "error");
+    write_log(&store, "api", "api error", "error");
+    write_log(&store, "web", "web info", "info");
 
-    let results = query_with_dsl(&reader, "@service:web AND @level:err");
+    let results = query_with_dsl(&reader, "@service:web AND @level:error");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0], "web error");
 }
@@ -169,11 +169,11 @@ fn dsl_implicit_and() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "web error", "err");
-    write_log(&store, "api", "api error", "err");
-    write_log(&store, "web", "web info", "out");
+    write_log(&store, "web", "web error", "error");
+    write_log(&store, "api", "api error", "error");
+    write_log(&store, "web", "web info", "info");
 
-    let results = query_with_dsl(&reader, "@service:web @level:err");
+    let results = query_with_dsl(&reader, "@service:web @level:error");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0], "web error");
 }
@@ -183,9 +183,9 @@ fn dsl_or_operator() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "web message", "out");
-    write_log(&store, "api", "api message", "out");
-    write_log(&store, "worker", "worker message", "out");
+    write_log(&store, "web", "web message", "info");
+    write_log(&store, "api", "api message", "info");
+    write_log(&store, "worker", "worker message", "info");
 
     let services = query_services(&reader, "@service:web OR @service:api");
     assert_eq!(services, vec!["web", "api"]);
@@ -196,9 +196,9 @@ fn dsl_not_operator() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "web message", "out");
-    write_log(&store, "api", "api message", "out");
-    write_log(&store, "worker", "worker message", "out");
+    write_log(&store, "web", "web message", "info");
+    write_log(&store, "api", "api message", "info");
+    write_log(&store, "worker", "worker message", "info");
 
     let services = query_services(&reader, "NOT @service:web");
     assert_eq!(services, vec!["api", "worker"]);
@@ -209,11 +209,11 @@ fn dsl_minus_negation() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "web error", "err");
-    write_log(&store, "api", "api error", "err");
-    write_log(&store, "api", "api info", "out");
+    write_log(&store, "web", "web error", "error");
+    write_log(&store, "api", "api error", "error");
+    write_log(&store, "api", "api info", "info");
 
-    let results = query_with_dsl(&reader, "@service:api -@level:err");
+    let results = query_with_dsl(&reader, "@service:api -@level:error");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0], "api info");
 }
@@ -227,12 +227,12 @@ fn dsl_grouped_or_with_and() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "web error", "err");
-    write_log(&store, "api", "api error", "err");
-    write_log(&store, "worker", "worker error", "err");
-    write_log(&store, "web", "web info", "out");
+    write_log(&store, "web", "web error", "error");
+    write_log(&store, "api", "api error", "error");
+    write_log(&store, "worker", "worker error", "error");
+    write_log(&store, "web", "web info", "info");
 
-    let results = query_with_dsl(&reader, "(@service:web OR @service:api) AND @level:err");
+    let results = query_with_dsl(&reader, "(@service:web OR @service:api) AND @level:error");
     assert_eq!(results.len(), 2);
     assert!(results.contains(&"web error".to_string()));
     assert!(results.contains(&"api error".to_string()));
@@ -388,9 +388,9 @@ fn dsl_fulltext_with_service_filter() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "connection timeout occurred", "err");
-    write_log(&store, "api", "connection timeout occurred", "err");
-    write_log(&store, "web", "all good", "out");
+    write_log(&store, "web", "connection timeout occurred", "error");
+    write_log(&store, "api", "connection timeout occurred", "error");
+    write_log(&store, "web", "all good", "info");
 
     // Full-text "timeout" AND @service:web
     let results = query_with_dsl(&reader, "timeout @service:web");
@@ -428,7 +428,7 @@ fn dsl_generated_sql_passes_authorizer() {
     let temp = TempDir::new().unwrap();
     let (store, reader) = setup_log_store(temp.path());
 
-    write_log(&store, "web", "hello world", "out");
+    write_log(&store, "web", "hello world", "info");
     write_json_log(
         &store, "api",
         r#"{"msg": "test", "count": 42}"#,
@@ -441,10 +441,10 @@ fn dsl_generated_sql_passes_authorizer() {
         "hello",
         r#""hello world""#,
         "@service:web",
-        "@level:out OR @level:err",
-        "@service:web AND @level:out",
+        "@level:info OR @level:error",
+        "@service:web AND @level:info",
         "NOT @service:api",
-        "-@level:err",
+        "-@level:error",
         "(@service:web OR @service:api)",
         "@count:>10",
         "@count:<=100",

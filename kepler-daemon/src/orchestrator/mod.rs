@@ -398,7 +398,7 @@ impl ServiceOrchestrator {
                 // Skip for hook errors — they already wrote to stderr in run_service_hook.
                 if !matches!(e, OrchestratorError::HookFailed(_))
                     && let Some(ref log_store) = handle.get_log_store().await {
-                        let writer = LogWriter::new(log_store, service_name, "err");
+                        let writer = LogWriter::new(log_store, service_name, "error");
                         writer.write(&e.to_string());
                     }
                 if let Err(err) = handle.set_service_status_with_reason(
@@ -1333,7 +1333,7 @@ impl ServiceOrchestrator {
 
                     if should_clear {
                         log_store.clear_service(service_name);
-                        log_store.clear_service_prefix(&format!("{}.", service_name));
+                        log_store.clear_service_hooks(service_name);
                     }
                 }
             }
@@ -2468,9 +2468,7 @@ impl ServiceOrchestrator {
 
         if retention == LogRetention::Clear {
             handle.clear_service_logs(service_name).await;
-            handle
-                .clear_service_logs_prefix(&format!("{}.", service_name))
-                .await;
+            handle.clear_service_hook_logs(service_name).await;
         }
     }
 

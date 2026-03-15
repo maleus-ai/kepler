@@ -967,8 +967,8 @@ impl ConfigActor {
             ConfigCommand::ClearServiceLogs { service_name } => {
                 self.log_store.clear_service(&service_name);
             }
-            ConfigCommand::ClearServiceLogsPrefix { prefix } => {
-                self.log_store.clear_service_prefix(&prefix);
+            ConfigCommand::ClearServiceHookLogs { service } => {
+                self.log_store.clear_service_hooks(&service);
             }
 
             // === Process Handle Commands ===

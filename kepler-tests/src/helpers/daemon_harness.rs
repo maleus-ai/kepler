@@ -971,7 +971,7 @@ impl TestDaemonHarness {
 
                     if should_clear {
                         ctx.log_store.clear_service(&event.service_name);
-                        ctx.log_store.clear_service_prefix(&format!("{}.", event.service_name));
+                        ctx.log_store.clear_service_hooks(&event.service_name);
                     }
                 }
 
@@ -1141,7 +1141,7 @@ impl TestDaemonHarness {
 
                     if should_clear {
                         ctx.log_store.clear_service(&event.service_name);
-                        ctx.log_store.clear_service_prefix(&format!("{}.", event.service_name));
+                        ctx.log_store.clear_service_hooks(&event.service_name);
                     }
                 }
 
@@ -1205,7 +1205,7 @@ impl TestDaemonHarness {
 
                         if should_clear {
                             ctx.log_store.clear_service(&event.service_name);
-                            ctx.log_store.clear_service_prefix(&format!("{}.", event.service_name));
+                            ctx.log_store.clear_service_hooks(&event.service_name);
                         }
                     }
 
@@ -1299,6 +1299,15 @@ impl TestLogHelper {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Push a hook log entry via SQLite store
+    pub fn push_hook(&self, service: &str, hook: &str, line: String, level: &'static str) {
+        let writer = LogWriter::with_hook(&self.store, service, hook, level);
+        writer.write(&line);
+        self.store.wait_flush_sync();
+        self.sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Get the last N log entries, optionally filtered by service
     pub fn tail(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
         let reader = SqliteLogReader::new(self.store.db_path().to_path_buf(), self.store.storage_mode());
@@ -1319,9 +1328,9 @@ impl TestLogHelper {
         self.store.wait_flush_sync();
     }
 
-    /// Clear logs for services matching a prefix
-    pub fn clear_service_prefix(&self, prefix: &str) {
-        self.store.clear_service_prefix(prefix);
+    /// Clear hook logs for a service
+    pub fn clear_service_hooks(&self, service: &str) {
+        self.store.clear_service_hooks(service);
         self.store.wait_flush_sync();
     }
 
