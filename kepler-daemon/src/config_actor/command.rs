@@ -305,11 +305,11 @@ pub enum ConfigCommand {
     },
 
     // === Monitor Commands ===
-    /// Store (or clear) the monitor task handle
-    SetMonitorTask {
-        handle: Option<JoinHandle<()>>,
+    /// Store (or clear) the monitor handle
+    SetMonitorHandle {
+        handle: Option<crate::monitor::MonitorHandle>,
     },
-    /// Check if a monitor task is running
+    /// Check if a monitor is running
     HasMonitorTask {
         reply: oneshot::Sender<bool>,
     },

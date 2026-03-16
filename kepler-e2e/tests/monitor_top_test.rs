@@ -425,3 +425,205 @@ async fn test_top_json_after_stop() -> E2eResult<()> {
     harness.stop_daemon().await?;
     Ok(())
 }
+
+/// Test that metrics persist across daemon restarts when no retention_period is set.
+///
+/// Starts services, collects metrics, stops services and daemon, restarts the
+/// daemon and re-loads the config, then verifies old metrics are still present
+/// in history output (not cleared on startup).
+#[tokio::test]
+async fn test_monitor_no_retention_persists_across_restart() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_monitor_no_retention")?;
+
+    harness.start_daemon().await?;
+    harness.start_services_wait(&config_path).await?;
+
+    // Wait for monitor to collect several samples
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    // Get initial history count
+    let output = harness
+        .run_cli(&[
+            "-f", config_path.to_str().unwrap(),
+            "top", "--json", "--history", "10m",
+        ])
+        .await?;
+    assert!(output.success(), "initial history should succeed. stderr: {}", output.stderr);
+    let json: serde_json::Value = serde_json::from_str(&output.stdout)
+        .unwrap_or_else(|e| panic!("parse error: {}. stdout: {}", e, output.stdout));
+    let initial_count = json.as_object().unwrap()["worker"]
+        .as_array()
+        .expect("should be array")
+        .len();
+    assert!(initial_count >= 2, "should have at least 2 samples, got {}", initial_count);
+
+    // Stop services and daemon
+    harness.stop_services(&config_path).await?;
+    harness.stop_daemon().await?;
+
+    // Restart daemon and re-load config
+    harness.start_daemon().await?;
+    harness.start_services_wait(&config_path).await?;
+
+    // Wait for a couple new samples
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Check history — should contain old metrics plus new ones
+    let output = harness
+        .run_cli(&[
+            "-f", config_path.to_str().unwrap(),
+            "top", "--json", "--history", "10m",
+        ])
+        .await?;
+    assert!(output.success(), "post-restart history should succeed. stderr: {}", output.stderr);
+    let json: serde_json::Value = serde_json::from_str(&output.stdout)
+        .unwrap_or_else(|e| panic!("parse error: {}. stdout: {}", e, output.stdout));
+    let after_count = json.as_object().unwrap()["worker"]
+        .as_array()
+        .expect("should be array")
+        .len();
+
+    // After restart, total count should be greater than initial (old data persisted + new data)
+    assert!(
+        after_count > initial_count,
+        "metrics should persist: initial={}, after_restart={}. Old data should not be cleared.",
+        initial_count, after_count
+    );
+
+    // Cleanup
+    let _ = harness.stop_services(&config_path).await;
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Test that retention_period causes old metrics to be cleaned up.
+///
+/// Uses a 2s retention period. Starts services, collects metrics for a few
+/// seconds, then waits for them to expire and verifies that old entries
+/// are eventually removed by periodic cleanup.
+#[tokio::test]
+async fn test_monitor_retention_period_cleans_old_metrics() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_monitor_retention_period")?;
+
+    harness.start_daemon().await?;
+    harness.start_services_wait(&config_path).await?;
+
+    // Wait for several samples (1s interval, retention 2s)
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    // Get the earliest timestamp currently in the DB
+    let output = harness
+        .run_cli(&[
+            "-f", config_path.to_str().unwrap(),
+            "top", "--json", "--history", "10m",
+        ])
+        .await?;
+    assert!(output.success(), "history should succeed. stderr: {}", output.stderr);
+    let json: serde_json::Value = serde_json::from_str(&output.stdout)
+        .unwrap_or_else(|e| panic!("parse error: {}. stdout: {}", e, output.stdout));
+    let entries = json.as_object().unwrap()["worker"]
+        .as_array()
+        .expect("should be array");
+    assert!(!entries.is_empty(), "should have some entries");
+    let earliest_ts = entries[0]["timestamp"].as_i64().unwrap();
+
+    // Wait longer than the retention period + cleanup interval to let cleanup run
+    // retention=2s, cleanup runs every 60s by default, but startup cleanup
+    // runs immediately. Wait a bit for periodic cleanup to trigger.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Now check — the earliest entry from before should have been cleaned up
+    let output = harness
+        .run_cli(&[
+            "-f", config_path.to_str().unwrap(),
+            "top", "--json", "--history", "10m",
+        ])
+        .await?;
+    assert!(output.success(), "second history should succeed. stderr: {}", output.stderr);
+    let json: serde_json::Value = serde_json::from_str(&output.stdout)
+        .unwrap_or_else(|e| panic!("parse error: {}. stdout: {}", e, output.stdout));
+    let entries = json.as_object().unwrap()["worker"]
+        .as_array()
+        .expect("should be array");
+    assert!(!entries.is_empty(), "should still have recent entries");
+    let new_earliest_ts = entries[0]["timestamp"].as_i64().unwrap();
+
+    // The oldest entry should now be newer than the original oldest
+    // (old entries were cleaned up by retention)
+    assert!(
+        new_earliest_ts > earliest_ts,
+        "retention cleanup should have removed old entries. \
+         Original earliest: {}, current earliest: {}",
+        earliest_ts, new_earliest_ts
+    );
+
+    // Cleanup
+    let _ = harness.stop_services(&config_path).await;
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Test that `stop --clean` removes the monitor database.
+///
+/// Starts services with monitoring, collects metrics, then does `stop --clean`.
+/// After restart, `kepler top` should have no old data.
+#[tokio::test]
+async fn test_stop_clean_removes_monitor_db() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_monitor_no_retention")?;
+
+    harness.start_daemon().await?;
+    harness.start_services_wait(&config_path).await?;
+
+    // Wait for metrics
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Verify we have data
+    let output = harness
+        .run_cli(&["-f", config_path.to_str().unwrap(), "top", "--json"])
+        .await?;
+    assert!(output.success());
+    let json: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+    assert!(
+        !json.as_object().unwrap().is_empty(),
+        "should have metrics before clean"
+    );
+
+    // Stop with --clean (removes state dir including monitor.db)
+    harness.stop_services_clean(&config_path).await?;
+
+    // Re-start — monitor.db was deleted, so top should fail (no DB)
+    // or return empty after new samples arrive
+    harness.start_services_wait(&config_path).await?;
+
+    // Immediately after start (before any new sample), history should be empty
+    // or top should show no data yet
+    let output = harness
+        .run_cli(&[
+            "-f", config_path.to_str().unwrap(),
+            "top", "--json", "--history", "10m",
+        ])
+        .await?;
+
+    if output.success() {
+        let json: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+        let obj = json.as_object().unwrap();
+        // Either empty object or worker has empty/very few entries (only just-collected ones)
+        if let Some(entries) = obj.get("worker").and_then(|v| v.as_array()) {
+            // Should have at most 1 entry (the one just collected), not the old data
+            assert!(
+                entries.len() <= 1,
+                "after stop --clean, old metrics should be gone. Got {} entries",
+                entries.len()
+            );
+        }
+    }
+    // If top fails (no monitor.db yet), that's also acceptable
+
+    // Cleanup
+    let _ = harness.stop_services(&config_path).await;
+    harness.stop_daemon().await?;
+    Ok(())
+}

@@ -21,6 +21,8 @@ fn setup_log_store(temp_dir: &std::path::Path) -> (LogStoreHandle, SqliteLogRead
         4096,
         StorageMode::Local,
         None,
+        None,
+        Duration::from_secs(60),
     );
     let reader = SqliteLogReader::new(db_path, StorageMode::Local);
     (store, reader)

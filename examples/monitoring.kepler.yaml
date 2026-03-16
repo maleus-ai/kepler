@@ -15,16 +15,15 @@
 kepler:
   monitor:
     interval: 1s
-    retention: 24h
+    retention_period: 24h
   logs:
     retention_period: 1h
 
 services:
-
   # ── Database (simulated) ──────────────────────────────────────────
   postgres:
     run: |
-      echo '{"level":"info","msg":"PostgreSQL 16.2 starting on host db-primary-01.us-east-1.internal with shared_buffers=4GB, effective_cache_size=12GB, work_mem=256MB, maintenance_work_mem=1GB, max_parallel_workers_per_gather=4","pid":1,"port":5432}'
+      echo '{"level":"info","msg":"PostgreSQL 16.2 starting","pid":1,"port":5432}'
       echo '{"level":"info","msg":"Listening on 0.0.0.0:5432","pid":1,"max_connections":100}'
       while true; do
         QUERIES=$((RANDOM % 200 + 50))
@@ -33,11 +32,11 @@ services:
         DEADLOCKS=$((RANDOM % 3))
         echo "{\"level\":\"info\",\"msg\":\"Checkpoint complete\",\"wal_size_mb\":$((RANDOM % 512 + 64)),\"active_connections\":$ACTIVE,\"queries_per_sec\":$QUERIES,\"cache_hit_ratio\":${CACHE_HIT}.$(( RANDOM % 10 ))}"
         sleep 4
-        if [ $((RANDOM % 8)) -eq 0 ]; then
-          echo "{\"level\":\"warn\",\"msg\":\"Long-running query detected: execution time exceeded threshold, query is holding AccessShareLock on 3 tables and waiting for RowExclusiveLock on inventory\",\"duration_ms\":$((RANDOM % 30000 + 5000)),\"query\":\"SELECT o.id, o.status, u.email, u.name, SUM(oi.quantity * p.price) AS total, array_agg(p.name) AS products FROM orders o JOIN users u ON o.user_id = u.id JOIN order_items oi ON oi.order_id = o.id JOIN products p ON oi.product_id = p.id LEFT JOIN discounts d ON d.order_id = o.id LEFT JOIN shipping s ON s.order_id = o.id WHERE o.status IN ('pending', 'processing', 'shipped') AND o.created_at >= NOW() - INTERVAL '90 days' AND u.is_active = true GROUP BY o.id, o.status, u.email, u.name HAVING SUM(oi.quantity * p.price) > 50 ORDER BY o.created_at DESC LIMIT 100\",\"pid\":$((RANDOM % 100 + 10)),\"state\":\"active\",\"blocked_by\":[\"pid:42 (VACUUM)\",\"pid:87 (UPDATE inventory)\"],\"tables_locked\":[\"orders\",\"users\",\"order_items\",\"products\"],\"plan\":\"Gather Merge -> Sort -> Hash Join -> Seq Scan on orders (cost=0.00..18734.00 rows=95000 width=72) -> Hash -> Index Scan on users (cost=0.42..8.44 rows=1 width=48)\"}"
+        if [ $((RANDOM % 15)) -eq 0 ]; then
+          echo "{\"level\":\"warn\",\"msg\":\"Long-running query detected\",\"duration_ms\":$((RANDOM % 30000 + 5000)),\"query\":\"SELECT * FROM orders JOIN users ON ...\",\"pid\":$((RANDOM % 100 + 10)),\"state\":\"active\"}"
         fi
         if [ $DEADLOCKS -gt 1 ]; then
-          echo "{\"level\":\"error\",\"msg\":\"Deadlock detected between two transactions after waiting 1000ms: transaction 1 (pid $((RANDOM % 100))) holds RowExclusiveLock on inventory and wants ShareLock on orders; transaction 2 (pid $((RANDOM % 100))) holds RowExclusiveLock on orders and wants ShareLock on inventory\",\"table\":\"inventory\",\"blocked_pid\":$((RANDOM % 100)),\"blocking_pid\":$((RANDOM % 100)),\"lock_type\":\"RowExclusiveLock\",\"resolution\":\"Transaction $((RANDOM % 100)) was rolled back\",\"queries\":[\"UPDATE inventory SET stock = stock - 1 WHERE product_id = 4521 AND stock > 0\",\"UPDATE orders SET status = 'confirmed' WHERE id = 78432 AND status = 'pending'\"]}"
+          echo "{\"level\":\"error\",\"msg\":\"Deadlock detected\",\"table\":\"inventory\",\"blocked_pid\":$((RANDOM % 100)),\"blocking_pid\":$((RANDOM % 100)),\"lock_type\":\"RowExclusiveLock\"}"
         fi
         sleep 3
       done
@@ -96,8 +95,6 @@ services:
         LATENCY=$((RANDOM % 500 + 5))
         REQ_ID="req-$(head -c 4 /dev/urandom | od -An -tx4 | tr -d ' ')"
         TRACE_ID="trace-$(head -c 8 /dev/urandom | od -An -tx8 | tr -d ' ')"
-        SPAN_ID="span-$(head -c 4 /dev/urandom | od -An -tx4 | tr -d ' ')"
-        PARENT_SPAN="span-$(head -c 4 /dev/urandom | od -An -tx4 | tr -d ' ')"
         if [ $STATUS -ge 500 ]; then
           LVL="error"
         elif [ $STATUS -ge 400 ]; then
@@ -105,14 +102,10 @@ services:
         else
           LVL="info"
         fi
-        UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        echo "{\"level\":\"$LVL\",\"msg\":\"${METHODS[$METHOD_IDX]} ${PATHS[$PATH_IDX]}\",\"method\":\"${METHODS[$METHOD_IDX]}\",\"path\":\"${PATHS[$PATH_IDX]}\",\"status\":$STATUS,\"latency_ms\":$LATENCY,\"request_id\":\"$REQ_ID\",\"trace_id\":\"$TRACE_ID\",\"span_id\":\"$SPAN_ID\",\"parent_span\":\"$PARENT_SPAN\",\"client_ip\":\"10.0.$(( RANDOM % 10 )).$(( RANDOM % 255 ))\",\"user_agent\":\"$UA\",\"request_headers\":\"Accept: application/json, text/plain, */*; Accept-Encoding: gzip, deflate, br; Accept-Language: en-US,en;q=0.9,fr;q=0.8; Cache-Control: no-cache; X-Forwarded-For: 203.0.113.$(( RANDOM % 255 )), 10.0.0.1; X-Request-ID: $REQ_ID\"}"
+        echo "{\"level\":\"$LVL\",\"msg\":\"${METHODS[$METHOD_IDX]} ${PATHS[$PATH_IDX]}\",\"method\":\"${METHODS[$METHOD_IDX]}\",\"path\":\"${PATHS[$PATH_IDX]}\",\"status\":$STATUS,\"latency_ms\":$LATENCY,\"request_id\":\"$REQ_ID\",\"trace_id\":\"$TRACE_ID\",\"client_ip\":\"10.0.$(( RANDOM % 10 )).$(( RANDOM % 255 ))\"}"
         sleep $(( (RANDOM % 3) + 1 ))
         if [ $LATENCY -gt 400 ]; then
-          echo "{\"level\":\"warn\",\"msg\":\"Slow request detected: ${METHODS[$METHOD_IDX]} ${PATHS[$PATH_IDX]} took ${LATENCY}ms which exceeds the 400ms threshold — downstream services user-service (${LATENCY_UPSTREAM1:=$((RANDOM % 200 + 100))}ms) and order-service (${LATENCY_UPSTREAM2:=$((RANDOM % 200 + 100))}ms) contributed most of the latency\",\"path\":\"${PATHS[$PATH_IDX]}\",\"latency_ms\":$LATENCY,\"request_id\":\"$REQ_ID\",\"trace_id\":\"$TRACE_ID\",\"threshold_ms\":400,\"upstream_latencies\":{\"user-service\":$LATENCY_UPSTREAM1,\"order-service\":$LATENCY_UPSTREAM2,\"postgres\":$((RANDOM % 50 + 10)),\"redis\":$((RANDOM % 5 + 1))},\"response_headers\":\"Content-Type: application/json; charset=utf-8; X-Response-Time: ${LATENCY}ms; X-RateLimit-Remaining: $((RANDOM % 100)); X-RateLimit-Reset: $(date -u +%s)\"}"
-        fi
-        if [ $STATUS -ge 500 ]; then
-          echo "{\"level\":\"error\",\"msg\":\"Internal server error: upstream service returned non-2xx status while processing ${METHODS[$METHOD_IDX]} ${PATHS[$PATH_IDX]} for client 10.0.$(( RANDOM % 10 )).$(( RANDOM % 255 ))\",\"request_id\":\"$REQ_ID\",\"trace_id\":\"$TRACE_ID\",\"status\":$STATUS,\"error_chain\":[\"GatewayError: upstream returned $STATUS\",\"HttpClientError: connection to order-service:3002 failed after 3 retries\",\"TcpError: connection refused (os error 111)\"],\"stacktrace\":[\"at Gateway.proxy (src/gateway/proxy.ts:142:15)\",\"at Router.handle (src/router/index.ts:89:22)\",\"at Middleware.rateLimit (src/middleware/rate-limit.ts:34:10)\",\"at Middleware.authenticate (src/middleware/auth.ts:67:8)\",\"at Server.onRequest (src/server.ts:23:5)\"]}"
+          echo "{\"level\":\"warn\",\"msg\":\"Slow request\",\"path\":\"${PATHS[$PATH_IDX]}\",\"latency_ms\":$LATENCY,\"request_id\":\"$REQ_ID\",\"threshold_ms\":400}"
         fi
       done
     depends_on:
@@ -164,16 +157,15 @@ services:
         ITEMS=$((RANDOM % 8 + 1))
         ACTION_ROLL=$((RANDOM % 10))
         if [ $ACTION_ROLL -lt 3 ]; then
-          echo "{\"level\":\"info\",\"msg\":\"Order created\",\"order_id\":\"$ORDER_ID\",\"amount\":$AMOUNT_FMT,\"currency\":\"USD\",\"items\":$ITEMS,\"user_id\":$((RANDOM % 10000 + 1)),\"shipping_address\":\"$((RANDOM % 9999 + 1)) Industrial Parkway, Suite $((RANDOM % 500 + 100)), Building $((RANDOM % 20 + 1)), San Francisco, CA 94$(( RANDOM % 40 + 100 )), United States\",\"billing_address\":\"$((RANDOM % 9999 + 1)) Corporate Boulevard, Floor $((RANDOM % 30 + 1)), New York, NY 10$(( RANDOM % 100 + 100 )), United States\"}"
+          echo "{\"level\":\"info\",\"msg\":\"Order created\",\"order_id\":\"$ORDER_ID\",\"amount\":$AMOUNT_FMT,\"currency\":\"USD\",\"items\":$ITEMS,\"user_id\":$((RANDOM % 10000 + 1))}"
         elif [ $ACTION_ROLL -lt 5 ]; then
-          TXN_ID="txn_$(head -c 6 /dev/urandom | od -An -tx4 | tr -d ' ')"
-          echo "{\"level\":\"info\",\"msg\":\"Payment processed\",\"order_id\":\"$ORDER_ID\",\"amount\":$AMOUNT_FMT,\"provider\":\"stripe\",\"transaction_id\":\"$TXN_ID\",\"payment_method\":\"card_visa_ending_$(( RANDOM % 9000 + 1000 ))\",\"idempotency_key\":\"idem_${ORDER_ID}_${TXN_ID}_$(date -u +%s)\",\"risk_score\":$((RANDOM % 100)),\"billing_descriptor\":\"MYSHOP.COM ORDER $ORDER_ID\"}"
+          echo "{\"level\":\"info\",\"msg\":\"Payment processed\",\"order_id\":\"$ORDER_ID\",\"amount\":$AMOUNT_FMT,\"provider\":\"stripe\",\"transaction_id\":\"txn_$(head -c 6 /dev/urandom | od -An -tx4 | tr -d ' ')\"}"
         elif [ $ACTION_ROLL -lt 7 ]; then
-          echo "{\"level\":\"info\",\"msg\":\"Order shipped\",\"order_id\":\"$ORDER_ID\",\"carrier\":\"fedex\",\"tracking\":\"FX$(( RANDOM % 9000000 + 1000000 ))\",\"estimated_delivery\":\"2026-03-$(( RANDOM % 14 + 16 ))\",\"warehouse\":\"WH-US-EAST-$((RANDOM % 5 + 1))\",\"package_dimensions\":\"$(( RANDOM % 40 + 10 ))x$(( RANDOM % 30 + 10 ))x$(( RANDOM % 20 + 5 ))cm, $(( RANDOM % 15000 + 500 ))g\"}"
+          echo "{\"level\":\"info\",\"msg\":\"Order shipped\",\"order_id\":\"$ORDER_ID\",\"carrier\":\"fedex\",\"tracking\":\"FX$(( RANDOM % 9000000 + 1000000 ))\",\"estimated_delivery\":\"2026-03-$(( RANDOM % 14 + 16 ))\"}"
         elif [ $ACTION_ROLL -lt 9 ]; then
-          echo "{\"level\":\"warn\",\"msg\":\"Payment retry scheduled: previous attempt failed with card_declined for order $ORDER_ID (amount $AMOUNT_FMT USD) — retrying with exponential backoff, next attempt in $((RANDOM % 60 + 30)) seconds\",\"order_id\":\"$ORDER_ID\",\"attempt\":$((RANDOM % 3 + 2)),\"reason\":\"card_declined\",\"amount\":$AMOUNT_FMT,\"gateway_response\":\"Your card was declined. Try contacting your card issuer for more information. Decline code: insufficient_funds. Risk level: elevated. Network status: declined_by_network.\"}"
+          echo "{\"level\":\"warn\",\"msg\":\"Payment retry\",\"order_id\":\"$ORDER_ID\",\"attempt\":$((RANDOM % 3 + 2)),\"reason\":\"card_declined\",\"amount\":$AMOUNT_FMT}"
         else
-          echo "{\"level\":\"error\",\"msg\":\"Order processing failed: insufficient inventory for $ITEMS items of SKU-$(( RANDOM % 9000 + 1000 )) while processing order $ORDER_ID — automatic restock request has been submitted to supplier\",\"order_id\":\"$ORDER_ID\",\"error\":\"inventory_insufficient\",\"requested\":$ITEMS,\"available\":$((ITEMS - RANDOM % 3 - 1)),\"sku\":\"SKU-$(( RANDOM % 9000 + 1000 ))\",\"restock_eta\":\"2026-03-$(( RANDOM % 14 + 16 ))T$((RANDOM % 24)):00:00Z\",\"affected_orders\":[\"$ORDER_ID\",\"ORD-$((RANDOM % 90000 + 10000))\",\"ORD-$((RANDOM % 90000 + 10000))\"],\"supplier_contact\":\"supplier-$(( RANDOM % 20 + 1))@wholesale-parts.example.com\"}"
+          echo "{\"level\":\"error\",\"msg\":\"Order processing failed\",\"order_id\":\"$ORDER_ID\",\"error\":\"inventory_insufficient\",\"requested\":$ITEMS,\"available\":$((ITEMS - RANDOM % 3 - 1)),\"sku\":\"SKU-$(( RANDOM % 9000 + 1000 ))\"}"
         fi
         sleep $((RANDOM % 5 + 3))
       done
@@ -241,11 +233,11 @@ services:
         DURATION=$((RANDOM % 10000 + 500))
         ROLL=$((RANDOM % 10))
         if [ $ROLL -lt 7 ]; then
-          echo "{\"level\":\"info\",\"msg\":\"Job completed\",\"job\":\"$JOB\",\"duration_ms\":$DURATION,\"records_processed\":$((RANDOM % 10000 + 100)),\"next_run_in_s\":$((RANDOM % 300 + 60)),\"query\":\"DELETE FROM sessions WHERE expires_at < NOW() - INTERVAL '24 hours' AND last_activity < NOW() - INTERVAL '48 hours' AND user_id NOT IN (SELECT id FROM users WHERE role = 'admin')\"}"
+          echo "{\"level\":\"info\",\"msg\":\"Job completed\",\"job\":\"$JOB\",\"duration_ms\":$DURATION,\"records_processed\":$((RANDOM % 10000 + 100)),\"next_run_in_s\":$((RANDOM % 300 + 60))}"
         elif [ $ROLL -lt 9 ]; then
-          echo "{\"level\":\"warn\",\"msg\":\"Job $JOB running slower than expected: processed $((RANDOM % 50000 + 10000)) records in $((DURATION + 15000))ms which is $(( (DURATION + 15000) * 100 / 10000 ))% of the 10000ms threshold — consider optimizing the batch size or adding an index on (created_at, status)\",\"job\":\"$JOB\",\"duration_ms\":$((DURATION + 15000)),\"threshold_ms\":10000,\"records_processed\":$((RANDOM % 50000 + 10000)),\"slow_phases\":[\"fetch_batch: $((RANDOM % 5000 + 2000))ms\",\"transform: $((RANDOM % 3000 + 500))ms\",\"write_back: $((RANDOM % 8000 + 3000))ms\",\"notify_downstream: $((RANDOM % 1000 + 100))ms\"]}"
+          echo "{\"level\":\"warn\",\"msg\":\"Job slow\",\"job\":\"$JOB\",\"duration_ms\":$((DURATION + 15000)),\"threshold_ms\":10000,\"records_processed\":$((RANDOM % 50000 + 10000))}"
         else
-          echo "{\"level\":\"error\",\"msg\":\"Job $JOB failed after 30000ms: database connection pool exhausted (active: 50/50, waiting: 23) while executing batch update — all pending records have been returned to the queue for retry\",\"job\":\"$JOB\",\"error\":\"connection_pool_exhausted\",\"duration_ms\":30000,\"max_duration_ms\":30000,\"will_retry\":true,\"retry_delay_s\":60,\"pool_stats\":\"active=50 idle=0 waiting=23 max=50 timeout=30s\",\"last_successful_query\":\"UPDATE inventory SET quantity = quantity - batch.qty, updated_at = NOW() FROM (SELECT product_id, SUM(quantity) AS qty FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE status = 'confirmed' AND processed_at IS NULL) GROUP BY product_id) AS batch WHERE inventory.product_id = batch.product_id\"}"
+          echo "{\"level\":\"error\",\"msg\":\"Job failed\",\"job\":\"$JOB\",\"error\":\"timeout\",\"duration_ms\":30000,\"max_duration_ms\":30000,\"will_retry\":true,\"retry_delay_s\":60}"
         fi
         sleep $((RANDOM % 15 + 8))
       done

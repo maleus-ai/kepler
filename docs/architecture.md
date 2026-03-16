@@ -701,28 +701,32 @@ Kepler includes an optional resource monitoring subsystem that periodically samp
 
 ### Architecture
 
-When `kepler.monitor` is configured, a single monitor task is spawned per config on the first service start. The task loops on the configured interval, collecting metrics for all running services and writing them to SQLite.
+When `kepler.monitor` is configured, the monitor is spawned per config on the first service start. It consists of two components running in parallel: an async **collector** task and a dedicated **writer** thread, connected by an mpsc channel. This mirrors the log store's actor pattern.
 
 ```mermaid
 flowchart LR
-    M[Monitor Task] -->|"enumerate PIDs"| C[Containment Manager]
-    M -->|"get running services"| A[Config Actor]
-    M -->|"refresh + read"| S[sysinfo]
-    M -->|"batch INSERT"| DB[(monitor.db)]
+    C[Collector Task<br/>async tokio] -->|"InsertMetrics"| CH[mpsc channel]
+    CH --> W[Writer Thread<br/>std::thread]
+    W -->|"INSERT/DELETE"| DB[(monitor.db)]
+    C -->|"enumerate PIDs"| CM[Containment Manager]
+    C -->|"get running services"| A[Config Actor]
+    C -->|"refresh + read"| S[sysinfo]
 ```
+
+The **collector** periodically samples CPU/memory metrics via sysinfo/cgroups and sends `InsertMetrics` commands through the channel. The **writer** owns the SQLite write connection, inserts metrics, and runs time-budgeted retention cleanup. Read-only queries open separate connections.
 
 ### Metric Collection
 
-For each running service, the monitor:
+For each running service, the collector:
 
 1. **Enumerates PIDs** — Uses cgroup v2 (if available) to get all PIDs in the service's cgroup, or falls back to the main PID + sysinfo process tree walking
 2. **Refreshes process info** — Calls `sysinfo` to get current CPU and memory stats for the enumerated PIDs
 3. **Aggregates** — Sums CPU percentage, RSS memory, and virtual memory across the entire process tree
-4. **Stores** — Batch-inserts all service metrics into SQLite in a single transaction
+4. **Sends** — Sends all service metrics to the writer thread through the channel
 
 ### Storage
 
-Metrics are stored in `<state_dir>/monitor.db` using SQLite with WAL mode for concurrent read/write performance. The schema:
+Metrics are stored in `<state_dir>/monitor.db` using SQLite (WAL mode on local filesystems, DELETE journal on NFS). The schema:
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -737,16 +741,43 @@ Indexes on `timestamp` and `(service, timestamp)` enable efficient range queries
 
 ### Retention
 
-- **No retention configured**: Database is cleared (`DELETE FROM metrics`) when the monitor starts
-- **With retention**: Rows older than the retention period are deleted on startup
+- **No `retention_period`** (default): Metrics persist indefinitely (same as logs)
+- **With `retention_period`**: Expired rows are cleaned up using time-budgeted batched deletes
+
+When retention is configured, cleanup runs in two modes:
+
+1. **Startup cleanup** — On config load, all rows older than the retention period are deleted in batches of 50,000 with no time budget (runs to completion). At monitor write rates (~1 sample/5s), the channel backlog during startup cleanup is negligible.
+
+2. **Periodic cleanup** — Every 60 seconds, expired rows are deleted in batches of 5,000. Each batch runs to completion, but the function stops starting new batches after 25ms of cumulative time. If more rows remain (`TimeBudgetExceeded`), cleanup resumes on the next interval via a `cleanup_has_more` catch-up flag.
+
+This batched, time-budgeted approach prevents cleanup from blocking metric writes for extended periods while still making progress on large backlogs.
 
 The database file is automatically removed by `stop --clean` since it resides inside the state directory.
+
+### Shutdown
+
+Two shutdown modes are supported:
+
+- **Graceful** (`kepler stop`): The writer flushes pending metrics, runs `PRAGMA optimize`, then exits. The collector exits naturally when the channel disconnects.
+- **Discard** (`kepler stop --clean`): An atomic discard flag is set, any running SQLite query is interrupted, the collector is aborted, and a `Shutdown` command is sent to unblock the writer. Pending metrics are dropped without flushing. The discard mechanism uses a pre-created `MonitorShutdownToken` stored on the `ConfigActorHandle`, allowing immediate cancellation even before the monitor is spawned.
+
+### Shared Cleanup Code
+
+Both the log store and monitor use the same batched-delete + time-budget pattern, extracted into `db_cleanup.rs`. This module provides:
+
+- `setup_writer_connection()` — Shared pragma setup (busy_timeout, cache_size, journal mode based on storage mode)
+- `run_cleanup_batches()` — Batched DELETE loop with time budget and discard flag support
+- `CleanupResult` enum — `Complete`, `TimeBudgetExceeded`, or `Discarded`
 
 ### Relevant Files
 
 | File | Description |
 |------|-------------|
-| `kepler-daemon/src/monitor.rs` | Monitor loop, SQLite schema, metric collection |
+| `kepler-daemon/src/monitor/mod.rs` | Public API, `spawn_monitor()`, `ServiceMetrics` |
+| `kepler-daemon/src/monitor/writer.rs` | Writer thread actor, `MonitorHandle`, `MonitorShutdownToken` |
+| `kepler-daemon/src/monitor/collector.rs` | Async metric collection task |
+| `kepler-daemon/src/monitor/query.rs` | Read-only query functions |
+| `kepler-daemon/src/db_cleanup.rs` | Shared cleanup utilities (used by logs and monitor) |
 | `kepler-daemon/src/containment.rs` | `enumerate_service_pids()` for cgroup PID enumeration |
 | `kepler-daemon/src/config/mod.rs` | `MonitorConfig` struct |
 
@@ -882,7 +913,8 @@ See [Security Model](security-model.md#kepler-group-stripping) for user-facing d
 | Dependency graph | `kepler-daemon/src/deps.rs` | Start/stop ordering, condition checking |
 | Service orchestration | `kepler-daemon/src/orchestrator/` | Event handling, restart propagation |
 | Health checking | `kepler-daemon/src/health.rs` | Health check loop, event emission |
-| Resource monitoring | `kepler-daemon/src/monitor.rs` | CPU/memory metric collection to SQLite |
+| Resource monitoring | `kepler-daemon/src/monitor/` | CPU/memory metric collection to SQLite |
+| Shared DB cleanup | `kepler-daemon/src/db_cleanup.rs` | Batched retention cleanup (logs + monitor) |
 | Log writing | `kepler-daemon/src/logs/log_writer.rs` | Per-service LogWriter |
 | Log reading | `kepler-daemon/src/logs/log_reader.rs` | SqliteLogReader (read-only queries, filter injection) |
 
