@@ -340,6 +340,12 @@ fn handle_subscribe_event(app: &mut TopApp, event: ServerEvent) {
         | ServicePhase::HookFailed { .. } => return,
     };
 
+    // Ensure service appears in the sidebar list
+    if !app.services.contains(&progress.service) {
+        app.services.push(progress.service.clone());
+        app.services.sort();
+    }
+
     if let Some(info) = app.service_status.get_mut(&progress.service) {
         info.status = status_str.to_string();
         // Clear PID/timestamps on terminal states
@@ -518,8 +524,16 @@ async fn fetch_and_update_status(client: &Client, config_path: &PathBuf, app: &m
             data: Some(ResponseData::ServiceStatus(statuses)),
             ..
         } => {
+            let mut added = false;
             for (name, info) in statuses {
+                if !app.services.contains(&name) {
+                    app.services.push(name.clone());
+                    added = true;
+                }
                 app.service_status.insert(name, info);
+            }
+            if added {
+                app.services.sort();
             }
         }
         _ => {}
