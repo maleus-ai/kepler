@@ -47,12 +47,6 @@ pub async fn run(
         }
     }
 
-    // Set initial tab to first available (Dashboard may be unavailable without monitor right)
-    let tabs = app.available_tabs();
-    if !tabs.contains(&app.tab) {
-        app.tab = *tabs.first().unwrap_or(&Tab::Detail);
-    }
-
     // Fetch initial metrics — only if user has monitor right
     if app.has_right("monitor") {
         let default_history = Duration::from_secs(app.chart_window.as_secs());
@@ -73,14 +67,20 @@ pub async fn run(
         .await
         {
             Ok(entries) => {
+                app.monitor_available = true;
                 app.update_metrics(entries);
             }
-            Err(Some(message)) => {
-                eprintln!("Error: {}", message);
-                std::process::exit(1);
+            Err(Some(_)) | Err(None) => {
+                // Non-fatal: monitor.db may not exist yet (e.g. kepler.monitor not configured).
+                // The TUI will still work for logs, service management, etc.
             }
-            Err(None) => {}
         }
+    }
+
+    // Set initial tab to first available (Dashboard may be unavailable without monitor data)
+    let tabs = app.available_tabs();
+    if !tabs.contains(&app.tab) {
+        app.tab = *tabs.first().unwrap_or(&Tab::Detail);
     }
 
     // Fetch initial status — only if user has status right
@@ -255,7 +255,7 @@ pub async fn run(
             }
 
             // Periodic metrics refresh (only in Live mode — paused mode uses on-demand refetch)
-            _ = tokio::time::sleep(metrics_remaining), if is_live && app.has_right("monitor") => {
+            _ = tokio::time::sleep(metrics_remaining), if is_live && app.monitor_available => {
                 last_fetch = std::time::Instant::now();
                 match fetch_metrics(client, &config_path, &service, &filter, sql).await {
                     Ok(entries) => {
