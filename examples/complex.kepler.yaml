@@ -53,7 +53,7 @@ kepler:
   output_max_size: "2mb"
   monitor: # Uncomment to enable CPU/memory metrics collection
     interval: 1s # Sample every 5 seconds
-    retention: 24h # Keep 24 hours of history (omit for fresh-start)
+    retention_period: 24h # Keep 24 hours of history (omit to keep forever)
   logs:
     retention:
       on_stop: clear

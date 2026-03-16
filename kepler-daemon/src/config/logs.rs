@@ -118,6 +118,12 @@ pub struct LogConfig {
     /// Supports `!lua` and `${{ }}$` expressions.
     #[serde(default)]
     pub batch_size: ConfigValue<Option<usize>>,
+    /// How often to run incremental retention cleanup.
+    /// Duration string: "30s", "1m", "5m". Default: "60s".
+    /// Only meaningful at global level (kepler.logs) when retention_period is set.
+    /// Supports `!lua` and `${{ }}$` expressions.
+    #[serde(default)]
+    pub cleanup_interval: ConfigValue<Option<String>>,
 }
 
 impl LogConfig {
@@ -182,5 +188,14 @@ impl LogConfig {
         self.batch_size
             .as_static()
             .and_then(|opt| *opt)
+    }
+
+    /// Get cleanup_interval as a Duration, parsing from the static string value.
+    /// Returns None if unset, dynamic (not yet resolved), or invalid.
+    pub fn cleanup_interval(&self) -> Option<std::time::Duration> {
+        self.cleanup_interval
+            .as_static()
+            .and_then(|opt| opt.as_deref())
+            .and_then(|s| parse_duration(s).ok())
     }
 }

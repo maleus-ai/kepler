@@ -1,0 +1,9 @@
+# Config for testing metrics persistence when no retention_period is set.
+# Metrics should persist indefinitely (same as logs behavior).
+kepler:
+  monitor:
+    interval: 1s
+
+services:
+  worker:
+    command: ["sh", "-c", "while true; do echo working; sleep 1; done"]
