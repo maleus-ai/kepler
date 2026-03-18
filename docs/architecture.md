@@ -37,9 +37,10 @@ For details on the security model, see [Security Model](security-model.md).
 ### Key Design Principles
 
 1. **Security by default**: Root-only daemon, kepler group access control, environment isolation
-2. **Configuration immutability**: Configs are "baked" on first service start
-3. **Single evaluation**: Lua scripts and env vars expanded once, results persisted
-4. **Graceful recovery**: State persisted to disk, restorable after daemon restart
+2. **Configuration immutability**: Configs are "baked" on first service start (`kepler start`)
+3. **Ephemeral mode**: `kepler run` provides fresh config loading with no snapshot for iterative workflows
+4. **Single evaluation**: Lua scripts and env vars expanded once, results persisted (in `start` mode)
+5. **Graceful recovery**: State persisted to disk, restorable after daemon restart
 
 ---
 
@@ -76,11 +77,11 @@ See [Security Model](security-model.md) for the full access control design.
 
 ### Relevant Files
 
-| File | Description |
-|------|-------------|
-| `kepler-daemon/src/lib.rs` | Directory structure constants and path helpers |
-| `kepler-daemon/src/main.rs` | Root enforcement, umask, secure directory creation with `0o771` mode |
-| `kepler-daemon/src/persistence.rs` | Secure file writing |
+| File                               | Description                                                          |
+| ---------------------------------- | -------------------------------------------------------------------- |
+| `kepler-daemon/src/lib.rs`         | Directory structure constants and path helpers                       |
+| `kepler-daemon/src/main.rs`        | Root enforcement, umask, secure directory creation with `0o771` mode |
+| `kepler-daemon/src/persistence.rs` | Secure file writing                                                  |
 
 ---
 
@@ -100,8 +101,8 @@ See [Security Model](security-model.md) for the full security design.
 
 ### Relevant Files
 
-| File | Description |
-|------|-------------|
+| File                            | Description                                                            |
+| ------------------------------- | ---------------------------------------------------------------------- |
 | `kepler-protocol/src/server.rs` | Socket permissions, group resolution, and peer credential verification |
 
 ---
@@ -141,7 +142,38 @@ flowchart TD
     D --> J[Run services with baked config]
 ```
 
+For `kepler run`, this flow is different — see [CLI Run Command](#cli-run-command-ephemeral-mode) below.
+
 See [Configuration](configuration.md) for the user-facing config reference, and [Variable Expansion](variable-expansion.md) / [Lua Scripting](lua-scripting.md) for details on the expansion stages.
+
+### CLI Run Command (Ephemeral Mode)
+
+The `run` command provides an ephemeral mode that always loads the config fresh from source, with no snapshot:
+
+```mermaid
+flowchart TD
+    A[CLI: run] --> B[Daemon]
+    B --> C{Services running?}
+    C -->|Yes| D[Stop all services]
+    C -->|No| E{Config loaded?}
+    D --> E
+    E -->|Yes| F[Clear snapshot + unload actor]
+    E -->|No| G{--start-clean?}
+    F --> G
+    G -->|Yes| H[Remove entire state dir]
+    G -->|No| I[Clear state files, keep logs + metrics]
+    H --> J[Load config fresh from source]
+    I --> J
+    J --> K[Suppress snapshot creation]
+    K --> L[Start services]
+```
+
+Key differences from `start`:
+- Always reloads from source file (never uses snapshot)
+- Stops all prior services before reloading
+- No snapshot taken (even if `autostart: true`)
+- `autostart: true` is ignored at runtime
+- Logs and metrics are preserved between runs (unless `--start-clean`)
 
 ### CLI Recreate Command
 
@@ -201,10 +233,10 @@ Once baked, the snapshot is immutable. Services always run using the baked snaps
 
 ### Relevant Files
 
-| File | Description |
-|------|-------------|
-| `kepler-daemon/src/config_actor/` | Config initialization and snapshot management |
-| `kepler-daemon/src/persistence.rs` | Snapshot persistence to disk |
+| File                               | Description                                   |
+| ---------------------------------- | --------------------------------------------- |
+| `kepler-daemon/src/config_actor/`  | Config initialization and snapshot management |
+| `kepler-daemon/src/persistence.rs` | Snapshot persistence to disk                  |
 
 ---
 
@@ -216,17 +248,17 @@ Kepler uses an event-driven architecture for service lifecycle management. Each 
 
 Services emit events at the following lifecycle points:
 
-| Event | Description |
-|-------|-------------|
-| `Init` | First start of a service |
-| `Start` | Before `pre_start` hook runs |
-| `Restart` | Before service restarts (with reason) |
-| `Exit` | When process exits (with exit code) |
-| `Stop` | Before `pre_stop` hook runs |
-| `Cleanup` | Before cleanup runs |
+| Event         | Description                           |
+| ------------- | ------------------------------------- |
+| `Init`        | First start of a service              |
+| `Start`       | Before `pre_start` hook runs          |
+| `Restart`     | Before service restarts (with reason) |
+| `Exit`        | When process exits (with exit code)   |
+| `Stop`        | Before `pre_stop` hook runs           |
+| `Cleanup`     | Before cleanup runs                   |
 | `Healthcheck` | After each health check (with status) |
-| `Healthy` | When service transitions to healthy |
-| `Unhealthy` | When service transitions to unhealthy |
+| `Healthy`     | When service transitions to healthy   |
+| `Unhealthy`   | When service transitions to unhealthy |
 
 See [Service Lifecycle](service-lifecycle.md) for state transitions, and [Hooks](hooks.md) for lifecycle hooks.
 
@@ -234,11 +266,11 @@ See [Service Lifecycle](service-lifecycle.md) for state transitions, and [Hooks]
 
 When a service restarts, the event includes the reason:
 
-| Reason | Description |
-|--------|-------------|
-| `Watch` | File watcher triggered restart |
-| `Failure` | Process exited with error (includes exit code) |
-| `Manual` | User requested restart via CLI |
+| Reason              | Description                                     |
+| ------------------- | ----------------------------------------------- |
+| `Watch`             | File watcher triggered restart                  |
+| `Failure`           | Process exited with error (includes exit code)  |
+| `Manual`            | User requested restart via CLI                  |
 | `DependencyRestart` | Dependency restarted (includes dependency name) |
 
 ### Per-Service Event Channels
@@ -259,10 +291,10 @@ flowchart LR
 
 ### Relevant Files
 
-| File | Description |
-|------|-------------|
-| `kepler-daemon/src/events.rs` | ServiceEvent types, channel creation |
-| `kepler-daemon/src/config_actor/` | Event channel management per service |
+| File                              | Description                           |
+| --------------------------------- | ------------------------------------- |
+| `kepler-daemon/src/events.rs`     | ServiceEvent types, channel creation  |
+| `kepler-daemon/src/config_actor/` | Event channel management per service  |
 | `kepler-daemon/src/orchestrator/` | ServiceEventHandler, event processing |
 
 ---
@@ -277,14 +309,14 @@ For user-facing documentation, see [Dependencies](dependencies.md).
 
 Services can specify conditions that must be met before starting:
 
-| Condition | Description |
-|-----------|-------------|
-| `service_started` | Dependency status is Running, Healthy, or Unhealthy (default) |
-| `service_healthy` | Dependency status is Healthy (requires healthcheck) |
-| `service_completed_successfully` | Dependency exited with code 0 |
-| `service_unhealthy` | Dependency was Healthy then became Unhealthy (requires healthcheck) |
-| `service_failed` | Dependency failed: Exited with non-zero code, Killed by signal, or Failed (spawn error). Optional `exit_code` filter |
-| `service_stopped` | Dependency is Stopped, Exited, Killed, or Failed. Optional `exit_code` filter |
+| Condition                        | Description                                                                                                          |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `service_started`                | Dependency status is Running, Healthy, or Unhealthy (default)                                                        |
+| `service_healthy`                | Dependency status is Healthy (requires healthcheck)                                                                  |
+| `service_completed_successfully` | Dependency exited with code 0                                                                                        |
+| `service_unhealthy`              | Dependency was Healthy then became Unhealthy (requires healthcheck)                                                  |
+| `service_failed`                 | Dependency failed: Exited with non-zero code, Killed by signal, or Failed (spawn error). Optional `exit_code` filter |
+| `service_stopped`                | Dependency is Stopped, Exited, Killed, or Failed. Optional `exit_code` filter                                        |
 
 ### Spawn-All Architecture
 
@@ -350,9 +382,11 @@ Both signals are suppressed by a **startup fence** (`startup_in_progress` flag) 
 
 ### Start Modes
 
+Both `kepler start` and `kepler run` support the same three CLI modes. The difference is in config handling: `start` uses/creates snapshots; `run` always loads fresh and takes no snapshot.
+
 ```mermaid
 flowchart TD
-    Start["kepler start"] --> Mode{"CLI flags?"}
+    Start["kepler start / kepler run"] --> Mode{"CLI flags?"}
     Mode -->|"-d"| Detached["Spawn all services
     Return immediately"]
     Mode -->|"-d --wait"| Wait["Spawn all services
@@ -366,11 +400,11 @@ flowchart TD
     style FG fill:#96b,color:#fff
 ```
 
-| Flags | Behavior |
-|-------|----------|
-| `-d` | All services spawned in background. Returns immediately |
-| `-d --wait` | All services spawned. CLI blocks until daemon sends **Ready** signal |
-| (no flags) | All services spawned. CLI follows logs until daemon sends **Quiescent** signal. Ctrl+C sends stop |
+| Flags       | Behavior                                                                                          |
+| ----------- | ------------------------------------------------------------------------------------------------- |
+| `-d`        | All services spawned in background. Returns immediately                                           |
+| `-d --wait` | All services spawned. CLI blocks until daemon sends **Ready** signal                              |
+| (no flags)  | All services spawned. CLI follows logs until daemon sends **Quiescent** signal. Ctrl+C sends stop |
 
 ### Configuration Format
 
@@ -387,14 +421,14 @@ depends_on:
 
 ### Relevant Files
 
-| File | Description |
-|------|-------------|
-| `kepler-daemon/src/config/mod.rs` | DependencyCondition, DependencyConfig, DependsOn types |
-| `kepler-daemon/src/config/deps.rs` | DependencyConfig with timeout, restart, exit_code fields |
-| `kepler-daemon/src/deps.rs` | Dependency graph, topological ordering, condition checking, permanently unsatisfied detection, structurally unreachable detection |
-| `kepler-daemon/src/orchestrator/mod.rs` | Spawn-all startup, per-dep wait_for_dependencies, skip/fail handling |
-| `kepler-daemon/src/orchestrator/events.rs` | Restart propagation with per-dep timeout |
-| `kepler-daemon/src/config_actor/actor.rs` | Ready and Quiescent signal computation, per-dep notification watchers, startup fence |
+| File                                       | Description                                                                                                                       |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `kepler-daemon/src/config/mod.rs`          | DependencyCondition, DependencyConfig, DependsOn types                                                                            |
+| `kepler-daemon/src/config/deps.rs`         | DependencyConfig with timeout, restart, exit_code fields                                                                          |
+| `kepler-daemon/src/deps.rs`                | Dependency graph, topological ordering, condition checking, permanently unsatisfied detection, structurally unreachable detection |
+| `kepler-daemon/src/orchestrator/mod.rs`    | Spawn-all startup, per-dep wait_for_dependencies, skip/fail handling                                                              |
+| `kepler-daemon/src/orchestrator/events.rs` | Restart propagation with per-dep timeout                                                                                          |
+| `kepler-daemon/src/config_actor/actor.rs`  | Ready and Quiescent signal computation, per-dep notification watchers, startup fence                                              |
 
 ---
 
@@ -404,12 +438,12 @@ depends_on:
 
 Kepler uses `${{ expr }}$` inline Lua expressions for dynamic values in configuration:
 
-| Syntax | Description |
-|--------|-------------|
-| `${{ service.env.VAR }}$` | Service environment variable reference |
-| `${{ service.env.VAR or "default" }}$` | Default value if unset |
-| `${{ deps.svc.status }}$` | Dependency status |
-| `${{ service.name }}$` | Current service name |
+| Syntax                                 | Description                            |
+| -------------------------------------- | -------------------------------------- |
+| `${{ service.env.VAR }}$`              | Service environment variable reference |
+| `${{ service.env.VAR or "default" }}$` | Default value if unset                 |
+| `${{ deps.svc.status }}$`              | Dependency status                      |
+| `${{ service.name }}$`                 | Current service name                   |
 
 See [Inline Expressions](variable-expansion.md) for the user-facing reference.
 
@@ -433,11 +467,11 @@ flowchart TD
     end
 ```
 
-| Stage | What is evaluated | Evaluation context |
-|-------|-------------------|-------------------|
-| 1 | `env_file` path | `kepler.env` only (config load time) |
-| 2 | `environment` array entries | `kepler.env` + env_file variables (sequential, service start time) |
-| 3 | All other fields (`command`, `working_dir`, `user`, hooks, etc.) | `kepler.env` + env_file + environment + deps (service start time) |
+| Stage | What is evaluated                                                | Evaluation context                                                 |
+| ----- | ---------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 1     | `env_file` path                                                  | `kepler.env` only (config load time)                               |
+| 2     | `environment` array entries                                      | `kepler.env` + env_file variables (sequential, service start time) |
+| 3     | All other fields (`command`, `working_dir`, `user`, hooks, etc.) | `kepler.env` + env_file + environment + deps (service start time)  |
 
 See [Environment Variables](environment-variables.md) for the full reference.
 
@@ -457,10 +491,10 @@ Higher priority values override lower priority ones when keys conflict.
 
 ### Relevant Files
 
-| File | Description |
-|------|-------------|
-| `kepler-daemon/src/config/expand.rs` | Two-stage shell expansion logic |
-| `kepler-daemon/src/env.rs` | Environment building and priority merging |
+| File                                 | Description                               |
+| ------------------------------------ | ----------------------------------------- |
+| `kepler-daemon/src/config/expand.rs` | Two-stage shell expansion logic           |
+| `kepler-daemon/src/env.rs`           | Environment building and priority merging |
 
 ---
 
@@ -476,16 +510,16 @@ For user-facing documentation, see [Lua Scripting](lua-scripting.md).
 
 The Lua environment provides a **restricted subset** of the standard library:
 
-| Available | NOT Available |
-|-----------|---------------|
-| `string` - String manipulation | `io` - File I/O operations |
-| `math` - Mathematical functions | `os.execute` - Shell command execution |
-| `table` - Table manipulation | `os.remove`, `os.rename` - File operations |
-| `tonumber`, `tostring` | `loadfile`, `dofile` - Arbitrary file loading |
-| `pairs`, `ipairs` | `debug` - Debug library |
-| `type`, `select`, `unpack` | `package.loadlib` - Native library loading |
-| `json` - JSON parse/stringify | |
-| `yaml` - YAML parse/stringify | |
+| Available                       | NOT Available                                 |
+| ------------------------------- | --------------------------------------------- |
+| `string` - String manipulation  | `io` - File I/O operations                    |
+| `math` - Mathematical functions | `os.execute` - Shell command execution        |
+| `table` - Table manipulation    | `os.remove`, `os.rename` - File operations    |
+| `tonumber`, `tostring`          | `loadfile`, `dofile` - Arbitrary file loading |
+| `pairs`, `ipairs`               | `debug` - Debug library                       |
+| `type`, `select`, `unpack`      | `package.loadlib` - Native library loading    |
+| `json` - JSON parse/stringify   |                                               |
+| `yaml` - YAML parse/stringify   |                                               |
 
 **No filesystem access**: Scripts cannot read, write, or modify files on disk.
 
@@ -495,18 +529,18 @@ The Lua environment provides a **restricted subset** of the standard library:
 
 ### Available Context
 
-| Symbol | Description |
-|--------|-------------|
-| `kepler.env` | Read-only kepler environment (declared via `autostart.environment`, or full CLI env when autostart is disabled) |
-| `service.env` | Read-only full environment (raw_env + env_file + environment) |
-| `service.raw_env` | Read-only inherited base environment (from daemon/CLI) |
-| `service.env_file` | Read-only env_file variables only |
-| `service.name` | Current service name (nil if global) |
-| `hook.name` | Current hook name (nil outside hooks) |
-| `hook.env` | Read-only full hook environment (raw_env + env_file + environment) |
-| `hook.raw_env` | Read-only inherited base environment (from parent service) |
-| `hook.env_file` | Read-only hook env_file variables only |
-| `global` | Mutable shared table for cross-block state |
+| Symbol             | Description                                                                                                     |
+| ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `kepler.env`       | Read-only kepler environment (declared via `autostart.environment`, or full CLI env when autostart is disabled) |
+| `service.env`      | Read-only full environment (raw_env + env_file + environment)                                                   |
+| `service.raw_env`  | Read-only inherited base environment (from daemon/CLI)                                                          |
+| `service.env_file` | Read-only env_file variables only                                                                               |
+| `service.name`     | Current service name (nil if global)                                                                            |
+| `hook.name`        | Current hook name (nil outside hooks)                                                                           |
+| `hook.env`         | Read-only full hook environment (raw_env + env_file + environment)                                              |
+| `hook.raw_env`     | Read-only inherited base environment (from parent service)                                                      |
+| `hook.env_file`    | Read-only hook env_file variables only                                                                          |
+| `global`           | Mutable shared table for cross-block state                                                                      |
 
 ### Security Measures
 
@@ -525,12 +559,12 @@ The Lua environment provides a **restricted subset** of the standard library:
 
 Lua scripts run in a specific order that mirrors shell expansion, with `service.env` progressively building up:
 
-| Order | Block | Available context |
-|-------|-------|-------------------|
-| 1 | `lua:` directive | `kepler.env` only |
-| 2 | `env_file: !lua` | `kepler.env` + `service.raw_env` |
-| 3 | `environment: !lua` | `kepler.env` + `service.raw_env` + `service.env_file` + `service.env` (sequential) |
-| 4 | All other `!lua` blocks | `kepler.env` + `service.raw_env` + `service.env_file` + `service.env` + `deps` |
+| Order | Block                   | Available context                                                                  |
+| ----- | ----------------------- | ---------------------------------------------------------------------------------- |
+| 1     | `lua:` directive        | `kepler.env` only                                                                  |
+| 2     | `env_file: !lua`        | `kepler.env` + `service.raw_env`                                                   |
+| 3     | `environment: !lua`     | `kepler.env` + `service.raw_env` + `service.env_file` + `service.env` (sequential) |
+| 4     | All other `!lua` blocks | `kepler.env` + `service.raw_env` + `service.env_file` + `service.env` + `deps`     |
 
 **Details:**
 
@@ -546,8 +580,8 @@ This ordering ensures that each stage has access to the variables it needs while
 
 ### Relevant Files
 
-| File | Description |
-|------|-------------|
+| File                     | Description                                                    |
+| ------------------------ | -------------------------------------------------------------- |
 | `kepler-daemon/src/lua/` | LuaEvaluator, frozen table pattern, sandbox setup, ACL runtime |
 
 ---
@@ -583,19 +617,19 @@ See [Environment Variables](environment-variables.md) for the full reference.
 
 Applied via `pre_exec` before process execution:
 
-| Limit | Description |
-|-------|-------------|
-| `RLIMIT_AS` | Memory limits |
-| `RLIMIT_CPU` | CPU time limits |
+| Limit           | Description            |
+| --------------- | ---------------------- |
+| `RLIMIT_AS`     | Memory limits          |
+| `RLIMIT_CPU`    | CPU time limits        |
 | `RLIMIT_NOFILE` | File descriptor limits |
 
 ### Relevant Files
 
-| File | Description |
-|------|-------------|
-| `kepler-daemon/src/main.rs` | Root enforcement, umask, state directory setup |
+| File                         | Description                                           |
+| ---------------------------- | ----------------------------------------------------- |
+| `kepler-daemon/src/main.rs`  | Root enforcement, umask, state directory setup        |
 | `kepler-daemon/src/process/` | Process spawning, privilege dropping, resource limits |
-| `kepler-daemon/src/user.rs` | User/group resolution |
+| `kepler-daemon/src/user.rs`  | User/group resolution                                 |
 
 ---
 
@@ -628,10 +662,10 @@ The actor batches up to 4096 entries and flushes them in a single transaction wh
 
 ### Storage Modes
 
-| Mode | Journal | Synchronous | Use Case |
-|------|---------|-------------|----------|
-| **Local** (default) | WAL | NORMAL | Local filesystem — concurrent readers, high throughput |
-| **NFS** | DELETE | FULL | Network filesystem — correctness over performance |
+| Mode                | Journal | Synchronous | Use Case                                               |
+| ------------------- | ------- | ----------- | ------------------------------------------------------ |
+| **Local** (default) | WAL     | NORMAL      | Local filesystem — concurrent readers, high throughput |
+| **NFS**             | DELETE  | FULL        | Network filesystem — correctness over performance      |
 
 Additional pragmas: `mmap_size=0` (disabled), `cache_size=-8000` (8MB), `temp_store=MEMORY`.
 
@@ -677,21 +711,21 @@ sequenceDiagram
 For follow mode, the client subscribes to `SubscribeLogs` notifications and issues `LogsStream` requests after each `LogsAvailable` event.
 
 **Modes:**
-| Mode | CLI Flag | Behavior |
-|------|----------|----------|
-| head | `--head` | Return first N lines (one-shot) |
-| tail | `--tail` | Return last N lines (one-shot) |
-| all | (default) | Stream all existing logs, then exit |
+| Mode   | CLI Flag   | Behavior                                |
+| ------ | ---------- | --------------------------------------- |
+| head   | `--head`   | Return first N lines (one-shot)         |
+| tail   | `--tail`   | Return last N lines (one-shot)          |
+| all    | (default)  | Stream all existing logs, then exit     |
 | follow | `--follow` | Stream existing + new logs continuously |
 
 ### Relevant Files
 
-| File | Description |
-|------|-------------|
-| `kepler-daemon/src/logs/store.rs` | LogStoreActor (writer thread) and LogStoreHandle |
-| `kepler-daemon/src/logs/log_writer.rs` | Per-service LogWriter (thin wrapper) |
-| `kepler-daemon/src/logs/log_reader.rs` | SqliteLogReader (read-only queries, filter injection) |
-| `kepler-daemon/src/logs/filter.rs` | Filter validation, SQLite authorizer setup, resource limits |
+| File                                   | Description                                                 |
+| -------------------------------------- | ----------------------------------------------------------- |
+| `kepler-daemon/src/logs/store.rs`      | LogStoreActor (writer thread) and LogStoreHandle            |
+| `kepler-daemon/src/logs/log_writer.rs` | Per-service LogWriter (thin wrapper)                        |
+| `kepler-daemon/src/logs/log_reader.rs` | SqliteLogReader (read-only queries, filter injection)       |
+| `kepler-daemon/src/logs/filter.rs`     | Filter validation, SQLite authorizer setup, resource limits |
 
 ---
 
@@ -728,14 +762,14 @@ For each running service, the collector:
 
 Metrics are stored in `<state_dir>/monitor.db` using SQLite (WAL mode on local filesystems, DELETE journal on NFS). The schema:
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `timestamp` | `INTEGER` | Unix epoch milliseconds |
-| `service` | `TEXT` | Service name |
-| `cpu_percent` | `REAL` | Total CPU usage across process tree |
-| `memory_rss` | `INTEGER` | Total RSS memory in bytes |
-| `memory_vss` | `INTEGER` | Total virtual memory in bytes |
-| `pids` | `TEXT` | JSON array of PIDs (e.g., `[1234,1235]`) |
+| Column        | Type      | Description                              |
+| ------------- | --------- | ---------------------------------------- |
+| `timestamp`   | `INTEGER` | Unix epoch milliseconds                  |
+| `service`     | `TEXT`    | Service name                             |
+| `cpu_percent` | `REAL`    | Total CPU usage across process tree      |
+| `memory_rss`  | `INTEGER` | Total RSS memory in bytes                |
+| `memory_vss`  | `INTEGER` | Total virtual memory in bytes            |
+| `pids`        | `TEXT`    | JSON array of PIDs (e.g., `[1234,1235]`) |
 
 Indexes on `timestamp` and `(service, timestamp)` enable efficient range queries.
 
@@ -771,15 +805,15 @@ Both the log store and monitor use the same batched-delete + time-budget pattern
 
 ### Relevant Files
 
-| File | Description |
-|------|-------------|
-| `kepler-daemon/src/monitor/mod.rs` | Public API, `spawn_monitor()`, `ServiceMetrics` |
-| `kepler-daemon/src/monitor/writer.rs` | Writer thread actor, `MonitorHandle`, `MonitorShutdownToken` |
-| `kepler-daemon/src/monitor/collector.rs` | Async metric collection task |
-| `kepler-daemon/src/monitor/query.rs` | Read-only query functions |
-| `kepler-daemon/src/db_cleanup.rs` | Shared cleanup utilities (used by logs and monitor) |
-| `kepler-daemon/src/containment.rs` | `enumerate_service_pids()` for cgroup PID enumeration |
-| `kepler-daemon/src/config/mod.rs` | `MonitorConfig` struct |
+| File                                     | Description                                                  |
+| ---------------------------------------- | ------------------------------------------------------------ |
+| `kepler-daemon/src/monitor/mod.rs`       | Public API, `spawn_monitor()`, `ServiceMetrics`              |
+| `kepler-daemon/src/monitor/writer.rs`    | Writer thread actor, `MonitorHandle`, `MonitorShutdownToken` |
+| `kepler-daemon/src/monitor/collector.rs` | Async metric collection task                                 |
+| `kepler-daemon/src/monitor/query.rs`     | Read-only query functions                                    |
+| `kepler-daemon/src/db_cleanup.rs`        | Shared cleanup utilities (used by logs and monitor)          |
+| `kepler-daemon/src/containment.rs`       | `enumerate_service_pids()` for cgroup PID enumeration        |
+| `kepler-daemon/src/config/mod.rs`        | `MonitorConfig` struct                                       |
 
 ---
 
@@ -888,35 +922,35 @@ See [Security Model](security-model.md#kepler-group-stripping) for user-facing d
 
 ### Relevant Files
 
-| File | Description |
-|------|-------------|
-| `kepler-protocol/src/server.rs` | Peer credential verification, connection limits |
-| `kepler-daemon/src/main.rs` | State directory hardening, symlink checks |
-| `kepler-daemon/src/process.rs` | Kepler group stripping, privilege dropping |
-| `kepler-daemon/src/config_actor/context.rs` | Token registration, permission store |
+| File                                        | Description                                     |
+| ------------------------------------------- | ----------------------------------------------- |
+| `kepler-protocol/src/server.rs`             | Peer credential verification, connection limits |
+| `kepler-daemon/src/main.rs`                 | State directory hardening, symlink checks       |
+| `kepler-daemon/src/process.rs`              | Kepler group stripping, privilege dropping      |
+| `kepler-daemon/src/config_actor/context.rs` | Token registration, permission store            |
 
 ---
 
 ## Key Files Reference
 
-| Component | File | Description |
-|-----------|------|-------------|
-| Directory structure | `kepler-daemon/src/lib.rs` | State directory paths |
-| Secure file writing | `kepler-daemon/src/persistence.rs` | File permissions |
-| Socket security | `kepler-protocol/src/server.rs` | Group-based access control |
-| Config loading | `kepler-daemon/src/config_actor/` | Lifecycle management, event channels |
-| Env expansion | `kepler-daemon/src/config/expand.rs` | `${{ }}$` inline Lua expression evaluation |
-| Env building | `kepler-daemon/src/env.rs` | Priority merging |
-| Lua evaluation | `kepler-daemon/src/lua/` | Sandbox implementation, ACL runtime, templating |
-| Process spawning | `kepler-daemon/src/process/` | Security controls, privilege dropping |
-| Event system | `kepler-daemon/src/events.rs` | ServiceEvent types, event channels |
-| Dependency graph | `kepler-daemon/src/deps.rs` | Start/stop ordering, condition checking |
-| Service orchestration | `kepler-daemon/src/orchestrator/` | Event handling, restart propagation |
-| Health checking | `kepler-daemon/src/health.rs` | Health check loop, event emission |
-| Resource monitoring | `kepler-daemon/src/monitor/` | CPU/memory metric collection to SQLite |
-| Shared DB cleanup | `kepler-daemon/src/db_cleanup.rs` | Batched retention cleanup (logs + monitor) |
-| Log writing | `kepler-daemon/src/logs/log_writer.rs` | Per-service LogWriter |
-| Log reading | `kepler-daemon/src/logs/log_reader.rs` | SqliteLogReader (read-only queries, filter injection) |
+| Component             | File                                   | Description                                           |
+| --------------------- | -------------------------------------- | ----------------------------------------------------- |
+| Directory structure   | `kepler-daemon/src/lib.rs`             | State directory paths                                 |
+| Secure file writing   | `kepler-daemon/src/persistence.rs`     | File permissions                                      |
+| Socket security       | `kepler-protocol/src/server.rs`        | Group-based access control                            |
+| Config loading        | `kepler-daemon/src/config_actor/`      | Lifecycle management, event channels                  |
+| Env expansion         | `kepler-daemon/src/config/expand.rs`   | `${{ }}$` inline Lua expression evaluation            |
+| Env building          | `kepler-daemon/src/env.rs`             | Priority merging                                      |
+| Lua evaluation        | `kepler-daemon/src/lua/`               | Sandbox implementation, ACL runtime, templating       |
+| Process spawning      | `kepler-daemon/src/process/`           | Security controls, privilege dropping                 |
+| Event system          | `kepler-daemon/src/events.rs`          | ServiceEvent types, event channels                    |
+| Dependency graph      | `kepler-daemon/src/deps.rs`            | Start/stop ordering, condition checking               |
+| Service orchestration | `kepler-daemon/src/orchestrator/`      | Event handling, restart propagation                   |
+| Health checking       | `kepler-daemon/src/health.rs`          | Health check loop, event emission                     |
+| Resource monitoring   | `kepler-daemon/src/monitor/`           | CPU/memory metric collection to SQLite                |
+| Shared DB cleanup     | `kepler-daemon/src/db_cleanup.rs`      | Batched retention cleanup (logs + monitor)            |
+| Log writing           | `kepler-daemon/src/logs/log_writer.rs` | Per-service LogWriter                                 |
+| Log reading           | `kepler-daemon/src/logs/log_reader.rs` | SqliteLogReader (read-only queries, filter injection) |
 
 ---
 

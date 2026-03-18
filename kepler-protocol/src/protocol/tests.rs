@@ -609,3 +609,126 @@ fn roundtrip_server_message_check_result() {
         }
     }
 }
+
+// ========================================================================
+// Request::Run roundtrip tests
+// ========================================================================
+
+#[test]
+fn roundtrip_envelope_run_basic() {
+    let envelope = RequestEnvelope {
+        id: 300,
+        token: None,
+        request: Request::Run {
+            config_path: PathBuf::from("/tmp/run.yaml"),
+            services: vec!["web".into()],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+            follow: true,
+            start_clean: false,
+        },
+    };
+    let bytes = encode_envelope(&envelope).unwrap();
+    let decoded = decode_envelope(&bytes[4..]).unwrap();
+    assert_eq!(decoded.id, 300);
+    match decoded.request {
+        Request::Run { config_path, services, sys_env, no_deps, override_envs, hardening, follow, start_clean } => {
+            assert_eq!(config_path, PathBuf::from("/tmp/run.yaml"));
+            assert_eq!(services, vec!["web".to_string()]);
+            assert!(sys_env.is_none());
+            assert!(!no_deps);
+            assert!(override_envs.is_none());
+            assert!(hardening.is_none());
+            assert!(follow);
+            assert!(!start_clean);
+        }
+        _ => panic!("Expected Run request"),
+    }
+}
+
+#[test]
+fn roundtrip_envelope_run_with_all_fields() {
+    let mut envs = HashMap::new();
+    envs.insert("K".to_string(), "V".to_string());
+    let mut sys = HashMap::new();
+    sys.insert("PATH".to_string(), "/usr/bin".to_string());
+    let envelope = RequestEnvelope {
+        id: 301,
+        token: Some([0u8; 32]),
+        request: Request::Run {
+            config_path: PathBuf::from("/app/kepler.yaml"),
+            services: vec!["api".into(), "worker".into()],
+            sys_env: Some(sys),
+            no_deps: true,
+            override_envs: Some(envs),
+            hardening: Some("strict".into()),
+            follow: false,
+            start_clean: true,
+        },
+    };
+    let bytes = encode_envelope(&envelope).unwrap();
+    let decoded = decode_envelope(&bytes[4..]).unwrap();
+    assert_eq!(decoded.id, 301);
+    match decoded.request {
+        Request::Run { config_path, services, sys_env, no_deps, override_envs, hardening, follow, start_clean } => {
+            assert_eq!(config_path, PathBuf::from("/app/kepler.yaml"));
+            assert_eq!(services, vec!["api".to_string(), "worker".to_string()]);
+            assert!(sys_env.is_some());
+            assert_eq!(sys_env.unwrap().get("PATH").unwrap(), "/usr/bin");
+            assert!(no_deps);
+            assert!(override_envs.is_some());
+            assert_eq!(override_envs.unwrap().get("K").unwrap(), "V");
+            assert_eq!(hardening, Some("strict".into()));
+            assert!(!follow);
+            assert!(start_clean);
+        }
+        _ => panic!("Expected Run request"),
+    }
+}
+
+#[test]
+fn run_variant_name() {
+    assert_eq!(
+        Request::Run {
+            config_path: PathBuf::new(),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+            follow: false,
+            start_clean: false,
+        }.variant_name(),
+        "Run"
+    );
+}
+
+#[test]
+fn roundtrip_envelope_run_empty_services() {
+    let envelope = RequestEnvelope {
+        id: 302,
+        token: None,
+        request: Request::Run {
+            config_path: PathBuf::from("/app/kepler.yaml"),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+            follow: false,
+            start_clean: false,
+        },
+    };
+    let bytes = encode_envelope(&envelope).unwrap();
+    let decoded = decode_envelope(&bytes[4..]).unwrap();
+    assert_eq!(decoded.id, 302);
+    match decoded.request {
+        Request::Run { services, start_clean, .. } => {
+            assert!(services.is_empty(), "Empty services should roundtrip");
+            assert!(!start_clean);
+        }
+        _ => panic!("Expected Run request"),
+    }
+}

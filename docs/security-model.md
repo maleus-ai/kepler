@@ -151,68 +151,73 @@ kepler:
         allow: [status]
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `lua` | `string` | No | Inline Lua code evaluated in the ACL Lua VM. Defines shared functions for authorizers. Separate from the config's main Lua VM. |
-| `aliases` | `object` | No | Named bundles of rights, expanded at parse time. Cannot shadow built-in aliases (`all`) or known rights. Max expansion depth: 2 levels. |
-| `users` | `object` | No | User rules keyed by username or numeric UID. |
-| `groups` | `object` | No | Group rules keyed by group name or numeric GID. |
+| Field     | Type     | Required | Description                                                                                                                             |
+| --------- | -------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `lua`     | `string` | No       | Inline Lua code evaluated in the ACL Lua VM. Defines shared functions for authorizers. Separate from the config's main Lua VM.          |
+| `aliases` | `object` | No       | Named bundles of rights, expanded at parse time. Cannot shadow built-in aliases (`all`) or known rights. Max expansion depth: 2 levels. |
+| `users`   | `object` | No       | User rules keyed by username or numeric UID.                                                                                            |
+| `groups`  | `object` | No       | Group rules keyed by group name or numeric GID.                                                                                         |
 
 Each rule accepts:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `allow` | `string[]` | Yes | Rights granted to this user/group. Supports aliases. |
-| `authorize` | `string` | No | Lua authorizer source. Called after static rights check. Must return truthy to allow, false/nil to deny. See [Lua Authorizers](#lua-authorizers). |
+| Field       | Type       | Required | Description                                                                                                                                       |
+| ----------- | ---------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allow`     | `string[]` | Yes      | Rights granted to this user/group. Supports aliases.                                                                                              |
+| `authorize` | `string`   | No       | Lua authorizer source. Called after static rights check. Must return truthy to allow, false/nil to deny. See [Lua Authorizers](#lua-authorizers). |
 
 ### Rights
 
 Rights are flat, explicit identifiers — there are no categories, no implicit cascading, and no hidden expansions.
 
-| Type | Description |
-| ---- | ----------- |
-| Base right | Gates exactly one request type (e.g., `start`, `stop`, `status`) |
-| Sub-right | Gates an optional feature within a request. Format: `base:feature` (e.g., `stop:clean`, `start:env-override`). Meaningless without its base right. |
-| Alias | Named bundle expanded at config parse time. Only `all` is built-in. User-defined aliases go in `kepler.acl.aliases`. |
+| Type       | Description                                                                                                                                        |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Base right | Gates exactly one request type (e.g., `start`, `stop`, `status`)                                                                                   |
+| Sub-right  | Gates an optional feature within a request. Format: `base:feature` (e.g., `stop:clean`, `start:env-override`). Meaningless without its base right. |
+| Alias      | Named bundle expanded at config parse time. Only `all` is built-in. User-defined aliases go in `kepler.acl.aliases`.                               |
 
 ### Available Rights
 
 **Base rights:**
 
-| Right        | Grants                                                                |
-| ------------ | --------------------------------------------------------------------- |
-| `start`      | Start services                                                        |
-| `stop`       | Stop services                                                         |
-| `restart`    | Restart services                                                      |
-| `recreate`   | Recreate config                                                       |
-| `status`     | View config/service status; filters `kepler ps --all` results |
-| `inspect`    | Inspect config                                                        |
-| `logs`       | View service logs and subscribe to log streams                        |
-| `subscribe`  | Subscribe to service state changes                                    |
-| `quiescence` | Check if system reached quiescence                                    |
-| `readiness`  | Check if services are ready                                           |
+| Right        | Grants                                                            |
+| ------------ | ----------------------------------------------------------------- |
+| `start`      | Start services                                                    |
+| `run`        | Run services in ephemeral mode (fresh config reload, no snapshot) |
+| `stop`       | Stop services                                                     |
+| `restart`    | Restart services                                                  |
+| `recreate`   | Recreate config                                                   |
+| `status`     | View config/service status; filters `kepler ps --all` results     |
+| `inspect`    | Inspect config                                                    |
+| `logs`       | View service logs and subscribe to log streams                    |
+| `subscribe`  | Subscribe to service state changes                                |
+| `quiescence` | Check if system reached quiescence                                |
+| `readiness`  | Check if services are ready                                       |
 
 **Sub-rights:**
 
-| Sub-right              | Base      | Grants                                                                |
-| ---------------------- | --------- | --------------------------------------------------------------------- |
-| `start:env-override`   | `start`   | Allow environment variable overrides (`-e`) on start                  |
-| `start:hardening`      | `start`   | Allow `--hardening` flag on start                                     |
-| `start:no-deps`        | `start`   | Allow `--no-deps` flag on start                                       |
-| `stop:clean`           | `stop`    | Allow `--clean` flag on stop                                          |
-| `stop:signal`          | `stop`    | Allow custom signal on stop                                           |
-| `restart:env-override` | `restart` | Allow environment variable overrides on restart                       |
-| `restart:no-deps`      | `restart` | Allow `--no-deps` flag on restart                                     |
-| `recreate:hardening`   | `recreate`| Allow `--hardening` flag on recreate                                  |
-| `logs:search`          | `logs`    | Allow log filter expressions (DSL). See [Log Query Security](#log-query-security) |
-| `logs:search:sql`      | `logs`    | Allow raw SQL filter expressions. Requires `logs:search`. See [Log Query Security](#log-query-security) |
-| `monitor:search`       | `monitor` | Allow monitor metric filter expressions (DSL). Same security model as `logs:search` |
-| `monitor:search:sql`   | `monitor` | Allow raw SQL filter expressions on metrics. Requires `monitor:search` |
+| Sub-right              | Base       | Grants                                                                                                  |
+| ---------------------- | ---------- | ------------------------------------------------------------------------------------------------------- |
+| `start:env-override`   | `start`    | Allow environment variable overrides (`-e`) on start                                                    |
+| `start:hardening`      | `start`    | Allow `--hardening` flag on start                                                                       |
+| `start:no-deps`        | `start`    | Allow `--no-deps` flag on start                                                                         |
+| `run:env-override`     | `run`      | Allow environment variable overrides (`-e`) on run                                                      |
+| `run:hardening`        | `run`      | Allow `--hardening` flag on run                                                                         |
+| `run:no-deps`          | `run`      | Allow `--no-deps` flag on run                                                                           |
+| `run:start-clean`      | `run`      | Allow `--start-clean` flag on run (wipes logs and metrics)                                              |
+| `stop:clean`           | `stop`     | Allow `--clean` flag on stop                                                                            |
+| `stop:signal`          | `stop`     | Allow custom signal on stop                                                                             |
+| `restart:env-override` | `restart`  | Allow environment variable overrides on restart                                                         |
+| `restart:no-deps`      | `restart`  | Allow `--no-deps` flag on restart                                                                       |
+| `recreate:hardening`   | `recreate` | Allow `--hardening` flag on recreate                                                                    |
+| `logs:search`          | `logs`     | Allow log filter expressions (DSL). See [Log Query Security](#log-query-security)                       |
+| `logs:search:sql`      | `logs`     | Allow raw SQL filter expressions. Requires `logs:search`. See [Log Query Security](#log-query-security) |
+| `monitor:search`       | `monitor`  | Allow monitor metric filter expressions (DSL). Same security model as `logs:search`                     |
+| `monitor:search:sql`   | `monitor`  | Allow raw SQL filter expressions on metrics. Requires `monitor:search`                                  |
 
 **Built-in alias:**
 
-| Alias | Expands to |
-| ----- | ---------- |
+| Alias | Expands to                         |
+| ----- | ---------------------------------- |
 | `all` | Every base right + every sub-right |
 
 > **Note:** Rights have no implications. `start` does NOT grant `stop`. A sub-right like `stop:clean` requires `stop` to also be granted — it is meaningless on its own.
@@ -425,11 +430,11 @@ services:
         return true
 ```
 
-| Field       | Type       | Default         | Description                                                                                            |
-| ----------- | ---------- | --------------- | ------------------------------------------------------------------------------------------------------ |
-| `allow`     | `string[]` | required        | Rights granted to the process. Subject to [permission ceiling](#permission-ceiling-token-inheritance) and [ACL intersection](#effective-permissions) at request time |
-| `hardening` | `string`   | inherited       | Hardening floor for configs spawned by this process. Cannot exceed the parent config's hardening level |
-| `authorize` | `string`   | none            | Lua authorizer source. Compiled at service start in the ACL Lua VM. Runs before ACL authorizers on each request -- can only deny within the token's rights. See [Lua Authorizers](#lua-authorizers) |
+| Field       | Type       | Default   | Description                                                                                                                                                                                         |
+| ----------- | ---------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allow`     | `string[]` | required  | Rights granted to the process. Subject to [permission ceiling](#permission-ceiling-token-inheritance) and [ACL intersection](#effective-permissions) at request time                                |
+| `hardening` | `string`   | inherited | Hardening floor for configs spawned by this process. Cannot exceed the parent config's hardening level                                                                                              |
+| `authorize` | `string`   | none      | Lua authorizer source. Compiled at service start in the ACL Lua VM. Runs before ACL authorizers on each request -- can only deny within the token's rights. See [Lua Authorizers](#lua-authorizers) |
 
 ### Permission Lifecycle
 
@@ -452,21 +457,21 @@ Kepler uses a unified authorization model where every request goes through the s
 
 ### Authorization Formula
 
-| Caller type | Formula | Description |
-|---|---|---|
-| **Root** (uid 0, no registration) | `effective = *` | Root always has full access. No ACL check. |
-| **Group** (kepler member, no registration) | `effective = ACL(uid, gid)` | Access controlled entirely by ACL. Config owner has implicit `*`. |
-| **Token-authenticated** (process with `permissions`) | `effective = Process.allow ∩ ACL(uid, gid)` | Both the process permissions AND the ACL must grant the right. |
+| Caller type                                          | Formula                                     | Description                                                       |
+| ---------------------------------------------------- | ------------------------------------------- | ----------------------------------------------------------------- |
+| **Root** (uid 0, no registration)                    | `effective = *`                             | Root always has full access. No ACL check.                        |
+| **Group** (kepler member, no registration)           | `effective = ACL(uid, gid)`                 | Access controlled entirely by ACL. Config owner has implicit `*`. |
+| **Token-authenticated** (process with `permissions`) | `effective = Process.allow ∩ ACL(uid, gid)` | Both the process permissions AND the ACL must grant the right.    |
 
 Where `ACL(uid, gid)` resolves to:
 
-| Caller identity | ACL value |
-|---|---|
-| Root (uid 0) | `*` -- implicit, never checked |
-| Config owner | `*` -- implicit, never checked |
-| User/group with matching ACL rules | Union of all matching rights |
-| User/group with no matching rules | `∅` (denied) |
-| No `acl` section in config | `∅` (denied) |
+| Caller identity                    | ACL value                      |
+| ---------------------------------- | ------------------------------ |
+| Root (uid 0)                       | `*` -- implicit, never checked |
+| Config owner                       | `*` -- implicit, never checked |
+| User/group with matching ACL rules | Union of all matching rights   |
+| User/group with no matching rules  | `∅` (denied)                   |
+| No `acl` section in config         | `∅` (denied)                   |
 
 ### Group ∩ ACL
 
@@ -567,10 +572,10 @@ child.allow = expand(service.permissions.allow) ∩ caller_ceiling
 
 Where `caller_ceiling` is:
 
-| Caller auth type | Ceiling |
-|---|---|
+| Caller auth type        | Ceiling                      |
+| ----------------------- | ---------------------------- |
 | **Token-authenticated** | Parent process's `allow` set |
-| **Root** or **Group** | No ceiling (unlimited) |
+| **Root** or **Group**   | No ceiling (unlimited)       |
 
 This guarantees that permissions can never grow in scope across nesting levels:
 
@@ -640,12 +645,12 @@ The `max()` comparison uses the ordering `none < no-root < strict`.
 
 > **Note:** When a registered process explicitly requests a hardening level below its floor, the request is **denied** (not silently raised). The `max()` formula applies only when no explicit level is requested — the process's floor becomes the default.
 
-| Process floor | Requested | Effective | Result |
-|---|---|---|---|
-| `no-root` | (none) | `no-root` | Process floor used as default |
-| `no-root` | `strict` | `strict` | Raised above floor -- allowed |
-| `no-root` | `none` | -- | **Denied** -- below process floor |
-| `none` | `strict` | `strict` | No floor -- requested level used |
+| Process floor | Requested | Effective | Result                            |
+| ------------- | --------- | --------- | --------------------------------- |
+| `no-root`     | (none)    | `no-root` | Process floor used as default     |
+| `no-root`     | `strict`  | `strict`  | Raised above floor -- allowed     |
+| `no-root`     | `none`    | --        | **Denied** -- below process floor |
+| `none`        | `strict`  | `strict`  | No floor -- requested level used  |
 
 ```yaml
 services:
@@ -1075,20 +1080,20 @@ Log filtering is gated by two sub-rights that control the query surface area ava
 
 Log access uses a base right and two sub-rights:
 
-| Right | Required for | Description |
-|-------|-------------|-------------|
-| `logs` | `kepler logs`, `kepler logs --follow` | Read and stream logs (no filtering) |
-| `logs:search` | `kepler logs --filter "..."` | Filter logs using the search DSL. Requires `logs` base right. |
-| `logs:search:sql` | `kepler logs --filter "..." --sql` | Filter logs using raw SQL WHERE clauses. Requires `logs:search`. |
+| Right             | Required for                          | Description                                                      |
+| ----------------- | ------------------------------------- | ---------------------------------------------------------------- |
+| `logs`            | `kepler logs`, `kepler logs --follow` | Read and stream logs (no filtering)                              |
+| `logs:search`     | `kepler logs --filter "..."`          | Filter logs using the search DSL. Requires `logs` base right.    |
+| `logs:search:sql` | `kepler logs --filter "..." --sql`    | Filter logs using raw SQL WHERE clauses. Requires `logs:search`. |
 
 **Right separation rationale:** Plain log reading (`logs`) is a read-only operation with no user-controlled SQL. DSL filtering (`logs:search`) uses a parser that only produces safe SQL fragments — users cannot write arbitrary queries. Raw SQL filtering (`logs:search:sql`) exposes the full SQL surface area and should only be granted to trusted users.
 
 Monitor metric access follows the same pattern:
 
-| Right | Required for | Description |
-|-------|-------------|-------------|
-| `monitor` | `kepler top` | View metrics (no filtering) |
-| `monitor:search` | `kepler top --filter "..."` | Filter metrics using the search DSL. Requires `monitor` base right. |
+| Right                | Required for                      | Description                                                            |
+| -------------------- | --------------------------------- | ---------------------------------------------------------------------- |
+| `monitor`            | `kepler top`                      | View metrics (no filtering)                                            |
+| `monitor:search`     | `kepler top --filter "..."`       | Filter metrics using the search DSL. Requires `monitor` base right.    |
 | `monitor:search:sql` | `kepler top --filter "..." --sql` | Filter metrics using raw SQL WHERE clauses. Requires `monitor:search`. |
 
 The same defense layers (authorizer, resource limits, timeout) apply to monitor filters, with the authorizer restricting reads to the `metrics` table instead of `logs`.
@@ -1136,15 +1141,15 @@ If the authorizer denies any operation, the query fails at compile time with an 
 
 SQLite resource limits are tightened on the filter connection to prevent denial-of-service:
 
-| Limit | Value | Purpose |
-|-------|-------|---------|
-| Expression depth | 20 | Prevents deeply nested expressions |
-| LIKE pattern length | 100 bytes | Prevents expensive LIKE patterns |
-| SQL length | 10,000 bytes | Prevents oversized queries |
-| String length | 1,000,000 bytes | Caps result sizes |
-| Compound SELECT | 2 | Prevents UNION chains |
-| Function arguments | 8 | Limits function call complexity |
-| Attached databases | 0 | Blocks ATTACH entirely |
+| Limit               | Value           | Purpose                            |
+| ------------------- | --------------- | ---------------------------------- |
+| Expression depth    | 20              | Prevents deeply nested expressions |
+| LIKE pattern length | 100 bytes       | Prevents expensive LIKE patterns   |
+| SQL length          | 10,000 bytes    | Prevents oversized queries         |
+| String length       | 1,000,000 bytes | Caps result sizes                  |
+| Compound SELECT     | 2               | Prevents UNION chains              |
+| Function arguments  | 8               | Limits function call complexity    |
+| Attached databases  | 0               | Blocks ATTACH entirely             |
 
 Additionally, the filter string itself is validated before injection: empty filters and filters exceeding 4,096 bytes are rejected.
 
@@ -1156,13 +1161,13 @@ A progress handler aborts queries that run longer than 5 seconds. This is the la
 
 The authorizer uses a **deny-by-default** policy for SQL functions. Only the following functions are permitted in filter expressions:
 
-| Category | Functions |
-|----------|-----------|
-| JSON | `json`, `json_extract`, `json_type`, `json_valid`, `json_array_length`, `json_each`, `json_tree`, `json_object`, `json_array`, `json_quote` |
-| String | `length`, `lower`, `upper`, `trim`, `ltrim`, `rtrim`, `substr`, `substring`, `replace`, `instr`, `like`, `glob` |
-| Comparison | `coalesce`, `ifnull`, `iif`, `nullif`, `typeof`, `min`, `max` |
-| Numeric | `abs`, `round` |
-| Aggregate | `count`, `sum`, `total`, `avg`, `group_concat` |
+| Category   | Functions                                                                                                                                   |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| JSON       | `json`, `json_extract`, `json_type`, `json_valid`, `json_array_length`, `json_each`, `json_tree`, `json_object`, `json_array`, `json_quote` |
+| String     | `length`, `lower`, `upper`, `trim`, `ltrim`, `rtrim`, `substr`, `substring`, `replace`, `instr`, `like`, `glob`                             |
+| Comparison | `coalesce`, `ifnull`, `iif`, `nullif`, `typeof`, `min`, `max`                                                                               |
+| Numeric    | `abs`, `round`                                                                                                                              |
+| Aggregate  | `count`, `sum`, `total`, `avg`, `group_concat`                                                                                              |
 
 All other functions are blocked. This prevents:
 - **`randomblob()`, `zeroblob()`**: memory allocation attacks

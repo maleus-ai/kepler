@@ -502,6 +502,26 @@ pub fn build_authorizer_context(
             }
             ("restart", params)
         }
+        Request::Run {
+            services,
+            no_deps,
+            override_envs,
+            hardening,
+            start_clean,
+            ..
+        } => {
+            let mut params = HashMap::new();
+            params.insert("services".into(), ParamValue::StringList(services.clone()));
+            params.insert("no_deps".into(), ParamValue::Bool(*no_deps));
+            params.insert("start_clean".into(), ParamValue::Bool(*start_clean));
+            if let Some(h) = hardening {
+                params.insert("hardening".into(), ParamValue::String(h.clone()));
+            }
+            if let Some(envs) = override_envs {
+                params.insert("override_envs".into(), ParamValue::StringMap(envs.clone()));
+            }
+            ("run", params)
+        }
         Request::Recreate { hardening, .. } => {
             let mut params = HashMap::new();
             if let Some(h) = hardening {

@@ -1,4 +1,45 @@
-use clap::Subcommand;
+use clap::{Args, Subcommand};
+
+/// Arguments shared between `start` and `run` commands
+#[derive(Args, Debug)]
+pub struct StartRunArgs {
+    /// Services to start/run (all if none specified)
+    #[arg(value_name = "SERVICE")]
+    pub services: Vec<String>,
+    /// Detach and return immediately (don't follow logs)
+    #[arg(short, long)]
+    pub detach: bool,
+    /// Block until startup cluster is ready, then return (requires -d)
+    #[arg(long, requires = "detach")]
+    pub wait: bool,
+    /// Timeout for --wait mode (e.g. "30s", "5m")
+    #[arg(long, requires = "wait")]
+    pub timeout: Option<String>,
+    /// Skip dependency waiting and `if:` condition (requires service names)
+    #[arg(long)]
+    pub no_deps: bool,
+    /// Override system environment variables (KEY=VALUE, repeatable)
+    #[arg(short = 'e', long = "override-envs", value_name = "KEY=VALUE")]
+    pub override_envs: Vec<String>,
+    /// Refresh all system environment variables from the current shell
+    #[arg(short = 'r', long)]
+    pub refresh_env: bool,
+    /// Output raw log lines without formatting (no timestamp, level, service name, color)
+    #[arg(long, conflicts_with = "detach")]
+    pub raw: bool,
+    /// Output logs as JSONL (one JSON object per line, OTEL/Datadog compatible)
+    #[arg(long, conflicts_with_all = ["detach", "raw"])]
+    pub json: bool,
+    /// Stop all services on unhandled failure (foreground mode)
+    #[arg(long, conflicts_with = "detach")]
+    pub abort_on_failure: bool,
+    /// Don't stop services on unhandled failure (--wait mode only)
+    #[arg(long, requires = "wait")]
+    pub no_abort_on_failure: bool,
+    /// Per-config hardening level (none, no-root, strict) [daemon default: no-root]
+    #[arg(long)]
+    pub hardening: Option<String>,
+}
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
@@ -10,42 +51,19 @@ pub enum Commands {
 
     /// Start services (requires daemon to be running)
     Start {
-        /// Services to start (starts all if none specified)
-        #[arg(value_name = "SERVICE")]
-        services: Vec<String>,
-        /// Detach and return immediately (don't follow logs)
-        #[arg(short, long)]
-        detach: bool,
-        /// Block until startup cluster is ready, then return (requires -d)
-        #[arg(long, requires = "detach")]
-        wait: bool,
-        /// Timeout for --wait mode (e.g. "30s", "5m")
-        #[arg(long, requires = "wait")]
-        timeout: Option<String>,
-        /// Skip dependency waiting and `if:` condition (requires service names)
+        #[command(flatten)]
+        args: StartRunArgs,
+    },
+    /// Run services (ephemeral mode: always reload config fresh, no snapshot)
+    Run {
+        #[command(flatten)]
+        args: StartRunArgs,
+        /// Remove entire state dir before loading (fresh slate: clears logs and metrics)
         #[arg(long)]
-        no_deps: bool,
-        /// Override system environment variables (KEY=VALUE, repeatable)
-        #[arg(short = 'e', long = "override-envs", value_name = "KEY=VALUE")]
-        override_envs: Vec<String>,
-        /// Refresh all system environment variables from the current shell
-        #[arg(short = 'r', long)]
-        refresh_env: bool,
-        /// Output raw log lines without formatting (no timestamp, level, service name, color)
+        start_clean: bool,
+        /// Remove entire state dir after all services exit (incompatible with -d)
         #[arg(long, conflicts_with = "detach")]
-        raw: bool,
-        /// Output logs as JSONL (one JSON object per line, OTEL/Datadog compatible)
-        #[arg(long, conflicts_with_all = ["detach", "raw"])]
-        json: bool,
-        /// Stop all services on unhandled failure (foreground mode)
-        #[arg(long, conflicts_with = "detach")]
-        abort_on_failure: bool,
-        /// Don't stop services on unhandled failure (--wait mode only)
-        #[arg(long, requires = "wait")]
-        no_abort_on_failure: bool,
-        /// Per-config hardening level (none, no-root, strict) [daemon default: no-root]
-        #[arg(long)]
-        hardening: Option<String>,
+        clean: bool,
     },
     /// Stop services (requires daemon to be running)
     Stop {
