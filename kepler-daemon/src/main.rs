@@ -669,6 +669,7 @@ async fn main() -> anyhow::Result<()> {
 fn extract_config_path(request: &Request) -> Option<&PathBuf> {
     match request {
         Request::Start { config_path, .. }
+        | Request::Run { config_path, .. }
         | Request::Stop { config_path, .. }
         | Request::Restart { config_path, .. }
         | Request::Recreate { config_path, .. }
@@ -717,6 +718,7 @@ async fn handle_request(
     if let kepler_daemon::auth::AuthContext::Token { ref ctx, .. } = auth_ctx {
         let requested_hardening = match &request {
             Request::Start { hardening, .. } => hardening.as_deref(),
+            Request::Run { hardening, .. } => hardening.as_deref(),
             Request::Recreate { hardening, .. } => hardening.as_deref(),
             _ => None,
         };
@@ -726,6 +728,7 @@ async fn handle_request(
                     let level_str = level.to_string();
                     match &mut request {
                         Request::Start { hardening, .. } => *hardening = Some(level_str),
+                        Request::Run { hardening, .. } => *hardening = Some(level_str),
                         Request::Recreate { hardening, .. } => *hardening = Some(level_str),
                         _ => {}
                     }
@@ -835,6 +838,53 @@ async fn handle_request(
                     if follow {
                         // Stream inline progress events until quiescence or client disconnect.
                         // This eliminates the need for a separate Subscribe request.
+                        if let Some(handle) = registry.get(&config_path) {
+                            if let Some(config) = handle.get_config().await {
+                                let svc_filter = if services.is_empty() { None } else { Some(services) };
+                                forward_state_events(&handle, &config, &svc_filter, &progress).await;
+                            }
+                        }
+                    }
+                    Response::ok_with_message(msg)
+                }
+                Err(e) => Response::error(e.to_string()),
+            }
+        }
+
+        Request::Run {
+            config_path,
+            services,
+            sys_env,
+            no_deps,
+            override_envs,
+            hardening,
+            follow,
+            start_clean,
+        } => {
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+            let hardening_level = match hardening.as_deref().map(|s| s.parse::<HardeningLevel>()) {
+                Some(Ok(level)) => Some(level),
+                Some(Err(e)) => return Response::error(e),
+                None => None,
+            };
+            // Compute permission ceiling from auth context
+            let permission_ceiling = match &auth_ctx {
+                kepler_daemon::auth::AuthContext::Token { ctx, .. } => Some(ctx.allow.clone()),
+                _ => None,
+            };
+            // Invalidate cached ACL — the config is being reloaded
+            if let Some(state_dir) = compute_state_dir(&config_path) {
+                unloaded_acl_cache.remove(&state_dir);
+            }
+            match orchestrator
+                .run_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps, override_envs, hardening_level, permission_ceiling, start_clean)
+                .await
+            {
+                Ok(msg) => {
+                    if follow {
                         if let Some(handle) = registry.get(&config_path) {
                             if let Some(config) = handle.get_config().await {
                                 let svc_filter = if services.is_empty() { None } else { Some(services) };

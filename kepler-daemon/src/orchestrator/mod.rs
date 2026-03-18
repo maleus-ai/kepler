@@ -1685,6 +1685,103 @@ impl ServiceOrchestrator {
     }
 
 
+    /// Run services in ephemeral mode: always reload config fresh, no snapshot.
+    ///
+    /// Flow:
+    /// 1. Stop all prior services (if any)
+    /// 2. Unload config actor
+    /// 3. Clear state dir contents (keep logs/ and monitor.db)
+    /// 4. If --start-clean: remove entire state dir
+    /// 5. Load config fresh with suppress_snapshot
+    /// 6. Start services
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_services(
+        &self,
+        config_path: &Path,
+        services: &[String],
+        sys_env: Option<HashMap<String, String>>,
+        config_owner: Option<(u32, u32)>,
+        progress: Option<ProgressSender>,
+        no_deps: bool,
+        override_envs: Option<HashMap<String, String>>,
+        hardening: Option<HardeningLevel>,
+        permission_ceiling: Option<HashSet<&'static str>>,
+        start_clean: bool,
+    ) -> Result<String, OrchestratorError> {
+        info!("Running config in ephemeral mode for {:?}", config_path);
+
+        // Step 1 & 2: Stop all running services and unload config if loaded
+        if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
+            if !handle.all_services_stopped().await {
+                info!("Stopping all services before run for {:?}", config_path);
+                self.stop_services(config_path, &[], false, None).await?;
+            }
+
+            // Clear snapshot to force re-expansion
+            if let Err(e) = handle.clear_snapshot().await {
+                warn!("Failed to clear snapshot: {}", e);
+            }
+
+            // Revoke all tokens before unloading
+            self.token_store.revoke_for_config(config_path).await;
+
+            // Unload the config actor (clean=true: skip save_state during
+            // shutdown/cleanup since run_services deletes state files anyway,
+            // and avoids a race where the old actor's cleanup() could recreate
+            // state.json after we delete it).
+            self.registry.unload(&config_path.to_path_buf(), true).await;
+        }
+
+        // Compute state dir path
+        use sha2::{Digest, Sha256};
+        let config_hash = hex::encode(Sha256::digest(
+            config_path.to_string_lossy().as_bytes(),
+        ));
+        let state_dir = crate::global_state_dir()
+            .map(|d| d.join("configs").join(&config_hash))
+            .map_err(|e| OrchestratorError::ConfigError(format!("Cannot determine state directory: {}", e)))?;
+
+        if start_clean {
+            // Step 4: --start-clean: remove entire state dir (including logs)
+            if state_dir.exists() {
+                info!("run_services: --start-clean: removing entire state directory {:?}", state_dir);
+                if let Err(e) = std::fs::remove_dir_all(&state_dir) {
+                    warn!("Failed to remove state directory {:?}: {}", state_dir, e);
+                }
+            }
+        } else if state_dir.exists() {
+            // Step 3: Clear state dir contents (keep logs/ and monitor.db)
+            for entry_name in &["expanded_config.yaml", "config.yaml", "state.json", "source_path.txt"] {
+                let path = state_dir.join(entry_name);
+                if path.exists() {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        warn!("Failed to remove {:?}: {}", path, e);
+                    }
+                }
+            }
+            let env_files_dir = state_dir.join("env_files");
+            if env_files_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&env_files_dir) {
+                    warn!("Failed to remove env_files dir {:?}: {}", env_files_dir, e);
+                }
+            }
+        }
+
+        // Step 5: Load config fresh
+        let handle = self
+            .registry
+            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening, permission_ceiling)
+            .await?;
+
+        // Suppress snapshot even if autostart: true
+        if let Err(e) = handle.set_suppress_snapshot().await {
+            warn!("Failed to set suppress_snapshot: {}", e);
+        }
+
+        // Step 6: Start services (reuses existing start_services logic)
+        self.start_services(config_path, services, sys_env, config_owner, progress, no_deps, override_envs, hardening, None).await
+    }
+
     /// Restart a single service (used by file watcher)
     pub async fn restart_single_service(
         &self,

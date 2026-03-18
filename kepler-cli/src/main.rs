@@ -11,7 +11,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{commands::Commands, commands::DaemonCommands, config::Config, errors::{CliError, Result}};
+use crate::{commands::Commands, commands::DaemonCommands, commands::StartRunArgs, config::Config, errors::{CliError, Result}};
 use chrono::{DateTime, Local, Utc};
 use clap::Parser;
 use colored::{Color, Colorize};
@@ -132,88 +132,13 @@ async fn run() -> Result<()> {
     // Collect system environment once for commands that need it.
     let sys_env: HashMap<String, String> = std::env::vars().collect();
 
-    /// Build override_envs from `-e` flags and `--refresh-env`.
-    /// - No flags: None (no override)
-    /// - `--refresh-env`: full sys_env from current CLI process
-    /// - `-e KEY=VALUE`: only those specific overrides
-    fn build_override_envs(raw: Vec<String>, refresh_env: bool, sys_env: &HashMap<String, String>) -> Option<HashMap<String, String>> {
-        // --refresh-env: start with the full current CLI env as the base
-        // -e KEY=VALUE: patch specific keys on top
-        // Both can be combined: refresh first, then apply -e overrides
-        let mut map = if refresh_env {
-            sys_env.clone()
-        } else if raw.is_empty() {
-            return None;
-        } else {
-            HashMap::new()
-        };
-        for entry in raw {
-            if let Some((key, value)) = entry.split_once('=') {
-                map.insert(key.to_string(), value.to_string());
-            } else {
-                eprintln!("Warning: ignoring invalid override-env (expected KEY=VALUE): {}", entry);
-            }
-        }
-        if map.is_empty() { None } else { Some(map) }
-    }
-
     match cli.command {
-        Commands::Start { services, detach, wait, timeout, no_deps, override_envs, refresh_env, raw: raw_output, json: json_output, abort_on_failure, no_abort_on_failure, hardening } => {
-            let override_envs = build_override_envs(override_envs, refresh_env, &sys_env);
-            if no_deps && services.is_empty() {
-                eprintln!("Error: --no-deps requires specifying at least one service");
-                std::process::exit(1);
-            }
-            if detach && wait {
-                // -d --wait: Start with follow — inline progress events until ready
-                let (progress_rx, start_future) = client.start(
-                    canonical_path.clone(),
-                    services,
-                    Some(sys_env),
-                    no_deps,
-                    override_envs,
-                    hardening,
-                    true, // follow: inline events until quiescence
-                )?;
-                if let Some(timeout_str) = &timeout {
-                    let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
-                        .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
-                    let result = tokio::time::timeout(
-                        timeout_duration,
-                        wait_until_ready(progress_rx, start_future, !no_abort_on_failure, &client, &canonical_path, cli.quiet),
-                    ).await;
-                    match result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => return Err(e),
-                        Err(_) => {
-                            eprintln!("Timeout: operation did not complete within {}", timeout_str);
-                            std::process::exit(1);
-                        }
-                    }
-                } else {
-                    wait_until_ready(progress_rx, start_future, !no_abort_on_failure, &client, &canonical_path, cli.quiet).await?;
-                }
-            } else if detach {
-                // -d: Fire start, exit immediately
-                let (_progress_rx, response_future) = client.start(canonical_path, services, Some(sys_env), no_deps, override_envs, hardening, false)?;
-                let response = response_future.await?;
-                handle_response(response);
-            } else {
-                // Foreground: start with follow — inline quiescence detection + log streaming.
-                let (progress_rx, start_future) = client.start(
-                    canonical_path.clone(),
-                    services.clone(),
-                    Some(sys_env),
-                    no_deps,
-                    override_envs,
-                    hardening,
-                    true, // follow: inline events until quiescence
-                )?;
-                foreground_with_logs(
-                    start_future,
-                    follow_logs_until_quiescent(&client, &canonical_path, &services, abort_on_failure, progress_rx, raw_output, json_output, cli.quiet),
-                ).await?;
-            }
+        Commands::Start { args } => {
+            handle_launch(&client, canonical_path, sys_env, args, LaunchMode::Start, cli.quiet).await?;
+        }
+
+        Commands::Run { args, start_clean, clean } => {
+            handle_launch(&client, canonical_path, sys_env, args, LaunchMode::Run { start_clean, clean }, cli.quiet).await?;
         }
 
         Commands::Stop { services, clean, signal } => {
@@ -530,6 +455,138 @@ async fn run_with_progress(
 }
 
 /// Drive a foreground start/restart: runs the daemon request concurrently with log following.
+// =========================================================================
+// Shared start/run launch logic
+// =========================================================================
+
+fn build_override_envs(raw: Vec<String>, refresh_env: bool, sys_env: &HashMap<String, String>) -> Option<HashMap<String, String>> {
+    // --refresh-env: start with the full current CLI env as the base
+    // -e KEY=VALUE: patch specific keys on top
+    // Both can be combined: refresh first, then apply -e overrides
+    let mut map = if refresh_env {
+        sys_env.clone()
+    } else if raw.is_empty() {
+        return None;
+    } else {
+        HashMap::new()
+    };
+    for entry in raw {
+        if let Some((key, value)) = entry.split_once('=') {
+            map.insert(key.to_string(), value.to_string());
+        } else {
+            eprintln!("Warning: ignoring invalid override-env (expected KEY=VALUE): {}", entry);
+        }
+    }
+    if map.is_empty() { None } else { Some(map) }
+}
+
+/// Distinguishes `kepler start` from `kepler run` for the shared launch handler.
+enum LaunchMode {
+    Start,
+    Run { start_clean: bool, clean: bool },
+}
+
+/// Send a start or run request to the daemon, dispatching based on `LaunchMode`.
+fn send_launch_request<'a>(
+    client: &'a Client,
+    canonical_path: PathBuf,
+    services: Vec<String>,
+    sys_env: HashMap<String, String>,
+    no_deps: bool,
+    override_envs: Option<HashMap<String, String>>,
+    hardening: Option<String>,
+    follow: bool,
+    mode: &LaunchMode,
+) -> std::result::Result<
+    (mpsc::UnboundedReceiver<ServerEvent>, std::pin::Pin<Box<dyn Future<Output = std::result::Result<Response, ClientError>> + 'a>>),
+    ClientError,
+> {
+    match mode {
+        LaunchMode::Start => {
+            let (rx, fut) = client.start(canonical_path, services, Some(sys_env), no_deps, override_envs, hardening, follow)?;
+            Ok((rx, Box::pin(fut)))
+        }
+        LaunchMode::Run { start_clean, .. } => {
+            let (rx, fut) = client.run(canonical_path, services, Some(sys_env), no_deps, override_envs, hardening, follow, *start_clean)?;
+            Ok((rx, Box::pin(fut)))
+        }
+    }
+}
+
+/// Shared handler for both `kepler start` and `kepler run`.
+///
+/// Both commands share the same 3-mode dispatch (detach+wait, detach, foreground).
+/// The only differences are: `run` passes `start_clean` to the daemon, and
+/// `run --clean` sends a post-quiescence `stop --clean` in foreground mode.
+async fn handle_launch(
+    client: &Client,
+    canonical_path: PathBuf,
+    sys_env: HashMap<String, String>,
+    args: StartRunArgs,
+    mode: LaunchMode,
+    quiet: bool,
+) -> Result<()> {
+    let override_envs = build_override_envs(args.override_envs, args.refresh_env, &sys_env);
+    if args.no_deps && args.services.is_empty() {
+        eprintln!("Error: --no-deps requires specifying at least one service");
+        std::process::exit(1);
+    }
+
+    if args.detach && args.wait {
+        // -d --wait: follow inline progress events until ready
+        let (progress_rx, fut) = send_launch_request(
+            client, canonical_path.clone(), args.services, sys_env,
+            args.no_deps, override_envs, args.hardening, true, &mode,
+        )?;
+        if let Some(timeout_str) = &args.timeout {
+            let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
+                .map_err(|_| CliError::Server(format!("Invalid timeout: {}", timeout_str)))?;
+            let result = tokio::time::timeout(
+                timeout_duration,
+                wait_until_ready(progress_rx, fut, !args.no_abort_on_failure, client, &canonical_path, quiet),
+            ).await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    eprintln!("Timeout: operation did not complete within {}", timeout_str);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            wait_until_ready(progress_rx, fut, !args.no_abort_on_failure, client, &canonical_path, quiet).await?;
+        }
+    } else if args.detach {
+        // -d: fire and forget
+        let (_progress_rx, fut) = send_launch_request(
+            client, canonical_path, args.services, sys_env,
+            args.no_deps, override_envs, args.hardening, false, &mode,
+        )?;
+        let response = fut.await?;
+        handle_response(response);
+    } else {
+        // Foreground: inline quiescence detection + log streaming
+        let (progress_rx, fut) = send_launch_request(
+            client, canonical_path.clone(), args.services.clone(), sys_env,
+            args.no_deps, override_envs, args.hardening, true, &mode,
+        )?;
+        foreground_with_logs(
+            fut,
+            follow_logs_until_quiescent(client, &canonical_path, &args.services, args.abort_on_failure, progress_rx, args.raw, args.json, quiet),
+        ).await?;
+
+        // run --clean: remove entire state dir after all services exit
+        if let LaunchMode::Run { clean: true, .. } = mode {
+            let (_progress_rx, response_future) = client.stop(
+                canonical_path, vec![], true, None,
+            )?;
+            let _ = response_future.await;
+        }
+    }
+
+    Ok(())
+}
+
 /// Exits when log following finishes (quiescence or Ctrl+C), even if the request hasn't responded.
 ///
 /// On start error, the log future continues running so it can drain any

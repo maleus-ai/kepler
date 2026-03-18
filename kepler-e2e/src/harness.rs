@@ -164,6 +164,15 @@ impl E2eHarness {
         None
     }
 
+    /// Check if a snapshot (expanded_config.yaml) exists for a specific config
+    pub fn snapshot_exists(&self, config_path: &Path) -> bool {
+        if let Some(state_dir) = self.get_config_state_dir(config_path) {
+            state_dir.join("expanded_config.yaml").exists()
+        } else {
+            false
+        }
+    }
+
     /// Check if logs exist for a specific config
     pub fn logs_exist(&self, config_path: &Path) -> bool {
         if let Some(state_dir) = self.get_config_state_dir(config_path) {
@@ -814,6 +823,34 @@ impl E2eHarness {
             E2eError::CommandFailed("Invalid config path".to_string())
         })?;
         self.run_cli_with_env(&["-f", config_str, "recreate"], env).await
+    }
+
+    /// Run services in ephemeral mode (detached for tests)
+    pub async fn run_services(&self, config_path: &Path) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "run", "-d"]).await
+    }
+
+    /// Run services in ephemeral mode with custom environment variables
+    pub async fn run_services_with_env(
+        &self,
+        config_path: &Path,
+        env: &[(&str, &str)],
+    ) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli_with_env(&["-f", config_str, "run", "-d"], env).await
+    }
+
+    /// Run services with --start-clean flag (detached for tests)
+    pub async fn run_services_start_clean(&self, config_path: &Path) -> E2eResult<CommandOutput> {
+        let config_str = config_path.to_str().ok_or_else(|| {
+            E2eError::CommandFailed("Invalid config path".to_string())
+        })?;
+        self.run_cli(&["-f", config_str, "run", "-d", "--start-clean"]).await
     }
 
     /// Start a specific service (detached mode for tests)

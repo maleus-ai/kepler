@@ -4,14 +4,27 @@ Kepler's multiplexed IPC protocol for CLI-daemon communication.
 
 ## Table of Contents
 
-- [Connection Model](#connection-model)
-- [Message Types](#message-types)
-- [Request Types](#request-types)
-- [Response Types](#response-types)
-- [Server Events](#server-events)
-- [Wire Format](#wire-format)
-- [Log Streaming](#log-streaming)
-- [Error Handling](#error-handling)
+- [Protocol](#protocol)
+  - [Table of Contents](#table-of-contents)
+  - [Connection Model](#connection-model)
+  - [Message Types](#message-types)
+    - [Client → Daemon](#client--daemon)
+    - [Daemon → Client](#daemon--client)
+  - [Request Types](#request-types)
+  - [Response Types](#response-types)
+    - [ResponseData Variants](#responsedata-variants)
+    - [Key Data Structures](#key-data-structures)
+  - [Server Events](#server-events)
+    - [ServerEvent Variants](#serverevent-variants)
+    - [Progress Events](#progress-events)
+    - [ServicePhase Variants](#servicephase-variants)
+  - [Wire Format](#wire-format)
+  - [Log Streaming](#log-streaming)
+  - [Error Handling](#error-handling)
+    - [Protocol Errors](#protocol-errors)
+    - [Client Errors](#client-errors)
+    - [Server Errors](#server-errors)
+  - [See Also](#see-also)
 
 ---
 
@@ -64,24 +77,25 @@ ServerMessage::Event {
 
 ## Request Types
 
-| Request | Fields | Description |
-|---------|--------|-------------|
-| `Start` | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?`, `hardening?`, `follow` | Start service(s) for a config. When `follow` is true, inline progress events (state changes, Ready, Quiescent, UnhandledFailure) are streamed until all services settle — no separate `Subscribe` needed |
-| `Stop` | `config_path`, `services[]`, `clean`, `signal?` | Stop service(s) with optional signal |
-| `Restart` | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?` | Restart service(s) |
-| `Recreate` | `config_path`, `sys_env?`, `hardening?` | Stop, re-bake config snapshot, start |
-| `Status` | `config_path?` | Get service status (`None` = all configs) |
-| `LogsStream` | `config_path`, `services[]`, `after_id?`, `from_end`, `limit`, `no_hooks`, `filter?`, `raw`, `tail` | Streaming log retrieval. Requires `logs` right; `logs:search` sub-right when `filter` is set |
-| `SubscribeLogs` | `config_path` | Subscribe to log-available notifications. Pushes `LogsAvailable` events when new logs are flushed. Requires `logs` right |
-| `Subscribe` | `config_path`, `services?` | Subscribe to service state change events |
-| `Inspect` | `config_path` | Inspect config and runtime state (JSON output) |
-| `CheckQuiescence` | `config_path` | Check if all services are quiescent (settled) |
-| `CheckReadiness` | `config_path` | Check if all services are ready (reached target state) |
-| `UserRights` | `config_path` | Query effective rights for the calling user on a config |
-| `Shutdown` | *(none)* | Shutdown the daemon |
-| `Ping` | *(none)* | Check if daemon is alive |
-| `ListConfigs` | *(none)* | List all loaded configs |
-| `Prune` | `force`, `dry_run` | Remove stopped/orphaned config state |
+| Request           | Fields                                                                                                               | Description                                                                                                                                                                                              |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Start`           | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?`, `hardening?`, `follow`                         | Start service(s) for a config. When `follow` is true, inline progress events (state changes, Ready, Quiescent, UnhandledFailure) are streamed until all services settle — no separate `Subscribe` needed |
+| `Run`             | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?`, `hardening?`, `follow`, `start_clean`, `clean` | Run service(s) in ephemeral mode. Stops prior services, reloads config fresh, takes no snapshot. `start_clean` wipes state dir before loading; `clean` signals post-exit cleanup                         |
+| `Stop`            | `config_path`, `services[]`, `clean`, `signal?`                                                                      | Stop service(s) with optional signal                                                                                                                                                                     |
+| `Restart`         | `config_path`, `services[]`, `sys_env?`, `no_deps`, `override_envs?`                                                 | Restart service(s)                                                                                                                                                                                       |
+| `Recreate`        | `config_path`, `sys_env?`, `hardening?`                                                                              | Stop, re-bake config snapshot, start                                                                                                                                                                     |
+| `Status`          | `config_path?`                                                                                                       | Get service status (`None` = all configs)                                                                                                                                                                |
+| `LogsStream`      | `config_path`, `services[]`, `after_id?`, `from_end`, `limit`, `no_hooks`, `filter?`, `raw`, `tail`                  | Streaming log retrieval. Requires `logs` right; `logs:search` sub-right when `filter` is set                                                                                                             |
+| `SubscribeLogs`   | `config_path`                                                                                                        | Subscribe to log-available notifications. Pushes `LogsAvailable` events when new logs are flushed. Requires `logs` right                                                                                 |
+| `Subscribe`       | `config_path`, `services?`                                                                                           | Subscribe to service state change events                                                                                                                                                                 |
+| `Inspect`         | `config_path`                                                                                                        | Inspect config and runtime state (JSON output)                                                                                                                                                           |
+| `CheckQuiescence` | `config_path`                                                                                                        | Check if all services are quiescent (settled)                                                                                                                                                            |
+| `CheckReadiness`  | `config_path`                                                                                                        | Check if all services are ready (reached target state)                                                                                                                                                   |
+| `UserRights`      | `config_path`                                                                                                        | Query effective rights for the calling user on a config                                                                                                                                                  |
+| `Shutdown`        | *(none)*                                                                                                             | Shutdown the daemon                                                                                                                                                                                      |
+| `Ping`            | *(none)*                                                                                                             | Check if daemon is alive                                                                                                                                                                                 |
+| `ListConfigs`     | *(none)*                                                                                                             | List all loaded configs                                                                                                                                                                                  |
+| `Prune`           | `force`, `dry_run`                                                                                                   | Remove stopped/orphaned config state                                                                                                                                                                     |
 
 ---
 
@@ -109,54 +123,54 @@ Response::PermissionDenied {
 
 ### ResponseData Variants
 
-| Variant | Payload | Used by |
-|---------|---------|---------|
-| `ServiceStatus` | `HashMap<String, ServiceInfo>` | `Status` (single config) |
-| `MultiConfigStatus` | `Vec<ConfigStatus>` | `Status` (all configs) |
-| `ConfigList` | `Vec<LoadedConfigInfo>` | `ListConfigs` |
-| `LogStream` | `LogStreamData` | `LogsStream` |
-| `DaemonInfo` | `DaemonInfo` | `Ping` |
-| `PrunedConfigs` | `Vec<PrunedConfigInfo>` | `Prune` |
-| `Inspect` | `String` | `Inspect` (pre-built JSON) |
-| `CheckResult` | `bool` | `CheckQuiescence`, `CheckReadiness` |
-| `UserRights` | `Vec<String>` | `UserRights` |
+| Variant             | Payload                        | Used by                             |
+| ------------------- | ------------------------------ | ----------------------------------- |
+| `ServiceStatus`     | `HashMap<String, ServiceInfo>` | `Status` (single config)            |
+| `MultiConfigStatus` | `Vec<ConfigStatus>`            | `Status` (all configs)              |
+| `ConfigList`        | `Vec<LoadedConfigInfo>`        | `ListConfigs`                       |
+| `LogStream`         | `LogStreamData`                | `LogsStream`                        |
+| `DaemonInfo`        | `DaemonInfo`                   | `Ping`                              |
+| `PrunedConfigs`     | `Vec<PrunedConfigInfo>`        | `Prune`                             |
+| `Inspect`           | `String`                       | `Inspect` (pre-built JSON)          |
+| `CheckResult`       | `bool`                         | `CheckQuiescence`, `CheckReadiness` |
+| `UserRights`        | `Vec<String>`                  | `UserRights`                        |
 
 ### Key Data Structures
 
 **ServiceInfo** -- Status information for a single service:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | `String` | Service status (e.g., "running", "stopped", "exited") |
-| `pid` | `Option<u32>` | Process ID (if running) |
-| `started_at` | `Option<i64>` | Start timestamp |
-| `stopped_at` | `Option<i64>` | Stop/exit/fail timestamp |
-| `health_check_failures` | `u32` | Health check failure count |
-| `exit_code` | `Option<i32>` | Exit code (for exited services) |
-| `signal` | `Option<i32>` | Signal that killed the process (e.g., 9 for SIGKILL) |
-| `initialized` | `bool` | Whether the service has completed its first start |
-| `skip_reason` | `Option<String>` | Reason for being skipped (when status is "skipped") |
-| `fail_reason` | `Option<String>` | Reason for failure (when status is "failed") |
+| Field                   | Type             | Description                                           |
+| ----------------------- | ---------------- | ----------------------------------------------------- |
+| `status`                | `String`         | Service status (e.g., "running", "stopped", "exited") |
+| `pid`                   | `Option<u32>`    | Process ID (if running)                               |
+| `started_at`            | `Option<i64>`    | Start timestamp                                       |
+| `stopped_at`            | `Option<i64>`    | Stop/exit/fail timestamp                              |
+| `health_check_failures` | `u32`            | Health check failure count                            |
+| `exit_code`             | `Option<i32>`    | Exit code (for exited services)                       |
+| `signal`                | `Option<i32>`    | Signal that killed the process (e.g., 9 for SIGKILL)  |
+| `initialized`           | `bool`           | Whether the service has completed its first start     |
+| `skip_reason`           | `Option<String>` | Reason for being skipped (when status is "skipped")   |
+| `fail_reason`           | `Option<String>` | Reason for failure (when status is "failed")          |
 
 **LogStreamData** -- A batch of log entries:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `service_table` | `Vec<String>` | Service name lookup table |
-| `entries` | `Vec<StreamLogEntry>` | Compact log entries (service stored as u16 index into `service_table`) |
-| `last_id` | `i64` | Row ID of the last entry. Pass as `after_id` in the next request |
-| `has_more` | `bool` | Whether more entries are available |
+| Field           | Type                  | Description                                                            |
+| --------------- | --------------------- | ---------------------------------------------------------------------- |
+| `service_table` | `Vec<String>`         | Service name lookup table                                              |
+| `entries`       | `Vec<StreamLogEntry>` | Compact log entries (service stored as u16 index into `service_table`) |
+| `last_id`       | `i64`                 | Row ID of the last entry. Pass as `after_id` in the next request       |
+| `has_more`      | `bool`                | Whether more entries are available                                     |
 
 **StreamLogEntry** -- A compact log entry:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `service_id` | `u16` | Index into `LogStreamData.service_table` |
-| `line` | `String` | Log line content |
-| `timestamp` | `i64` | Timestamp (ms since Unix epoch) |
-| `level` | `String` | Log level (`"out"`, `"err"`, `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`, `"fatal"`) |
-| `hook` | `Option<String>` | Hook name (`None` for service process logs) |
-| `attributes` | `Option<String>` | Remaining JSON attributes (`None` for non-JSON lines) |
+| Field        | Type             | Description                                                                                  |
+| ------------ | ---------------- | -------------------------------------------------------------------------------------------- |
+| `service_id` | `u16`            | Index into `LogStreamData.service_table`                                                     |
+| `line`       | `String`         | Log line content                                                                             |
+| `timestamp`  | `i64`            | Timestamp (ms since Unix epoch)                                                              |
+| `level`      | `String`         | Log level (`"out"`, `"err"`, `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`, `"fatal"`) |
+| `hook`       | `Option<String>` | Hook name (`None` for service process logs)                                                  |
+| `attributes` | `Option<String>` | Remaining JSON attributes (`None` for non-JSON lines)                                        |
 
 ---
 
@@ -166,12 +180,12 @@ The daemon pushes `ServerMessage::Event` messages for asynchronous notifications
 
 ### ServerEvent Variants
 
-| Event | Fields | Description |
-|-------|--------|-------------|
-| `Progress` | `request_id`, `event: ProgressEvent` | Progress update for a lifecycle operation |
-| `Ready` | `request_id` | All services reached their target state (for `--wait`) |
-| `Quiescent` | `request_id` | All services settled (for foreground mode exit) |
-| `LogsAvailable` | `request_id` | New logs flushed to SQLite. Client should issue `LogsStream` to fetch |
+| Event              | Fields                                | Description                                                             |
+| ------------------ | ------------------------------------- | ----------------------------------------------------------------------- |
+| `Progress`         | `request_id`, `event: ProgressEvent`  | Progress update for a lifecycle operation                               |
+| `Ready`            | `request_id`                          | All services reached their target state (for `--wait`)                  |
+| `Quiescent`        | `request_id`                          | All services settled (for foreground mode exit)                         |
+| `LogsAvailable`    | `request_id`                          | New logs flushed to SQLite. Client should issue `LogsStream` to fetch   |
 | `UnhandledFailure` | `request_id`, `service`, `exit_code?` | A service failed with no handler (won't restart, no dependent watching) |
 
 ### Progress Events
@@ -192,23 +206,23 @@ ProgressEvent {
 
 ### ServicePhase Variants
 
-| Phase | Fields | Description |
-|-------|--------|-------------|
-| `Pending` | `target: ServiceTarget` | Queued, waiting to start (target: `Started` or `Healthy`) |
-| `Waiting` | *(none)* | Waiting for dependencies to be satisfied |
-| `Starting` | *(none)* | Process is being spawned |
-| `Started` | *(none)* | Process is running |
-| `Healthy` | *(none)* | Health check is passing |
-| `Stopping` | *(none)* | Stop signal sent, waiting for exit |
-| `Stopped` | *(none)* | Process has stopped |
-| `Restarting` | *(none)* | Process is being restarted |
-| `Cleaning` | *(none)* | Cleanup hooks are running |
-| `Cleaned` | *(none)* | Cleanup hooks completed |
-| `Skipped` | `reason: String` | Service was skipped (with reason) |
-| `Failed` | `message: String` | Operation failed (with reason) |
-| `HookStarted` | `hook: String` | A lifecycle hook started execution |
-| `HookCompleted` | `hook: String` | A lifecycle hook completed successfully |
-| `HookFailed` | `hook: String`, `message: String` | A lifecycle hook failed |
+| Phase           | Fields                            | Description                                               |
+| --------------- | --------------------------------- | --------------------------------------------------------- |
+| `Pending`       | `target: ServiceTarget`           | Queued, waiting to start (target: `Started` or `Healthy`) |
+| `Waiting`       | *(none)*                          | Waiting for dependencies to be satisfied                  |
+| `Starting`      | *(none)*                          | Process is being spawned                                  |
+| `Started`       | *(none)*                          | Process is running                                        |
+| `Healthy`       | *(none)*                          | Health check is passing                                   |
+| `Stopping`      | *(none)*                          | Stop signal sent, waiting for exit                        |
+| `Stopped`       | *(none)*                          | Process has stopped                                       |
+| `Restarting`    | *(none)*                          | Process is being restarted                                |
+| `Cleaning`      | *(none)*                          | Cleanup hooks are running                                 |
+| `Cleaned`       | *(none)*                          | Cleanup hooks completed                                   |
+| `Skipped`       | `reason: String`                  | Service was skipped (with reason)                         |
+| `Failed`        | `message: String`                 | Operation failed (with reason)                            |
+| `HookStarted`   | `hook: String`                    | A lifecycle hook started execution                        |
+| `HookCompleted` | `hook: String`                    | A lifecycle hook completed successfully                   |
+| `HookFailed`    | `hook: String`, `message: String` | A lifecycle hook failed                                   |
 
 ---
 
@@ -249,22 +263,22 @@ For follow mode, the client subscribes via `SubscribeLogs` and issues `LogsStrea
 
 ### Protocol Errors
 
-| Error | Description |
-|-------|-------------|
-| `Encode` | Failed to encode message (bincode serialization error) |
-| `Decode` | Failed to decode message (bincode deserialization error) |
-| `MessageTooLarge` | Message exceeds maximum size (10 MB) |
+| Error             | Description                                              |
+| ----------------- | -------------------------------------------------------- |
+| `Encode`          | Failed to encode message (bincode serialization error)   |
+| `Decode`          | Failed to decode message (bincode deserialization error) |
+| `MessageTooLarge` | Message exceeds maximum size (10 MB)                     |
 
 ### Client Errors
 
-| Error | Description |
-|-------|-------------|
-| `Connect` | Failed to create socket connection |
-| `Send` | Failed to send request (includes request type) |
-| `Receive` | Failed to receive response (includes request type) |
-| `MessageTooLarge` | Response message exceeds maximum size |
-| `Disconnected` | Connection to daemon was lost |
-| `Protocol` | Underlying protocol error (encode/decode) |
+| Error             | Description                                        |
+| ----------------- | -------------------------------------------------- |
+| `Connect`         | Failed to create socket connection                 |
+| `Send`            | Failed to send request (includes request type)     |
+| `Receive`         | Failed to receive response (includes request type) |
+| `MessageTooLarge` | Response message exceeds maximum size              |
+| `Disconnected`    | Connection to daemon was lost                      |
+| `Protocol`        | Underlying protocol error (encode/decode)          |
 
 ### Server Errors
 

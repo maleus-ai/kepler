@@ -1,0 +1,6 @@
+# Config with autostart: true. After run (no snapshot), start should create one.
+kepler:
+  autostart: true
+services:
+  echo-service:
+    command: ["sh", "-c", "echo Running; sleep 300"]

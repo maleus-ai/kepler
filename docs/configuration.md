@@ -4,14 +4,23 @@ Complete reference for Kepler's YAML configuration format.
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Full Example](#full-example)
-- [Top-Level Structure](#top-level-structure)
-- [Global Settings](#global-settings)
-- [Service Options](#service-options)
-- [Resource Monitoring](#resource-monitoring)
-- [Service Name Validation](#service-name-validation)
-- [Config Immutability](#config-immutability)
+- [Configuration](#configuration)
+  - [Table of Contents](#table-of-contents)
+  - [Overview](#overview)
+  - [Full Example](#full-example)
+  - [Top-Level Structure](#top-level-structure)
+  - [Global Settings](#global-settings)
+    - [Global Log Settings](#global-log-settings)
+  - [Service Options](#service-options)
+    - [User Format](#user-format)
+    - [Resource Limits](#resource-limits)
+    - [Restart Configuration](#restart-configuration)
+      - [Restart Backoff](#restart-backoff)
+      - [Grace Period](#grace-period)
+    - [Resource Monitoring](#resource-monitoring)
+  - [Service Name Validation](#service-name-validation)
+  - [Config Immutability](#config-immutability)
+  - [See Also](#see-also)
 
 ---
 
@@ -135,11 +144,11 @@ services:
 
 A Kepler config has three top-level keys:
 
-| Key | Required | Description |
-|-----|----------|-------------|
-| `kepler` | No | Global settings (env policy, timeout, logs) |
-| `services` | Yes | Service definitions |
-| `lua` | No | Global Lua code executed before all other blocks |
+| Key        | Required | Description                                      |
+| ---------- | -------- | ------------------------------------------------ |
+| `kepler`   | No       | Global settings (env policy, timeout, logs)      |
+| `services` | Yes      | Service definitions                              |
+| `lua`      | No       | Global Lua code executed before all other blocks |
 
 ```yaml
 kepler:
@@ -158,50 +167,50 @@ services:
 
 Settings under the `kepler:` namespace apply to all services unless overridden.
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `default_inherit_env` | `bool` | `true` | Global default for `inherit_env`. When `false`, `kepler.env` is not injected into services — only explicit `environment` and `env_file` entries are passed. Applied to all services and hooks unless overridden. See [Environment Variables](environment-variables.md) |
-| `timeout` | `duration` | none | Global default timeout for dependency waits. See [Dependencies](dependencies.md) |
-| `logs` | `object` | - | Global log settings. See [Log Management](log-management.md) |
-| `autostart` | `bool\|object` | `false` | Enable automatic service restart on daemon restart. Accepts `true` (no declared env), `false`, or `{ environment: [...] }`. See [Environment Variables](environment-variables.md#kepler-environment-declaration) |
-| `output_max_size` | `string` | `1mb` | Max output capture size per step/process (e.g., `"2mb"`, `"512kb"`). See [Outputs](outputs.md) |
-| `acl` | `object` | - | Per-config ACL restricting non-owner `kepler` group members. Supports `users`, `groups`, `aliases`, `lua`, and per-rule `authorize` Lua authorizers. See [Security Model](security-model.md#per-config-acl) |
-| `monitor` | `object` | - | Resource monitoring configuration. See [Resource Monitoring](#resource-monitoring) |
+| Option                | Type           | Default | Description                                                                                                                                                                                                                                                            |
+| --------------------- | -------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `default_inherit_env` | `bool`         | `true`  | Global default for `inherit_env`. When `false`, `kepler.env` is not injected into services — only explicit `environment` and `env_file` entries are passed. Applied to all services and hooks unless overridden. See [Environment Variables](environment-variables.md) |
+| `timeout`             | `duration`     | none    | Global default timeout for dependency waits. See [Dependencies](dependencies.md)                                                                                                                                                                                       |
+| `logs`                | `object`       | -       | Global log settings. See [Log Management](log-management.md)                                                                                                                                                                                                           |
+| `autostart`           | `bool\|object` | `false` | Enable automatic service restart on daemon restart. Accepts `true` (no declared env), `false`, or `{ environment: [...] }`. See [Environment Variables](environment-variables.md#kepler-environment-declaration)                                                       |
+| `output_max_size`     | `string`       | `1mb`   | Max output capture size per step/process (e.g., `"2mb"`, `"512kb"`). See [Outputs](outputs.md)                                                                                                                                                                         |
+| `acl`                 | `object`       | -       | Per-config ACL restricting non-owner `kepler` group members. Supports `users`, `groups`, `aliases`, `lua`, and per-rule `authorize` Lua authorizers. See [Security Model](security-model.md#per-config-acl)                                                            |
+| `monitor`             | `object`       | -       | Resource monitoring configuration. See [Resource Monitoring](#resource-monitoring)                                                                                                                                                                                     |
 
 ### Global Log Settings
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `logs.flush_interval` | `duration` | `100ms` | How often the SQLite writer flushes batched inserts (e.g., `"100ms"`, `"1s"`) |
-| `logs.retention_period` | `duration` | none | Delete logs older than this on config load (e.g., `"7d"`, `"24h"`) |
-| `logs.batch_size` | `int` | `4096` | Max log entries buffered in memory before forcing a flush |
+| Option                  | Type       | Default | Description                                                                   |
+| ----------------------- | ---------- | ------- | ----------------------------------------------------------------------------- |
+| `logs.flush_interval`   | `duration` | `100ms` | How often the SQLite writer flushes batched inserts (e.g., `"100ms"`, `"1s"`) |
+| `logs.retention_period` | `duration` | none    | Delete logs older than this on config load (e.g., `"7d"`, `"24h"`)            |
+| `logs.batch_size`       | `int`      | `4096`  | Max log entries buffered in memory before forcing a flush                     |
 
 See [Log Management](log-management.md) for full details.
 
 ## Service Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `if` | `string` | - | Lua condition expression. When present, service is only started if truthy. |
-| `command` | `string[]` | - | Command to run (exec, no shell). Supports `${{ }}$` and `!lua`. Mutually exclusive with `run`. |
-| `run` | `string` | - | Shell script to run (via `sh -c`). Supports `${{ }}$` and `!lua`. Mutually exclusive with `command`. |
-| `working_dir` | `string` | config dir | Working directory. Supports `${{ }}$`. |
-| `depends_on` | `string[]\|object` | `[]` | Service dependencies. Service names must be static. Config fields (`condition`, `timeout`, `restart`, `exit_code`) support `!lua` and `${{ }}$`. See [Dependencies](dependencies.md) |
-| `environment` | `string[]\|object` | `[]` | Environment variables. Accepts a sequence of `KEY=value` strings or a mapping of `KEY: value` pairs. Supports `${{ }}$` (sequential) and `!lua`. See [Environment Variables](environment-variables.md) |
-| `env_file` | `string` | - | Path to `.env` file. Supports `${{ }}$` (`kepler.env` only). |
-| `inherit_env` | `bool` | global | Whether to inherit `kepler.env` into the service's process environment. Inherits from `kepler.default_inherit_env` if not set |
-| `user_identity` | `bool` | `true` | Controls injection of user-specific env vars (HOME, USER, LOGNAME, SHELL) from `/etc/passwd`. When `true` (default), identity vars are always force-injected from the target user. Set to `false` to disable injection. See [User Environment Injection](environment-variables.md#user-environment-injection) |
-| `restart` | `string\|object` | `no` | Restart policy. See [Restart Configuration](#restart-configuration) |
-| `healthcheck` | `object` | - | Health check config. Supports `${{ }}$` and `!lua`. See [Health Checks](health-checks.md) |
-| `hooks` | `object` | - | Service-specific hooks. Supports `${{ }}$` and `!lua`. See [Hooks](hooks.md) |
-| `user` | `string` | CLI user | User to run as (Unix). Supports `${{ }}$`. Supports `"name"`, `"uid"`, `"name:group"`, `"uid:gid"`. Defaults to the CLI user who loaded the config. See [Privilege Dropping](privilege-dropping.md) |
-| `groups` | `string[]` | `[]` | Supplementary groups lockdown (Unix). Supports `${{ }}$`. See [Privilege Dropping](privilege-dropping.md) |
-| `logs` | `object` | - | Log configuration. Supports `${{ }}$` and `!lua`. See [Log Management](log-management.md) |
-| `limits` | `object` | - | Resource limits. See [Privilege Dropping](privilege-dropping.md) |
-| `no_new_privileges` | `bool` | `true` | When `true`, sets `PR_SET_NO_NEW_PRIVS` on the spawned process to prevent privilege escalation via setuid/setgid binaries (e.g. `sudo`, `su`). Inherited by hooks and healthchecks. See [Privilege Dropping](privilege-dropping.md#no-new-privileges) |
-| `output` | `bool` | `false` | Enable `::output::KEY=VALUE` capture from process stdout. Requires `restart: no`. See [Outputs](outputs.md) |
-| `outputs` | `object` | - | Named output declarations (expressions referencing hook/dep outputs). Requires `restart: no`. See [Outputs](outputs.md) |
-| `permissions` | `string[]\|object` | - | Token-based permissions for the spawned process. When present, the daemon generates a CSPRNG bearer token, registers it with the granted rights, and passes it via `KEPLER_TOKEN` env var. Accepts a list shorthand (`permissions: ["start", "stop"]`) or object form (`permissions: { allow: [...], hardening: "strict", authorize: "..." }`) where `allow` is required. The optional `authorize` field is a Lua authorizer that can deny requests within the token's rights. Alias: `security` (backward compat). See [Security Model](security-model.md#service-permissions-token-based) |
+| Option              | Type               | Default    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------- | ------------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `if`                | `string`           | -          | Lua condition expression. When present, service is only started if truthy.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `command`           | `string[]`         | -          | Command to run (exec, no shell). Supports `${{ }}$` and `!lua`. Mutually exclusive with `run`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `run`               | `string`           | -          | Shell script to run (via `sh -c`). Supports `${{ }}$` and `!lua`. Mutually exclusive with `command`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `working_dir`       | `string`           | config dir | Working directory. Supports `${{ }}$`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `depends_on`        | `string[]\|object` | `[]`       | Service dependencies. Service names must be static. Config fields (`condition`, `timeout`, `restart`, `exit_code`) support `!lua` and `${{ }}$`. See [Dependencies](dependencies.md)                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `environment`       | `string[]\|object` | `[]`       | Environment variables. Accepts a sequence of `KEY=value` strings or a mapping of `KEY: value` pairs. Supports `${{ }}$` (sequential) and `!lua`. See [Environment Variables](environment-variables.md)                                                                                                                                                                                                                                                                                                                                                                                      |
+| `env_file`          | `string`           | -          | Path to `.env` file. Supports `${{ }}$` (`kepler.env` only).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `inherit_env`       | `bool`             | global     | Whether to inherit `kepler.env` into the service's process environment. Inherits from `kepler.default_inherit_env` if not set                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `user_identity`     | `bool`             | `true`     | Controls injection of user-specific env vars (HOME, USER, LOGNAME, SHELL) from `/etc/passwd`. When `true` (default), identity vars are always force-injected from the target user. Set to `false` to disable injection. See [User Environment Injection](environment-variables.md#user-environment-injection)                                                                                                                                                                                                                                                                               |
+| `restart`           | `string\|object`   | `no`       | Restart policy. See [Restart Configuration](#restart-configuration)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `healthcheck`       | `object`           | -          | Health check config. Supports `${{ }}$` and `!lua`. See [Health Checks](health-checks.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `hooks`             | `object`           | -          | Service-specific hooks. Supports `${{ }}$` and `!lua`. See [Hooks](hooks.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `user`              | `string`           | CLI user   | User to run as (Unix). Supports `${{ }}$`. Supports `"name"`, `"uid"`, `"name:group"`, `"uid:gid"`. Defaults to the CLI user who loaded the config. See [Privilege Dropping](privilege-dropping.md)                                                                                                                                                                                                                                                                                                                                                                                         |
+| `groups`            | `string[]`         | `[]`       | Supplementary groups lockdown (Unix). Supports `${{ }}$`. See [Privilege Dropping](privilege-dropping.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `logs`              | `object`           | -          | Log configuration. Supports `${{ }}$` and `!lua`. See [Log Management](log-management.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `limits`            | `object`           | -          | Resource limits. See [Privilege Dropping](privilege-dropping.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `no_new_privileges` | `bool`             | `true`     | When `true`, sets `PR_SET_NO_NEW_PRIVS` on the spawned process to prevent privilege escalation via setuid/setgid binaries (e.g. `sudo`, `su`). Inherited by hooks and healthchecks. See [Privilege Dropping](privilege-dropping.md#no-new-privileges)                                                                                                                                                                                                                                                                                                                                       |
+| `output`            | `bool`             | `false`    | Enable `::output::KEY=VALUE` capture from process stdout. Requires `restart: no`. See [Outputs](outputs.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `outputs`           | `object`           | -          | Named output declarations (expressions referencing hook/dep outputs). Requires `restart: no`. See [Outputs](outputs.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `permissions`       | `string[]\|object` | -          | Token-based permissions for the spawned process. When present, the daemon generates a CSPRNG bearer token, registers it with the granted rights, and passes it via `KEPLER_TOKEN` env var. Accepts a list shorthand (`permissions: ["start", "stop"]`) or object form (`permissions: { allow: [...], hardening: "strict", authorize: "..." }`) where `allow` is required. The optional `authorize` field is a Lua authorizer that can deny requests within the token's rights. Alias: `security` (backward compat). See [Security Model](security-model.md#service-permissions-token-based) |
 
 ### User Format
 
@@ -213,11 +222,11 @@ User format (Unix only):
 
 ### Resource Limits
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `limits.memory` | `string` | Memory limit (e.g., `"512M"`, `"1G"`, `"2048K"`) |
-| `limits.cpu_time` | `int` | CPU time limit in seconds |
-| `limits.max_fds` | `int` | Maximum number of open file descriptors |
+| Option            | Type     | Description                                      |
+| ----------------- | -------- | ------------------------------------------------ |
+| `limits.memory`   | `string` | Memory limit (e.g., `"512M"`, `"1G"`, `"2048K"`) |
+| `limits.cpu_time` | `int`    | CPU time limit in seconds                        |
+| `limits.max_fds`  | `int`    | Maximum number of open file descriptors          |
 
 See [Privilege Dropping](privilege-dropping.md) for details.
 
@@ -245,13 +254,13 @@ restart:
   max_delay: "30s"                     # Maximum delay cap
 ```
 
-| Flag | Description |
-|------|-------------|
-| `no` | Never restart (default) |
-| `on-failure` | Restart on non-zero exit |
-| `on-success` | Restart on zero exit |
-| `on-unhealthy` | Restart when healthcheck marks service as unhealthy |
-| `always` | All flags combined (`on-failure\|on-success\|on-unhealthy`) |
+| Flag           | Description                                                 |
+| -------------- | ----------------------------------------------------------- |
+| `no`           | Never restart (default)                                     |
+| `on-failure`   | Restart on non-zero exit                                    |
+| `on-success`   | Restart on zero exit                                        |
+| `on-unhealthy` | Restart when healthcheck marks service as unhealthy         |
+| `always`       | All flags combined (`on-failure\|on-success\|on-unhealthy`) |
 
 Flags are combined with `|`: `"on-failure|on-unhealthy"` restarts on both non-zero exit and healthcheck failure. The `no` flag cannot be combined with other flags.
 
@@ -261,11 +270,11 @@ Flags are combined with `|`: `"on-failure|on-unhealthy"` restarts on both non-ze
 
 The `delay`, `backoff`, and `max_delay` options control how long Kepler waits before restarting a service. Only available in the extended form.
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `delay` | `duration` | `"0s"` | Base delay before restart |
-| `backoff` | `float` | `1.0` | Exponential backoff multiplier |
-| `max_delay` | `duration` | `"0s"` | Maximum delay cap (0 = no cap) |
+| Option      | Type       | Default | Description                    |
+| ----------- | ---------- | ------- | ------------------------------ |
+| `delay`     | `duration` | `"0s"`  | Base delay before restart      |
+| `backoff`   | `float`    | `1.0`   | Exponential backoff multiplier |
+| `max_delay` | `duration` | `"0s"`  | Maximum delay cap (0 = no cap) |
 
 **Delay formula:** `min(delay * backoff ^ restart_count_since_healthy, max_delay)`
 
@@ -315,9 +324,9 @@ Duration units: `ms` (milliseconds), `s` (seconds), `m` (minutes), `h` (hours), 
 
 The `grace_period` option controls how long Kepler waits after sending SIGTERM before force-killing the process with SIGKILL. Only available in the extended form.
 
-| Value | Behavior |
-|-------|----------|
-| `"0s"` (default) | No SIGTERM is sent; the process is force-killed immediately with SIGKILL |
+| Value                 | Behavior                                                                                      |
+| --------------------- | --------------------------------------------------------------------------------------------- |
+| `"0s"` (default)      | No SIGTERM is sent; the process is force-killed immediately with SIGKILL                      |
 | `"5s"`, `"10s"`, etc. | SIGTERM is sent first, then SIGKILL after the specified duration if the process hasn't exited |
 
 ```yaml
@@ -343,10 +352,10 @@ See [File Watching](file-watching.md) for details on watch patterns.
 
 Kepler can periodically collect CPU and memory metrics for all running services and store them in a SQLite database. This is configured globally under `kepler.monitor`.
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `monitor.interval` | `duration` | *(required)* | How often to sample metrics (e.g., `5s`, `10s`) |
-| `monitor.retention_period` | `duration` | none | How long to keep metrics. When set, expired rows are deleted on startup and periodically during operation |
+| Option                     | Type       | Default      | Description                                                                                               |
+| -------------------------- | ---------- | ------------ | --------------------------------------------------------------------------------------------------------- |
+| `monitor.interval`         | `duration` | *(required)* | How often to sample metrics (e.g., `5s`, `10s`)                                                           |
+| `monitor.retention_period` | `duration` | none         | How long to keep metrics. When set, expired rows are deleted on startup and periodically during operation |
 
 Metrics are stored in `<state_dir>/monitor.db` (SQLite with WAL mode on local filesystems, DELETE journal on NFS). Each row contains a timestamp, service name, CPU percentage, RSS memory, virtual memory, and a JSON array of PIDs in the process tree.
 
@@ -400,7 +409,8 @@ Once a config is loaded, the raw service definitions are stored as a snapshot. G
 To apply changes to the config file:
 
 ```bash
-kepler recreate
+kepler recreate    # Re-bake snapshot and restart (immutable mode)
+kepler run         # Always fresh reload, no snapshot (ephemeral mode)
 ```
 
 The `recreate` command:
@@ -409,6 +419,8 @@ The `recreate` command:
 - Re-evaluates global Lua code
 - Creates a new snapshot
 - Starts all services again (re-evaluating service-level expressions)
+
+Alternatively, `kepler run` provides an ephemeral mode that always loads the config fresh from source without creating a snapshot. This is ideal for iterative development where you frequently edit and re-run. See [CLI Reference -- kepler run](cli-reference.md#kepler-run) for details.
 
 ---
 

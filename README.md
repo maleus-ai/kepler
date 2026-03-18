@@ -66,6 +66,7 @@ kepler daemon start -d   # Start daemon in background
 kepler start             # Start services, follow logs (Ctrl+C to stop)
 kepler start -d          # Return immediately, startup runs in background
 kepler start -d --wait   # Block until startup cluster ready, then return
+kepler run               # Ephemeral mode: fresh reload, no snapshot (dev/iterative)
 ```
 
 **3. Monitor and manage:**

@@ -1,0 +1,12 @@
+# Test that run always reloads config fresh (like recreate, unlike restart)
+kepler:
+  autostart:
+    environment:
+      - TEST_RUN_VAR
+services:
+  env-service:
+    command: ["sh", "-c", "echo VAR=$TEST_RUN_VAR && sleep 3600"]
+    inherit_env: true
+    environment:
+      - TEST_RUN_VAR=${{ service.env.TEST_RUN_VAR }}$
+    restart: no

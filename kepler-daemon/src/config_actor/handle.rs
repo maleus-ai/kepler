@@ -939,6 +939,19 @@ impl ConfigActorHandle {
             .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
     }
 
+    /// Suppress snapshot creation for this config (ephemeral run mode).
+    pub async fn set_suppress_snapshot(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(ConfigCommand::SetSuppressSnapshot { reply: reply_tx })
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor closed".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?;
+        Ok(())
+    }
+
     /// Check if this config was restored from a snapshot.
     pub async fn is_restored_from_snapshot(&self) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();

@@ -1,0 +1,4 @@
+# Config for verifying --start-clean removes old log content
+services:
+  marker-service:
+    command: ["sh", "-c", "echo UNIQUE_MARKER_12345; sleep 300"]

@@ -253,6 +253,10 @@ pub enum ConfigCommand {
     ClearSnapshot {
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Suppress snapshot creation (for ephemeral run mode)
+    SetSuppressSnapshot {
+        reply: oneshot::Sender<()>,
+    },
     /// Check if this config was restored from a snapshot
     IsRestoredFromSnapshot {
         reply: oneshot::Sender<bool>,

@@ -17,6 +17,7 @@ use kepler_protocol::protocol::Request;
 /// Base rights — each gates exactly one request type.
 pub const BASE_RIGHTS: &[&str] = &[
     "start",
+    "run",
     "stop",
     "restart",
     "recreate",
@@ -35,6 +36,10 @@ pub const SUB_RIGHTS: &[&str] = &[
     "start:env-override",
     "start:hardening",
     "start:no-deps",
+    "run:env-override",
+    "run:hardening",
+    "run:no-deps",
+    "run:start-clean",
     "stop:clean",
     "stop:signal",
     "restart:env-override",
@@ -120,6 +125,31 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
                 }
                 if *no_deps {
                     s.push("start:no-deps");
+                }
+                s
+            },
+        }),
+        Request::Run {
+            override_envs,
+            hardening,
+            no_deps,
+            start_clean,
+            ..
+        } => Some(RequiredRights {
+            base: "run",
+            sub_rights: {
+                let mut s = vec![];
+                if override_envs.is_some() {
+                    s.push("run:env-override");
+                }
+                if hardening.is_some() {
+                    s.push("run:hardening");
+                }
+                if *no_deps {
+                    s.push("run:no-deps");
+                }
+                if *start_clean {
+                    s.push("run:start-clean");
                 }
                 s
             },
