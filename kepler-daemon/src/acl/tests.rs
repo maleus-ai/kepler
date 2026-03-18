@@ -108,6 +108,7 @@ fn check_access_uid_match_allows() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -129,6 +130,7 @@ fn check_access_uid_match_denies_missing_right() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -151,6 +153,7 @@ fn check_access_no_match_denies_gated() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -185,6 +188,7 @@ fn check_access_gid_match() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -207,6 +211,7 @@ fn union_of_user_and_group_rules() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -264,7 +269,7 @@ fn all_alias_grants_everything() {
         no_deps: false,
         override_envs: None,
         hardening: Some("strict".to_string()),
-
+        define_flags: None,
         follow: false,
     };
     assert!(resolved.check_access(1000, 1000, &req).is_ok());
@@ -284,6 +289,7 @@ fn empty_acl_denies_all_gated() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -335,6 +341,7 @@ fn multiple_base_rights_grant_respective_operations() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -498,6 +505,7 @@ fn sub_right_requires_base_right() {
         no_deps: false,
         override_envs: Some(HashMap::new()),
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -520,6 +528,7 @@ fn base_right_without_sub_right_denies_feature() {
         no_deps: false,
         override_envs: Some(HashMap::new()),
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -541,6 +550,7 @@ fn base_and_sub_right_together_allows_feature() {
         no_deps: false,
         override_envs: Some(HashMap::new()),
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };

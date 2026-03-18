@@ -43,6 +43,9 @@ pub enum Request {
         /// separate Subscribe request needed.
         #[serde(default)]
         follow: bool,
+        /// User-defined flags accessible via `kepler.flags` in expressions
+        #[serde(default)]
+        define_flags: Option<HashMap<String, String>>,
     },
     /// Run service(s) — ephemeral mode: always reload config fresh, no snapshot
     Run {
@@ -69,6 +72,9 @@ pub enum Request {
         /// Remove entire state dir before loading (fresh slate)
         #[serde(default)]
         start_clean: bool,
+        /// User-defined flags accessible via `kepler.flags` in expressions
+        #[serde(default)]
+        define_flags: Option<HashMap<String, String>>,
     },
     /// Stop service(s)
     Stop {
@@ -99,6 +105,9 @@ pub enum Request {
         /// Override specific system environment variables (merged into stored sys_env)
         #[serde(default)]
         override_envs: Option<HashMap<String, String>>,
+        /// User-defined flags accessible via `kepler.flags` in expressions
+        #[serde(default)]
+        define_flags: Option<HashMap<String, String>>,
     },
     /// Recreate config - stop, re-bake config snapshot, start
     Recreate {
@@ -110,6 +119,9 @@ pub enum Request {
         /// Per-config hardening level (e.g. "none", "no-root", "strict")
         #[serde(default)]
         hardening: Option<String>,
+        /// User-defined flags accessible via `kepler.flags` in expressions
+        #[serde(default)]
+        define_flags: Option<HashMap<String, String>>,
     },
     /// Get status of services
     Status {

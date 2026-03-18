@@ -853,3 +853,80 @@ async fn test_quiescence_monitor_sends_unhandled_failure() {
         .expect("channel should not be closed");
     assert!(matches!(signal, QuiescenceSignal::Quiescent));
 }
+
+// ========================================================================
+// build_define_flags tests
+// ========================================================================
+
+#[test]
+fn test_build_define_flags_empty_vec() {
+    assert_eq!(build_define_flags(vec![]), None);
+}
+
+#[test]
+fn test_build_define_flags_single_flag() {
+    let result = build_define_flags(vec!["MODE=prod".to_string()]);
+    let map = result.expect("should be Some");
+    assert_eq!(map.get("MODE").unwrap(), "prod");
+    assert_eq!(map.len(), 1);
+}
+
+#[test]
+fn test_build_define_flags_multiple_flags() {
+    let result = build_define_flags(vec![
+        "A=1".to_string(),
+        "B=2".to_string(),
+        "C=3".to_string(),
+    ]);
+    let map = result.expect("should be Some");
+    assert_eq!(map.get("A").unwrap(), "1");
+    assert_eq!(map.get("B").unwrap(), "2");
+    assert_eq!(map.get("C").unwrap(), "3");
+    assert_eq!(map.len(), 3);
+}
+
+#[test]
+fn test_build_define_flags_value_with_equals() {
+    // split_once should only split on the first '='
+    let result = build_define_flags(vec!["URL=http://host?a=b&c=d".to_string()]);
+    let map = result.expect("should be Some");
+    assert_eq!(map.get("URL").unwrap(), "http://host?a=b&c=d");
+}
+
+#[test]
+fn test_build_define_flags_empty_value() {
+    let result = build_define_flags(vec!["KEY=".to_string()]);
+    let map = result.expect("should be Some");
+    assert_eq!(map.get("KEY").unwrap(), "");
+}
+
+#[test]
+fn test_build_define_flags_invalid_no_equals() {
+    // All entries invalid → returns None
+    let result = build_define_flags(vec!["INVALID".to_string()]);
+    assert_eq!(result, None);
+}
+
+#[test]
+fn test_build_define_flags_mixed_valid_invalid() {
+    let result = build_define_flags(vec![
+        "A=1".to_string(),
+        "INVALID".to_string(),
+        "B=2".to_string(),
+    ]);
+    let map = result.expect("should be Some");
+    assert_eq!(map.get("A").unwrap(), "1");
+    assert_eq!(map.get("B").unwrap(), "2");
+    assert_eq!(map.len(), 2);
+}
+
+#[test]
+fn test_build_define_flags_duplicate_key_last_wins() {
+    let result = build_define_flags(vec![
+        "KEY=first".to_string(),
+        "KEY=second".to_string(),
+    ]);
+    let map = result.expect("should be Some");
+    assert_eq!(map.get("KEY").unwrap(), "second");
+    assert_eq!(map.len(), 1);
+}

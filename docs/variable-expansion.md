@@ -21,12 +21,13 @@ Kepler supports inline Lua expressions in configuration values using `${{ expr }
 | `${{ expr }}$`                 | Evaluate a Lua expression inline   |
 | `${{ service.env.VAR }}$`              | Reference a service environment variable  |
 | `${{ service.env.VAR or "default" }}$` | Use `"default"` if `VAR` is unset  |
+| `${{ kepler.flags.KEY }}$`     | Reference a CLI define flag         |
 | `${{ deps.svc.status }}$`      | Reference dependency status        |
 | `${{ deps.svc.outputs.key }}$` | Reference a dependency's output value |
 | `${{ hooks.pre_start.outputs.step1.token }}$` | Reference a hook step output |
 | `${{ service.name }}$`         | Reference the current service name |
 
-Expressions are evaluated as Lua code with access to `service`, `hook`, `kepler`, `deps`, `hooks`, `global`, and built-in libraries (`json`, `yaml`).
+Expressions are evaluated as Lua code with access to `service`, `hook`, `kepler` (including `kepler.env` and `kepler.flags`), `deps`, `hooks`, `global`, and built-in libraries (`json`, `yaml`).
 
 ---
 
@@ -123,7 +124,7 @@ environment:
 
 ### Stage 3: Other Fields (service start time)
 
-All remaining fields are evaluated with the full context (`kepler.env` + env_file + environment + deps):
+All remaining fields are evaluated with the full context (`kepler.env` + `kepler.flags` + env_file + environment + deps):
 
 ```yaml
 working_dir: ${{ service.env.APP_DIR }}$
@@ -162,6 +163,7 @@ user: ${{ service.env.SERVICE_USER or "nobody" }}$
 | Variable                  | Description                                                |
 | ------------------------- | ---------------------------------------------------------- |
 | `kepler.env.VAR`          | Kepler environment (declared via `autostart.environment`, or full CLI env when autostart is disabled) |
+| `kepler.flags.KEY`        | Define flags passed via `-D KEY=VALUE` on the CLI. Not injected into service environments. See [CLI Reference — Define Flags](cli-reference.md#define-flags) |
 
 #### Shortcuts and Shared Tables
 

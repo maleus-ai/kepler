@@ -1099,6 +1099,37 @@ impl ConfigActorHandle {
 
     // === Environment Override ===
 
+    /// Get the stored kepler_flags (user-defined flags for expressions)
+    pub async fn get_kepler_flags(&self) -> HashMap<String, String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ConfigCommand::GetKeplerFlags { reply: reply_tx })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send GetKeplerFlags");
+        }
+        reply_rx.await.unwrap_or_default()
+    }
+
+    /// Merge flags into the stored kepler_flags, re-save snapshot, and clear resolved config cache.
+    pub async fn merge_kepler_flags(&self, flags: HashMap<String, String>) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ConfigCommand::MergeKeplerFlags {
+                flags,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            warn!("Config actor closed, cannot send MergeKeplerFlags");
+        }
+        let _ = reply_rx.await;
+    }
+
     /// Merge overrides into the stored kepler_env, re-save snapshot, and clear resolved config cache.
     pub async fn merge_kepler_env(&self, overrides: HashMap<String, String>) {
         let (reply_tx, reply_rx) = oneshot::channel();

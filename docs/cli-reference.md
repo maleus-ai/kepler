@@ -7,6 +7,7 @@ Complete reference for the `kepler` command-line interface.
 - [Global Options](#global-options)
 - [Daemon Commands](#daemon-commands)
 - [Service Commands](#service-commands)
+- [Define Flags](#define-flags)
 - [Signal Handling](#signal-handling)
 - [Duration Format](#duration-format)
 - [Exit Codes](#exit-codes)
@@ -93,6 +94,7 @@ kepler start -d --wait --timeout 30s     # Block with timeout
 kepler start backend                     # Start a specific service
 kepler start -e MY_VAR=hello             # Override a kepler.env variable
 kepler start -e A=1 -e B=2              # Override multiple env vars
+kepler start -D MODE=debug -D PORT=8080 # Define flags for Lua expressions
 kepler start --refresh-env               # Refresh all kepler env from current shell
 kepler start --abort-on-failure            # Stop all services immediately on unhandled failure
 kepler start -d --wait --no-abort-on-failure  # Don't stop services on failure, just exit 1
@@ -107,6 +109,7 @@ kepler start --hardening strict          # Start with per-config hardening
 | `--no-deps`                       | Skip dependency waiting and `if:` conditions (requires specifying service names)                                                                           |
 | `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services      |
 | `-r, --refresh-env`               | Re-capture the entire `kepler.env` from the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
+| `-D, --define <KEY=VALUE>`        | Define a flag accessible via `kepler.flags` in `${{ }}$` and `!lua` expressions (repeatable). Flags are **not** injected into service environments — they are only available in Lua context. See [Define Flags](#define-flags) |
 | `--raw`                           | Output raw log lines without formatting (foreground mode only, incompatible with `-d`)                                                                     |
 | `--abort-on-failure`              | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`)                                                                      |
 | `--no-abort-on-failure`           | Don't stop services on unhandled failure (requires `--wait`)                                                                                               |
@@ -144,6 +147,7 @@ kepler run -d --wait                    # Block until startup cluster ready
 kepler run -d --wait --timeout 30s      # Block with timeout
 kepler run backend                      # Run a specific service (still stops all prior)
 kepler run -e MY_VAR=hello              # Override a kepler.env variable
+kepler run -D MODE=debug               # Define flags for Lua expressions
 kepler run --start-clean                # Wipe entire state dir (including logs) before loading
 kepler run --clean                      # Remove state dir after all services exit
 kepler run --abort-on-failure           # Stop all services immediately on unhandled failure
@@ -158,6 +162,7 @@ kepler run --hardening strict           # Run with per-config hardening
 | `--no-deps`                       | Skip dependency waiting and `if:` conditions (requires specifying service names)                           |
 | `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Applies to the entire config                        |
 | `-r, --refresh-env`               | Re-capture the entire `kepler.env` from the current shell environment                                      |
+| `-D, --define <KEY=VALUE>`        | Define a flag accessible via `kepler.flags` in expressions (repeatable). See [Define Flags](#define-flags) |
 | `--start-clean`                   | Remove entire state dir (including logs and metrics) before loading config                                 |
 | `--clean`                         | Remove entire state dir after all services exit (foreground only, incompatible with `-d`)                  |
 | `--raw`                           | Output raw log lines without formatting (foreground mode only, incompatible with `-d`)                     |
@@ -235,6 +240,7 @@ kepler restart --wait --timeout 30s      # Block with timeout
 kepler restart --follow                  # Restart, then follow logs (Ctrl+C just exits)
 kepler restart backend worker            # Restart specific services
 kepler restart -e MY_VAR=new_value       # Restart with overridden env var
+kepler restart -D MODE=production        # Restart with defined flags
 kepler restart --refresh-env             # Restart with refreshed shell env
 ```
 
@@ -246,6 +252,7 @@ kepler restart --refresh-env             # Restart with refreshed shell env
 | `--raw`                           | Output raw log lines without formatting                                                                                                                    |
 | `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services      |
 | `-r, --refresh-env`               | Re-capture the entire `kepler.env` from the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
+| `-D, --define <KEY=VALUE>`        | Define a flag accessible via `kepler.flags` in expressions (repeatable). See [Define Flags](#define-flags)                                                 |
 | `--no-deps`                       | Skip dependency ordering (requires specifying service names)                                                                                               |
 
 **Behavior by mode:**
@@ -264,11 +271,13 @@ Stop all services, re-bake the config snapshot, and start all services again. Th
 ```bash
 kepler recreate                          # Recreate with current settings
 kepler recreate --hardening strict       # Recreate with per-config hardening
+kepler recreate -D MODE=production       # Recreate with defined flags
 ```
 
-| Flag                  | Description                                                                                                                                       |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--hardening <LEVEL>` | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening) |
+| Flag                           | Description                                                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--hardening <LEVEL>`          | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening) |
+| `-D, --define <KEY=VALUE>`     | Define a flag accessible via `kepler.flags` in expressions (repeatable). See [Define Flags](#define-flags)                                        |
 
 This is equivalent to running `kepler stop --clean` followed by `kepler start`, but also re-bakes the config snapshot in between.
 
@@ -295,6 +304,42 @@ The daemon sets a floor via its `--hardening` flag; the CLI can raise the level 
 The per-config hardening level persists across daemon restarts (baked into the config snapshot). To change it, use `kepler recreate --hardening <new-level>`.
 
 See [Security Model -- Hardening](security-model.md#hardening) for full details on hardening levels.
+
+### Define Flags
+
+The `-D` / `--define` flag passes explicit key-value pairs that are accessible in `${{ }}$` and `!lua` expressions via `kepler.flags`. Unlike `-e` (which overrides `kepler.env` and gets inherited into service process environments), define flags are **only** available in the Lua evaluation context — they are never injected into service environments.
+
+```bash
+kepler start -D MODE=debug -D PORT=8080
+kepler run -D DEPLOY_ENV=staging
+kepler restart -D MODE=production
+kepler recreate -D MODE=production
+```
+
+**Usage in config:**
+
+```yaml
+services:
+  app:
+    command: !lua |
+      if kepler.flags.MODE == "debug" then
+        return {"./app", "--debug", "--verbose"}
+      else
+        return {"./app"}
+      end
+    environment:
+      - PORT=${{ kepler.flags.PORT or "3000" }}$
+```
+
+**Key properties:**
+
+- **Repeatable**: Use multiple `-D` flags to define multiple values
+- **String values**: All values are strings (use `tonumber(kepler.flags.PORT)` in Lua if needed)
+- **Merge semantics**: Re-invocation with the same key overwrites the previous value (same as `-e`)
+- **Persisted in snapshot**: Flags are saved in the config snapshot for `start`/`recreate`, so they survive daemon restarts. For `run` mode, flags are ephemeral
+- **Not inherited**: Flags do not appear in service process environments — use them to control config generation logic without polluting the runtime environment
+
+See [Inline Expressions — Kepler Context](variable-expansion.md#kepler-context) and [Lua Scripting — Kepler Context](lua-scripting.md#kepler-context) for details on accessing `kepler.flags` in expressions.
 
 ### `kepler ps`
 

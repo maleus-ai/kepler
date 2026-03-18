@@ -1290,3 +1290,122 @@ fn test_kepler_env_denied_false_allows_access() {
     let result: String = eval.eval(r#"return kepler.env.MY_VAR"#, &ctx, "test").unwrap();
     assert_eq!(result, "hello");
 }
+
+// ========================================================================
+// kepler.flags (--define / -D) tests
+// ========================================================================
+
+#[test]
+fn test_kepler_flags_access() {
+    let eval = LuaEvaluator::new().unwrap();
+    let mut kepler_flags = HashMap::new();
+    kepler_flags.insert("MODE".to_string(), "debug".to_string());
+    kepler_flags.insert("PORT".to_string(), "9090".to_string());
+    let ctx = EvalContext {
+        kepler_flags,
+        ..Default::default()
+    };
+
+    let result: String = eval.eval(r#"return kepler.flags.MODE"#, &ctx, "test").unwrap();
+    assert_eq!(result, "debug");
+
+    let result: String = eval.eval(r#"return kepler.flags.PORT"#, &ctx, "test").unwrap();
+    assert_eq!(result, "9090");
+}
+
+#[test]
+fn test_kepler_flags_nil_on_missing_key() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        kepler_flags: HashMap::new(),
+        ..Default::default()
+    };
+
+    let result: Value = eval.eval(r#"return kepler.flags.NONEXISTENT"#, &ctx, "test").unwrap();
+    assert!(result.is_nil(), "Missing flag should return nil, got: {:?}", result);
+}
+
+#[test]
+fn test_kepler_flags_readonly() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        kepler_flags: HashMap::from([("A".to_string(), "1".to_string())]),
+        ..Default::default()
+    };
+
+    let result = eval.eval::<Value>(r#"kepler.flags.NEW = "value""#, &ctx, "test");
+    assert!(result.is_err(), "Writing to kepler.flags should fail");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("readonly") || err.contains("read-only"),
+        "Error should mention readonly: {}",
+        err
+    );
+}
+
+#[test]
+fn test_kepler_flags_inline_expr() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        kepler_flags: HashMap::from([("PORT".to_string(), "8080".to_string())]),
+        ..Default::default()
+    };
+
+    let result = eval.eval_inline_expr("kepler.flags.PORT", &ctx, "test").unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "8080");
+}
+
+#[test]
+fn test_kepler_flags_inline_expr_with_default() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        kepler_flags: HashMap::new(),
+        ..Default::default()
+    };
+
+    let result = eval.eval_inline_expr(r#"kepler.flags.PORT or "3000""#, &ctx, "test").unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "3000");
+}
+
+#[test]
+fn test_kepler_flags_in_condition() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        kepler_flags: HashMap::from([("DEBUG".to_string(), "true".to_string())]),
+        ..Default::default()
+    };
+
+    let result = eval.eval_condition("kepler.flags.DEBUG == 'true'", &ctx).unwrap();
+    assert!(result.value, "Condition should be true when flag matches");
+
+    let result = eval.eval_condition("kepler.flags.DEBUG == 'false'", &ctx).unwrap();
+    assert!(!result.value, "Condition should be false when flag doesn't match");
+}
+
+#[test]
+fn test_kepler_flags_empty_string_value() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        kepler_flags: HashMap::from([("KEY".to_string(), String::new())]),
+        ..Default::default()
+    };
+
+    let result: String = eval.eval(r#"return kepler.flags.KEY"#, &ctx, "test").unwrap();
+    assert_eq!(result, "");
+}
+
+#[test]
+fn test_kepler_flags_coexists_with_kepler_env() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        kepler_env: HashMap::from([("ENV_VAR".to_string(), "from_env".to_string())]),
+        kepler_flags: HashMap::from([("FLAG_VAR".to_string(), "from_flag".to_string())]),
+        ..Default::default()
+    };
+
+    let result: String = eval.eval(r#"return kepler.env.ENV_VAR"#, &ctx, "test").unwrap();
+    assert_eq!(result, "from_env");
+
+    let result: String = eval.eval(r#"return kepler.flags.FLAG_VAR"#, &ctx, "test").unwrap();
+    assert_eq!(result, "from_flag");
+}

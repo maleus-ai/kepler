@@ -119,6 +119,8 @@ pub struct EvalContext {
     pub hardening: HardeningLevel,
     /// Kepler-level environment variables (replaces raw_env / sys_env)
     pub kepler_env: HashMap<String, String>,
+    /// User-defined flags accessible via `kepler.flags` in expressions
+    pub kepler_flags: HashMap<String, String>,
     /// When true, `kepler.env` access raises a Lua error (autostart: true without environment)
     pub kepler_env_denied: bool,
 }
@@ -525,6 +527,8 @@ impl LuaEvaluator {
                 t
             };
             kepler_table.raw_set("env", kepler_env_sub.clone())?;
+            let kepler_flags_sub = self.create_frozen_env(&ctx.kepler_flags)?;
+            kepler_table.raw_set("flags", kepler_flags_sub)?;
             kepler_table.set_readonly(true);
             env_table.set("kepler", kepler_table)?;
             kepler_env_sub

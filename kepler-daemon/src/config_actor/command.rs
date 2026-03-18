@@ -307,6 +307,15 @@ pub enum ConfigCommand {
         overrides: HashMap<String, String>,
         reply: oneshot::Sender<()>,
     },
+    /// Get the stored kepler_flags
+    GetKeplerFlags {
+        reply: oneshot::Sender<HashMap<String, String>>,
+    },
+    /// Merge flags into the stored kepler_flags, re-save snapshot, and clear resolved config cache
+    MergeKeplerFlags {
+        flags: HashMap<String, String>,
+        reply: oneshot::Sender<()>,
+    },
 
     // === Monitor Commands ===
     /// Store (or clear) the monitor handle

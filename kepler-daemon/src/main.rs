@@ -811,6 +811,7 @@ async fn handle_request(
             override_envs,
             hardening,
             follow,
+            define_flags,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -831,7 +832,7 @@ async fn handle_request(
                 unloaded_acl_cache.remove(&state_dir);
             }
             match orchestrator
-                .start_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps, override_envs, hardening_level, permission_ceiling)
+                .start_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps, override_envs, hardening_level, permission_ceiling, define_flags)
                 .await
             {
                 Ok(msg) => {
@@ -860,6 +861,7 @@ async fn handle_request(
             hardening,
             follow,
             start_clean,
+            define_flags,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -880,7 +882,7 @@ async fn handle_request(
                 unloaded_acl_cache.remove(&state_dir);
             }
             match orchestrator
-                .run_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps, override_envs, hardening_level, permission_ceiling, start_clean)
+                .run_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps, override_envs, hardening_level, permission_ceiling, start_clean, define_flags)
                 .await
             {
                 Ok(msg) => {
@@ -1066,6 +1068,7 @@ async fn handle_request(
             sys_env: _,
             no_deps,
             override_envs,
+            define_flags,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -1152,7 +1155,7 @@ async fn handle_request(
 
             // Run restart_services (blocks until done)
             let result = orchestrator
-                .restart_services(&config_path, &services, no_deps, override_envs)
+                .restart_services(&config_path, &services, no_deps, override_envs, define_flags)
                 .await;
 
             // Brief sleep to drain remaining events, then abort forwarding task
@@ -1172,6 +1175,7 @@ async fn handle_request(
             config_path,
             sys_env,
             hardening,
+            define_flags,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -1193,7 +1197,7 @@ async fn handle_request(
                 unloaded_acl_cache.remove(&state_dir);
             }
             match orchestrator
-                .recreate_services(&config_path, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), hardening_level, permission_ceiling)
+                .recreate_services(&config_path, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), hardening_level, permission_ceiling, define_flags)
                 .await
             {
                 Ok(msg) if msg.is_empty() => Response::Ok { message: None, data: None },
@@ -2542,6 +2546,7 @@ mod tests {
             config_dir: PathBuf::from("/home/user/project"),
             snapshot_time: 1700000000,
             kepler_env: kepler_env.clone(),
+            kepler_flags: HashMap::new(),
             owner_uid: Some(1000),
             owner_gid: Some(1000),
             hardening: None,
@@ -2761,8 +2766,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
-
             follow: false,
+            define_flags: None,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_err());
     }
@@ -2783,8 +2788,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
-
             follow: false,
+            define_flags: None,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_ok());
     }
@@ -2858,8 +2863,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
-
             follow: false,
+            define_flags: None,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_err());
 
@@ -2899,8 +2904,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
-
             follow: false,
+            define_flags: None,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_ok());
 
@@ -2945,8 +2950,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
-
             follow: false,
+            define_flags: None,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_err());
     }
@@ -2982,8 +2987,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
-
             follow: false,
+            define_flags: None,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_err());
 
@@ -3009,8 +3014,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
-
             follow: false,
+            define_flags: None,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_ok());
     }
@@ -3033,8 +3038,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
-
             follow: false,
+            define_flags: None,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_ok());
 
@@ -3156,8 +3161,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
-
             follow: false,
+            define_flags: None,
         };
 
         // Token with ACL for config A → allowed

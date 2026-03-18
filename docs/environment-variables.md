@@ -190,9 +190,9 @@ user: ${{ service.env.SERVICE_USER or "nobody" }}$
 
 | Stage | What is expanded | Expansion context |
 |-------|------------------|-------------------|
-| 1 | `env_file` path | `kepler.env` only |
-| 2 | `environment` entries | `kepler.env` + env_file variables (sequential) |
-| 3 | All other fields | `kepler.env` + env_file + environment + deps |
+| 1 | `env_file` path | `kepler.env`, `kepler.flags` |
+| 2 | `environment` entries | `kepler.env`, `kepler.flags` + env_file variables (sequential) |
+| 3 | All other fields | `kepler.env`, `kepler.flags` + env_file + environment + deps |
 
 See [Inline Expressions](variable-expansion.md) for the full syntax reference.
 
@@ -298,6 +298,29 @@ This re-captures all environment variables from the current shell and replaces t
 The alternative is to unload the config entirely with `kepler stop --clean`, which drops the in-memory environment and forces a fresh capture on the next load.
 
 `--refresh-env` and `-e` can be combined: the CLI environment is refreshed first, then `-e` overrides are applied on top.
+
+### Define Flags (`-D`) vs Environment Overrides (`-e`)
+
+The `-D` / `--define` flag is complementary to `-e` but serves a different purpose:
+
+| | `-e` / `--override-envs` | `-D` / `--define` |
+|---|---|---|
+| **Scope** | `kepler.env` — inherited into service process environments | `kepler.flags` — only available in `${{ }}$` and `!lua` expressions |
+| **Accessible via** | `kepler.env.VAR`, `service.env.VAR` (after inheritance) | `kepler.flags.KEY` |
+| **In process env?** | Yes (via `inherit_env: true`) | No — never injected |
+| **Use case** | Override runtime config values (DB host, API keys) | Control config generation logic (feature flags, build modes) |
+
+Use `-D` when you want to pass values that influence **how the config is evaluated** without polluting the service runtime environment. Use `-e` when you want to change values that services **see at runtime**.
+
+```bash
+# -e: services see DB_HOST in their process environment
+kepler start -e DB_HOST=newhost
+
+# -D: MODE is only available in ${{ kepler.flags.MODE }}$, not in process env
+kepler start -D MODE=debug
+```
+
+See [CLI Reference — Define Flags](cli-reference.md#define-flags) for the full reference.
 
 ---
 

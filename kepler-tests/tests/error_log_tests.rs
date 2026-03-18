@@ -105,7 +105,7 @@ services:
 
     // Start the service — resolution should fail due to Lua error
     let _result = orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None, None, None)
         .await;
 
     // Wait for the service to reach Failed status
@@ -177,7 +177,7 @@ async fn test_hook_failure_logged_to_stderr() {
 
     // Start the service — pre_start hook should fail
     let _result = orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None, None, None)
         .await;
 
     // Wait for the service to reach Failed status
@@ -244,7 +244,7 @@ services:
 
     // Start the service — hook resolution should fail due to Lua error
     let _result = orchestrator
-        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None, None)
+        .start_services(&config_path, &[], Some(sys_env), None, None, false, None, None, None, None)
         .await;
 
     // Wait for the service to reach Failed status

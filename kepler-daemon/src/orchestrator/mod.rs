@@ -153,6 +153,7 @@ impl ServiceOrchestrator {
         override_envs: Option<HashMap<String, String>>,
         hardening: Option<HardeningLevel>,
         permission_ceiling: Option<HashSet<&'static str>>,
+        define_flags: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
         if let Some(fd_count) = crate::fd_count::count_open_fds() {
             debug!("FD count at start_services entry: {}", fd_count);
@@ -176,6 +177,11 @@ impl ServiceOrchestrator {
         // Merge override envs into stored kepler_env if provided
         if let Some(overrides) = override_envs {
             handle.merge_kepler_env(overrides).await;
+        }
+
+        // Merge define flags into stored kepler_flags if provided
+        if let Some(flags) = define_flags {
+            handle.merge_kepler_flags(flags).await;
         }
 
         // Get config and determine services to start
@@ -456,10 +462,11 @@ impl ServiceOrchestrator {
         // Transition: Waiting → Starting (dependencies satisfied)
         handle.set_service_status(service_name, ServiceStatus::Starting).await?;
 
-        // Build evaluation context (kepler_env + deps).
+        // Build evaluation context (kepler_env + kepler_flags + deps).
         // env_file vars are loaded inside resolve_service (step 0) so that
         // !lua env_file tags are evaluated before environment.
         let kepler_env = handle.get_kepler_env().await;
+        let kepler_flags = handle.get_kepler_flags().await;
         let config = handle.get_config().await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
         let config_dir = handle.get_config_dir().await;
@@ -528,6 +535,7 @@ impl ServiceOrchestrator {
             owner: Self::build_owner_ctx(handle),
             hardening: effective_hardening,
             kepler_env: kepler_env.clone(),
+            kepler_flags,
             kepler_env_denied,
         };
         debug!("[timeit] {} eval context built in {:?}", service_name, ctx_start.elapsed());
@@ -774,6 +782,7 @@ impl ServiceOrchestrator {
         let config_dir = handle.get_config_dir().await;
         let state_dir = handle.get_state_dir().await;
         let kepler_env = handle.get_kepler_env().await;
+        let kepler_flags = handle.get_kepler_flags().await;
 
         // Build dependency info from current service states
         let mut dep_infos = HashMap::new();
@@ -836,6 +845,7 @@ impl ServiceOrchestrator {
             owner: Self::build_owner_ctx(handle),
             hardening: self.effective_hardening(handle),
             kepler_env: kepler_env.clone(),
+            kepler_flags,
             kepler_env_denied,
         };
 
@@ -1424,6 +1434,7 @@ impl ServiceOrchestrator {
         services: &[String],
         no_deps: bool,
         override_envs: Option<HashMap<String, String>>,
+        define_flags: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
         info!("Restarting services for {:?} (preserving state)", config_path);
 
@@ -1435,6 +1446,11 @@ impl ServiceOrchestrator {
         // Merge override envs into stored kepler_env if provided
         if let Some(overrides) = override_envs {
             handle.merge_kepler_env(overrides).await;
+        }
+
+        // Merge define flags into stored kepler_flags if provided
+        if let Some(flags) = define_flags {
+            handle.merge_kepler_flags(flags).await;
         }
 
         let config = handle
@@ -1645,6 +1661,7 @@ impl ServiceOrchestrator {
         progress: Option<ProgressSender>,
         hardening: Option<HardeningLevel>,
         permission_ceiling: Option<HashSet<&'static str>>,
+        define_flags: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
         info!("Recreating config for {:?}", config_path);
 
@@ -1679,7 +1696,7 @@ impl ServiceOrchestrator {
         }
 
         // Start all services
-        self.start_services(config_path, &[], sys_env, config_owner, progress, false, None, hardening, None).await?;
+        self.start_services(config_path, &[], sys_env, config_owner, progress, false, None, hardening, None, define_flags).await?;
 
         Ok(String::new())
     }
@@ -1707,6 +1724,7 @@ impl ServiceOrchestrator {
         hardening: Option<HardeningLevel>,
         permission_ceiling: Option<HashSet<&'static str>>,
         start_clean: bool,
+        define_flags: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
         info!("Running config in ephemeral mode for {:?}", config_path);
 
@@ -1779,7 +1797,7 @@ impl ServiceOrchestrator {
         }
 
         // Step 6: Start services (reuses existing start_services logic)
-        self.start_services(config_path, services, sys_env, config_owner, progress, no_deps, override_envs, hardening, None).await
+        self.start_services(config_path, services, sys_env, config_owner, progress, no_deps, override_envs, hardening, None, define_flags).await
     }
 
     /// Restart a single service (used by file watcher)
@@ -2415,9 +2433,14 @@ impl ServiceOrchestrator {
         let evaluator = config.as_ref()
             .and_then(|c| c.create_lua_evaluator().ok());
 
-        // Get kepler_env for hook context
+        // Get kepler_env and kepler_flags for hook context
         let kepler_env = if let Some(h) = handle {
             h.get_kepler_env().await
+        } else {
+            HashMap::new()
+        };
+        let kepler_flags = if let Some(h) = handle {
+            h.get_kepler_flags().await
         } else {
             HashMap::new()
         };
@@ -2434,6 +2457,7 @@ impl ServiceOrchestrator {
             working_dir: &ctx.working_dir,
             env: &ctx.env,
             kepler_env: &kepler_env,
+            kepler_flags: &kepler_flags,
             env_file_vars: &ctx.env_file_vars,
             log_store: Some(&ctx.log_store),
             service_user: resolved.user.as_deref(),

@@ -299,8 +299,9 @@ async fn run_status_change_hook(
         let evaluator = config.as_ref()
             .and_then(|c| c.create_lua_evaluator().ok());
 
-        // Get kepler_env for hook context
+        // Get kepler_env and kepler_flags for hook context
         let kepler_env = handle.get_kepler_env().await;
+        let kepler_flags = handle.get_kepler_flags().await;
 
         // Fetch service token for hook authentication
         let service_token = handle.get_service_token_hex(service_name).await;
@@ -310,6 +311,7 @@ async fn run_status_change_hook(
             working_dir: &ctx.working_dir,
             env: &ctx.env,
             kepler_env: &kepler_env,
+            kepler_flags: &kepler_flags,
             env_file_vars: &ctx.env_file_vars,
             log_store: Some(&ctx.log_store),
             service_user: resolved.user.as_deref(),
