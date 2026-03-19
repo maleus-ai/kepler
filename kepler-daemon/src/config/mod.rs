@@ -1444,10 +1444,20 @@ impl KeplerConfig {
         let restart = raw.restart.resolve_with_env(evaluator, ctx, config_path, &format!("{}.restart", name), &mut shared_env)?;
         // Resolve inner ConfigValue fields of RestartConfig
         let restart = match restart {
-            RestartConfig::Extended { policy, watch, grace_period } => {
+            RestartConfig::Extended { policy, watch, grace_period, delay, backoff, max_delay } => {
                 let resolved_patterns = resolve_nested_vec(&watch, evaluator, ctx, config_path, &format!("{}.restart.watch", name), &mut shared_env)?;
                 let resolved_grace_period = grace_period.resolve_with_env(evaluator, ctx, config_path, &format!("{}.restart.grace_period", name), &mut shared_env)?;
-                RestartConfig::Extended { policy, watch: ConfigValue::wrap_vec(resolved_patterns).into(), grace_period: ConfigValue::Static(resolved_grace_period) }
+                let resolved_delay = delay.resolve_with_env(evaluator, ctx, config_path, &format!("{}.restart.delay", name), &mut shared_env)?;
+                let resolved_backoff: f64 = backoff.resolve_with_env(evaluator, ctx, config_path, &format!("{}.restart.backoff", name), &mut shared_env)?;
+                let resolved_max_delay = max_delay.resolve_with_env(evaluator, ctx, config_path, &format!("{}.restart.max_delay", name), &mut shared_env)?;
+                RestartConfig::Extended {
+                    policy,
+                    watch: ConfigValue::wrap_vec(resolved_patterns).into(),
+                    grace_period: ConfigValue::Static(resolved_grace_period),
+                    delay: ConfigValue::Static(resolved_delay),
+                    backoff: ConfigValue::Static(resolved_backoff),
+                    max_delay: ConfigValue::Static(resolved_max_delay),
+                }
             }
             simple => simple,
         };

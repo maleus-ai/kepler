@@ -867,6 +867,7 @@ impl ConfigActor {
             } => {
                 let result = if let Some(ss) = self.services.get_mut(&service_name) {
                     ss.restart_count += 1;
+                    ss.restart_count_since_healthy += 1;
                     Ok(())
                 } else {
                     Err(DaemonError::ServiceNotFound(service_name))
@@ -882,6 +883,7 @@ impl ConfigActor {
             } => {
                 let result = if let Some(ss) = self.services.get_mut(&service_name) {
                     ss.restart_count = 0;
+                    ss.restart_count_since_healthy = 0;
                     Ok(())
                 } else {
                     Err(DaemonError::ServiceNotFound(service_name))
@@ -1456,6 +1458,7 @@ impl ConfigActor {
             {
                 service_state.status = ServiceStatus::Healthy;
                 service_state.was_healthy = true;
+                service_state.restart_count_since_healthy = 0;
             }
         } else {
             service_state.health_check_failures += 1;

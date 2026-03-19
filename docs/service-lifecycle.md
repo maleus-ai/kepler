@@ -225,6 +225,16 @@ Restart policies are flags that can be combined with the pipe (`|`) operator:
 
 Flags can be combined: `restart: "on-failure|on-unhealthy"` restarts on both non-zero exit and healthcheck failure. The `no` flag cannot be combined with other flags.
 
+### Restart Backoff
+
+When a service restarts automatically (via policy, unhealthy, or file watcher), Kepler can apply an exponential backoff delay before restarting. This prevents failing services from restarting in a tight loop.
+
+The delay is computed as: `min(delay * backoff ^ restart_count_since_healthy, max_delay)`
+
+The `restart_count_since_healthy` counter tracks how many times the service has restarted since it last became healthy. When the service passes its healthcheck, the counter resets to 0.
+
+See [Restart Backoff](configuration.md#restart-backoff) for configuration details.
+
 ### Restart Triggers
 
 Services can restart due to:
