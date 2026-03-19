@@ -133,9 +133,8 @@ pub fn resolve_user_env(user_spec: &str) -> Result<HashMap<String, String>> {
 ///
 /// Used to prevent spawned processes (services, hooks, healthchecks) from
 /// inheriting kepler group membership, which would give them daemon socket access.
-pub fn strip_kepler_group(groups: &mut Vec<String>, kepler_gid: u32, context: &str) {
+pub fn strip_kepler_group(groups: &mut Vec<String>, kepler_gid: u32) {
     let kgid_str = kepler_gid.to_string();
-    let before = groups.len();
     groups.retain(|g| {
         if g == &kgid_str {
             return false;
@@ -145,12 +144,6 @@ pub fn strip_kepler_group(groups: &mut Vec<String>, kepler_gid: u32, context: &s
         }
         true
     });
-    if groups.len() < before {
-        tracing::warn!(
-            "Stripped kepler group from {}: spawned processes cannot inherit kepler group membership (see security-model.md#kepler-group-stripping)",
-            context
-        );
-    }
 }
 
 /// Compute supplementary groups for a user, excluding a specific GID.
@@ -222,7 +215,7 @@ pub fn effective_groups(
 
     // Always strip kepler group from final list
     if let Some(kgid) = kepler_gid {
-        strip_kepler_group(&mut result, kgid, context);
+        strip_kepler_group(&mut result, kgid);
     }
 
     result
