@@ -1,12 +1,12 @@
 //! Authorizer-based safety for user-provided SQL filter expressions.
 //!
-//! Instead of parsing a custom DSL, user WHERE fragments are injected directly
-//! into SQL queries. Safety is enforced by SQLite's authorizer API combined with
-//! resource limits and a progress-handler timeout.
+//! User WHERE fragments are injected directly into SQL queries. Safety is
+//! enforced by SQLite's authorizer API combined with resource limits and a
+//! progress-handler timeout.
 //!
 //! Defense layers:
 //! 1. Read-only connection (SQLITE_OPEN_READ_ONLY + PRAGMA query_only)
-//! 2. Authorizer: deny-by-default, allow only SELECT on `logs` + whitelisted functions
+//! 2. Authorizer: deny-by-default, allow only SELECT on caller-specified tables + whitelisted functions
 //! 3. Resource limits (expression depth, LIKE pattern length, SQL length, etc.)
 //! 4. Progress handler timeout (circuit breaker for runaway queries)
 
@@ -65,13 +65,19 @@ pub fn validate_filter(filter: &str) -> Result<(), String> {
 /// Apply authorizer, resource limits, and progress handler to a connection
 /// for safely executing queries with user-provided filter expressions.
 ///
+/// `allowed_tables` specifies which tables the filter is allowed to read from
+/// (e.g. `&["logs"]` for log queries, `&["metrics"]` for monitor queries).
+///
 /// Must be called BEFORE `conn.prepare()` — the authorizer validates at
 /// compile time.
 pub fn apply_filter_safeguards(
     conn: &rusqlite::Connection,
     timeout: Duration,
+    allowed_tables: &[&str],
 ) {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    let tables: Vec<String> = allowed_tables.iter().map(|t| t.to_string()).collect();
 
     // Authorizer: deny-by-default
     conn.authorizer(Some(
@@ -80,8 +86,10 @@ pub fn apply_filter_safeguards(
                 // Allow the SELECT operation itself
                 AuthAction::Select => Authorization::Allow,
 
-                // Allow reading columns from the `logs` table only
-                AuthAction::Read { table_name, .. } if table_name == "logs" => {
+                // Allow reading columns from allowed tables only
+                AuthAction::Read { table_name, .. }
+                    if tables.iter().any(|t| t == table_name) =>
+                {
                     Authorization::Allow
                 }
 
@@ -181,7 +189,7 @@ mod tests {
     #[test]
     fn authorizer_allows_select_on_logs() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         let count: i64 = conn
             .query_row(
@@ -196,7 +204,7 @@ mod tests {
     #[test]
     fn authorizer_allows_json_extract() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         // Query JSON attributes column
         let count: i64 = conn
@@ -212,7 +220,7 @@ mod tests {
     #[test]
     fn authorizer_allows_string_functions() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         let count: i64 = conn
             .query_row(
@@ -227,7 +235,7 @@ mod tests {
     #[test]
     fn authorizer_allows_like() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         let count: i64 = conn
             .query_row(
@@ -246,7 +254,7 @@ mod tests {
         let conn = setup_db();
         conn.execute_batch("CREATE TABLE secrets (data TEXT)")
             .unwrap();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         assert!(conn.prepare("SELECT * FROM secrets").is_err());
     }
@@ -254,7 +262,7 @@ mod tests {
     #[test]
     fn authorizer_denies_sqlite_master() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         assert!(conn
             .prepare(
@@ -266,7 +274,7 @@ mod tests {
     #[test]
     fn authorizer_denies_randomblob() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         assert!(conn
             .prepare("SELECT id FROM logs WHERE randomblob(1000) IS NOT NULL")
@@ -276,7 +284,7 @@ mod tests {
     #[test]
     fn authorizer_denies_zeroblob() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         assert!(conn
             .prepare("SELECT id FROM logs WHERE zeroblob(1000) IS NOT NULL")
@@ -286,7 +294,7 @@ mod tests {
     #[test]
     fn authorizer_denies_insert() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         assert!(conn
             .prepare("INSERT INTO logs VALUES (3, 0, 'x', NULL, 'out', 'x', 0)")
@@ -296,7 +304,7 @@ mod tests {
     #[test]
     fn authorizer_denies_delete() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         assert!(conn.prepare("DELETE FROM logs").is_err());
     }
@@ -304,7 +312,7 @@ mod tests {
     #[test]
     fn authorizer_denies_attach() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         assert!(conn
             .prepare("ATTACH DATABASE '/tmp/evil.db' AS evil")
@@ -314,7 +322,7 @@ mod tests {
     #[test]
     fn authorizer_denies_pragma() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         assert!(conn.execute_batch("PRAGMA table_info(logs)").is_err());
     }
@@ -324,7 +332,7 @@ mod tests {
     #[test]
     fn expr_depth_limit() {
         let conn = setup_db();
-        apply_filter_safeguards(&conn, Duration::from_secs(5));
+        apply_filter_safeguards(&conn, Duration::from_secs(5), &["logs"]);
 
         // Build a deeply nested expression: coalesce(coalesce(...(1)...))
         // Each function call adds real depth to the parse tree.

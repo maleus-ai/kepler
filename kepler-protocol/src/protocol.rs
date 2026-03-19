@@ -188,6 +188,15 @@ pub enum Request {
         /// Maximum number of entries to return
         #[serde(default)]
         limit: Option<usize>,
+        /// Optional filter expression. Requires `monitor:search` sub-right.
+        /// By default, this is a DSL expression (e.g. `@cpu_percent:>50`).
+        /// Set `sql` to true to pass a raw SQL WHERE fragment instead.
+        #[serde(default)]
+        filter: Option<String>,
+        /// If true, `filter` is a raw SQL WHERE fragment.
+        /// If false (default), `filter` is a DSL expression.
+        #[serde(default)]
+        sql: bool,
     },
 }
 

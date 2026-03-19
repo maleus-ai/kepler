@@ -42,6 +42,8 @@ pub const SUB_RIGHTS: &[&str] = &[
     "recreate:hardening",
     "logs:search",
     "logs:search:sql",
+    "monitor:search",
+    "monitor:search:sql",
 ];
 
 /// All known rights (base + sub), computed once.
@@ -192,9 +194,13 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
             base: "inspect",
             sub_rights: vec![],
         }),
-        Request::MonitorMetrics { .. } => Some(RequiredRights {
+        Request::MonitorMetrics { filter, sql, .. } => Some(RequiredRights {
             base: "monitor",
-            sub_rights: vec![],
+            sub_rights: match (filter.is_some(), *sql) {
+                (true, true) => vec!["monitor:search", "monitor:search:sql"],
+                (true, false) => vec!["monitor:search"],
+                _ => vec![],
+            },
         }),
         Request::Status {
             config_path: Some(_),

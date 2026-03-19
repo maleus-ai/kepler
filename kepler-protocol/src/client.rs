@@ -383,8 +383,10 @@ impl Client {
         service: Option<String>,
         since: Option<i64>,
         limit: Option<usize>,
+        filter: Option<String>,
+        sql: bool,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
-        self.send_request(Request::MonitorMetrics { config_path, service, since, limit })
+        self.send_request(Request::MonitorMetrics { config_path, service, since, limit, filter, sql })
     }
 
     /// Check if all services are ready (reached target state)
