@@ -461,7 +461,7 @@ impl TestDaemonHarness {
             resolved.groups.clone(),
             resolved.limits.clone(),
             true,
-            resolved.no_new_privileges.unwrap_or(true),
+            resolved.no_new_privileges.unwrap_or(false),
         );
 
         // Inject KEPLER_TOKEN and KEPLER_SOCKET_PATH into the process environment
@@ -1002,7 +1002,7 @@ impl TestDaemonHarness {
                     resolved.groups.clone(),
                     resolved.limits.clone(),
                     true,
-                    resolved.no_new_privileges.unwrap_or(true),
+                    resolved.no_new_privileges.unwrap_or(false),
                 );
                 let spawn_params = SpawnServiceParams {
                     service_name: &event.service_name,
@@ -1220,7 +1220,7 @@ impl TestDaemonHarness {
                         resolved.groups.clone(),
                         resolved.limits.clone(),
                         true,
-                        resolved.no_new_privileges.unwrap_or(true),
+                        resolved.no_new_privileges.unwrap_or(false),
                     );
                     let spawn_params = SpawnServiceParams {
                         service_name: &event.service_name,
