@@ -116,6 +116,10 @@ pub struct ConfigActor {
     /// Cached topological order for quiescence computation (dep graph is immutable)
     cached_topo_order: Option<Vec<String>>,
 
+    /// When true, snapshot creation is suppressed even if autostart is enabled.
+    /// Used by `kepler run` for ephemeral mode.
+    suppress_snapshot: bool,
+
     /// Set when Shutdown{clean: true} is processed. Tells cleanup() to skip
     /// save_state — the state directory is about to be removed.
     clean_shutdown: bool,
@@ -538,6 +542,7 @@ impl ConfigActor {
             last_quiescent: false,
             startup_in_progress: false,
             cached_topo_order: None,
+            suppress_snapshot: false,
             clean_shutdown: false,
             shutdown_reply: None,
             monitor_handle: None,
@@ -1128,6 +1133,10 @@ impl ConfigActor {
             ConfigCommand::IsRestoredFromSnapshot { reply } => {
                 let _ = reply.send(self.restored_from_snapshot);
             }
+            ConfigCommand::SetSuppressSnapshot { reply } => {
+                self.suppress_snapshot = true;
+                let _ = reply.send(());
+            }
 
             // === Event Channel Commands ===
             ConfigCommand::CreateEventChannel {
@@ -1255,6 +1264,12 @@ impl ConfigActor {
     /// Returns Ok(true) if snapshot was taken, Ok(false) if already taken or autostart is disabled.
     fn take_snapshot_if_needed(&mut self) -> Result<bool> {
         if self.snapshot_taken {
+            return Ok(false);
+        }
+
+        // Suppress snapshot in ephemeral mode (kepler run).
+        // Auto-reset so a subsequent `start` can take a snapshot.
+        if std::mem::take(&mut self.suppress_snapshot) {
             return Ok(false);
         }
 

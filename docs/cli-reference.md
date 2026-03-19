@@ -15,12 +15,12 @@ Complete reference for the `kepler` command-line interface.
 
 ## Global Options
 
-| Option | Description |
-|--------|-------------|
+| Option              | Description                                                          |
+| ------------------- | -------------------------------------------------------------------- |
 | `-f, --file <FILE>` | Config file path (default: `kepler.yaml`, also accepts `kepler.yml`) |
-| `-v, --verbose` | Enable verbose output |
-| `-q, --quiet` | Suppress degraded mode warnings (when optional requests are denied) |
-| `--version` | Show version information |
+| `-v, --verbose`     | Enable verbose output                                                |
+| `-q, --quiet`       | Suppress degraded mode warnings (when optional requests are denied)  |
+| `--version`         | Show version information                                             |
 
 ---
 
@@ -43,10 +43,10 @@ The daemon requires root privileges. It creates the state directory, socket, and
 
 The daemon binary (`kepler-daemon`) accepts the following options:
 
-| Option | Description |
-|--------|-------------|
+| Option                | Description                                                          |
+| --------------------- | -------------------------------------------------------------------- |
 | `--hardening <level>` | Set privilege hardening level: `none` (default), `no-root`, `strict` |
-| `-h, --help` | Show help message |
+| `-h, --help`          | Show help message                                                    |
 
 The hardening level can also be set via the `KEPLER_HARDENING` environment variable (CLI flag takes precedence). See [Security Model -- Hardening](security-model.md#hardening) for details.
 
@@ -99,39 +99,110 @@ kepler start -d --wait --no-abort-on-failure  # Don't stop services on failure, 
 kepler start --hardening strict          # Start with per-config hardening
 ```
 
-| Flag | Description |
-|------|-------------|
-| `-d, --detach` | Return immediately, startup runs in background |
-| `--wait` | Block until startup cluster is ready (requires `-d`) |
-| `--timeout <DURATION>` | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait` |
-| `--no-deps` | Skip dependency waiting and `if:` conditions (requires specifying service names) |
-| `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services |
-| `-r, --refresh-env` | Re-capture the entire `kepler.env` from the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
-| `--raw` | Output raw log lines without formatting (foreground mode only, incompatible with `-d`) |
-| `--abort-on-failure` | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`) |
-| `--no-abort-on-failure` | Don't stop services on unhandled failure (requires `--wait`) |
-| `--hardening <LEVEL>` | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening) |
+| Flag                              | Description                                                                                                                                                |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-d, --detach`                    | Return immediately, startup runs in background                                                                                                             |
+| `--wait`                          | Block until startup cluster is ready (requires `-d`)                                                                                                       |
+| `--timeout <DURATION>`            | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait`                                                                                                |
+| `--no-deps`                       | Skip dependency waiting and `if:` conditions (requires specifying service names)                                                                           |
+| `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services      |
+| `-r, --refresh-env`               | Re-capture the entire `kepler.env` from the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
+| `--raw`                           | Output raw log lines without formatting (foreground mode only, incompatible with `-d`)                                                                     |
+| `--abort-on-failure`              | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`)                                                                      |
+| `--no-abort-on-failure`           | Don't stop services on unhandled failure (requires `--wait`)                                                                                               |
+| `--hardening <LEVEL>`             | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening)          |
 
 **Behavior by mode:**
 
-| Mode | Blocks until | Then |
-|------|-------------|------|
-| `start` (no flags) | All services quiescent | Follows logs, Ctrl+C stops all |
-| `start -d` | Immediately | Returns |
-| `start -d --wait` | Startup cluster ready | Returns (deferred continue in background) |
-| `start -d --wait --timeout T` | Startup cluster ready OR timeout | Returns |
+| Mode                          | Blocks until                     | Then                                      |
+| ----------------------------- | -------------------------------- | ----------------------------------------- |
+| `start` (no flags)            | All services quiescent           | Follows logs, Ctrl+C stops all            |
+| `start -d`                    | Immediately                      | Returns                                   |
+| `start -d --wait`             | Startup cluster ready            | Returns (deferred continue in background) |
+| `start -d --wait --timeout T` | Startup cluster ready OR timeout | Returns                                   |
 
 **Unhandled failure behavior:**
 
 An "unhandled failure" occurs when a service fails (exits with non-zero code, is killed, or fails to start), won't restart, and no other service has a `service_failed` or `service_stopped` dependency on it. See [Service Lifecycle](service-lifecycle.md#unhandled-failure-detection) for details.
 
-| Mode | Default behavior | Override |
-|------|-----------------|----------|
+| Mode                 | Default behavior                                             | Override                                                    |
+| -------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
 | Foreground (`start`) | Exit 1 at quiescence (services keep running until quiescent) | `--abort-on-failure`: stop all services immediately, exit 1 |
-| `start -d --wait` | Stop all services, exit 1 | `--no-abort-on-failure`: exit 1 without stopping services |
-| `start -d` | No failure detection (fire-and-forget) | — |
+| `start -d --wait`    | Stop all services, exit 1                                    | `--no-abort-on-failure`: exit 1 without stopping services   |
+| `start -d`           | No failure detection (fire-and-forget)                       | —                                                           |
 
 See [Service Lifecycle](service-lifecycle.md) for details on startup/deferred clusters and quiescence.
+
+### `kepler run`
+
+Run services in ephemeral mode. Always reloads the config fresh from source, stops any prior services, and takes no snapshot. Ideal for development, oneshot, and iterative workflows.
+
+```bash
+kepler run                              # Follow logs until quiescent (Ctrl+C stops)
+kepler run -d                           # Detach immediately
+kepler run -d --wait                    # Block until startup cluster ready
+kepler run -d --wait --timeout 30s      # Block with timeout
+kepler run backend                      # Run a specific service (still stops all prior)
+kepler run -e MY_VAR=hello              # Override a kepler.env variable
+kepler run --start-clean                # Wipe entire state dir (including logs) before loading
+kepler run --clean                      # Remove state dir after all services exit
+kepler run --abort-on-failure           # Stop all services immediately on unhandled failure
+kepler run --hardening strict           # Run with per-config hardening
+```
+
+| Flag                              | Description                                                                                                |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `-d, --detach`                    | Return immediately, startup runs in background                                                             |
+| `--wait`                          | Block until startup cluster is ready (requires `-d`)                                                       |
+| `--timeout <DURATION>`            | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait`                                                |
+| `--no-deps`                       | Skip dependency waiting and `if:` conditions (requires specifying service names)                           |
+| `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Applies to the entire config                        |
+| `-r, --refresh-env`               | Re-capture the entire `kepler.env` from the current shell environment                                      |
+| `--start-clean`                   | Remove entire state dir (including logs and metrics) before loading config                                 |
+| `--clean`                         | Remove entire state dir after all services exit (foreground only, incompatible with `-d`)                  |
+| `--raw`                           | Output raw log lines without formatting (foreground mode only, incompatible with `-d`)                     |
+| `--json`                          | Output logs as JSONL (foreground mode only, incompatible with `-d` and `--raw`)                            |
+| `--abort-on-failure`              | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`)                      |
+| `--no-abort-on-failure`           | Don't stop services on unhandled failure (requires `--wait`)                                               |
+| `--hardening <LEVEL>`             | Per-config hardening level: `none`, `no-root`, `strict`. See [Per-Config Hardening](#per-config-hardening) |
+
+**Key differences from `start`:**
+
+| Behavior             | `start`                           | `run`                          |
+| -------------------- | --------------------------------- | ------------------------------ |
+| Config loading       | Uses snapshot if exists           | Always loads fresh from source |
+| Snapshot             | Taken on first start              | Never taken                    |
+| `autostart: true`    | Honored (daemon auto-restarts)    | Ignored (ephemeral)            |
+| Prior services       | Starts alongside or reuses        | Stops all prior services first |
+| After daemon restart | Services auto-start (if snapshot) | Services are gone              |
+
+**Behavior by mode:**
+
+| Mode                        | Blocks until                     | Then                                      |
+| --------------------------- | -------------------------------- | ----------------------------------------- |
+| `run` (no flags)            | All services quiescent           | Follows logs, Ctrl+C stops all            |
+| `run -d`                    | Immediately                      | Returns                                   |
+| `run -d --wait`             | Startup cluster ready            | Returns (deferred continue in background) |
+| `run -d --wait --timeout T` | Startup cluster ready OR timeout | Returns                                   |
+
+**Iterative workflow:**
+
+```bash
+# Edit config, run, observe, edit again, run again
+vim kepler.yaml
+kepler run           # Loads fresh, starts services
+# (make changes)
+kepler run           # Stops prior services, reloads config, starts again
+```
+
+**Cleaning up:**
+
+```bash
+kepler run --start-clean   # Fresh slate: wipe logs/metrics before starting
+kepler run --clean         # Auto-cleanup: remove state dir after services exit
+```
+
+See [Service Lifecycle](service-lifecycle.md) for details on startup/deferred clusters, quiescence, and the difference between `start` and `run` modes.
 
 ### `kepler stop`
 
@@ -145,11 +216,11 @@ kepler stop -s SIGKILL       # Stop with a specific signal
 kepler stop --clean          # Stop and run cleanup hooks
 ```
 
-| Flag | Description |
-|------|-------------|
-| `[SERVICE...]` | Services to stop (stops all if none specified) |
-| `-s, --signal <SIGNAL>` | Signal to send (default: SIGTERM) |
-| `--clean` | Run cleanup hooks after stopping |
+| Flag                    | Description                                    |
+| ----------------------- | ---------------------------------------------- |
+| `[SERVICE...]`          | Services to stop (stops all if none specified) |
+| `-s, --signal <SIGNAL>` | Signal to send (default: SIGTERM)              |
+| `--clean`               | Run cleanup hooks after stopping               |
 
 See [Hooks](hooks.md) for details on cleanup hooks.
 
@@ -167,24 +238,24 @@ kepler restart -e MY_VAR=new_value       # Restart with overridden env var
 kepler restart --refresh-env             # Restart with refreshed shell env
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--wait` | Block until restart completes with progress bars (mutually exclusive with `--follow`) |
-| `--timeout <DURATION>` | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait` |
-| `--follow` | Follow logs after restart completes. Ctrl+C exits log following, services keep running (mutually exclusive with `--wait`) |
-| `--raw` | Output raw log lines without formatting |
-| `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services |
-| `-r, --refresh-env` | Re-capture the entire `kepler.env` from the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
-| `--no-deps` | Skip dependency ordering (requires specifying service names) |
+| Flag                              | Description                                                                                                                                                |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--wait`                          | Block until restart completes with progress bars (mutually exclusive with `--follow`)                                                                      |
+| `--timeout <DURATION>`            | Timeout for `--wait` (e.g., `30s`, `5m`). Requires `--wait`                                                                                                |
+| `--follow`                        | Follow logs after restart completes. Ctrl+C exits log following, services keep running (mutually exclusive with `--wait`)                                  |
+| `--raw`                           | Output raw log lines without formatting                                                                                                                    |
+| `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services      |
+| `-r, --refresh-env`               | Re-capture the entire `kepler.env` from the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
+| `--no-deps`                       | Skip dependency ordering (requires specifying service names)                                                                                               |
 
 **Behavior by mode:**
 
-| Mode | Blocks until | Then |
-|------|-------------|------|
-| `restart` (no flags) | Progress bars finish | Returns |
-| `restart --wait` | Progress bars finish | Returns |
-| `restart --wait --timeout T` | Progress bars finish OR timeout | Returns |
-| `restart --follow` | Progress bars finish | Follows logs, Ctrl+C just exits (services keep running) |
+| Mode                         | Blocks until                    | Then                                                    |
+| ---------------------------- | ------------------------------- | ------------------------------------------------------- |
+| `restart` (no flags)         | Progress bars finish            | Returns                                                 |
+| `restart --wait`             | Progress bars finish            | Returns                                                 |
+| `restart --wait --timeout T` | Progress bars finish OR timeout | Returns                                                 |
+| `restart --follow`           | Progress bars finish            | Follows logs, Ctrl+C just exits (services keep running) |
 
 ### `kepler recreate`
 
@@ -195,8 +266,8 @@ kepler recreate                          # Recreate with current settings
 kepler recreate --hardening strict       # Recreate with per-config hardening
 ```
 
-| Flag | Description |
-|------|-------------|
+| Flag                  | Description                                                                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--hardening <LEVEL>` | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening) |
 
 This is equivalent to running `kepler stop --clean` followed by `kepler start`, but also re-bakes the config snapshot in between.
@@ -205,7 +276,7 @@ See [Configuration](configuration.md#config-immutability) for details on the bak
 
 ### Per-Config Hardening
 
-The `--hardening` flag on `kepler start` and `kepler recreate` sets a per-config hardening level that is baked into the config snapshot. This allows untrusted configs to be loaded with stricter hardening while others remain unrestricted.
+The `--hardening` flag on `kepler start`, `kepler run`, and `kepler recreate` sets a per-config hardening level that is baked into the config snapshot (for `start`/`recreate`) or applied ephemerally (for `run`). This allows untrusted configs to be loaded with stricter hardening while others remain unrestricted.
 
 The effective hardening level for a config is:
 
@@ -235,10 +306,10 @@ kepler ps --all    # Services across all loaded configs
 kepler ps --json   # Output as JSON
 ```
 
-| Flag | Description |
-|------|-------------|
+| Flag          | Description                        |
+| ------------- | ---------------------------------- |
 | `--all`, `-a` | Show status for all loaded configs |
-| `--json` | Output as JSON instead of a table |
+| `--json`      | Output as JSON instead of a table  |
 
 Output columns: **NAME**, **STATUS**, **PID**
 
@@ -268,18 +339,18 @@ kepler inspect | jq .services    # Pipe to jq for filtering
 
 **Output structure:**
 
-| Field | Description |
-|-------|-------------|
-| `config_path` | Absolute path to the config file |
-| `config_hash` | SHA-256 hash used to locate the state directory |
-| `state_dir` | Full path to the state directory (`/var/lib/kepler/configs/<hash>`) |
-| `kepler` | Global kepler configuration (`default_inherit_env`, `logs`, `timeout`, `autostart`) |
-| `environment` | Resolved environment variables passed to services. `null` if config was never started |
-| `services.<name>.config` | Raw parsed service config (static values resolved, dynamic shown as expressions) |
-| `services.<name>.state` | Runtime state: `status`, `pid`, `started_at`, `stopped_at`, `exit_code`, `signal`, etc. |
-| `services.<name>.outputs.path` | Filesystem path to the service outputs directory |
-| `services.<name>.outputs.process` | Process output captures (`::output::KEY=VALUE`) |
-| `services.<name>.outputs.hooks` | Hook step outputs (`hook_name -> step_name -> {key: value}`) |
+| Field                             | Description                                                                             |
+| --------------------------------- | --------------------------------------------------------------------------------------- |
+| `config_path`                     | Absolute path to the config file                                                        |
+| `config_hash`                     | SHA-256 hash used to locate the state directory                                         |
+| `state_dir`                       | Full path to the state directory (`/var/lib/kepler/configs/<hash>`)                     |
+| `kepler`                          | Global kepler configuration (`default_inherit_env`, `logs`, `timeout`, `autostart`)     |
+| `environment`                     | Resolved environment variables passed to services. `null` if config was never started   |
+| `services.<name>.config`          | Raw parsed service config (static values resolved, dynamic shown as expressions)        |
+| `services.<name>.state`           | Runtime state: `status`, `pid`, `started_at`, `stopped_at`, `exit_code`, `signal`, etc. |
+| `services.<name>.outputs.path`    | Filesystem path to the service outputs directory                                        |
+| `services.<name>.outputs.process` | Process output captures (`::output::KEY=VALUE`)                                         |
+| `services.<name>.outputs.hooks`   | Hook step outputs (`hook_name -> step_name -> {key: value}`)                            |
 
 Individual output values longer than 512 characters are truncated with a `"... (truncated)"` suffix.
 
@@ -302,15 +373,15 @@ kepler logs -F '@service:web AND @latency:>100'
 kepler logs -F "level = 'err'" --sql   # Raw SQL filter
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--follow` | Stream new logs continuously |
-| `--head <N>` | Show first N lines |
-| `--tail <N>` | Show last N lines |
-| `--no-hook` | Exclude hook log output |
-| `--raw` | Output raw log lines without formatting (no timestamp, level, service name, color) |
-| `-F, --filter <EXPR>` | Filter logs using a [search expression](log-management.md#log-filtering) |
-| `--sql` | Treat `--filter` as a raw SQL WHERE clause (requires `logs:search:sql` right) |
+| Flag                  | Description                                                                        |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| `--follow`            | Stream new logs continuously                                                       |
+| `--head <N>`          | Show first N lines                                                                 |
+| `--tail <N>`          | Show last N lines                                                                  |
+| `--no-hook`           | Exclude hook log output                                                            |
+| `--raw`               | Output raw log lines without formatting (no timestamp, level, service name, color) |
+| `-F, --filter <EXPR>` | Filter logs using a [search expression](log-management.md#log-filtering)           |
+| `--sql`               | Treat `--filter` as a raw SQL WHERE clause (requires `logs:search:sql` right)      |
 
 See [Log Management -- Log Filtering](log-management.md#log-filtering) for the full search DSL reference.
 
@@ -339,24 +410,24 @@ kepler top -F '@service:web AND @memory_rss:>1000000'
 kepler top -F "cpu_percent > 50" --sql  # Raw SQL filter
 ```
 
-| Option | Description |
-|--------|-------------|
-| `SERVICE` | Service to monitor (monitors all if not specified) |
-| `--json` | Output as JSON instead of interactive TUI |
-| `--history <DURATION>` | Time range for historical data (e.g. `5m`, `1h`, `24h`) |
-| `--interval <DURATION>` | TUI refresh interval (default: `2s`) |
-| `-F, --filter <EXPR>` | Filter metrics using a search expression (see below) |
-| `--sql` | Treat `--filter` as a raw SQL WHERE clause (requires `monitor:search:sql` right) |
+| Option                  | Description                                                                      |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| `SERVICE`               | Service to monitor (monitors all if not specified)                               |
+| `--json`                | Output as JSON instead of interactive TUI                                        |
+| `--history <DURATION>`  | Time range for historical data (e.g. `5m`, `1h`, `24h`)                          |
+| `--interval <DURATION>` | TUI refresh interval (default: `2s`)                                             |
+| `-F, --filter <EXPR>`   | Filter metrics using a search expression (see below)                             |
+| `--sql`                 | Treat `--filter` as a raw SQL WHERE clause (requires `monitor:search:sql` right) |
 
 The filter DSL supports the same syntax as log filtering but with monitor-specific fields:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `@service` | text | Service name |
-| `@timestamp` | integer | Timestamp in milliseconds since Unix epoch |
-| `@cpu_percent` | real | CPU usage percentage |
-| `@memory_rss` | integer | Resident set size in bytes |
-| `@memory_vss` | integer | Virtual memory size in bytes |
+| Field          | Type    | Description                                |
+| -------------- | ------- | ------------------------------------------ |
+| `@service`     | text    | Service name                               |
+| `@timestamp`   | integer | Timestamp in milliseconds since Unix epoch |
+| `@cpu_percent` | real    | CPU usage percentage                       |
+| `@memory_rss`  | integer | Resident set size in bytes                 |
+| `@memory_vss`  | integer | Virtual memory size in bytes               |
 
 ---
 
@@ -387,23 +458,23 @@ When running `kepler start` (without `-d`), pressing Ctrl+C:
 
 Durations are used for timeouts, health check intervals, and other time-based settings:
 
-| Format | Example | Description |
-|--------|---------|-------------|
+| Format       | Example | Description      |
+| ------------ | ------- | ---------------- |
 | Milliseconds | `100ms` | 100 milliseconds |
-| Seconds | `10s` | 10 seconds |
-| Minutes | `5m` | 5 minutes |
-| Hours | `1h` | 1 hour |
-| Days | `1d` | 1 day |
+| Seconds      | `10s`   | 10 seconds       |
+| Minutes      | `5m`    | 5 minutes        |
+| Hours        | `1h`    | 1 hour           |
+| Days         | `1d`    | 1 day            |
 
 ---
 
 ## Exit Codes
 
-| Code | Description |
-|------|-------------|
-| `0` | Success (all services completed normally, or all failures were handled) |
-| `1` | General error, or unhandled service failure detected |
-| `2` | Connection error (daemon not running) |
+| Code | Description                                                             |
+| ---- | ----------------------------------------------------------------------- |
+| `0`  | Success (all services completed normally, or all failures were handled) |
+| `1`  | General error, or unhandled service failure detected                    |
+| `2`  | Connection error (daemon not running)                                   |
 
 ---
 

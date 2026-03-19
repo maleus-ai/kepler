@@ -1,0 +1,6 @@
+# Config with autostart enabled — run should still not create a snapshot
+kepler:
+  autostart: true
+services:
+  echo-service:
+    command: ["sh", "-c", "echo Running; sleep 300"]

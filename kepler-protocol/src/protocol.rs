@@ -44,6 +44,32 @@ pub enum Request {
         #[serde(default)]
         follow: bool,
     },
+    /// Run service(s) — ephemeral mode: always reload config fresh, no snapshot
+    Run {
+        /// Path to the config file
+        config_path: PathBuf,
+        /// Services to run (empty = all services)
+        #[serde(default)]
+        services: Vec<String>,
+        /// System environment variables captured from CLI
+        #[serde(default)]
+        sys_env: Option<HashMap<String, String>>,
+        /// Skip dependency waiting and `if:` condition (requires specific services)
+        #[serde(default)]
+        no_deps: bool,
+        /// Override specific system environment variables (merged into stored sys_env)
+        #[serde(default)]
+        override_envs: Option<HashMap<String, String>>,
+        /// Per-config hardening level (e.g. "none", "no-root", "strict")
+        #[serde(default)]
+        hardening: Option<String>,
+        /// When true, the handler streams inline progress events until all services settle
+        #[serde(default)]
+        follow: bool,
+        /// Remove entire state dir before loading (fresh slate)
+        #[serde(default)]
+        start_clean: bool,
+    },
     /// Stop service(s)
     Stop {
         /// Path to the config file
@@ -221,6 +247,7 @@ impl Request {
     pub fn variant_name(&self) -> &'static str {
         match self {
             Request::Start { .. } => "Start",
+            Request::Run { .. } => "Run",
             Request::Stop { .. } => "Stop",
             Request::Restart { .. } => "Restart",
             Request::Recreate { .. } => "Recreate",

@@ -921,3 +921,215 @@ fn ceiling_applies_to_sub_rights() {
     assert!(effective.contains("start:env-override"));
     assert!(!effective.contains("start:hardening"));
 }
+
+// =========================================================================
+// Request::Run required_rights and check_rights
+// =========================================================================
+
+#[test]
+fn required_rights_run_basic() {
+    let req = Request::Run {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: None,
+        hardening: None,
+        follow: false,
+        start_clean: false,
+    };
+    let rr = required_rights(&req).unwrap();
+    assert_eq!(rr.base, "run");
+    assert!(rr.sub_rights.is_empty());
+}
+
+#[test]
+fn required_rights_run_with_all_flags() {
+    let mut envs = HashMap::new();
+    envs.insert("K".to_string(), "V".to_string());
+    let req = Request::Run {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: true,
+        override_envs: Some(envs),
+        hardening: Some("strict".to_string()),
+        follow: false,
+        start_clean: true,
+    };
+    let rr = required_rights(&req).unwrap();
+    assert_eq!(rr.base, "run");
+    assert!(rr.sub_rights.contains(&"run:env-override"));
+    assert!(rr.sub_rights.contains(&"run:hardening"));
+    assert!(rr.sub_rights.contains(&"run:no-deps"));
+    assert!(rr.sub_rights.contains(&"run:start-clean"));
+}
+
+#[test]
+fn check_rights_run_basic_allowed() {
+    let granted: HashSet<&'static str> = ["run"].into();
+    let req = Request::Run {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: None,
+        hardening: None,
+        follow: false,
+        start_clean: false,
+    };
+    assert!(check_rights(&granted, &req).is_ok());
+}
+
+#[test]
+fn check_rights_run_denied_without_run_right() {
+    let granted: HashSet<&'static str> = ["start"].into();
+    let req = Request::Run {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: None,
+        hardening: None,
+        follow: false,
+        start_clean: false,
+    };
+    assert!(check_rights(&granted, &req).is_err());
+}
+
+#[test]
+fn check_rights_run_with_env_override_denied() {
+    let granted: HashSet<&'static str> = ["run"].into();
+    let mut envs = HashMap::new();
+    envs.insert("K".to_string(), "V".to_string());
+    let req = Request::Run {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: Some(envs),
+        hardening: None,
+        follow: false,
+        start_clean: false,
+    };
+    assert!(check_rights(&granted, &req).is_err());
+}
+
+#[test]
+fn check_rights_run_with_env_override_granted() {
+    let granted: HashSet<&'static str> = ["run", "run:env-override"].into();
+    let mut envs = HashMap::new();
+    envs.insert("K".to_string(), "V".to_string());
+    let req = Request::Run {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: Some(envs),
+        hardening: None,
+        follow: false,
+        start_clean: false,
+    };
+    assert!(check_rights(&granted, &req).is_ok());
+}
+
+#[test]
+fn check_rights_run_with_hardening_denied() {
+    let granted: HashSet<&'static str> = ["run"].into();
+    let req = Request::Run {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: None,
+        hardening: Some("strict".to_string()),
+        follow: false,
+        start_clean: false,
+    };
+    assert!(check_rights(&granted, &req).is_err());
+}
+
+#[test]
+fn check_rights_run_with_no_deps_denied() {
+    let granted: HashSet<&'static str> = ["run"].into();
+    let req = Request::Run {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: true,
+        override_envs: None,
+        hardening: None,
+        follow: false,
+        start_clean: false,
+    };
+    assert!(check_rights(&granted, &req).is_err());
+}
+
+#[test]
+fn check_rights_run_start_does_not_grant_run() {
+    // Having "start" right does NOT grant "run" — they are separate rights
+    let granted: HashSet<&'static str> = ["start", "start:env-override", "start:hardening", "start:no-deps"].into();
+    let req = Request::Run {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: None,
+        hardening: None,
+        follow: false,
+        start_clean: false,
+    };
+    assert!(check_rights(&granted, &req).is_err());
+}
+
+#[test]
+fn resolve_all_includes_run_rights() {
+    let aliases = HashMap::new();
+    let result = resolve_aliases(&["all".to_string()], &aliases).unwrap();
+    assert!(result.contains("run"), "all should include run");
+    assert!(result.contains("run:env-override"), "all should include run:env-override");
+    assert!(result.contains("run:hardening"), "all should include run:hardening");
+    assert!(result.contains("run:no-deps"), "all should include run:no-deps");
+    assert!(result.contains("run:start-clean"), "all should include run:start-clean");
+}
+
+#[test]
+fn check_rights_run_with_start_clean_denied() {
+    let granted: HashSet<&'static str> = ["run"].into();
+    let req = Request::Run {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: None,
+        hardening: None,
+        follow: false,
+        start_clean: true,
+    };
+    assert!(check_rights(&granted, &req).is_err());
+}
+
+#[test]
+fn check_rights_run_with_start_clean_granted() {
+    let granted: HashSet<&'static str> = ["run", "run:start-clean"].into();
+    let req = Request::Run {
+        config_path: "/test".into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: None,
+        hardening: None,
+        follow: false,
+        start_clean: true,
+    };
+    assert!(check_rights(&granted, &req).is_ok());
+}
+
+#[test]
+fn intern_right_run_rights() {
+    assert_eq!(intern_right("run"), Some("run"));
+    assert_eq!(intern_right("run:env-override"), Some("run:env-override"));
+    assert_eq!(intern_right("run:hardening"), Some("run:hardening"));
+    assert_eq!(intern_right("run:no-deps"), Some("run:no-deps"));
+    assert_eq!(intern_right("run:start-clean"), Some("run:start-clean"));
+}

@@ -4,12 +4,17 @@ How to run tests, the Docker environment, test harnesses, and common patterns.
 
 ## Table of Contents
 
-- [Running Tests](#running-tests)
-- [Docker Environment](#docker-environment)
-- [Test Harnesses](#test-harnesses)
-- [Writing Integration Tests](#writing-integration-tests)
-- [Writing E2E Tests](#writing-e2e-tests)
-- [Common Pitfalls](#common-pitfalls)
+- [Testing](#testing)
+  - [Table of Contents](#table-of-contents)
+  - [Running Tests](#running-tests)
+  - [Docker Environment](#docker-environment)
+  - [Test Harnesses](#test-harnesses)
+    - [TestDaemonHarness (kepler-tests)](#testdaemonharness-kepler-tests)
+    - [E2eHarness (kepler-e2e)](#e2eharness-kepler-e2e)
+  - [Writing Integration Tests](#writing-integration-tests)
+  - [Writing E2E Tests](#writing-e2e-tests)
+  - [Common Pitfalls](#common-pitfalls)
+  - [See Also](#see-also)
 
 ---
 
@@ -80,10 +85,10 @@ Features:
 - Builds and runs real binaries
 - Tests actual CLI-daemon communication
 - Tests real socket permissions and auth
-- Provides helper methods: `start_daemon`, `stop_daemon`, `start_services`, `ps`, `logs`, etc.
+- Provides helper methods: `start_daemon`, `stop_daemon`, `start_services`, `run_services`, `ps`, `logs`, etc.
 - Status display assertions (e.g., "Up ", "(healthy)", "Exited", "Failed")
 
-Used by: `kepler-e2e` tests (20 test files)
+Used by: `kepler-e2e` tests (21 test files)
 
 ---
 

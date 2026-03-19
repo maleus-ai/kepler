@@ -1,0 +1,12 @@
+# Multi-service config for testing partial run and dependency ordering
+services:
+  db:
+    command: ["sh", "-c", "echo DB_STARTED; sleep 300"]
+  api:
+    command: ["sh", "-c", "echo API_STARTED; sleep 300"]
+    depends_on:
+      - db
+  web:
+    command: ["sh", "-c", "echo WEB_STARTED; sleep 300"]
+    depends_on:
+      - api

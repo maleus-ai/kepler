@@ -4,7 +4,7 @@ End-to-end test suite that tests real `kepler` and `kepler-daemon` binaries.
 
 ## Library + Tests
 
-This crate provides the `E2eHarness` library and 20 test files covering all major features.
+This crate provides the `E2eHarness` library and 21 test files covering all major features.
 
 ## Architecture
 
@@ -37,6 +37,7 @@ Unlike `kepler-tests` (which runs in-process), E2E tests spawn **real binaries**
 | `multi_config_test` | Multiple config management |
 | `prune_start_test` | Config pruning |
 | `recreate_test` | Config re-baking |
+| `run_test` | Ephemeral run mode: fresh reload, no snapshot, start-clean, detach |
 | `restart_policy_test` | Restart policies |
 | `service_lifecycle_test` | Service start/stop/restart |
 | `shell_expansion_test` | Variable expansion |

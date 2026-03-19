@@ -11,7 +11,7 @@ The main Kepler daemon. Manages service lifecycles, dependencies, health checks,
 The daemon uses an actor-based architecture:
 
 - **Config Actor** (`config_actor/`) -- One per loaded config. Manages the config lifecycle, event channels, and service state.
-- **Service Orchestrator** (`orchestrator/`) -- Handles service startup ordering, dependency waiting, restart propagation, and start mode logic (attached/detached/wait).
+- **Service Orchestrator** (`orchestrator/`) -- Handles service startup ordering, dependency waiting, restart propagation, start mode logic (attached/detached/wait), and ephemeral run mode.
 - **Process Manager** (`process/`) -- Spawns processes, drops privileges, applies resource limits.
 
 ## Key Modules

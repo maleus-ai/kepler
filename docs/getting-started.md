@@ -8,6 +8,8 @@ This guide walks you through installing Kepler, setting up your system, and runn
   - [Table of Contents](#table-of-contents)
   - [Prerequisites](#prerequisites)
   - [Installing from GitHub Releases](#installing-from-github-releases)
+    - [One-line install (recommended)](#one-line-install-recommended)
+    - [Manual download](#manual-download)
   - [Installing from Source](#installing-from-source)
     - [Installed Binaries](#installed-binaries)
   - [Install Options](#install-options)
@@ -154,6 +156,9 @@ kepler start -d
 
 # Or start detached and wait for startup cluster
 kepler start -d --wait
+
+# Ephemeral mode: always reload fresh, no snapshot (great for dev)
+kepler run
 ```
 
 ### 3. Monitor and manage

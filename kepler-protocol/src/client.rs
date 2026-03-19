@@ -230,6 +230,30 @@ impl Client {
         })
     }
 
+    /// Run services for a config (ephemeral mode: fresh reload, no snapshot)
+    pub fn run(
+        &self,
+        config_path: PathBuf,
+        services: Vec<String>,
+        sys_env: Option<HashMap<String, String>>,
+        no_deps: bool,
+        override_envs: Option<HashMap<String, String>>,
+        hardening: Option<String>,
+        follow: bool,
+        start_clean: bool,
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::Run {
+            config_path,
+            services,
+            sys_env,
+            no_deps,
+            override_envs,
+            hardening,
+            follow,
+            start_clean,
+        })
+    }
+
     /// Stop services for a config
     pub fn stop(
         &self,
