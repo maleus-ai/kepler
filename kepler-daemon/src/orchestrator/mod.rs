@@ -1159,8 +1159,9 @@ impl ServiceOrchestrator {
         // Also interrupts any running SQLite query (e.g. DELETE FROM logs triggered
         // by a concurrent `stop` command's log retention).
         if clean && services.is_empty() {
-            info!("stop_services: setting early discard flag on log store");
+            info!("stop_services: setting early discard flag on log store and monitor");
             handle.shutdown_discard_log_store();
+            handle.shutdown_discard_monitor();
         }
 
         let log_store = handle.get_log_store().await;
@@ -2710,14 +2711,15 @@ impl ServiceOrchestrator {
                 if let Some(monitor_config) = config.global_monitor() {
                     let state_dir = handle.get_state_dir().await;
                     let storage_mode = config.storage_mode();
-                    let task = crate::monitor::spawn_monitor(
+                    let monitor_handle = crate::monitor::spawn_monitor(
                         monitor_config.clone(),
+                        handle.monitor_shutdown_token(),
                         handle.clone(),
                         state_dir,
                         self.containment.clone(),
                         storage_mode,
                     );
-                    handle.set_monitor_task(Some(task)).await;
+                    handle.set_monitor_handle(Some(monitor_handle)).await;
                 }
             }
         }

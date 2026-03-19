@@ -123,8 +123,8 @@ pub struct ConfigActor {
     /// so the caller knows the log store Connection is closed.
     shutdown_reply: Option<oneshot::Sender<()>>,
 
-    /// JoinHandle for the resource monitor task (for cleanup)
-    monitor_task: Option<JoinHandle<()>>,
+    /// Handle for the resource monitor (writer thread + collector task)
+    monitor_handle: Option<crate::monitor::MonitorHandle>,
 
     rx: mpsc::Receiver<ConfigCommand>,
 }
@@ -488,6 +488,7 @@ impl ConfigActor {
             Some(acl)
         };
 
+        let monitor_shutdown_token = std::sync::Arc::new(crate::monitor::MonitorShutdownToken::new());
         let handle = ConfigActorHandle::new(
             canonical_path.clone(),
             hash.clone(),
@@ -501,6 +502,7 @@ impl ConfigActor {
             resolved_acl,
             permission_ceiling.clone(),
             log_store.clone(),
+            monitor_shutdown_token,
         );
 
         let actor = ConfigActor {
@@ -538,7 +540,7 @@ impl ConfigActor {
             cached_topo_order: None,
             clean_shutdown: false,
             shutdown_reply: None,
-            monitor_task: None,
+            monitor_handle: None,
             rx,
         };
 
@@ -551,11 +553,16 @@ impl ConfigActor {
         let batch_size = config.log_batch_size();
         let storage_mode = config.storage_mode();
         let db_path = logs_dir.join("logs.db");
+        let retention_period = config.log_retention_period();
+        let cleanup_interval = config.log_cleanup_interval();
 
-        let handle = LogStoreHandle::spawn(db_path, flush_interval, batch_size, storage_mode, None);
+        let handle = LogStoreHandle::spawn(
+            db_path, flush_interval, batch_size, storage_mode, None,
+            retention_period, cleanup_interval,
+        );
 
-        // Apply retention period cleanup on startup
-        if let Some(period) = config.log_retention_period() {
+        // Startup catch-up: batched delete of accumulated old logs
+        if let Some(period) = retention_period {
             let cutoff = chrono::Utc::now().timestamp_millis() - period.as_millis() as i64;
             handle.cleanup_before(cutoff);
         }
@@ -1231,14 +1238,14 @@ impl ConfigActor {
                 let _ = reply.send(());
             }
             // === Monitor Commands ===
-            ConfigCommand::SetMonitorTask { handle } => {
-                if let Some(old) = self.monitor_task.take() {
-                    old.abort();
+            ConfigCommand::SetMonitorHandle { handle } => {
+                if let Some(old) = self.monitor_handle.take() {
+                    old.shutdown();
                 }
-                self.monitor_task = handle;
+                self.monitor_handle = handle;
             }
             ConfigCommand::HasMonitorTask { reply } => {
-                let _ = reply.send(self.monitor_task.is_some());
+                let _ = reply.send(self.monitor_handle.is_some());
             }
         }
         false
@@ -2004,9 +2011,13 @@ impl ConfigActor {
         // (otherwise it only exits when the entire ConfigActor struct drops)
         self.lua_eval_tx = None;
 
-        // Abort monitor task
-        if let Some(task) = self.monitor_task.take() {
-            task.abort();
+        // Shut down monitor: discard on clean shutdown, flush on graceful.
+        if let Some(handle) = self.monitor_handle.take() {
+            if self.clean_shutdown {
+                handle.shutdown_discard();
+            } else {
+                handle.shutdown();
+            }
         }
 
         // Abort event handler and forwarder tasks

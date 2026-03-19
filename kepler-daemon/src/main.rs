@@ -877,6 +877,7 @@ async fn handle_request(
             if clean && services.is_empty() {
                 if let Some(handle) = registry.get(&config_path) {
                     handle.shutdown_discard_log_store();
+                    handle.shutdown_discard_monitor();
                 }
             }
 

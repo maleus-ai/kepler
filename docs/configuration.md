@@ -56,7 +56,7 @@ kepler:
         allow: [viewer]    # Expands alias
   monitor:               # Resource monitoring (CPU/memory metrics to SQLite)
     interval: 5s         # How often to sample metrics
-    retention: 24h       # Optional — how long to keep metrics (omit for fresh-start)
+    retention_period: 24h  # Optional — how long to keep metrics (omit to keep forever)
 
 services:
   database:
@@ -346,20 +346,20 @@ Kepler can periodically collect CPU and memory metrics for all running services 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `monitor.interval` | `duration` | *(required)* | How often to sample metrics (e.g., `5s`, `10s`) |
-| `monitor.retention` | `duration` | none | How long to keep metrics. When omitted, the database is cleared on daemon restart. When set, rows older than the retention period are deleted on startup |
+| `monitor.retention_period` | `duration` | none | How long to keep metrics. When set, expired rows are deleted on startup and periodically during operation |
 
-Metrics are stored in `<state_dir>/monitor.db` (SQLite with WAL mode). Each row contains a timestamp, service name, CPU percentage, RSS memory, virtual memory, and a JSON array of PIDs in the process tree.
+Metrics are stored in `<state_dir>/monitor.db` (SQLite with WAL mode on local filesystems, DELETE journal on NFS). Each row contains a timestamp, service name, CPU percentage, RSS memory, virtual memory, and a JSON array of PIDs in the process tree.
 
 ```yaml
 kepler:
   monitor:
-    interval: 5s        # Sample every 5 seconds
-    retention: 24h       # Keep 24 hours of history
+    interval: 5s             # Sample every 5 seconds
+    retention_period: 24h    # Keep 24 hours of history
 ```
 
 **Retention behavior:**
-- **No `retention`** (default): The metrics database is cleared each time the monitor starts (fresh-start behavior)
-- **With `retention`**: Only rows older than the retention period are deleted on startup; existing data within the window is preserved
+- **No `retention_period`** (default): Metrics persist indefinitely (same as logs)
+- **With `retention_period`**: Expired rows are deleted on startup (full cleanup) and periodically during operation (time-budgeted batched deletes). Existing data within the retention window is preserved
 
 The monitor starts automatically when the first service starts and stops when the config is unloaded. The database file is removed automatically by `stop --clean` (since it lives inside the state directory).
 

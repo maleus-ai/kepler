@@ -100,13 +100,17 @@ Duration units: `ms` (milliseconds), `s` (seconds), `m` (minutes).
 
 ## Time-Based Retention
 
-The `retention_period` setting enables automatic cleanup of old logs. When set, logs older than the specified duration are deleted when the config is loaded. This is a **global-only** setting.
+The `retention_period` setting enables automatic cleanup of old logs. When set, expired logs are deleted on config load and periodically during operation. This is a **global-only** setting.
 
 ```yaml
 kepler:
   logs:
     retention_period: "7d"    # Delete logs older than 7 days
 ```
+
+Cleanup uses time-budgeted batched deletes to avoid blocking log writes:
+- **On startup**: Expired logs are deleted in large batches (50,000 rows), interleaving with pending writes between time windows
+- **During operation**: Every 60 seconds, expired logs are deleted in batches of 5,000 within a 25ms time budget. If more rows remain, cleanup resumes on the next interval
 
 Duration units: `ms`, `s`, `m` (minutes), `h` (hours), `d` (days).
 

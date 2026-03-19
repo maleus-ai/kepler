@@ -911,7 +911,17 @@ pub struct MonitorConfig {
         deserialize_with = "duration::deserialize_optional_duration",
         serialize_with = "duration::serialize_optional_duration"
     )]
-    pub retention: Option<std::time::Duration>,
+    pub retention_period: Option<std::time::Duration>,
+
+    /// How often to run incremental retention cleanup.
+    /// Default: 60s. Only meaningful when `retention_period` is set.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "duration::deserialize_optional_duration",
+        serialize_with = "duration::serialize_optional_duration"
+    )]
+    pub cleanup_interval: Option<std::time::Duration>,
 }
 
 // ============================================================================
@@ -1746,6 +1756,13 @@ impl KeplerConfig {
         self.global_logs()
             .and_then(|l| l.batch_size())
             .unwrap_or(4096)
+    }
+
+    /// Get log cleanup interval (default: 60s)
+    pub fn log_cleanup_interval(&self) -> std::time::Duration {
+        self.global_logs()
+            .and_then(|l| l.cleanup_interval())
+            .unwrap_or(std::time::Duration::from_secs(60))
     }
 
     /// Get global default_inherit_env setting

@@ -1463,3 +1463,73 @@ services:
     let restart = svc.restart.as_static().unwrap();
     assert_eq!(restart.grace_period(), Duration::ZERO);
 }
+
+// ============================================================================
+// MonitorConfig parsing
+// ============================================================================
+
+#[test]
+fn test_monitor_config_full() {
+    let yaml = r#"
+kepler:
+  monitor:
+    interval: 5s
+    retention_period: 24h
+    cleanup_interval: 2m
+services:
+  app:
+    command: ["./app"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let monitor = config.global_monitor().unwrap();
+    assert_eq!(monitor.interval, Duration::from_secs(5));
+    assert_eq!(monitor.retention_period, Some(Duration::from_secs(86400)));
+    assert_eq!(monitor.cleanup_interval, Some(Duration::from_secs(120)));
+}
+
+#[test]
+fn test_monitor_config_interval_only() {
+    let yaml = r#"
+kepler:
+  monitor:
+    interval: 1s
+services:
+  app:
+    command: ["./app"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    let monitor = config.global_monitor().unwrap();
+    assert_eq!(monitor.interval, Duration::from_secs(1));
+    assert_eq!(monitor.retention_period, None);
+    assert_eq!(monitor.cleanup_interval, None);
+}
+
+#[test]
+fn test_monitor_config_absent() {
+    let yaml = r#"
+services:
+  app:
+    command: ["./app"]
+"#;
+    let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(config.global_monitor().is_none());
+}
+
+#[test]
+fn test_monitor_config_old_retention_name_rejected() {
+    // The field was renamed from `retention` to `retention_period`.
+    // MonitorConfig uses deny_unknown_fields, so the old name must be rejected.
+    let yaml = r#"
+kepler:
+  monitor:
+    interval: 5s
+    retention: 24h
+services:
+  app:
+    command: ["./app"]
+"#;
+    assert!(
+        serde_yaml::from_str::<KeplerConfig>(yaml).is_err(),
+        "old field name 'retention' should be rejected"
+    );
+}

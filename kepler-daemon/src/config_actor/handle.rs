@@ -50,6 +50,9 @@ pub struct ConfigActorHandle {
     /// Direct handle to the log store — allows shutdown_discard() without
     /// going through the config actor's message queue.
     log_store: crate::logs::LogStoreHandle,
+    /// Pre-created shutdown token for the monitor — allows shutdown_discard()
+    /// before the monitor is even spawned. Passed to `MonitorHandle::spawn()`.
+    monitor_shutdown_token: Arc<crate::monitor::MonitorShutdownToken>,
 }
 
 impl ConfigActorHandle {
@@ -68,6 +71,7 @@ impl ConfigActorHandle {
         acl: Option<crate::acl::ResolvedAcl>,
         permission_ceiling: Option<std::collections::HashSet<&'static str>>,
         log_store: crate::logs::LogStoreHandle,
+        monitor_shutdown_token: Arc<crate::monitor::MonitorShutdownToken>,
     ) -> Self {
         Self {
             config_path,
@@ -82,6 +86,7 @@ impl ConfigActorHandle {
             acl,
             permission_ceiling,
             log_store,
+            monitor_shutdown_token,
         }
     }
 
@@ -91,6 +96,17 @@ impl ConfigActorHandle {
     pub fn shutdown_discard_log_store(&self) {
         self.log_store.shutdown_discard();
         self.log_store.shutdown();
+    }
+
+    /// Immediately set the discard flag on the monitor and interrupt any
+    /// running SQLite query. Works even if the monitor hasn't been spawned yet.
+    pub fn shutdown_discard_monitor(&self) {
+        self.monitor_shutdown_token.discard();
+    }
+
+    /// Get the monitor shutdown token (for passing to `MonitorHandle::spawn()`).
+    pub fn monitor_shutdown_token(&self) -> Arc<crate::monitor::MonitorShutdownToken> {
+        Arc::clone(&self.monitor_shutdown_token)
     }
 
     /// Get the config path this handle is for
@@ -1089,19 +1105,19 @@ impl ConfigActorHandle {
 
     // === Monitor Methods ===
 
-    /// Store (or clear) the monitor task handle
-    pub async fn set_monitor_task(&self, handle: Option<JoinHandle<()>>) {
+    /// Store (or clear) the monitor handle
+    pub async fn set_monitor_handle(&self, handle: Option<crate::monitor::MonitorHandle>) {
         if self
             .tx
-            .send(ConfigCommand::SetMonitorTask { handle })
+            .send(ConfigCommand::SetMonitorHandle { handle })
             .await
             .is_err()
         {
-            warn!("Config actor closed, cannot send SetMonitorTask");
+            warn!("Config actor closed, cannot send SetMonitorHandle");
         }
     }
 
-    /// Check if a monitor task is running
+    /// Check if a monitor is running
     pub async fn has_monitor_task(&self) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self

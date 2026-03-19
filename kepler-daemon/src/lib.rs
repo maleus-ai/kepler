@@ -7,6 +7,7 @@ pub mod allocator;
 pub mod auth;
 pub mod config;
 pub mod containment;
+pub mod db_cleanup;
 
 pub mod config_actor;
 pub mod config_registry;

@@ -1,0 +1,12 @@
+# Config for testing monitor retention_period.
+# Uses a very short retention period (2s) and cleanup interval (2s)
+# so cleanup is observable quickly in tests.
+kepler:
+  monitor:
+    interval: 1s
+    retention_period: 2s
+    cleanup_interval: 2s
+
+services:
+  worker:
+    command: ["sh", "-c", "while true; do echo working; sleep 1; done"]

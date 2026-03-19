@@ -70,6 +70,8 @@ impl LogStoreHandle {
         batch_size: usize,
         storage_mode: StorageMode,
         log_notify: Option<Arc<Notify>>,
+        retention_period: Option<Duration>,
+        cleanup_interval: Duration,
     ) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let pending_count = Arc::new(AtomicU64::new(0));
@@ -97,6 +99,8 @@ impl LogStoreHandle {
                     log_notify,
                     actor_pending,
                     actor_discard,
+                    retention_period,
+                    cleanup_interval,
                 ) {
                     Ok(a) => a,
                     Err(e) => {
@@ -209,6 +213,9 @@ impl LogStoreHandle {
 
 pub const DEFAULT_BATCH_SIZE: usize = 4096;
 
+const LOG_DELETE_SQL: &str =
+    "DELETE FROM logs WHERE id IN (SELECT id FROM logs WHERE timestamp < ?1 ORDER BY timestamp LIMIT ?2)";
+
 struct LogStoreActor {
     conn: Connection,
     rx: std::sync::mpsc::Receiver<LogCommand>,
@@ -218,6 +225,10 @@ struct LogStoreActor {
     log_notify: Option<Arc<Notify>>,
     pending_count: Arc<AtomicU64>,
     discard_flag: Arc<AtomicBool>,
+    retention_period: Option<Duration>,
+    cleanup_interval: Duration,
+    last_cleanup: Instant,
+    cleanup_has_more: bool,
 }
 
 impl LogStoreActor {
@@ -230,6 +241,8 @@ impl LogStoreActor {
         log_notify: Option<Arc<Notify>>,
         pending_count: Arc<AtomicU64>,
         discard_flag: Arc<AtomicBool>,
+        retention_period: Option<Duration>,
+        cleanup_interval: Duration,
     ) -> Result<Self, rusqlite::Error> {
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
@@ -254,7 +267,7 @@ impl LogStoreActor {
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
 
-        setup_writer_connection(&conn, storage_mode)?;
+        crate::db_cleanup::setup_writer_connection(&conn, storage_mode)?;
         create_schema(&conn)?;
 
         Ok(Self {
@@ -266,6 +279,10 @@ impl LogStoreActor {
             log_notify,
             pending_count,
             discard_flag,
+            retention_period,
+            cleanup_interval,
+            last_cleanup: Instant::now(),
+            cleanup_has_more: false,
         })
     }
 
@@ -279,14 +296,30 @@ impl LogStoreActor {
                 return;
             }
 
-            // When the batch is empty there is nothing to flush on a timer,
-            // so block indefinitely until the next command arrives.
-            // This avoids a tight loop when recv_timeout(0) returns instantly.
-            let msg = if self.batch.is_empty() {
-                self.rx.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
+            let timeout = if !self.batch.is_empty() {
+                let flush_remaining = self.flush_interval.saturating_sub(last_flush.elapsed());
+                if self.should_cleanup() {
+                    // Catch-up mode: 1ms min to avoid spin while still being responsive
+                    Some(flush_remaining.min(Duration::from_millis(1)))
+                } else if self.retention_period.is_some() {
+                    Some(flush_remaining.min(self.cleanup_remaining()))
+                } else {
+                    Some(flush_remaining)
+                }
+            } else if self.should_cleanup() {
+                // Catch-up with empty batch: 1ms to avoid spin
+                Some(Duration::from_millis(1))
+            } else if self.retention_period.is_some() {
+                // Sleep until next cleanup check
+                Some(self.cleanup_remaining())
             } else {
-                let remaining = self.flush_interval.saturating_sub(last_flush.elapsed());
-                self.rx.recv_timeout(remaining)
+                // No retention, no pending writes: block indefinitely
+                None
+            };
+
+            let msg = match timeout {
+                None => self.rx.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+                Some(t) => self.rx.recv_timeout(t),
             };
 
             // Re-check discard flag after waking from recv. This handles the
@@ -310,7 +343,9 @@ impl LogStoreActor {
                         match self.rx.try_recv() {
                             Ok(LogCommand::Write(e)) => self.batch.push(e),
                             Ok(cmd) => {
-                                self.handle_non_write(cmd, &mut last_flush);
+                                if self.handle_non_write(cmd, &mut last_flush) {
+                                    return; // shutdown
+                                }
                                 break;
                             }
                             Err(_) => break,
@@ -321,10 +356,10 @@ impl LogStoreActor {
                     if self.handle_non_write(cmd, &mut last_flush) {
                         return; // shutdown
                     }
-                    continue;
+                    // Fall through to flush+cleanup checks (no continue)
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // Flush interval elapsed
+                    // Flush or cleanup interval elapsed
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     if self.discard_flag.load(Ordering::Relaxed) {
@@ -342,6 +377,11 @@ impl LogStoreActor {
             {
                 self.flush_batch();
                 last_flush = Instant::now();
+            }
+
+            // Periodic retention cleanup
+            if self.should_cleanup() {
+                self.run_cleanup_pass();
             }
         }
     }
@@ -377,15 +417,8 @@ impl LogStoreActor {
             LogCommand::CleanupBefore { cutoff_ms } => {
                 self.flush_batch();
                 *last_flush = Instant::now();
-                if let Err(e) = self.conn.execute(
-                    "DELETE FROM logs WHERE timestamp < ?1",
-                    params![cutoff_ms],
-                ) {
-                    tracing::warn!("Failed to cleanup old logs: {}", e);
-                }
-                // VACUUM to reclaim disk space
-                if let Err(e) = self.conn.execute_batch("VACUUM") {
-                    tracing::warn!("Failed to VACUUM: {}", e);
+                if self.run_batched_delete(cutoff_ms) {
+                    return true; // Shutdown happened during batched delete
                 }
             }
             LogCommand::FlushSync { reply } => {
@@ -402,6 +435,117 @@ impl LogStoreActor {
                 let _ = self.conn.execute_batch("PRAGMA optimize");
                 return true;
             }
+        }
+        false
+    }
+
+    // ========================================================================
+    // Retention cleanup
+    // ========================================================================
+
+    fn should_cleanup(&self) -> bool {
+        self.retention_period.is_some()
+            && (self.cleanup_has_more || self.last_cleanup.elapsed() >= self.cleanup_interval)
+    }
+
+    fn cleanup_remaining(&self) -> Duration {
+        self.cleanup_interval.saturating_sub(self.last_cleanup.elapsed())
+    }
+
+    /// Delete expired rows within the time budget (periodic cleanup).
+    fn run_cleanup_pass(&mut self) {
+        use crate::db_cleanup::{self, CleanupResult};
+
+        let Some(retention) = self.retention_period else { return };
+        let cutoff = chrono::Utc::now().timestamp_millis() - retention.as_millis() as i64;
+
+        self.flush_batch();
+
+        match db_cleanup::run_cleanup_batches(
+            &self.conn,
+            LOG_DELETE_SQL,
+            cutoff,
+            db_cleanup::PERIODIC_CLEANUP_BATCH,
+            Some(db_cleanup::DEFAULT_CLEANUP_TIME_BUDGET),
+            &self.discard_flag,
+        ) {
+            Ok(CleanupResult::Complete) => {
+                self.cleanup_has_more = false;
+            }
+            Ok(CleanupResult::TimeBudgetExceeded) => {
+                self.cleanup_has_more = true;
+            }
+            Ok(CleanupResult::Discarded) => {
+                self.cleanup_has_more = false;
+            }
+            Err(e) => {
+                if !self.discard_flag.load(Ordering::Relaxed) {
+                    tracing::warn!("log cleanup failed: {}", e);
+                }
+                self.cleanup_has_more = false;
+            }
+        }
+
+        self.last_cleanup = Instant::now();
+    }
+
+    /// Batched delete loop for startup catch-up. Uses larger batches and
+    /// drains pending writes between time-budget windows to avoid channel
+    /// backpressure. Returns `true` if a Shutdown command was processed.
+    fn run_batched_delete(&mut self, cutoff_ms: i64) -> bool {
+        use crate::db_cleanup::{self, CleanupResult};
+
+        loop {
+            match db_cleanup::run_cleanup_batches(
+                &self.conn,
+                LOG_DELETE_SQL,
+                cutoff_ms,
+                db_cleanup::STARTUP_CLEANUP_BATCH,
+                Some(db_cleanup::DEFAULT_CLEANUP_TIME_BUDGET),
+                &self.discard_flag,
+            ) {
+                Ok(CleanupResult::Complete) => return false,
+                Ok(CleanupResult::Discarded) => return false,
+                Ok(CleanupResult::TimeBudgetExceeded) => {
+                    // Drain and flush pending writes between budget windows
+                    if self.drain_and_flush_writes() {
+                        return true; // Shutdown requested
+                    }
+                }
+                Err(e) => {
+                    if !self.discard_flag.load(Ordering::Relaxed) {
+                        tracing::warn!("log startup cleanup failed: {}", e);
+                    }
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Drain pending Write commands from the channel and flush them.
+    /// Handles non-Write commands inline. Returns `true` if shutdown was requested.
+    fn drain_and_flush_writes(&mut self) -> bool {
+        let mut last_flush = Instant::now();
+        loop {
+            match self.rx.try_recv() {
+                Ok(LogCommand::Write(entry)) => {
+                    self.batch.push(entry);
+                    if self.batch.len() >= self.batch_size {
+                        self.flush_batch();
+                        last_flush = Instant::now();
+                    }
+                }
+                Ok(cmd) => {
+                    if self.handle_non_write(cmd, &mut last_flush) {
+                        return true; // Shutdown
+                    }
+                    break;
+                }
+                Err(_) => break, // Channel empty
+            }
+        }
+        if !self.batch.is_empty() {
+            self.flush_batch();
         }
         false
     }
@@ -466,34 +610,7 @@ impl LogStoreActor {
 // SQLite setup
 // ============================================================================
 
-fn setup_writer_connection(conn: &Connection, mode: StorageMode) -> Result<(), rusqlite::Error> {
-    // Shared pragmas
-    conn.execute_batch(
-        "PRAGMA mmap_size = 0;
-         PRAGMA cache_size = -8000;
-         PRAGMA temp_store = MEMORY;
-         PRAGMA page_size = 4096;
-         PRAGMA journal_size_limit = 6291456;",
-    )?;
-
-    match mode {
-        StorageMode::Local => {
-            conn.execute_batch(
-                "PRAGMA journal_mode = WAL;
-                 PRAGMA synchronous = NORMAL;
-                 PRAGMA wal_autocheckpoint = 1000;",
-            )?;
-        }
-        StorageMode::Nfs => {
-            conn.execute_batch(
-                "PRAGMA journal_mode = DELETE;
-                 PRAGMA synchronous = FULL;",
-            )?;
-        }
-    }
-
-    Ok(())
-}
+// setup_writer_connection is shared — see crate::db_cleanup::setup_writer_connection
 
 fn create_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
@@ -520,9 +637,157 @@ pub fn open_readonly(db_path: &Path) -> Result<Connection, rusqlite::Error> {
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+    // busy_timeout is harmless in WAL mode and critical for NFS DELETE-journal
+    // mode where readers can get SQLITE_BUSY during writer commits.
+    conn.busy_timeout(Duration::from_secs(2))?;
     conn.execute_batch(
         "PRAGMA query_only = ON;
          PRAGMA mmap_size = 0;",
     )?;
     Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{Connection, params};
+
+    const BATCHED_DELETE_SQL: &str =
+        "DELETE FROM logs WHERE id IN (SELECT id FROM logs WHERE timestamp < ?1 ORDER BY timestamp LIMIT ?2)";
+
+    /// Verify that the batched DELETE subquery is accepted by bundled SQLite.
+    #[test]
+    fn batched_delete_syntax_accepted() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE logs (
+                id        INTEGER PRIMARY KEY,
+                timestamp INTEGER NOT NULL,
+                line      TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+
+        conn.execute(BATCHED_DELETE_SQL, params![1000, 100]).unwrap();
+    }
+
+    /// Batched DELETE deletes at most N rows and leaves the rest intact.
+    #[test]
+    fn batched_delete_caps_deleted_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE logs (
+                id        INTEGER PRIMARY KEY,
+                timestamp INTEGER NOT NULL,
+                line      TEXT NOT NULL
+            );
+            CREATE INDEX idx_logs_ts ON logs(timestamp);",
+        )
+        .unwrap();
+
+        for i in 1..=20 {
+            conn.execute(
+                "INSERT INTO logs (timestamp, line) VALUES (?1, ?2)",
+                params![i, format!("line {}", i)],
+            )
+            .unwrap();
+        }
+
+        let deleted = conn.execute(BATCHED_DELETE_SQL, params![15, 5]).unwrap();
+        assert_eq!(deleted, 5, "should delete exactly 5 rows");
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 15);
+    }
+
+    /// ORDER BY in the subquery ensures the oldest rows are deleted first.
+    #[test]
+    fn batched_delete_removes_oldest_first() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE logs (
+                id        INTEGER PRIMARY KEY,
+                timestamp INTEGER NOT NULL,
+                line      TEXT NOT NULL
+            );
+            CREATE INDEX idx_logs_ts ON logs(timestamp);",
+        )
+        .unwrap();
+
+        for ts in [100, 200, 300, 400, 500] {
+            conn.execute(
+                "INSERT INTO logs (timestamp, line) VALUES (?1, ?2)",
+                params![ts, format!("ts={}", ts)],
+            )
+            .unwrap();
+        }
+
+        let deleted = conn.execute(BATCHED_DELETE_SQL, params![600, 3]).unwrap();
+        assert_eq!(deleted, 3);
+
+        let mut stmt = conn
+            .prepare("SELECT timestamp FROM logs ORDER BY timestamp")
+            .unwrap();
+        let timestamps: Vec<i64> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(timestamps, vec![400, 500]);
+    }
+
+    /// When fewer rows match than the limit, all matching rows are deleted.
+    #[test]
+    fn batched_delete_fewer_rows_than_limit() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE logs (
+                id        INTEGER PRIMARY KEY,
+                timestamp INTEGER NOT NULL,
+                line      TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+
+        for i in 1..=3 {
+            conn.execute(
+                "INSERT INTO logs (timestamp, line) VALUES (?1, ?2)",
+                params![i, format!("line {}", i)],
+            )
+            .unwrap();
+        }
+
+        let deleted = conn.execute(BATCHED_DELETE_SQL, params![100, 1000]).unwrap();
+        assert_eq!(deleted, 3);
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    /// LIMIT 0 deletes nothing.
+    #[test]
+    fn batched_delete_limit_zero() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE logs (
+                id        INTEGER PRIMARY KEY,
+                timestamp INTEGER NOT NULL,
+                line      TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+
+        conn.execute("INSERT INTO logs (timestamp, line) VALUES (1, 'hello')", []).unwrap();
+
+        let deleted = conn.execute(BATCHED_DELETE_SQL, params![100, 0]).unwrap();
+        assert_eq!(deleted, 0);
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+    }
 }
