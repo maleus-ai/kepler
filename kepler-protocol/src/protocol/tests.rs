@@ -60,7 +60,7 @@ fn roundtrip_envelope_stop() {
         token: None,
         request: Request::Stop {
             config_path: PathBuf::from("/etc/kepler.yaml"),
-            service: None,
+            services: vec![],
             clean: true,
             signal: Some("SIGKILL".into()),
         },
@@ -69,11 +69,37 @@ fn roundtrip_envelope_stop() {
     let decoded = decode_envelope(&bytes[4..]).unwrap();
     assert_eq!(decoded.id, 3);
     match decoded.request {
-        Request::Stop { config_path, service, clean, signal } => {
+        Request::Stop { config_path, services, clean, signal } => {
             assert_eq!(config_path, PathBuf::from("/etc/kepler.yaml"));
-            assert!(service.is_none());
+            assert!(services.is_empty());
             assert!(clean);
             assert_eq!(signal, Some("SIGKILL".into()));
+        }
+        _ => panic!("Expected Stop request"),
+    }
+}
+
+#[test]
+fn roundtrip_envelope_stop_multiple_services() {
+    let envelope = RequestEnvelope {
+        id: 4,
+        token: None,
+        request: Request::Stop {
+            config_path: PathBuf::from("/etc/kepler.yaml"),
+            services: vec!["web".into(), "worker".into()],
+            clean: false,
+            signal: None,
+        },
+    };
+    let bytes = encode_envelope(&envelope).unwrap();
+    let decoded = decode_envelope(&bytes[4..]).unwrap();
+    assert_eq!(decoded.id, 4);
+    match decoded.request {
+        Request::Stop { config_path, services, clean, signal } => {
+            assert_eq!(config_path, PathBuf::from("/etc/kepler.yaml"));
+            assert_eq!(services, vec!["web".to_string(), "worker".to_string()]);
+            assert!(!clean);
+            assert_eq!(signal, None);
         }
         _ => panic!("Expected Stop request"),
     }

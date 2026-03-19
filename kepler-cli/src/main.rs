@@ -261,9 +261,9 @@ async fn run() -> Result<()> {
             }
         }
 
-        Commands::Stop { service, clean, signal } => {
+        Commands::Stop { services, clean, signal } => {
             let (progress_rx, response_future) = client.stop(
-                canonical_path, service, clean, signal,
+                canonical_path, services, clean, signal,
             )?;
             let response = run_with_progress(progress_rx, response_future).await?;
             // Progress bars already show per-service stop/clean status;
@@ -809,7 +809,7 @@ async fn wait_until_ready_with_start(
         eprintln!("Stopping all services due to unhandled failure...");
         if let Ok((progress_rx, response_future)) = client.stop(
             config_path.to_path_buf(),
-            None,
+            vec![],
             false,
             None,
         ) {
@@ -1796,7 +1796,7 @@ async fn follow_logs_until_quiescent(
         }
         let _ = tokio::signal::ctrl_c().await;
         eprintln!("\nGracefully stopping...");
-        match client.stop(config_path.to_path_buf(), service.map(String::from), false, None) {
+        match client.stop(config_path.to_path_buf(), service.iter().map(|s| s.to_string()).collect(), false, None) {
             Ok((progress_rx, response_future)) => {
                 tokio::select! {
                     biased;
@@ -1832,7 +1832,7 @@ async fn follow_logs_until_quiescent(
         }
         match client.stop(
             config_path.to_path_buf(),
-            service.map(String::from),
+            service.iter().map(|s| s.to_string()).collect(),
             false,
             None,
         ) {

@@ -43,8 +43,9 @@ pub enum Request {
     Stop {
         /// Path to the config file
         config_path: PathBuf,
-        /// Service name (None = all services)
-        service: Option<String>,
+        /// Services to stop (empty = all services)
+        #[serde(default)]
+        services: Vec<String>,
         /// Whether to cleanup everything after stopping processes
         clean: bool,
         /// Signal to send (e.g., "SIGKILL", "TERM", "9"). Default: SIGTERM

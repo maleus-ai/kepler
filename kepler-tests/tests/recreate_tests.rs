@@ -155,7 +155,7 @@ async fn test_restart_calls_restart_hooks() {
     );
 
     // Stop services
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    orchestrator.stop_services(&config_path, &[], false, None).await.unwrap();
 }
 
 /// restart preserves baked config (doesn't re-expand environment variables)
@@ -251,7 +251,7 @@ async fn test_restart_preserves_baked_config() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    orchestrator.stop_services(&config_path, &[], false, None).await.unwrap();
     {
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
@@ -358,7 +358,7 @@ async fn test_recreate_rebakes_config() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    orchestrator.stop_services(&config_path, &[], false, None).await.unwrap();
     {
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
@@ -441,7 +441,7 @@ async fn test_recreate_runs_pre_start_hooks() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    orchestrator.stop_services(&config_path, &[], false, None).await.unwrap();
 }
 
 // ============================================================================
@@ -523,7 +523,7 @@ async fn test_restart_specific_service_hooks() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    orchestrator.stop_services(&config_path, &[], false, None).await.unwrap();
 }
 
 /// restart respects dependency order (stop dependents first, start dependencies first)
@@ -633,7 +633,7 @@ async fn test_restart_respects_dependency_order() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    orchestrator.stop_services(&config_path, &[], false, None).await.unwrap();
 }
 
 // ============================================================================
@@ -704,7 +704,7 @@ async fn test_stop_respects_reverse_dependency_order() {
 
     // Stop all services
     orchestrator
-        .stop_services(&config_path, None, false, None)
+        .stop_services(&config_path, &[], false, None)
         .await
         .unwrap();
 
@@ -797,7 +797,7 @@ async fn test_recreate_stops_and_restarts_services() {
     assert!(running.contains(&"frontend".to_string()), "frontend should be running after recreate");
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    orchestrator.stop_services(&config_path, &[], false, None).await.unwrap();
 }
 
 /// recreate fires stop hooks, then start hooks on the new config
@@ -874,7 +874,7 @@ async fn test_recreate_calls_all_lifecycle_hooks() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    orchestrator.stop_services(&config_path, &[], false, None).await.unwrap();
 }
 
 /// recreate succeeds while services are running (stops them first)
@@ -921,7 +921,7 @@ async fn test_recreate_stops_running_services_automatically() {
     assert!(running.contains(&"test".to_string()), "test should be running after recreate");
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    orchestrator.stop_services(&config_path, &[], false, None).await.unwrap();
 }
 
 /// restart calls all restart-related hooks in correct order
@@ -1032,5 +1032,5 @@ async fn test_restart_calls_all_restart_hooks_in_order() {
     );
 
     // Cleanup
-    orchestrator.stop_services(&config_path, None, false, None).await.unwrap();
+    orchestrator.stop_services(&config_path, &[], false, None).await.unwrap();
 }

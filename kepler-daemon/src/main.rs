@@ -836,7 +836,7 @@ async fn handle_request(
 
         Request::Stop {
             config_path,
-            service,
+            services,
             clean,
             signal,
         } => {
@@ -860,7 +860,7 @@ async fn handle_request(
             // immediately — before progress tracking or stop_services(). This
             // bypasses the config actor's message queue and also interrupts any
             // ongoing SQLite query (e.g. from a concurrent `stop` command).
-            if clean && service.is_none() {
+            if clean && services.is_empty() {
                 if let Some(handle) = registry.get(&config_path) {
                     handle.shutdown_discard_log_store();
                 }
@@ -875,15 +875,13 @@ async fn handle_request(
                     match config {
                         Some(cfg) => {
                             // Determine which services to track
-                            let all_services: Vec<String> = match &service {
-                                Some(name) => {
-                                    if cfg.services.contains_key(name) {
-                                        vec![name.clone()]
-                                    } else {
-                                        vec![]
-                                    }
-                                }
-                                None => cfg.services.keys().cloned().collect(),
+                            let all_services: Vec<String> = if services.is_empty() {
+                                cfg.services.keys().cloned().collect()
+                            } else {
+                                services.iter()
+                                    .filter(|s| cfg.services.contains_key(*s))
+                                    .cloned()
+                                    .collect()
                             };
                             // Filter to only active services
                             let mut active = Vec::new();
@@ -960,7 +958,7 @@ async fn handle_request(
 
             // Run stop_services (blocks until done including cleanup)
             let result = orchestrator
-                .stop_services(&config_path, service.as_deref(), clean, signal_num)
+                .stop_services(&config_path, &services, clean, signal_num)
                 .await;
 
             // Brief sleep to drain remaining events, then abort forwarding task

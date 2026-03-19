@@ -84,7 +84,7 @@ fn required_rights_start_with_all_flags() {
 fn required_rights_stop_basic() {
     let req = Request::Stop {
         config_path: "/test".into(),
-        service: None,
+        services: vec![],
         clean: false,
         signal: None,
     };
@@ -97,7 +97,7 @@ fn required_rights_stop_basic() {
 fn required_rights_stop_with_clean_and_signal() {
     let req = Request::Stop {
         config_path: "/test".into(),
-        service: None,
+        services: vec![],
         clean: true,
         signal: Some("SIGKILL".to_string()),
     };
@@ -292,7 +292,7 @@ fn check_rights_stop_clean_needs_both() {
     let stop_only: HashSet<&'static str> = ["stop"].into();
     let req = Request::Stop {
         config_path: "/test".into(),
-        service: None,
+        services: vec![],
         clean: true,
         signal: None,
     };
@@ -308,7 +308,7 @@ fn check_rights_stop_signal_needs_sub_right() {
     let stop_only: HashSet<&'static str> = ["stop"].into();
     let req = Request::Stop {
         config_path: "/test".into(),
-        service: None,
+        services: vec![],
         clean: false,
         signal: Some("SIGKILL".to_string()),
     };
@@ -324,7 +324,7 @@ fn check_rights_no_right_implies_another() {
     let granted: HashSet<&'static str> = ["start"].into();
     let req = Request::Stop {
         config_path: "/test".into(),
-        service: None,
+        services: vec![],
         clean: false,
         signal: None,
     };

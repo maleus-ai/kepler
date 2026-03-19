@@ -151,7 +151,7 @@ async fn test_file_change_ignored_for_stopped_service() {
 
     // Stop the service
     orchestrator
-        .stop_services(&config_path, Some("test"), false, None)
+        .stop_services(&config_path, &["test".to_string()], false, None)
         .await
         .unwrap();
 
@@ -421,7 +421,7 @@ async fn test_file_change_handler_independent_services() {
 
     // Stop service_a, leave service_b running
     orchestrator
-        .stop_services(&config_path, Some("service_a"), false, None)
+        .stop_services(&config_path, &["service_a".to_string()], false, None)
         .await
         .unwrap();
 

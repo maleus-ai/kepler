@@ -139,13 +139,15 @@ Stop services.
 
 ```bash
 kepler stop                  # Stop all services (SIGTERM)
+kepler stop backend          # Stop a specific service
+kepler stop backend worker   # Stop multiple specific services
 kepler stop -s SIGKILL       # Stop with a specific signal
 kepler stop --clean          # Stop and run cleanup hooks
-kepler stop backend          # Stop a specific service
 ```
 
 | Flag | Description |
 |------|-------------|
+| `[SERVICE...]` | Services to stop (stops all if none specified) |
 | `-s, --signal <SIGNAL>` | Signal to send (default: SIGTERM) |
 | `--clean` | Run cleanup hooks after stopping |
 
