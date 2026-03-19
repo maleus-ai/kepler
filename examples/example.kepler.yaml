@@ -9,6 +9,11 @@
 #   kepler stop
 #   kepler stop -s SIGKILL        # force kill
 
+kepler:
+  monitor: # Uncomment to enable CPU/memory metrics collection
+    interval: 1s # Sample every 5 seconds
+    retention: 24h # Keep 24 hours of history (omit for fresh-start)
+
 services:
   # A one-shot migration task that runs first then exits
   # `run:` executes via sh -c — ideal for shell scripts, pipes, and chaining

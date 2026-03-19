@@ -2706,6 +2706,24 @@ impl ServiceOrchestrator {
                 .await;
         }
 
+        // Start monitor if configured and not already running
+        if !handle.has_monitor_task().await {
+            if let Some(config) = handle.get_config().await {
+                if let Some(monitor_config) = config.global_monitor() {
+                    let state_dir = handle.get_state_dir().await;
+                    let storage_mode = config.storage_mode();
+                    let task = crate::monitor::spawn_monitor(
+                        monitor_config.clone(),
+                        handle.clone(),
+                        state_dir,
+                        self.containment.clone(),
+                        storage_mode,
+                    );
+                    handle.set_monitor_task(Some(task)).await;
+                }
+            }
+        }
+
         // Start file watcher if configured
         let watch_patterns = resolved.restart.watch_patterns();
         if !watch_patterns.is_empty() {

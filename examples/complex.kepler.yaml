@@ -51,7 +51,9 @@ kepler:
   default_inherit_env: true
   timeout: 30s
   output_max_size: "2mb"
-
+  monitor: # Uncomment to enable CPU/memory metrics collection
+    interval: 1s # Sample every 5 seconds
+    retention: 24h # Keep 24 hours of history (omit for fresh-start)
   logs:
     retention:
       on_stop: clear
