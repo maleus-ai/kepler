@@ -172,6 +172,7 @@ The `ps` command lists services and their states, including exit codes for stopp
 
 - `kepler ps` - Show services for the current config
 - `kepler ps --all` - Show services across all loaded configs
+- `kepler ps --json` - Output as JSON instead of a table
 
 Exit codes are displayed inline with the status (e.g., `Exited (0)`, `Exited (1)`, `Killed (SIGKILL)`).
 
