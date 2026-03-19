@@ -1,7 +1,3 @@
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   healthy-dependency:
     command: ["sh", "-c", "echo HEALTHY_DEP_STARTED; sleep 300"]

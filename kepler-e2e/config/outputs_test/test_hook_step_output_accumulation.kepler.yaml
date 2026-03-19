@@ -2,10 +2,6 @@
 # Step A emits outputs, Step B reads step A's output via ${{ }}$,
 # Step C emits its own outputs, Step D reads both step A and step C outputs.
 
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   accumulator:
     command: ["sh", "-c", "echo SERVICE_STARTED && sleep 300"]

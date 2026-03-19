@@ -762,30 +762,6 @@ pub fn resolve_log_store(
     }
 }
 
-/// Resolve log max_size setting.
-/// Priority: service setting > global setting > None (unbounded)
-/// Returns bytes if specified, None for unbounded.
-pub fn resolve_log_max_size(
-    service_logs: Option<&LogConfig>,
-    global_logs: Option<&LogConfig>,
-) -> Option<u64> {
-    service_logs
-        .and_then(|l| l.max_size_bytes())
-        .or_else(|| global_logs.and_then(|l| l.max_size_bytes()))
-}
-
-/// Resolve log buffer_size setting.
-/// Priority: service setting > global setting > default (8KB)
-pub fn resolve_log_buffer_size(
-    service_logs: Option<&LogConfig>,
-    global_logs: Option<&LogConfig>,
-    default_buffer_size: usize,
-) -> usize {
-    service_logs
-        .and_then(|l| l.buffer_size.as_static().and_then(|v| *v))
-        .or_else(|| global_logs.and_then(|l| l.buffer_size.as_static().and_then(|v| *v)))
-        .unwrap_or(default_buffer_size)
-}
 
 // ============================================================================
 // Main configuration types
@@ -891,6 +867,19 @@ impl serde::Serialize for AutostartConfig {
 // KeplerGlobalConfig
 // ============================================================================
 
+/// Storage backend type — controls SQLite journal/locking mode for filesystem compatibility.
+#[derive(Debug, Clone, Copy, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageMode {
+    /// Local filesystem with POSIX semantics (ext4, xfs, btrfs, tmpfs).
+    /// Uses WAL mode: concurrent readers + single writer via separate connections.
+    #[default]
+    Local,
+    /// Network filesystem (NFS, CIFS) where shared memory is unavailable.
+    /// Uses DELETE journal mode: multiple connections via fcntl locks, no shared memory.
+    Nfs,
+}
+
 /// Global Kepler configuration (under the `kepler` namespace)
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -899,6 +888,10 @@ pub struct KeplerGlobalConfig {
     /// Applied to all services/hooks/healthchecks unless overridden
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_inherit_env: Option<bool>,
+
+    /// Storage backend type. Default: local.
+    #[serde(default)]
+    pub storage: StorageMode,
 
     /// Global log configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1132,10 +1125,10 @@ impl KeplerConfig {
             })?;
         }
 
-        // Step 4: Process global lua block (execute to define functions)
-        // !lua tags in the kepler namespace are evaluated eagerly
-        let has_lua_tags = contents.contains("!lua");
-        if has_lua_tags {
+        // Step 4: Process global lua/expression block
+        // !lua tags and ${{ }}$ expressions in the kepler namespace are evaluated eagerly
+        let has_dynamic_values = contents.contains("!lua") || contents.contains("${{");
+        if has_dynamic_values {
             lua::process_lua_scripts(&mut root, &load_evaluator, path, sys_env)?;
         }
 
@@ -1462,10 +1455,11 @@ impl KeplerConfig {
             simple => simple,
         };
         let logs: Option<LogConfig> = raw.logs.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs", name), &mut shared_env)?;
-        // Resolve inner ConfigValue fields of LogConfig
-        let logs = logs.map(|mut l| -> crate::errors::Result<LogConfig> {
-            l.max_size = ConfigValue::Static(l.max_size.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs.max_size", name), &mut shared_env)?);
-            l.buffer_size = ConfigValue::Static(l.buffer_size.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs.buffer_size", name), &mut shared_env)?);
+        // Resolve inner ConfigValue fields in logs
+        let logs = logs.map(|mut l| -> Result<LogConfig> {
+            l.flush_interval = ConfigValue::Static(l.flush_interval.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs.flush_interval", name), &mut shared_env)?);
+            l.retention_period = ConfigValue::Static(l.retention_period.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs.retention_period", name), &mut shared_env)?);
+            l.batch_size = ConfigValue::Static(l.batch_size.resolve_with_env(evaluator, ctx, config_path, &format!("{}.logs.batch_size", name), &mut shared_env)?);
             Ok(l)
         }).transpose()?;
         // hooks is not ConfigValue — inner ConfigValue fields are resolved per-step at execution time
@@ -1666,6 +1660,32 @@ impl KeplerConfig {
     /// Get global log configuration
     pub fn global_logs(&self) -> Option<&LogConfig> {
         self.kepler.as_ref().and_then(|k| k.logs.as_ref())
+    }
+
+    /// Get storage mode (default: Local)
+    pub fn storage_mode(&self) -> StorageMode {
+        self.kepler.as_ref()
+            .map(|k| k.storage)
+            .unwrap_or_default()
+    }
+
+    /// Get log flush interval (default: 100ms)
+    pub fn log_flush_interval(&self) -> std::time::Duration {
+        self.global_logs()
+            .and_then(|l| l.flush_interval())
+            .unwrap_or(std::time::Duration::from_millis(100))
+    }
+
+    /// Get log retention period (default: None = keep forever)
+    pub fn log_retention_period(&self) -> Option<std::time::Duration> {
+        self.global_logs().and_then(|l| l.retention_period())
+    }
+
+    /// Get log batch size (default: 4096)
+    pub fn log_batch_size(&self) -> usize {
+        self.global_logs()
+            .and_then(|l| l.batch_size())
+            .unwrap_or(4096)
     }
 
     /// Get global default_inherit_env setting

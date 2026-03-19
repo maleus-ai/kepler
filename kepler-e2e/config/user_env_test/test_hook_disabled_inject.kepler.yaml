@@ -4,9 +4,6 @@
 # testuser1's injected values from the service level).
 # This test verifies user_identity: false on a hook prevents hook-level injection.
 # We verify by checking that the hook sees the service's environment as-is.
-kepler:
-  logs:
-    buffer_size: 0
 
 services:
   user-env-svc:

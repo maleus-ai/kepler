@@ -1,11 +1,6 @@
 # Test config for multi-service log merging and ordering
 # Uses small max_size to verify truncation behavior
 
-kepler:
-  logs:
-    buffer_size: 0     # Disable buffering for immediate writes
-    max_size: "10K"    # Very small (10KB) to force truncation
-
 services:
   log-rotation-a:
     command: ["bash", "-c", "i=1; while [ $i -le 200 ]; do echo \"SRVA_$i padding_to_fill_the_file_quickly_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; i=$((i+1)); done; echo SRVA_DONE; sleep 300"]

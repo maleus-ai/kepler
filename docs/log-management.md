@@ -1,50 +1,55 @@
 # Log Management
 
-How Kepler stores, buffers, retains, and streams service logs.
+How Kepler stores, retains, and streams service logs.
 
 ## Table of Contents
 
-- [Log File Structure](#log-file-structure)
+- [Log Storage](#log-storage)
 - [Log Settings](#log-settings)
-- [Log Size Management](#log-size-management)
-- [Buffered Writing](#buffered-writing)
-- [Log Retention](#log-retention)
+- [Flush Interval](#flush-interval)
+- [Time-Based Retention](#time-based-retention)
+- [Event-Based Retention](#event-based-retention)
 - [Log Store Configuration](#log-store-configuration)
 - [Viewing Logs](#viewing-logs)
+- [Log Filtering](#log-filtering)
 - [Cursor-Based Streaming](#cursor-based-streaming)
 
 ---
 
-## Log File Structure
+## Log Storage
 
-Logs are stored in each config's state directory:
+All logs are stored in a single SQLite database per config:
 
 ```
-/var/lib/kepler/configs/<config-hash>/logs/
-├── service-name.stdout.log    # Standard output
-└── service-name.stderr.log    # Standard error
+/var/lib/kepler/configs/<config-hash>/logs/logs.db
 ```
 
-Each service has two log files: one for stdout and one for stderr. Logs persist across service restarts and daemon restarts.
+Logs from all services (stdout, stderr, hooks) are stored in a single `logs` table with metadata columns for service name, log level, timestamp, and JSON detection. This replaces the previous flat-file approach with separate `.stdout.log` / `.stderr.log` files per service.
+
+**Storage modes:**
+
+- **Local filesystem (default):** Uses WAL (Write-Ahead Logging) mode with `synchronous = NORMAL` for high write throughput and concurrent reader access.
+- **NFS:** Uses DELETE journal mode with `synchronous = FULL` for correctness on network filesystems.
+
+Logs persist across service restarts and daemon restarts.
 
 ---
 
 ## Log Settings
 
-Log behavior is configured with the same options at two levels: **global** (under `kepler.logs`) and **per-service** (under `services.<name>.logs`). Per-service values override global values; unset fields fall back to the global setting.
+Log behavior is configured at two levels: **global** (under `kepler.logs`) and **per-service** (under `services.<name>.logs`). Per-service values override global values; unset fields fall back to the global setting.
 
 ```yaml
 kepler:
   logs:
-    max_size: "50MB"        # Global default for all services
-    buffer_size: 16384
+    flush_interval: "100ms"     # How often batched writes are flushed (global only)
+    retention_period: "7d"      # Delete logs older than 7 days on config load (global only)
+    batch_size: 4096            # Max entries buffered before forcing a flush (global only)
 
 services:
   app:
     command: ["./app"]
     logs:
-      max_size: "100MB"     # Overrides global for this service
-      buffer_size: 0        # Overrides global for this service
       store:
         stdout: false
         stderr: true
@@ -52,77 +57,54 @@ services:
         on_stop: retain
 ```
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `max_size` | `string` | unbounded | Max log file size before truncation (`K`, `KB`, `M`, `MB`, `G`, `GB`) |
-| `buffer_size` | `int` | `0` | Bytes to buffer before flushing to disk (0 = synchronous writes) |
-| `store` | `bool\|object` | `true` | Store logs to disk |
-| `store.stdout` | `bool` | `true` | Store stdout |
-| `store.stderr` | `bool` | `true` | Store stderr |
-| `retention.on_start` | `clear\|retain` | `retain` | Log behavior on service start |
-| `retention.on_stop` | `clear\|retain` | `clear` | Log behavior on service stop |
-| `retention.on_restart` | `clear\|retain` | `retain` | Log behavior on restart |
-| `retention.on_exit` | `clear\|retain` | `retain` | Log behavior on process exit |
+| Option | Type | Default | Scope | Description |
+|--------|------|---------|-------|-------------|
+| `flush_interval` | `duration` | `100ms` | global only | How often the writer flushes batched inserts to SQLite |
+| `retention_period` | `duration` | none | global only | Delete logs older than this on config load |
+| `batch_size` | `int` | `4096` | global only | Max log entries buffered in memory before forcing a flush |
+| `store` | `bool\|object` | `true` | global + per-service | Store logs to the database |
+| `store.stdout` | `bool` | `true` | global + per-service | Store stdout |
+| `store.stderr` | `bool` | `true` | global + per-service | Store stderr |
+| `retention.on_start` | `clear\|retain` | `retain` | global + per-service | Log behavior on service start |
+| `retention.on_stop` | `clear\|retain` | `clear` | global + per-service | Log behavior on service stop |
+| `retention.on_restart` | `clear\|retain` | `retain` | global + per-service | Log behavior on restart |
+| `retention.on_exit` | `clear\|retain` | `retain` | global + per-service | Log behavior on process exit |
 
 ---
 
-## Log Size Management
+## Flush Interval
 
-### Unbounded (Default)
+The `flush_interval` setting controls how often the SQLite writer actor flushes its in-memory batch to disk. This is a **global-only** setting.
 
-By default, log files grow without limit. This is suitable for development or when external log rotation is in place.
+| Value | Behavior | Trade-off |
+|-------|----------|-----------|
+| `"10ms"` | Very frequent flushes | Lowest latency for log readers, higher I/O |
+| `"100ms"` (default) | Balanced | Good latency/throughput balance |
+| `"500ms"` | Less frequent flushes | Better write throughput, higher read latency |
 
-### Truncation
+The writer batches log entries in memory and flushes them in a single SQLite transaction when the interval elapses or the batch reaches `batch_size` entries (default: 4096), whichever comes first. Pending entries are always flushed on service stop and daemon shutdown.
 
-When `max_size` is configured, Kepler manages disk usage:
+Duration units: `ms` (milliseconds), `s` (seconds), `m` (minutes).
 
-- Each service/stream has a single log file (`service.stdout.log`, `service.stderr.log`)
-- When a file exceeds `max_size`, it is truncated from the beginning
-- Only the most recent logs are preserved
-- Disk usage per service is bounded and predictable
+---
+
+## Time-Based Retention
+
+The `retention_period` setting enables automatic cleanup of old logs. When set, logs older than the specified duration are deleted when the config is loaded. This is a **global-only** setting.
 
 ```yaml
 kepler:
   logs:
-    max_size: "50MB"    # Global limit
-
-services:
-  chatty-service:
-    logs:
-      max_size: "200MB"   # Higher limit for this service
-  quiet-service:
-    logs:
-      max_size: "10MB"    # Lower limit
+    retention_period: "7d"    # Delete logs older than 7 days
 ```
 
-### Size Format
-
-Accepted suffixes: `K`, `KB`, `M`, `MB`, `G`, `GB`
-
-Examples: `"512K"`, `"50MB"`, `"1G"`
+Duration units: `ms`, `s`, `m` (minutes), `h` (hours), `d` (days).
 
 ---
 
-## Buffered Writing
+## Event-Based Retention
 
-The `buffer_size` setting controls write batching:
-
-| Value | Behavior | Trade-off |
-|-------|----------|-----------|
-| `0` (default) | Synchronous writes | Safest -- no data loss on crash |
-| `8192` | 8KB buffer | Good performance/safety balance |
-| `16384` | 16KB buffer | ~30% better throughput |
-| Higher | Larger buffer | Diminishing returns, more data at risk |
-
-- Buffers are automatically flushed on service stop
-- Buffers are flushed when full
-- On daemon crash, buffered (unflushed) logs are lost
-
----
-
-## Log Retention
-
-Control when log files are cleared or retained:
+Control when logs are cleared or retained based on service lifecycle events:
 
 ```yaml
 logs:
@@ -144,7 +126,7 @@ logs:
 
 ## Log Store Configuration
 
-Control whether stdout and/or stderr are stored to disk:
+Control whether stdout and/or stderr are stored to the database:
 
 ```yaml
 # Disable all log storage
@@ -186,19 +168,63 @@ Logs from multiple services are merged chronologically and displayed with servic
 
 ---
 
+## Log Filtering
+
+Log queries support SQL WHERE expressions for filtering. The filter is injected directly into the SQL query, allowing full use of SQLite's expression syntax against the `logs` table columns.
+
+### Available Columns
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER | Auto-incrementing row ID |
+| `timestamp` | INTEGER | Milliseconds since Unix epoch |
+| `service` | TEXT | Service name |
+| `hook` | TEXT | Hook name (NULL for service process logs) |
+| `level` | TEXT | `"out"` (stdout) or `"err"` (stderr) |
+| `line` | TEXT | Log line content |
+| `is_json` | INTEGER | 1 if the line is valid JSON, 0 otherwise |
+
+### Filter Examples
+
+```bash
+# Filter by log level
+kepler logs --filter "level = 'err'"
+
+# Filter by service and level
+kepler logs --filter "service = 'web' AND level = 'err'"
+
+# Search log content
+kepler logs --filter "line LIKE '%error%'"
+
+# JSON field extraction (guard with json_valid for mixed-format logs)
+kepler logs --filter "json_valid(line) AND json_extract(line, '$.status') >= 500"
+
+# Time range (timestamp is ms since epoch)
+kepler logs --filter "timestamp > 1709913600000"
+
+# Combine with --follow for live filtered streaming
+kepler logs --follow --filter "service = 'api' AND level = 'err'"
+```
+
+### Permissions
+
+Filtering requires the `logs:search` scope. Plain log viewing (`kepler logs` without `--filter`) only requires `logs:read`. See [Security Model -- Log Query Security](security-model.md#log-query-security) for the full security design, allowed functions, and known attack vectors.
+
+---
+
 ## Cursor-Based Streaming
 
-Log retrieval uses server-side cursors for efficient streaming:
+Log retrieval uses server-side cursors backed by SQLite rowid-based pagination:
 
 1. CLI sends a log request (with optional cursor ID)
 2. Daemon returns a batch of entries and a cursor ID
 3. CLI uses the cursor ID to continue reading from where it left off
 
 Cursor features:
-- **Position tracking**: Each cursor tracks byte offsets per log file
-- **Truncation detection**: Cursors detect when files are truncated and reset automatically
+- **Rowid-based position tracking**: Each cursor tracks the last seen SQLite rowid for efficient `WHERE id > ?` queries
 - **TTL cleanup**: Stale cursors are cleaned up after 5 minutes of inactivity
-- **Chronological merging**: Logs from multiple services/streams are merged by timestamp
+- **Chronological ordering**: Logs are stored in insertion order and returned chronologically via rowid ordering
+- **Follow mode notifications**: The store actor notifies cursors after each batch flush, enabling low-latency log following
 
 ---
 

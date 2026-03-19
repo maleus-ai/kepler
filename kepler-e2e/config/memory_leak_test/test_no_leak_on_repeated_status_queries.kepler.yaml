@@ -25,8 +25,6 @@ kepler:
   default_inherit_env: true
   timeout: 30s
   logs:
-    max_size: "1M"
-    buffer_size: 4096
     retention:
       on_stop: clear
       on_start: clear
@@ -46,7 +44,6 @@ services:
       memory: "512M"
       max_fds: 1024
     logs:
-      buffer_size: 8192
       retention:
         on_stop: retain
         on_start: clear
@@ -201,9 +198,7 @@ services:
     limits:
       memory: "256M"
       max_fds: 256
-    logs:
-      buffer_size: 16384
-
+  
   analytics-service:
     command: ["sh", "-c", "echo Analytics starting; exec sleep 300"]
     restart: on-failure

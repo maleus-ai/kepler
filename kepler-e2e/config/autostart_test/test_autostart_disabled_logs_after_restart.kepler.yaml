@@ -1,7 +1,3 @@
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   worker:
     command: ["sh", "-c", "echo WORKER_LOG_MARKER; sleep 300"]

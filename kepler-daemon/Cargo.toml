@@ -29,12 +29,12 @@ mlua = { version = "0.10", features = ["luau", "serialize", "send"] }
 dashmap = "5"
 futures = "0.3"
 tokio-stream = "0.1"
-memchr = "2.7"
 base64 = "0.22"
 tempfile = "3.10"
 subtle = "2.6"
 getrandom = "0.2"
 semver = "1"
+rusqlite = { version = "0.34", features = ["bundled", "hooks", "limits"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

@@ -598,47 +598,70 @@ Applied via `pre_exec` before process execution:
 
 ## Log Storage
 
-### File Structure
+### SQLite-Backed Architecture
 
-Logs are stored in the config's state directory under `logs/`:
+Logs are stored in a single SQLite database per config:
 
 ```
-/var/lib/kepler/configs/<config-hash>/logs/
-├── service-name.stdout.log    # Standard output
-└── service-name.stderr.log    # Standard error
+/var/lib/kepler/configs/<config-hash>/logs/logs.db
 ```
 
-Each service has two log files: one for stdout and one for stderr. Log files are timestamped line-by-line with millisecond precision.
+All services share a single database with a `logs` table containing service name, log level (out/err), timestamp, line content, hook name, and JSON detection flag. The monotonically increasing rowid serves as the cursor position for streaming.
 
 For user-facing documentation, see [Log Management](log-management.md).
 
-### Log Size Management
+### Single-Writer Architecture
 
-By default, log files grow unbounded. When `max_size` is configured, Kepler uses truncation to manage disk usage:
+The log system uses a dedicated writer thread per config (the `LogStoreActor`):
 
-- **Single file per stream**: One file per service/stream (`service.stdout.log`, `service.stderr.log`)
-- **Optional truncation**: When a log file exceeds `max_size`, it is truncated from the beginning
-- **Recent logs preserved**: Only the oldest logs are discarded when truncating
-- **Predictable disk usage**: When `max_size` is set, disk usage per service is bounded
+1. **LogStoreHandle** (cloneable) — sends commands via `std::sync::mpsc` channel
+2. **LogWriter** — thin per-service wrapper that sends `InsertEntry` commands to the store
+3. **LogStoreActor** — dedicated `std::thread` that owns the SQLite write connection, batches inserts, and flushes on a configurable interval
 
-Settings can be configured globally under `kepler.logs` or per-service under `services.<name>.logs`. Per-service settings override global settings.
+Write path:
+- Service stdout/stderr → `LogWriter::write()` → `LogStoreHandle::send()` → mpsc channel → `LogStoreActor` batches → SQLite transaction
 
-### Buffered Writing
+The actor batches up to 4096 entries and flushes them in a single transaction when the `flush_interval` elapses or the batch is full.
 
-Log writes are buffered for performance:
+### Storage Modes
 
-1. **Lock-free buffer**: Each writer uses a per-service buffer to batch writes
-2. **Configurable size**: `buffer_size` controls how many bytes are buffered before flushing (default: 0, synchronous writes)
-3. **Automatic flush**: Buffers are flushed on service stop or when full
+| Mode | Journal | Synchronous | Use Case |
+|------|---------|-------------|----------|
+| **Local** (default) | WAL | NORMAL | Local filesystem — concurrent readers, high throughput |
+| **NFS** | DELETE | FULL | Network filesystem — correctness over performance |
 
-Trade-offs:
-- `buffer_size: 0` (default) - Synchronous writes, safest for crash recovery
-- `buffer_size: 8192` - 8KB buffer, good balance of performance and safety
-- `buffer_size: 16384` - 16KB buffer, ~30% better throughput
+Additional pragmas: `mmap_size=0` (disabled), `cache_size=-8000` (8MB), `temp_store=MEMORY`.
+
+### Read Path
+
+Log reads use fresh read-only connections opened per query (required for NFS correctness, cheap on local WAL). The `SqliteLogReader` provides:
+- `tail(count)` — last N entries
+- `head(count)` — first N entries
+- `after(id, limit, filter?)` — cursor-based pagination with optional SQL WHERE filter
+
+All read methods support optional service name filter and `no_hooks` filter (excludes hook logs by service name pattern).
+
+### Filter Security (Authorizer-Based)
+
+When a user provides a filter expression, the raw SQL WHERE fragment is injected directly into the query. Safety is enforced by SQLite's authorizer API combined with resource limits and a progress handler timeout — **not** by parsing a custom DSL.
+
+This design was chosen over a custom filter parser because it:
+- Supports JSON queries (`json_extract`), full-text search, and timestamp ranges without parser maintenance
+- Leverages SQLite's own compile-time validation via the authorizer callback
+- Cannot be bypassed by SQL syntax tricks (the authorizer sees the parsed AST, not raw text)
+
+**Defense layers applied to filter connections:**
+
+1. **Read-only connection** — `SQLITE_OPEN_READONLY`, cannot modify data
+2. **Authorizer** — deny-by-default callback set before `prepare()`. Allows only SELECT on `logs`, column reads on `logs`, and whitelisted functions. Denies writes, DDL, ATTACH, PRAGMA, reads on other tables, and non-whitelisted functions
+3. **Resource limits** — expression depth (20), LIKE pattern length (100), SQL length (10K), compound SELECT (2), function args (8), attached databases (0)
+4. **Progress handler** — aborts queries exceeding 5 seconds
+
+See [Security Model — Log Query Security](security-model.md#log-query-security) for the full security design, allowed functions, and known attack vectors.
 
 ### Cursor-Based Streaming
 
-Log retrieval uses server-side cursors for efficient streaming:
+Log retrieval uses server-side cursors backed by SQLite rowid-based pagination:
 
 ```mermaid
 sequenceDiagram
@@ -649,10 +672,9 @@ sequenceDiagram
 ```
 
 **Cursor features:**
-- **Position tracking**: Each cursor tracks byte offsets per log file
-- **Truncation detection**: Cursors detect when files are truncated and reset
+- **Rowid-based position tracking**: Each cursor stores the last seen rowid for efficient `WHERE id > ?` queries
 - **TTL cleanup**: Stale cursors are automatically cleaned up (default: 5 minutes)
-- **Chronological merging**: Logs from multiple services are merged by timestamp
+- **Follow mode notifications**: The store actor fires an `Arc<Notify>` after each batch flush, waking up long-polling cursor reads
 
 **Modes:**
 | Mode | CLI Flag | Behavior |
@@ -666,9 +688,11 @@ sequenceDiagram
 
 | File | Description |
 |------|-------------|
-| `kepler-daemon/src/logs/writer.rs` | Buffered log writer with truncation |
-| `kepler-daemon/src/logs/reader.rs` | Log file reader and merged iterators |
-| `kepler-daemon/src/cursor.rs` | CursorManager for streaming |
+| `kepler-daemon/src/logs/store.rs` | LogStoreActor (writer thread) and LogStoreHandle |
+| `kepler-daemon/src/logs/log_writer.rs` | Per-service LogWriter (thin wrapper) |
+| `kepler-daemon/src/logs/log_reader.rs` | SqliteLogReader (read-only queries, filter injection) |
+| `kepler-daemon/src/logs/filter.rs` | Filter validation, SQLite authorizer setup, resource limits |
+| `kepler-daemon/src/cursor.rs` | CursorManager for rowid-based streaming |
 
 ---
 
@@ -777,7 +801,7 @@ See [Security Model](security-model.md#kepler-group-stripping) for user-facing d
 
 ### Subscribe / CheckQuiescence / CheckReadiness Authorization
 
-The internal `Subscribe`, `CheckQuiescence`, and `CheckReadiness` requests do not map to a specific permission scope. Instead, they require the caller to have at least one `service:*` scope (e.g., `service:start`, `service:logs`, or the `service` category). If the caller has no service-related scopes, the request is denied. When no ACL rules match at all, these requests are also denied.
+The internal `Subscribe`, `CheckQuiescence`, and `CheckReadiness` requests do not map to a specific permission scope. Instead, they require the caller to have at least one `service:*` scope (e.g., `service:start`, `service:stop`, or the `service` category). If the caller has no service-related scopes, the request is denied. When no ACL rules match at all, these requests are also denied.
 
 `CheckQuiescence` and `CheckReadiness` are read-only queries that ask the daemon whether all services have settled (quiescent) or reached their target state (ready). They respect the `startup_in_progress` fence — returning `false` while the fence is up — making the daemon the single source of truth for lifecycle state evaluation.
 

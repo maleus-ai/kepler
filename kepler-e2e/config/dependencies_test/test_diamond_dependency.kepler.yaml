@@ -1,7 +1,3 @@
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   diamond-a:
     command: ["sh", "-c", "echo DIAMOND_A_STARTED; sleep 300"]

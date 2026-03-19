@@ -1,10 +1,6 @@
 # Test depends_on with service_unhealthy condition
 # Alert should wait for monitor to become healthy then transition to unhealthy
 
-kepler:
-  logs:
-    buffer_size: 0
-
 services:
   monitor:
     command: ["sh", "-c", "echo MONITOR_STARTED; sleep 300"]

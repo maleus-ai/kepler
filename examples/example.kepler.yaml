@@ -9,10 +9,6 @@
 #   kepler stop
 #   kepler stop -s SIGKILL        # force kill
 
-kepler:
-  logs:
-    buffer_size: 0 # Flush logs immediately (good for demos)
-
 services:
   # A one-shot migration task that runs first then exits
   # `run:` executes via sh -c — ideal for shell scripts, pipes, and chaining

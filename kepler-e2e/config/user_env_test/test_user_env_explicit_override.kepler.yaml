@@ -1,8 +1,5 @@
 # Service runs as testuser1, but HOME is explicitly overridden.
 # The explicit value should win over the auto-injected one.
-kepler:
-  logs:
-    buffer_size: 0
 
 services:
   user-env-svc:

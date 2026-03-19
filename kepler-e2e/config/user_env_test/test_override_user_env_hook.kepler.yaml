@@ -1,9 +1,6 @@
 # Service with a pre_start hook that has user_identity enabled (default).
 # The hook explicitly sets HOME, but user_identity forces it to
 # match the effective user's /etc/passwd entry.
-kepler:
-  logs:
-    buffer_size: 0
 
 services:
   user-env-svc:

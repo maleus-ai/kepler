@@ -16,7 +16,7 @@ use tracing::debug;
 use crate::{
     errors::ClientError,
     protocol::{
-        LogMode, MAX_MESSAGE_SIZE, Request, RequestEnvelope, Response,
+        MAX_MESSAGE_SIZE, Request, RequestEnvelope, Response,
         ServerEvent, ServerMessage, decode_server_message, encode_envelope,
     },
 };
@@ -281,45 +281,6 @@ impl Client {
         self.send_request(Request::ListConfigs)
     }
 
-    /// Get logs for a config
-    pub fn logs(
-        &self,
-        config_path: PathBuf,
-        service: Option<String>,
-        follow: bool,
-        lines: usize,
-        mode: LogMode,
-        no_hooks: bool,
-    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
-        self.send_request(Request::Logs {
-            config_path,
-            service,
-            follow,
-            lines,
-            max_bytes: None,
-            mode,
-            no_hooks,
-        })
-    }
-
-    /// Get logs with pagination (for large log responses)
-    pub fn logs_chunk(
-        &self,
-        config_path: PathBuf,
-        service: Option<String>,
-        offset: usize,
-        limit: usize,
-        no_hooks: bool,
-    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
-        self.send_request(Request::LogsChunk {
-            config_path,
-            service,
-            offset,
-            limit,
-            no_hooks,
-        })
-    }
-
     /// Shutdown the daemon
     pub fn shutdown(
         &self,
@@ -336,23 +297,30 @@ impl Client {
         self.send_request(Request::Prune { force, dry_run })
     }
 
-    /// Cursor-based log streaming (for 'all' and 'follow' modes)
-    pub fn logs_cursor(
+    /// Log query (streaming with cursor, one-shot head, or one-shot tail).
+    /// Client tracks position via `after_id` for streaming modes.
+    pub fn logs_stream(
         &self,
         config_path: &Path,
         service: Option<&str>,
-        cursor_id: Option<&str>,
-        from_start: bool,
+        after_id: Option<i64>,
+        from_end: bool,
+        limit: usize,
         no_hooks: bool,
-        poll_timeout_ms: Option<u32>,
+        filter: Option<&str>,
+        raw: bool,
+        tail: bool,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
-        self.send_request(Request::LogsCursor {
+        self.send_request(Request::LogsStream {
             config_path: config_path.to_path_buf(),
             service: service.map(String::from),
-            cursor_id: cursor_id.map(String::from),
-            from_start,
+            after_id,
+            from_end,
+            limit,
             no_hooks,
-            poll_timeout_ms,
+            filter: filter.map(String::from),
+            raw,
+            tail,
         })
     }
 
@@ -393,6 +361,38 @@ impl Client {
         config_path: PathBuf,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::CheckReadiness { config_path })
+    }
+
+    /// Subscribe to log-available notifications for a config.
+    ///
+    /// Returns a progress receiver that emits `LogsAvailable` events when new logs
+    /// are flushed to SQLite. The caller should issue a `LogsStream` request to fetch.
+    pub async fn subscribe_logs(
+        &self,
+        config_path: PathBuf,
+    ) -> Result<mpsc::UnboundedReceiver<ServerEvent>> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+
+        let (response_tx, _response_rx) = oneshot::channel();
+        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+
+        self.pending.insert(id, PendingRequest {
+            response_tx,
+            progress_tx: Some(progress_tx),
+        });
+
+        let envelope = RequestEnvelope {
+            id,
+            request: Request::SubscribeLogs { config_path },
+            token: self.process_token,
+        };
+        let bytes = encode_envelope(&envelope)?;
+        self.writer_tx
+            .send(bytes)
+            .await
+            .map_err(|_| ClientError::Disconnected)?;
+
+        Ok(progress_rx)
     }
 
     /// Fire-and-forget subscribe: sends the Subscribe request eagerly and returns

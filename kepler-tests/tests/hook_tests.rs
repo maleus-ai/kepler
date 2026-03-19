@@ -1086,8 +1086,7 @@ async fn test_log_output_disabled() {
         .with_logs(LogConfig {
             store: Some(LogStoreConfig::Simple(false)),
             retention: None,
-            max_size: ConfigValue::default(),
-            buffer_size: ConfigValue::default(),
+            ..Default::default()
         })
         .add_service(
             "test",
@@ -1142,8 +1141,7 @@ async fn test_log_output_enabled() {
         .with_logs(LogConfig {
             store: Some(LogStoreConfig::Simple(true)),
             retention: None,
-            max_size: ConfigValue::default(),
-            buffer_size: ConfigValue::default(),
+            ..Default::default()
         })
         .add_service(
             "test",

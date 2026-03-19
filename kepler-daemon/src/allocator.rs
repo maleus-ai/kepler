@@ -83,3 +83,4 @@ pub fn purge_caches() {
         debug!("glibc: malloc_trim(0) called");
     }
 }
+

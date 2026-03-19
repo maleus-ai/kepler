@@ -11,45 +11,10 @@ pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 /// Maximum lines for one-shot queries (head/tail)
 pub const MAX_LINES_ONE_SHOT: usize = 10_000;
 
-/// Maximum entries per cursor batch (secondary cap; byte budget is the primary limit)
-pub const MAX_CURSOR_BATCH_SIZE: usize = 50_000;
+/// Maximum entries per stream batch (secondary cap; byte budget is the primary limit)
+pub const MAX_STREAM_BATCH_SIZE: usize = 50_000;
 
-/// Stream type for log entries (stdout/stderr)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StreamType {
-    Stdout,
-    Stderr,
-}
-
-impl StreamType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Stdout => "stdout",
-            Self::Stderr => "stderr",
-        }
-    }
-    pub fn is_stderr(&self) -> bool {
-        matches!(self, Self::Stderr)
-    }
-}
-
-impl std::fmt::Display for StreamType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Log reading mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum LogMode {
-    /// Read all logs chronologically using forward iterator (default)
-    #[default]
-    All,
-    /// Return the last N lines (newest entries, in chronological order)
-    Tail,
-    /// Return the first N lines (oldest first)
-    Head,
-}
+fn default_stream_limit() -> usize { MAX_STREAM_BATCH_SIZE }
 
 /// Request sent from CLI to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,40 +84,6 @@ pub enum Request {
         /// Path to the config file (None = all configs)
         config_path: Option<PathBuf>,
     },
-    /// Get logs
-    Logs {
-        /// Path to the config file
-        config_path: PathBuf,
-        /// Service name (None = all services)
-        service: Option<String>,
-        /// Whether to follow (stream) logs
-        follow: bool,
-        /// Number of lines to retrieve
-        lines: usize,
-        /// Maximum bytes to read (prevents OOM with large logs)
-        #[serde(default)]
-        max_bytes: Option<usize>,
-        /// Log reading mode (head or tail)
-        #[serde(default)]
-        mode: LogMode,
-        /// Whether to exclude hook log entries
-        #[serde(default)]
-        no_hooks: bool,
-    },
-    /// Get logs with pagination (for large log responses)
-    LogsChunk {
-        /// Path to the config file
-        config_path: PathBuf,
-        /// Service name (None = all services)
-        service: Option<String>,
-        /// Offset for pagination
-        offset: usize,
-        /// Maximum number of entries to return
-        limit: usize,
-        /// Whether to exclude hook log entries
-        #[serde(default)]
-        no_hooks: bool,
-    },
     /// Shutdown the daemon
     Shutdown,
     /// Ping to check if daemon is alive
@@ -166,24 +97,45 @@ pub enum Request {
         /// Show what would be pruned without deleting
         dry_run: bool,
     },
-    /// Cursor-based log streaming (for 'all' and 'follow' modes)
-    LogsCursor {
+    /// Streaming log query (for 'all' and 'follow' modes).
+    /// The client tracks its own position via `last_id`.
+    LogsStream {
         /// Path to the config file
         config_path: PathBuf,
         /// Service name (None = all services)
         service: Option<String>,
-        /// Cursor ID from previous response (None = create new cursor)
-        cursor_id: Option<String>,
-        /// If true, start cursor at beginning of files (for 'all' mode)
-        /// If false, start cursor at end of files (for 'follow' mode)
-        from_start: bool,
+        /// Read entries after this row ID (None = from start).
+        /// The client passes back `last_id` from the previous response.
+        #[serde(default)]
+        after_id: Option<i64>,
+        /// If true and after_id is None, start from the end (for 'follow' mode).
+        /// The server returns `last_id = max_id` with empty entries.
+        #[serde(default)]
+        from_end: bool,
+        /// Maximum number of entries to return per batch
+        #[serde(default = "default_stream_limit")]
+        limit: usize,
         /// Whether to exclude hook log entries
         #[serde(default)]
         no_hooks: bool,
-        /// If set, the server will wait up to this many ms for new data before
-        /// returning an empty response. Enables server-side long polling.
+        /// Optional filter expression (DSL). Requires `logs:search` scope.
+        /// Example: `level='err' AND (service='web' OR service='api')`
         #[serde(default)]
-        poll_timeout_ms: Option<u32>,
+        filter: Option<String>,
+        /// Raw mode: only return log line content, skip metadata
+        #[serde(default)]
+        raw: bool,
+        /// Tail mode: return the last `limit` entries in chronological order.
+        /// Ignores `after_id` and `from_end`.
+        #[serde(default)]
+        tail: bool,
+    },
+    /// Subscribe to log-available notifications for a config.
+    /// The server pushes LogsAvailable events when new logs are flushed to SQLite.
+    /// The client should fetch logs via LogsStream after receiving the event.
+    SubscribeLogs {
+        /// Path to the config file
+        config_path: PathBuf,
     },
     /// Subscribe to service state change events
     Subscribe {
@@ -218,13 +170,12 @@ impl Request {
             Request::Restart { .. } => "Restart",
             Request::Recreate { .. } => "Recreate",
             Request::Status { .. } => "Status",
-            Request::Logs { .. } => "Logs",
-            Request::LogsChunk { .. } => "LogsChunk",
             Request::Shutdown => "Shutdown",
             Request::Ping => "Ping",
             Request::ListConfigs => "ListConfigs",
             Request::Prune { .. } => "Prune",
-            Request::LogsCursor { .. } => "LogsCursor",
+            Request::LogsStream { .. } => "LogsStream",
+            Request::SubscribeLogs { .. } => "SubscribeLogs",
             Request::Subscribe { .. } => "Subscribe",
             Request::Inspect { .. } => "Inspect",
             Request::CheckQuiescence { .. } => "CheckQuiescence",
@@ -284,12 +235,8 @@ pub enum ResponseData {
     MultiConfigStatus(Vec<ConfigStatus>),
     /// List of loaded configs
     ConfigList(Vec<LoadedConfigInfo>),
-    /// Log entries
-    Logs(Vec<LogEntry>),
-    /// Log entries chunk (for large log responses)
-    LogChunk(LogChunkData),
-    /// Log entries for cursor-based streaming (all/follow modes)
-    LogCursor(LogCursorData),
+    /// Log stream batch
+    LogStream(LogStreamData),
     /// Daemon info
     DaemonInfo(DaemonInfo),
     /// Pruned configs info
@@ -313,43 +260,34 @@ pub struct PrunedConfigInfo {
     pub status: String,
 }
 
-/// Chunked log entries for large log responses
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogChunkData {
-    /// Log entries in this chunk
-    pub entries: Vec<LogEntry>,
-    /// Whether there are more entries after this chunk
-    pub has_more: bool,
-    /// Offset for next chunk request
-    pub next_offset: usize,
-    /// Total number of entries (if known)
-    pub total: Option<usize>,
-}
-
-/// Compact log entry for cursor-based streaming.
+/// Compact log entry for streaming.
 /// Uses a u16 service index into the service_table instead of a full service name per entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CursorLogEntry {
-    /// Index into LogCursorData::service_table
+pub struct StreamLogEntry {
+    /// Index into LogStreamData::service_table
     pub service_id: u16,
     /// Log line content
     pub line: String,
     /// Timestamp in milliseconds since Unix epoch
     pub timestamp: i64,
-    /// Stream (stdout/stderr)
-    pub stream: StreamType,
+    /// Log level ("out", "err", "trace", "debug", "info", "warn", "error", "fatal")
+    pub level: Arc<str>,
+    /// Hook name (None for service process logs)
+    pub hook: Option<Arc<str>>,
+    /// Remaining JSON attributes (None for non-JSON lines)
+    pub attributes: Option<Arc<str>>,
 }
 
-/// Log entries for cursor-based streaming (all/follow modes)
+/// Log stream batch response
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogCursorData {
-    /// Service name table: CursorLogEntry::service_id indexes into this vec
+pub struct LogStreamData {
+    /// Service name table: StreamLogEntry::service_id indexes into this vec
     pub service_table: Vec<Arc<str>>,
     /// Compact log entries (service stored as u16 index)
-    pub entries: Vec<CursorLogEntry>,
-    /// Cursor ID to use for next request
-    pub cursor_id: String,
-    /// Whether there are more entries to read (false when EOF reached for 'all' mode)
+    pub entries: Vec<StreamLogEntry>,
+    /// Row ID of the last entry returned. Pass as `after_id` in the next request.
+    pub last_id: i64,
+    /// Whether there are more entries to read
     pub has_more: bool,
 }
 
@@ -408,19 +346,6 @@ pub struct ServiceInfo {
     pub fail_reason: Option<String>,
 }
 
-/// A log entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogEntry {
-    /// Service name
-    pub service: Arc<str>,
-    /// Log line content
-    pub line: String,
-    /// Timestamp
-    pub timestamp: Option<i64>,
-    /// Stream (stdout/stderr)
-    pub stream: StreamType,
-}
-
 /// Information about the daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonInfo {
@@ -475,6 +400,9 @@ pub enum ServerEvent {
     Ready { request_id: u64 },
     /// All services settled — nothing more will change (for foreground mode exit)
     Quiescent { request_id: u64 },
+    /// New log data has been flushed to SQLite for a config.
+    /// The client should issue a LogsStream request to fetch it.
+    LogsAvailable { request_id: u64 },
     /// A service failed with no handler (no `service_failed`/`service_stopped` dependency, won't restart)
     UnhandledFailure {
         request_id: u64,
@@ -490,6 +418,7 @@ impl ServerEvent {
             ServerEvent::Progress { request_id, .. } => *request_id,
             ServerEvent::Ready { request_id } => *request_id,
             ServerEvent::Quiescent { request_id } => *request_id,
+            ServerEvent::LogsAvailable { request_id } => *request_id,
             ServerEvent::UnhandledFailure { request_id, .. } => *request_id,
         }
     }

@@ -20,7 +20,7 @@ use kepler_daemon::Daemon;
 use kepler_protocol::{
     client::Client,
     errors::ClientError,
-    protocol::{ConfigStatus, CursorLogEntry, LogCursorData, LogEntry, LogMode, Response, ResponseData, ServerEvent, ServiceInfo, ServicePhase, ServiceTarget},
+    protocol::{ConfigStatus, StreamLogEntry, LogStreamData, Response, ResponseData, ServerEvent, ServiceInfo, ServicePhase, ServiceTarget},
 };
 use tokio::sync::mpsc;
 use tabled::{Table, Tabled};
@@ -178,7 +178,7 @@ async fn run() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Start { services, detach, wait, timeout, no_deps, override_envs, refresh_env, abort_on_failure, no_abort_on_failure, hardening } => {
+        Commands::Start { services, detach, wait, timeout, no_deps, override_envs, refresh_env, raw: raw_output, abort_on_failure, no_abort_on_failure, hardening } => {
             let override_envs = build_override_envs(override_envs, refresh_env, &sys_env);
             if no_deps && services.is_empty() {
                 eprintln!("Error: --no-deps requires specifying at least one service");
@@ -252,7 +252,7 @@ async fn run() -> Result<()> {
                 };
                 foreground_with_logs(
                     wrapped_start,
-                    follow_logs_until_quiescent(&client, &canonical_path, log_service, abort_on_failure, start_acknowledged),
+                    follow_logs_until_quiescent(&client, &canonical_path, log_service, abort_on_failure, start_acknowledged, raw_output),
                 ).await?;
             }
         }
@@ -270,7 +270,7 @@ async fn run() -> Result<()> {
             }
         }
 
-        Commands::Restart { services, wait, timeout, follow, no_deps, override_envs, refresh_env } => {
+        Commands::Restart { services, wait, timeout, raw: raw_output, follow, no_deps, override_envs, refresh_env } => {
             let override_envs = build_override_envs(override_envs, refresh_env, &sys_env);
             if no_deps && services.is_empty() {
                 eprintln!("Error: --no-deps requires specifying at least one service");
@@ -316,7 +316,7 @@ async fn run() -> Result<()> {
                 )?;
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);
-                handle_logs(&client, canonical_path, log_service, true, 100, LogMode::All, false).await?;
+                handle_logs(&client, canonical_path, log_service, true, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, false, false, raw_output).await?;
             } else {
                 // Default: Progress bars, exit when done
                 let (progress_rx, restart_future) = client.restart(
@@ -343,15 +343,16 @@ async fn run() -> Result<()> {
             head,
             tail,
             no_hook,
+            raw: raw_output,
         } => {
-            let (mode, lines) = if let Some(n) = head {
-                (LogMode::Head, n)
+            let (is_tail, lines) = if let Some(n) = head {
+                (false, n)
             } else if let Some(n) = tail {
-                (LogMode::Tail, n)
+                (true, n)
             } else {
-                (LogMode::All, 100)
+                (false, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE)
             };
-            handle_logs(&client, canonical_path, service, follow, lines, mode, no_hook).await?;
+            handle_logs(&client, canonical_path, service, follow, lines, is_tail, no_hook, raw_output).await?;
         }
 
         Commands::PS { .. } => {
@@ -493,7 +494,7 @@ async fn run_with_progress(
                             }
                         }
                     }
-                    Some(ServerEvent::Ready { .. } | ServerEvent::Quiescent { .. } | ServerEvent::UnhandledFailure { .. }) => {
+                    Some(ServerEvent::Ready { .. } | ServerEvent::Quiescent { .. } | ServerEvent::UnhandledFailure { .. } | ServerEvent::LogsAvailable { .. }) => {
                         // Ignored in run_with_progress (used by start -d / foreground mode)
                     }
                     None => {
@@ -543,7 +544,7 @@ async fn run_with_progress(
 /// Drive a foreground start/restart: runs the daemon request concurrently with log following.
 /// Exits when log following finishes (quiescence or Ctrl+C), even if the request hasn't responded.
 ///
-/// On start error, the log future continues running so the cursor can drain any
+/// On start error, the log future continues running so it can drain any
 /// remaining hook logs before the error is returned to the caller.
 async fn foreground_with_logs(
     request_future: impl Future<Output = std::result::Result<Response, ClientError>>,
@@ -734,8 +735,8 @@ async fn wait_until_ready_with_start(
                         }
                         break;
                     }
-                    Some(ServerEvent::Quiescent { .. }) => {
-                        // Ignored in --wait mode (unless inside Ready grace period above)
+                    Some(ServerEvent::Quiescent { .. } | ServerEvent::LogsAvailable { .. }) => {
+                        // Ignored in --wait mode
                     }
                     Some(ServerEvent::UnhandledFailure { service, exit_code, .. }) => {
                         let code_str = exit_code.map(|c| format!(" (exit code {})", c)).unwrap_or_default();
@@ -1277,35 +1278,41 @@ fn print_multi_config_table(configs: &[ConfigStatus]) {
 }
 
 
-/// Trait abstracting client operations used by follow_logs_loop, enabling unit tests.
+/// Trait abstracting client operations used by stream_logs, enabling unit tests.
 trait FollowClient {
-    async fn logs_cursor(
+    async fn logs_stream(
         &self,
         config_path: &Path,
         service: Option<&str>,
-        cursor_id: Option<&str>,
-        from_start: bool,
+        after_id: Option<i64>,
+        from_end: bool,
+        limit: usize,
         no_hooks: bool,
-        poll_timeout_ms: Option<u32>,
+        filter: Option<&str>,
+        raw: bool,
+        tail: bool,
     ) -> std::result::Result<Response, ClientError>;
 }
 
 impl FollowClient for Client {
-    async fn logs_cursor(
+    async fn logs_stream(
         &self,
         config_path: &Path,
         service: Option<&str>,
-        cursor_id: Option<&str>,
-        from_start: bool,
+        after_id: Option<i64>,
+        from_end: bool,
+        limit: usize,
         no_hooks: bool,
-        poll_timeout_ms: Option<u32>,
+        filter: Option<&str>,
+        raw: bool,
+        tail: bool,
     ) -> std::result::Result<Response, ClientError> {
-        let (_rx, fut) = Client::logs_cursor(self, config_path, service, cursor_id, from_start, no_hooks, poll_timeout_ms)?;
+        let (_rx, fut) = Client::logs_stream(self, config_path, service, after_id, from_end, limit, no_hooks, filter, raw, tail)?;
         fut.await
     }
 }
 
-/// Cursor streaming mode.
+/// Streaming mode.
 #[derive(Clone, Copy, PartialEq)]
 enum StreamMode {
     /// Read all existing logs from start, exit when done.
@@ -1317,26 +1324,34 @@ enum StreamMode {
     UntilQuiescent,
 }
 
-/// Why `stream_cursor_logs` exited.
+/// Why `stream_logs` exited.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum StreamExitReason {
-    /// Natural exit (quiescence, all data read, error, or disconnect).
+    /// Natural exit (quiescence, all data read, or disconnect).
     Done,
     /// Shutdown signal received — caller should stop services.
     ShutdownRequested,
+    /// Server returned a fatal error (permission denied, etc.).
+    ServerError,
 }
 
-/// Non-generic parameters for `stream_cursor_logs`.
-struct StreamCursorParams<'a> {
+/// Non-generic parameters for `stream_logs`.
+struct StreamParams<'a> {
     config_path: &'a Path,
     service: Option<&'a str>,
     no_hooks: bool,
     mode: StreamMode,
-    /// If set, the server waits up to this many ms for new data (long polling).
-    poll_timeout_ms: Option<u32>,
+    /// Maximum entries per batch.
+    limit: usize,
+    /// Optional filter DSL expression (requires `logs:search` scope).
+    filter: Option<&'a str>,
+    /// Raw mode: only fetch and output log line content.
+    raw: bool,
+    /// Tail mode: return last `limit` entries (one-shot).
+    tail: bool,
 }
 
-/// Unified cursor-based log streaming loop.
+/// Unified log streaming loop with client-side position tracking.
 ///
 /// Generic over the client (real or mock) and shutdown/quiescence signals, enabling unit tests.
 /// `on_batch` receives each batch's service table and entries for efficient output.
@@ -1344,113 +1359,80 @@ struct StreamCursorParams<'a> {
 /// In `UntilQuiescent` mode, the `quiescence` future signals when all services have reached
 /// a terminal state (via subscription events) or the config was unloaded. The loop drains
 /// remaining logs before exiting.
-async fn stream_cursor_logs(
+///
+/// `log_notify` is an optional receiver for `LogsAvailable` push events from the daemon.
+/// When available, the loop waits for notifications (with a 2s fallback) instead of polling.
+async fn stream_logs(
     client: &impl FollowClient,
-    params: StreamCursorParams<'_>,
+    params: StreamParams<'_>,
     shutdown: impl Future<Output = ()>,
     quiescence: impl Future<Output = ()>,
-    mut on_batch: impl FnMut(&[Arc<str>], &[CursorLogEntry]),
+    mut log_notify: Option<mpsc::UnboundedReceiver<ServerEvent>>,
+    mut on_batch: impl FnMut(&[Arc<str>], &[StreamLogEntry]),
 ) -> Result<StreamExitReason> {
-    let from_start = params.mode != StreamMode::Follow;
-    let mut cursor_id: Option<String> = None;
+    let from_end = params.mode == StreamMode::Follow;
+    let mut last_id: Option<i64> = None;
     tokio::pin!(shutdown);
     tokio::pin!(quiescence);
     let mut quiescent_received = false;
 
     loop {
-        // Skip long polling for the drain pass after quiescence — we just want
-        // to check for remaining data, not wait for new writes.
-        let effective_timeout = if quiescent_received { None } else { params.poll_timeout_ms };
-
-        // When long polling is active in UntilQuiescent mode, race the cursor request
-        // against shutdown/quiescence so we react immediately instead of blocking for
-        // up to poll_timeout_ms. Without long polling, signals are checked in the
-        // post-processing section (original behavior).
-        let log_response = if params.mode == StreamMode::UntilQuiescent && effective_timeout.is_some() {
-            let cursor_fut = client.logs_cursor(
-                params.config_path, params.service, cursor_id.as_deref(),
-                from_start, params.no_hooks, effective_timeout,
-            );
-            tokio::pin!(cursor_fut);
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => {
-                    return Ok(StreamExitReason::ShutdownRequested);
-                }
-                _ = &mut quiescence, if !quiescent_received => {
-                    quiescent_received = true;
-                    // The daemon's cursor is a server-side mutable iterator:
-                    // read_entries() advances the position immediately. If a
-                    // log write already notified the long-poll handler, the
-                    // daemon may have read and advanced past the new data.
-                    // Dropping cursor_fut would lose that data. Wait briefly
-                    // for the response; if it truly hasn't arrived yet (the
-                    // handler is still blocked), the timeout fires and we
-                    // fall through to the drain pass with the cursor intact.
-                    match tokio::time::timeout(
-                        Duration::from_millis(500),
-                        &mut cursor_fut,
-                    ).await {
-                        Ok(resp) => resp,
-                        Err(_) => continue,
-                    }
-                }
-                resp = &mut cursor_fut => resp,
-            }
-        } else {
-            client.logs_cursor(
-                params.config_path, params.service, cursor_id.as_deref(),
-                from_start, params.no_hooks, effective_timeout,
-            ).await
-        };
+        let log_response = client.logs_stream(
+            params.config_path, params.service, last_id,
+            from_end && last_id.is_none(), params.limit, params.no_hooks,
+            params.filter, params.raw, params.tail,
+        ).await;
 
         let has_more_data;
         match log_response {
             Ok(response) => match response {
                 Response::Ok {
-                    data: Some(ResponseData::LogCursor(LogCursorData {
+                    data: Some(ResponseData::LogStream(LogStreamData {
                         service_table,
                         entries,
-                        cursor_id: new_cursor_id,
+                        last_id: new_last_id,
                         has_more,
                     })),
                     ..
                 } => {
-                    cursor_id = Some(new_cursor_id);
-                    has_more_data = has_more;
+                    last_id = Some(new_last_id);
+                    // has_more but empty entries means data is pending flush —
+                    // treat as "no more readable data" so we wait for notification
+                    has_more_data = has_more && !entries.is_empty();
                     if !entries.is_empty() {
                         on_batch(&service_table, &entries);
                     }
                 }
                 Response::Error { message } => {
-                    if message.starts_with("Cursor expired or invalid") {
-                        cursor_id = None;
-                        continue;
-                    }
-                    // In UntilQuiescent mode, "Config not loaded" means either:
-                    // 1. Startup race: config not loaded YET → retry
-                    // 2. Config was unloaded (stop --clean) → quiescence future fires
-                    if params.mode == StreamMode::UntilQuiescent && message == "Config not loaded" {
-                        if quiescent_received {
-                            // Config unloaded and quiescence already signaled — nothing left to drain.
-                            break;
-                        }
-                        tokio::select! {
-                            biased;
-                            _ = &mut shutdown => {
-                                return Ok(StreamExitReason::ShutdownRequested);
+                    if message == "Config not loaded" {
+                        // In UntilQuiescent mode, this means either:
+                        // 1. Startup race: config not loaded YET → retry
+                        // 2. Config was unloaded (stop --clean) → quiescence future fires
+                        if params.mode == StreamMode::UntilQuiescent {
+                            if quiescent_received {
+                                // Config unloaded and quiescence already signaled — nothing left to drain.
+                                break;
                             }
-                            _ = &mut quiescence, if !quiescent_received => {
-                                // Config was loaded, services ran and finished.
-                                // Continue to drain any logs written during execution.
-                                quiescent_received = true;
-                                continue;
+                            tokio::select! {
+                                biased;
+                                _ = &mut shutdown => {
+                                    return Ok(StreamExitReason::ShutdownRequested);
+                                }
+                                _ = &mut quiescence, if !quiescent_received => {
+                                    // Config was loaded, services ran and finished.
+                                    // Continue to drain any logs written during execution.
+                                    quiescent_received = true;
+                                    continue;
+                                }
+                                _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
                             }
-                            _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
                         }
+                        // For non-follow modes (All, Tail, Head), "Config not loaded" simply
+                        // means there are no logs — return empty results, not an error.
+                        break;
                     }
                     eprintln!("Error: {}", message);
-                    break;
+                    return Ok(StreamExitReason::ServerError);
                 }
                 _ => {
                     has_more_data = false;
@@ -1468,40 +1450,40 @@ async fn stream_cursor_logs(
                     break;
                 }
             }
-            StreamMode::Follow => {
-                // When long polling is active, the server already waited — no client-side sleep needed
-                if !has_more_data && params.poll_timeout_ms.is_none() {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-            StreamMode::UntilQuiescent => {
+            StreamMode::Follow | StreamMode::UntilQuiescent => {
                 // After quiescence signaled and all logs drained, exit.
-                // Only break when this iteration was a proper drain pass
-                // (effective_timeout=None), not when quiescence just arrived
-                // during an in-flight long-poll whose response may be stale.
-                if quiescent_received && !has_more_data && effective_timeout.is_none() {
+                if quiescent_received && !has_more_data {
                     break;
                 }
-                // When long polling is active, signals are already checked during
-                // the cursor call (select! racing). Without long polling, check
-                // signals between iterations with a rate-limiting sleep.
-                if effective_timeout.is_none() {
-                    let delay = if has_more_data {
-                        Duration::ZERO
-                    } else {
-                        Duration::from_millis(100)
-                    };
+                // If there's more data, fetch immediately — but check shutdown first
+                if has_more_data {
                     tokio::select! {
                         biased;
                         _ = &mut shutdown => {
                             return Ok(StreamExitReason::ShutdownRequested);
                         }
-                        _ = &mut quiescence, if !quiescent_received => {
-                            quiescent_received = true;
-                            continue;
-                        }
-                        _ = tokio::time::sleep(delay) => {}
+                        _ = std::future::ready(()) => {}
                     }
+                    continue;
+                }
+                // Wait for new logs notification, shutdown, quiescence, or 2s fallback
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown => {
+                        return Ok(StreamExitReason::ShutdownRequested);
+                    }
+                    _ = &mut quiescence, if !quiescent_received => {
+                        quiescent_received = true;
+                        continue;
+                    }
+                    _ = async { if let Some(rx) = log_notify.as_mut() { rx.recv().await; } else { std::future::pending::<()>().await; } } => {
+                        // Drain any additional queued notifications to avoid redundant requests.
+                        // This channel is dedicated to SubscribeLogs and only receives LogsAvailable.
+                        if let Some(rx) = log_notify.as_mut() {
+                            while rx.try_recv().is_ok() {}
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
                 }
             }
         }
@@ -1511,10 +1493,10 @@ async fn stream_cursor_logs(
 }
 
 
-/// Write a batch of cursor log entries to stdout using BufWriter.
-fn write_cursor_batch(
+/// Write a batch of stream log entries to stdout using BufWriter.
+fn write_log_batch(
     service_table: &[Arc<str>],
-    entries: &[CursorLogEntry],
+    entries: &[StreamLogEntry],
     color_map: &mut HashMap<String, Color>,
     cached_ts_secs: &mut i64,
     cached_ts_str: &mut String,
@@ -1525,7 +1507,7 @@ fn write_cursor_batch(
 
     for entry in entries {
         let service_name = &service_table[entry.service_id as usize];
-        let stream_prefix = if entry.stream.is_stderr() { "err" } else { "out" };
+        let level = format_log_level(&entry.level);
         let secs = entry.timestamp / 1000;
 
         if secs != *cached_ts_secs {
@@ -1540,14 +1522,33 @@ fn write_cursor_batch(
             }
         }
 
+        let source = match &entry.hook {
+            Some(hook) => format!("{}.{}", service_name, hook),
+            None => service_name.to_string(),
+        };
+
         if use_color {
-            let color = get_service_color(service_name, color_map);
-            let service_label = format!("[{}: {}]", stream_prefix, service_name);
-            let colored_service = service_label.color(color);
-            let _ = writeln!(out, "{} {} | {}", cached_ts_str, colored_service, entry.line);
+            let svc_color = get_service_color(service_name, color_map);
+            let lvl_color = level_color(&entry.level);
+            let _ = writeln!(
+                out, "{} [{}] {} | {}",
+                cached_ts_str,
+                level.color(lvl_color).bold(),
+                source.color(svc_color),
+                entry.line,
+            );
         } else {
-            let _ = writeln!(out, "{} [{}: {}] | {}", cached_ts_str, stream_prefix, service_name, entry.line);
+            let _ = writeln!(out, "{} [{}] {} | {}", cached_ts_str, level, source, entry.line);
         }
+    }
+}
+
+/// Write raw log lines (no formatting) to stdout using BufWriter.
+fn write_log_batch_raw(entries: &[StreamLogEntry]) {
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
+    for entry in entries {
+        let _ = writeln!(out, "{}", entry.line);
     }
 }
 
@@ -1630,8 +1631,9 @@ async fn follow_logs_until_quiescent(
     service: Option<&str>,
     abort_on_failure: bool,
     start_acknowledged: Arc<AtomicBool>,
+    raw: bool,
 ) -> Result<()> {
-    let use_color = colored::control::SHOULD_COLORIZE.should_colorize();
+    let use_color = !raw && colored::control::SHOULD_COLORIZE.should_colorize();
     let mut color_map: HashMap<String, Color> = HashMap::new();
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
@@ -1651,6 +1653,9 @@ async fn follow_logs_until_quiescent(
 
     // Spawn quiescence monitor task
     tokio::spawn(quiescence_monitor(progress_rx, signal_tx, Arc::clone(&seen_non_terminal), Arc::clone(&start_acknowledged)));
+
+    // Subscribe to log-available notifications
+    let log_notify_rx = client.subscribe_logs(config_path.to_path_buf()).await.ok();
 
     // Track whether any unhandled failure was seen
     let mut has_unhandled_failure = false;
@@ -1704,19 +1709,27 @@ async fn follow_logs_until_quiescent(
         *quiescence_result_clone.lock().unwrap() = result;
     };
 
-    let exit_reason = stream_cursor_logs(
+    let exit_reason = stream_logs(
         client,
-        StreamCursorParams {
+        StreamParams {
             config_path,
             service,
             no_hooks: false,
             mode: StreamMode::UntilQuiescent,
-            poll_timeout_ms: Some(2000),
+            limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE,
+            filter: None,
+            raw,
+            tail: false,
         },
         async { let _ = tokio::signal::ctrl_c().await; },
         quiescence_wrapper,
+        log_notify_rx,
         |service_table, entries| {
-            write_cursor_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
+            if raw {
+                write_log_batch_raw(entries);
+            } else {
+                write_log_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
+            }
         },
     )
     .await?;
@@ -1771,68 +1784,52 @@ async fn handle_logs(
     service: Option<String>,
     follow: bool,
     lines: usize,
-    mode: LogMode,
+    tail: bool,
     no_hooks: bool,
+    raw: bool,
 ) -> Result<()> {
+    let use_color = !raw && colored::control::SHOULD_COLORIZE.should_colorize();
     let mut color_map: HashMap<String, Color> = HashMap::new();
-
-    // For head/tail modes, use one-shot request
-    if mode == LogMode::Head || mode == LogMode::Tail {
-        let (_progress_rx, response_future) = client
-            .logs(config_path.clone(), service.clone(), false, lines, mode, no_hooks)?;
-        let response = response_future.await?;
-
-        let entries = match response {
-            Response::Ok {
-                data: Some(ResponseData::Logs(entries)),
-                ..
-            } => entries,
-            Response::Ok {
-                data: Some(ResponseData::LogChunk(chunk)),
-                ..
-            } => chunk.entries,
-            Response::Error { message } => {
-                eprintln!("Error: {}", message);
-                std::process::exit(1);
-            }
-            _ => {
-                println!("No logs available");
-                return Ok(());
-            }
-        };
-
-        for entry in &entries {
-            print_log_entry(entry, &mut color_map);
-        }
-
-        return Ok(());
-    }
-
-    // For 'all' mode (default) and 'follow' mode, use cursor-based streaming
-    let stream_mode = if follow { StreamMode::UntilQuiescent } else { StreamMode::All };
-    let use_color = colored::control::SHOULD_COLORIZE.should_colorize();
     let mut cached_ts_secs: i64 = i64::MIN;
     let mut cached_ts_str = String::new();
 
-    // Use long polling for follow modes (Follow/UntilQuiescent), not for All mode
-    let poll_timeout_ms = if stream_mode != StreamMode::All { Some(2000) } else { None };
+    let stream_mode = if follow { StreamMode::UntilQuiescent } else { StreamMode::All };
 
-    stream_cursor_logs(
+    // Subscribe to log-available notifications for follow modes
+    let log_notify_rx = if stream_mode != StreamMode::All {
+        client.subscribe_logs(config_path.clone()).await.ok()
+    } else {
+        None
+    };
+
+    let exit_reason = stream_logs(
         client,
-        StreamCursorParams {
+        StreamParams {
             config_path: &config_path,
             service: service.as_deref(),
             no_hooks,
             mode: stream_mode,
-            poll_timeout_ms,
+            limit: lines,
+            filter: None, // TODO: wire --filter CLI flag
+            raw,
+            tail,
         },
         std::future::pending(),
         std::future::pending(),
+        log_notify_rx,
         |service_table, entries| {
-            write_cursor_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
+            if raw {
+                write_log_batch_raw(entries);
+            } else {
+                write_log_batch(service_table, entries, &mut color_map, &mut cached_ts_secs, &mut cached_ts_str, use_color);
+            }
         },
     )
     .await?;
+
+    if exit_reason == StreamExitReason::ServerError {
+        std::process::exit(1);
+    }
 
     Ok(())
 }
@@ -1884,28 +1881,29 @@ fn get_service_color(service: &str, color_map: &mut HashMap<String, Color>) -> C
     color
 }
 
-fn print_log_entry(entry: &LogEntry, color_map: &mut HashMap<String, Color>) {
-    let timestamp_str = entry
-        .timestamp
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .map(|dt| {
-            let local: DateTime<Local> = dt.into();
-            local.format("%Y-%m-%d %H:%M:%S").to_string()
-        })
-        .unwrap_or_default();
+/// Format a log level string for CLI display (full uppercase).
+fn format_log_level(level: &str) -> &'static str {
+    match level {
+        "trace" => "TRACE",
+        "debug" => "DEBUG",
+        "info" | "out" => "INFO",
+        "warn" => "WARN",
+        "error" | "err" => "ERROR",
+        "fatal" => "FATAL",
+        _ => "INFO",
+    }
+}
 
-    let color = get_service_color(&entry.service, color_map);
-    let stream_prefix = if entry.stream.is_stderr() { "err" } else { "out" };
-    let service_label = format!("[{}: {}]", stream_prefix, entry.service);
-    let colored_service = service_label.color(color);
-
-    if timestamp_str.is_empty() {
-        println!("{} | {}", colored_service, entry.line);
-    } else {
-        println!(
-            "{} {} | {}",
-            timestamp_str, colored_service, entry.line
-        );
+/// Color associated with a log level (convention-aligned).
+fn level_color(level: &str) -> Color {
+    match level {
+        "trace" => Color::BrightBlack,   // gray
+        "debug" => Color::Blue,          // blue
+        "info" | "out" => Color::Green,  // green
+        "warn" => Color::Yellow,         // yellow
+        "error" | "err" => Color::Red,   // red
+        "fatal" => Color::BrightRed,     // bright red
+        _ => Color::Green,
     }
 }
 

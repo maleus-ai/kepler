@@ -2,6 +2,15 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// jemalloc configuration: don't retain virtual memory mappings after freeing.
+/// Without this, jemalloc keeps freed mappings (madvise'd MADV_DONTNEED) for reuse,
+/// which inflates VIRT in monitoring tools. With retain:false, freed extents are
+/// munmap'd, reducing virtual memory at the cost of extra mmap syscalls on re-allocation.
+#[cfg(all(feature = "jemalloc", not(feature = "dhat-heap")))]
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static malloc_conf: &[u8] = b"retain:false\0";
+
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -9,10 +18,9 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 use kepler_daemon::config_actor::context::ConfigEvent;
 use kepler_daemon::config_registry::{ConfigRegistry, SharedConfigRegistry};
 use kepler_daemon::containment::ContainmentManager;
-use kepler_daemon::cursor::CursorManager;
 use kepler_daemon::errors::DaemonError;
 use kepler_daemon::hardening::HardeningLevel;
-use kepler_daemon::logs::LogReader;
+use kepler_daemon::logs::SqliteLogReader;
 use kepler_daemon::orchestrator::ServiceOrchestrator;
 use kepler_daemon::persistence::ConfigPersistence;
 use kepler_daemon::process::{kill_process_by_pid, parse_signal_name, validate_running_process, ProcessExitEvent};
@@ -20,7 +28,7 @@ use kepler_daemon::state::{ServiceState, ServiceStatus};
 use kepler_daemon::watcher::FileChangeEvent;
 use kepler_daemon::token_store::{SharedTokenStore, TokenStore};
 use kepler_daemon::Daemon;
-use kepler_protocol::protocol::{LogMode, ProgressEvent, Request, Response, ResponseData, ServiceInfo, ServicePhase, ServiceTarget};
+use kepler_protocol::protocol::{ProgressEvent, Request, Response, ResponseData, ServiceInfo, ServicePhase, ServiceTarget};
 use kepler_protocol::server::{PeerCredentials, ProgressSender, Server};
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -555,13 +563,8 @@ async fn main() -> anyhow::Result<()> {
     // Using 500 capacity to handle rapid file changes
     let (restart_tx, restart_rx) = mpsc::channel::<FileChangeEvent>(500);
 
-    // Create CursorManager for log streaming
-    // TTL configurable via KEPLER_CURSOR_TTL env var (default 10 seconds)
-    let cursor_ttl_seconds = std::env::var("KEPLER_CURSOR_TTL")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(10);
-    let cursor_manager = Arc::new(CursorManager::new(cursor_ttl_seconds));
+    // Log notifiers for long-polling (per-config Notify)
+    let log_notifiers: kepler_daemon::orchestrator::LogNotifiers = Arc::new(DashMap::new());
 
     // Create token-based permission store
     let token_store: SharedTokenStore = Arc::new(TokenStore::new());
@@ -569,7 +572,7 @@ async fn main() -> anyhow::Result<()> {
     // Detect process containment strategy (cgroup v2 on Linux, killpg fallback otherwise)
     let containment = ContainmentManager::detect();
 
-    // Create ServiceOrchestrator (needs cursor_manager to invalidate cursors on stop --clean)
+    // Create ServiceOrchestrator
     #[cfg(unix)]
     let kepler_gid_for_orchestrator = Some(kepler_gid);
     #[cfg(not(unix))]
@@ -578,27 +581,17 @@ async fn main() -> anyhow::Result<()> {
         registry.clone(),
         exit_tx.clone(),
         restart_tx.clone(),
-        cursor_manager.clone(),
+        log_notifiers.clone(),
         hardening,
         kepler_gid_for_orchestrator,
         token_store.clone(),
         containment.clone(),
     ));
 
-    // Spawn cursor cleanup task (runs every 5 seconds)
-    let cleanup_manager = cursor_manager.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
-        loop {
-            interval.tick().await;
-            cleanup_manager.cleanup_stale();
-        }
-    });
-
     // Clone orchestrator for handler
     let handler_orchestrator = orchestrator.clone();
     let handler_registry = registry.clone();
-    let handler_cursor_manager = cursor_manager.clone();
+    let handler_log_notifiers = log_notifiers.clone();
     let handler_token_store = token_store.clone();
     let unloaded_acl_cache: UnloadedAclCache = Arc::new(DashMap::new());
     let handler_unloaded_acl_cache = unloaded_acl_cache.clone();
@@ -609,19 +602,18 @@ async fn main() -> anyhow::Result<()> {
     let handler = move |request: Request, shutdown_tx: mpsc::Sender<()>, progress: ProgressSender, peer: PeerCredentials| {
         let orchestrator = handler_orchestrator.clone();
         let registry = handler_registry.clone();
-        let cursor_manager = handler_cursor_manager.clone();
+        let log_notifiers = handler_log_notifiers.clone();
         let token_store = handler_token_store.clone();
         let unloaded_acl_cache = handler_unloaded_acl_cache.clone();
         async move {
             handle_request(
-                request, orchestrator, registry, cursor_manager,
+                request, orchestrator, registry, log_notifiers,
                 shutdown_tx, progress, peer, token_store,
                 handler_kepler_gid, unloaded_acl_cache,
             ).await
         }
     };
 
-    // Create server with on_disconnect callback to clean up cursors
     let socket_path = Daemon::get_socket_path().unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
@@ -659,11 +651,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let disconnect_cursor_manager = cursor_manager.clone();
-    let server = Server::new(socket_path.clone(), handler)?
-        .with_on_disconnect(move |connection_id| {
-            disconnect_cursor_manager.invalidate_connection_cursors(connection_id);
-        });
+    let server = Server::new(socket_path.clone(), handler)?;
 
     if let Some(fd_count) = kepler_daemon::fd_count::count_open_fds() {
         info!("FD count before config discovery: {}", fd_count);
@@ -743,9 +731,8 @@ fn extract_config_path(request: &Request) -> Option<&PathBuf> {
         | Request::Stop { config_path, .. }
         | Request::Restart { config_path, .. }
         | Request::Recreate { config_path, .. }
-        | Request::Logs { config_path, .. }
-        | Request::LogsChunk { config_path, .. }
-        | Request::LogsCursor { config_path, .. }
+        | Request::LogsStream { config_path, .. }
+        | Request::SubscribeLogs { config_path, .. }
         | Request::Subscribe { config_path, .. }
         | Request::CheckQuiescence { config_path, .. }
         | Request::CheckReadiness { config_path, .. } => Some(config_path),
@@ -760,7 +747,7 @@ async fn handle_request(
     mut request: Request,
     orchestrator: Arc<ServiceOrchestrator>,
     registry: SharedConfigRegistry,
-    cursor_manager: Arc<CursorManager>,
+    log_notifiers: kepler_daemon::orchestrator::LogNotifiers,
     shutdown_tx: mpsc::Sender<()>,
     progress: ProgressSender,
     peer: PeerCredentials,
@@ -927,6 +914,16 @@ async fn handle_request(
                 None => None,
             };
 
+            // For full clean shutdown, set the discard flag on the log store
+            // immediately — before progress tracking or stop_services(). This
+            // bypasses the config actor's message queue and also interrupts any
+            // ongoing SQLite query (e.g. from a concurrent `stop` command).
+            if clean && service.is_none() {
+                if let Some(handle) = registry.get(&config_path) {
+                    handle.shutdown_discard_log_store();
+                }
+            }
+
             // Get handle + config for progress tracking
             let progress_handle = registry.get(&config_path);
             let (tracked_services, clean_services, state_rx) = match &progress_handle {
@@ -1048,6 +1045,9 @@ async fn handle_request(
                     }).await;
                 }
             }
+
+            // Drop progress handle (releases its LogStoreHandle clone)
+            drop(progress_handle);
 
             match result {
                 Ok(msg) => Response::ok_with_message(msg),
@@ -1238,41 +1238,6 @@ async fn handle_request(
             }
         },
 
-        Request::Logs {
-            config_path,
-            service,
-            follow: _,
-            lines,
-            max_bytes,
-            mode,
-            no_hooks,
-        } => {
-            let config_path = match canonicalize_config_path(config_path) {
-                Ok(p) => p,
-                Err(e) => return Response::error(e.to_string()),
-            };
-
-            match registry.get(&config_path) {
-                Some(handle) => {
-                    let entries = handle.get_logs_with_mode(service, lines, max_bytes, mode, no_hooks).await;
-                    Response::ok_with_data(ResponseData::Logs(entries))
-                }
-                None => {
-                    let entries = if let Some(state_dir) = compute_state_dir(&config_path) {
-                        let reader = LogReader::new(state_dir.join("logs"));
-                        match mode {
-                            LogMode::Head => reader.head(lines, service.as_deref(), no_hooks),
-                            LogMode::Tail => reader.tail_bounded(lines, service.as_deref(), max_bytes, no_hooks),
-                            LogMode::All => reader.iter(service.as_deref(), no_hooks).take(lines).collect(),
-                        }.into_iter().map(|l| l.into()).collect()
-                    } else {
-                        Vec::new()
-                    };
-                    Response::ok_with_data(ResponseData::Logs(entries))
-                }
-            }
-        }
-
         Request::ListConfigs => {
             let handles = registry.all_handles();
             // Filter by ACL read access
@@ -1297,44 +1262,6 @@ async fn handle_request(
             Response::ok_with_data(ResponseData::ConfigList(configs))
         }
 
-        Request::LogsChunk {
-            config_path,
-            service,
-            offset,
-            limit,
-            no_hooks,
-        } => {
-            use kepler_protocol::protocol::LogChunkData;
-
-            let config_path = match canonicalize_config_path(config_path) {
-                Ok(p) => p,
-                Err(e) => return Response::error(e.to_string()),
-            };
-
-            // Use true pagination - reads efficiently from disk with offset/limit
-            let (entries, has_more) = match registry.get(&config_path) {
-                Some(handle) => handle.get_logs_paginated(service, offset, limit, no_hooks).await,
-                None => {
-                    if let Some(state_dir) = compute_state_dir(&config_path) {
-                        let reader = LogReader::new(state_dir.join("logs"));
-                        let (logs, has_more) = reader.get_paginated(service.as_deref(), offset, limit, no_hooks);
-                        (logs.into_iter().map(|l| l.into()).collect(), has_more)
-                    } else {
-                        (Vec::new(), false)
-                    }
-                }
-            };
-
-            let next_offset = offset + entries.len();
-
-            Response::ok_with_data(ResponseData::LogChunk(LogChunkData {
-                entries,
-                has_more,
-                next_offset,
-                total: None,
-            }))
-        }
-
         Request::Prune { force, dry_run } => {
             // Daemon-level ops are root-only
             if !matches!(auth_ctx, kepler_daemon::auth::AuthContext::Root { .. }) {
@@ -1355,119 +1282,140 @@ async fn handle_request(
             }
         }
 
-        Request::LogsCursor {
+        Request::LogsStream {
             config_path,
             service,
-            cursor_id,
-            from_start,
+            after_id,
+            from_end,
+            limit,
             no_hooks,
-            poll_timeout_ms,
+            filter,
+            raw,
+            tail,
         } => {
-            use kepler_protocol::protocol::{CursorLogEntry, LogCursorData};
-            use tokio::time::Instant;
+            use kepler_protocol::protocol::{StreamLogEntry, LogStreamData};
 
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
 
-            // Get logs directory from config actor, or fall back to disk
-            let logs_dir = match registry.get(&config_path) {
-                Some(handle) => match handle.get_log_config().await {
-                    Some(config) => config.logs_dir,
+            // Get log store info from config actor, or fall back to disk.
+            let (db_path, storage_mode, has_pending) = match registry.get(&config_path) {
+                Some(handle) => match handle.get_log_store().await {
+                    Some(store) => {
+                        (store.db_path().to_path_buf(), store.storage_mode(), store.has_pending())
+                    }
                     None => return Response::error("Config not loaded"),
                 },
                 None => match compute_state_dir(&config_path) {
-                    Some(state_dir) => state_dir.join("logs"),
+                    Some(state_dir) => (state_dir.join("logs").join("logs.db"), kepler_daemon::config::StorageMode::Local, false),
                     None => return Response::error("Config not loaded"),
                 },
             };
 
-            // Create new cursor or use existing one
-            let cursor_id = match cursor_id {
-                Some(id) => id,
-                None => cursor_manager.create_cursor(
-                    config_path.clone(),
-                    logs_dir,
-                    service,
-                    from_start,
-                    no_hooks,
-                    peer.connection_id,
-                ),
-            };
+            let reader = SqliteLogReader::new(db_path, storage_mode);
 
-            // Read entries from cursor
-            let (entries, has_more) = match cursor_manager.read_entries(&cursor_id, &config_path) {
-                Ok(result) => result,
-                Err(e) => return Response::error(e.to_string()),
-            };
-
-            // If no data and poll_timeout_ms is set, wait for notification
-            let (entries, has_more) = if entries.is_empty() && !has_more {
-                if let Some(timeout_ms) = poll_timeout_ms {
-                    let notify = cursor_manager.get_log_notify(&config_path);
-                    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-                    let mut final_entries = entries;
-                    let mut final_has_more = has_more;
-                    loop {
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        if remaining.is_zero() || progress.is_closed() {
-                            break;
-                        }
-                        tokio::select! {
-                            _ = notify.notified() => {}
-                            _ = tokio::time::sleep(remaining) => { break; }
-                        }
-                        match cursor_manager.read_entries(&cursor_id, &config_path) {
-                            Ok((entries, has_more)) if !entries.is_empty() || has_more => {
-                                final_entries = entries;
-                                final_has_more = has_more;
-                                break;
-                            }
-                            Err(e) => return Response::error(e.to_string()),
-                            _ => {} // spurious wake — continue waiting
-                        }
-                    }
-                    (final_entries, final_has_more)
-                } else {
-                    (entries, has_more)
-                }
+            let (entries, has_more, last_id) = if tail {
+                // Tail mode: return last `limit` entries in chronological order
+                let entries = reader.tail(limit, service.as_deref(), no_hooks);
+                let last_id = entries.last().map(|e| e.id).unwrap_or(0);
+                (entries, has_pending, last_id)
             } else {
-                (entries, has_more)
+                // Determine the starting position
+                let effective_after_id = match after_id {
+                    Some(id) => id,
+                    None if from_end => reader.max_id(),
+                    None => 0,
+                };
+
+                // Read entries
+                let (entries, has_more) = match reader.after(effective_after_id, limit, service.as_deref(), no_hooks, filter.as_deref()) {
+                    Ok(r) => r,
+                    Err(e) => return Response::error(format!("invalid filter: {}", e)),
+                };
+
+                // Compute last_id from entries (or keep effective_after_id if empty)
+                let last_id = entries.last().map(|e| e.id).unwrap_or(effective_after_id);
+                (entries, has_more || has_pending, last_id)
             };
 
             // Build service table and compact entries with u16 service_id
-            let mut service_table: Vec<Arc<str>> = Vec::new();
-            let mut service_map: HashMap<Arc<str>, u16> = HashMap::new();
             let mut compact_entries = Vec::with_capacity(entries.len());
 
-            for log_line in entries {
-                let service_id = match service_map.get(&log_line.service) {
-                    Some(&id) => id,
-                    None => {
-                        let id = service_table.len() as u16;
-                        service_table.push(Arc::clone(&log_line.service));
-                        service_map.insert(Arc::clone(&log_line.service), id);
-                        id
+            if raw {
+                // Raw mode: only line content, skip metadata to reduce payload
+                let empty_level: Arc<str> = Arc::from("");
+                for log_line in entries {
+                    compact_entries.push(StreamLogEntry {
+                        service_id: 0,
+                        line: log_line.line,
+                        timestamp: 0,
+                        level: Arc::clone(&empty_level),
+                        hook: None,
+                        attributes: None,
+                    });
+                }
+                Response::ok_with_data(ResponseData::LogStream(LogStreamData {
+                    service_table: Vec::new(),
+                    entries: compact_entries,
+                    last_id,
+                    has_more,
+                }))
+            } else {
+                let mut service_table: Vec<Arc<str>> = Vec::new();
+                let mut service_map: HashMap<Arc<str>, u16> = HashMap::new();
+                for log_line in entries {
+                    let service_id = match service_map.get(&log_line.service) {
+                        Some(&id) => id,
+                        None => {
+                            let id = service_table.len() as u16;
+                            service_table.push(Arc::clone(&log_line.service));
+                            service_map.insert(Arc::clone(&log_line.service), id);
+                            id
+                        }
+                    };
+                    compact_entries.push(StreamLogEntry {
+                        service_id,
+                        line: log_line.line,
+                        timestamp: log_line.timestamp,
+                        level: log_line.level,
+                        hook: log_line.hook,
+                        attributes: log_line.attributes.map(Arc::from),
+                    });
+                }
+                Response::ok_with_data(ResponseData::LogStream(LogStreamData {
+                    service_table,
+                    entries: compact_entries,
+                    last_id,
+                    has_more,
+                }))
+            }
+        }
+
+        Request::SubscribeLogs { config_path } => {
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+
+            // Get or create the log notify for this config
+            let notify = log_notifiers
+                .entry(config_path.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+                .clone();
+
+            // Push LogsAvailable events until client disconnects
+            loop {
+                tokio::select! {
+                    _ = notify.notified() => {
+                        progress.send_logs_available().await;
                     }
-                };
-                compact_entries.push(CursorLogEntry {
-                    service_id,
-                    line: log_line.line,
-                    timestamp: log_line.timestamp,
-                    stream: match log_line.stream {
-                        kepler_daemon::logs::LogStream::Stdout => kepler_protocol::protocol::StreamType::Stdout,
-                        kepler_daemon::logs::LogStream::Stderr => kepler_protocol::protocol::StreamType::Stderr,
-                    },
-                });
+                    _ = progress.closed() => break,
+                }
             }
 
-            Response::ok_with_data(ResponseData::LogCursor(LogCursorData {
-                service_table,
-                entries: compact_entries,
-                cursor_id,
-                has_more,
-            }))
+            Response::ok_with_message("Log subscription ended")
         }
 
         Request::Subscribe {
@@ -2607,6 +2555,7 @@ mod tests {
             timeout: None,
             output_max_size: None,
             autostart: Default::default(),
+            storage: Default::default(),
             acl,
         });
         let config = KeplerConfig {
@@ -2764,11 +2713,11 @@ mod tests {
         let cache = new_acl_cache();
         save_state_with_owner(state_dir, Some(1000));
 
-        // ACL grants config:status + service:logs
+        // ACL grants config:status + logs:read
         let acl = AclConfig {
             users: HashMap::from([(
                 "2000".to_string(),
-                AclRule { allow: vec!["config:status".to_string(), "service:logs".to_string()] },
+                AclRule { allow: vec!["config:status".to_string(), "logs:read".to_string()] },
             )]),
             groups: HashMap::new(),
         };

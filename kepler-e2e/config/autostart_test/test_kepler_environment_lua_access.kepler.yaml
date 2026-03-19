@@ -2,8 +2,6 @@ kepler:
   autostart:
     environment:
       - KEPLER_TEST_VAR=lua_test_value
-  logs:
-    buffer_size: 0
 
 services:
   lua-checker:
