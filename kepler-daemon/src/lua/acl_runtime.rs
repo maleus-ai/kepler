@@ -510,11 +510,10 @@ pub fn build_authorizer_context(
             ("recreate", params)
         }
         Request::LogsStream {
-            service, filter, ..
+            services, filter, ..
         } => {
             let mut params = HashMap::new();
-            let services: Vec<String> = service.iter().cloned().collect();
-            params.insert("services".into(), ParamValue::StringList(services));
+            params.insert("services".into(), ParamValue::StringList(services.clone()));
             if let Some(f) = filter {
                 params.insert("filter".into(), ParamValue::String(f.clone()));
             }

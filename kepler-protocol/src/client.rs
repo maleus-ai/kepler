@@ -302,7 +302,7 @@ impl Client {
     pub fn logs_stream(
         &self,
         config_path: &Path,
-        service: Option<&str>,
+        services: &[String],
         after_id: Option<i64>,
         from_end: bool,
         limit: usize,
@@ -313,7 +313,7 @@ impl Client {
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::LogsStream {
             config_path: config_path.to_path_buf(),
-            service: service.map(String::from),
+            services: services.to_vec(),
             after_id,
             from_end,
             limit,

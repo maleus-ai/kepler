@@ -91,8 +91,9 @@ pub enum Commands {
     },
     /// View service logs
     Logs {
-        /// Specific service to view logs for (shows all if not specified)
-        service: Option<String>,
+        /// Services to view logs for (shows all if none specified)
+        #[arg(value_name = "SERVICE")]
+        services: Vec<String>,
 
         /// Follow log output (use --follow, -f is reserved for --file)
         #[arg(long)]

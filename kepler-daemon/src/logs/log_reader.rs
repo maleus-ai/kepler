@@ -20,13 +20,13 @@ impl LogReader {
     }
 
     /// Get the last N entries (newest, returned in chronological order).
-    pub fn tail(&self, count: usize, service: Option<&str>, no_hooks: bool) -> Vec<LogLine> {
+    pub fn tail(&self, count: usize, services: &[String], no_hooks: bool) -> Vec<LogLine> {
         let conn = match open_readonly(&self.db_path) {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
 
-        let (where_clause, bind) = build_filter(service, no_hooks, None);
+        let (where_clause, bind) = build_filter(services, no_hooks, None);
         let sql = format!(
             "SELECT * FROM (SELECT id, timestamp, service, hook, level, line, attributes \
              FROM logs {where_clause} ORDER BY id DESC LIMIT ?{next}) ORDER BY id ASC",
@@ -38,13 +38,13 @@ impl LogReader {
     }
 
     /// Get the first N entries in chronological order.
-    pub fn head(&self, count: usize, service: Option<&str>, no_hooks: bool) -> Vec<LogLine> {
+    pub fn head(&self, count: usize, services: &[String], no_hooks: bool) -> Vec<LogLine> {
         let conn = match open_readonly(&self.db_path) {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
 
-        let (where_clause, bind) = build_filter(service, no_hooks, None);
+        let (where_clause, bind) = build_filter(services, no_hooks, None);
         let sql = format!(
             "SELECT id, timestamp, service, hook, level, line, attributes \
              FROM logs {where_clause} ORDER BY id ASC LIMIT ?{next}",
@@ -64,7 +64,7 @@ impl LogReader {
         &self,
         after_id: i64,
         limit: usize,
-        service: Option<&str>,
+        services: &[String],
         no_hooks: bool,
         filter: Option<&str>,
     ) -> Result<(Vec<LogLine>, bool), String> {
@@ -83,7 +83,7 @@ impl LogReader {
             super::filter::apply_filter_safeguards(&conn, super::filter::FILTER_QUERY_TIMEOUT);
         }
 
-        let (filter_clause, mut bind) = build_filter(service, no_hooks, filter);
+        let (filter_clause, mut bind) = build_filter(services, no_hooks, filter);
         // Combine id > ? with existing filters
         let where_clause = if filter_clause.is_empty() {
             "WHERE id > ?1".to_string()
@@ -114,11 +114,11 @@ impl LogReader {
     pub fn tail_bounded(
         &self,
         count: usize,
-        service: Option<&str>,
+        services: &[String],
         max_bytes: Option<usize>,
         no_hooks: bool,
     ) -> Vec<LogLine> {
-        let entries = self.tail(count, service, no_hooks);
+        let entries = self.tail(count, services, no_hooks);
         match max_bytes {
             Some(budget) => {
                 let mut total = 0usize;
@@ -176,16 +176,26 @@ enum BindValue {
 }
 
 fn build_filter(
-    service: Option<&str>,
+    services: &[String],
     no_hooks: bool,
     filter: Option<&str>,
 ) -> (String, Vec<BindValue>) {
     let mut conditions = Vec::new();
     let mut bind = Vec::new();
 
-    if let Some(svc) = service {
-        bind.push(BindValue::Text(svc.to_string()));
-        conditions.push(format!("service = ?{}", bind.len()));
+    match services.len() {
+        0 => {} // no service filter — return all
+        1 => {
+            bind.push(BindValue::Text(services[0].clone()));
+            conditions.push(format!("service = ?{}", bind.len()));
+        }
+        _ => {
+            let placeholders: Vec<String> = services.iter().map(|svc| {
+                bind.push(BindValue::Text(svc.clone()));
+                format!("?{}", bind.len())
+            }).collect();
+            conditions.push(format!("service IN ({})", placeholders.join(", ")));
+        }
     }
 
     if no_hooks {

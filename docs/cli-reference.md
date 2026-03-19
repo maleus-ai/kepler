@@ -290,6 +290,7 @@ kepler logs --head 50           # First 50 lines
 kepler logs --tail 20           # Last 20 lines
 kepler logs --no-hook           # Exclude hook output
 kepler logs backend             # Logs for a specific service
+kepler logs web api             # Logs for multiple services
 ```
 
 | Flag | Description |
