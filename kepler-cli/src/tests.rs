@@ -70,7 +70,7 @@ fn stream_response(entries: &[(&str, &str)], has_more: bool) -> ClientResult {
                 service_id,
                 line: line.to_string(),
                 timestamp: 1000,
-                level: Arc::from("out"),
+                level: Arc::from("info"),
                 hook: None,
                 attributes: None,
             }

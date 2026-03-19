@@ -30,9 +30,9 @@ fn nice_ceil(v: u32) -> u32 {
 /// Log level categories: error=0, warn=1, info=2, debug=3, trace=4
 fn level_category(level: &str) -> usize {
     match level {
-        "err" | "error" | "fatal" => 0,
+        "error" | "fatal" => 0,
         "warn" | "warning" => 1,
-        "info" | "out" => 2,
+        "info" => 2,
         "debug" => 3,
         "trace" => 4,
         _ => 2, // unknown → info

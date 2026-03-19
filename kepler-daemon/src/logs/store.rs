@@ -19,7 +19,7 @@ pub(crate) enum LogCommand {
     Write(InsertEntry),
     Clear,
     ClearService { service: String },
-    ClearServicePrefix { prefix: String },
+    ClearServiceHooks { service: String },
     CleanupBefore { cutoff_ms: i64 },
     /// Flush pending batch and reply when done (for tests / graceful shutdown).
     FlushSync { reply: std::sync::mpsc::SyncSender<()> },
@@ -158,9 +158,9 @@ impl LogStoreHandle {
         self.send(LogCommand::ClearService { service: service.to_string() });
     }
 
-    /// Clear hook logs for a service prefix (not the service's own logs).
-    pub fn clear_service_prefix(&self, prefix: &str) {
-        self.send(LogCommand::ClearServicePrefix { prefix: prefix.to_string() });
+    /// Clear hook logs for a service (not the service's own logs).
+    pub fn clear_service_hooks(&self, service: &str) {
+        self.send(LogCommand::ClearServiceHooks { service: service.to_string() });
     }
 
     /// Delete logs older than `cutoff_ms` (milliseconds since epoch).
@@ -364,17 +364,14 @@ impl LogStoreActor {
                     tracing::warn!("Failed to clear service logs: {}", e);
                 }
             }
-            LogCommand::ClearServicePrefix { prefix } => {
+            LogCommand::ClearServiceHooks { service } => {
                 self.flush_batch();
                 *last_flush = Instant::now();
-                // Prefix is "servicename." — delete all entries where service starts with prefix
-                // (hook logs use service names like "web.pre_start.0")
-                let like_pattern = format!("{}%", prefix);
                 if let Err(e) = self.conn.execute(
-                    "DELETE FROM logs WHERE service LIKE ?1",
-                    params![like_pattern],
+                    "DELETE FROM logs WHERE service = ?1 AND hook IS NOT NULL",
+                    params![service],
                 ) {
-                    tracing::warn!("Failed to clear service prefix logs: {}", e);
+                    tracing::warn!("Failed to clear service hook logs: {}", e);
                 }
             }
             LogCommand::CleanupBefore { cutoff_ms } => {

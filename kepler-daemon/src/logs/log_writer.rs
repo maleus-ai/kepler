@@ -91,7 +91,7 @@ impl LogWriter {
         &self.service
     }
 
-    /// Get the level (e.g. "out" or "err").
+    /// Get the level (e.g. "info" or "error").
     pub fn level(&self) -> &'static str {
         self.level
     }

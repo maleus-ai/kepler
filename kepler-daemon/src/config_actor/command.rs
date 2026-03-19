@@ -172,8 +172,8 @@ pub enum ConfigCommand {
     ClearServiceLogs {
         service_name: String,
     },
-    ClearServiceLogsPrefix {
-        prefix: String,
+    ClearServiceHookLogs {
+        service: String,
     },
 
     // === Process Handle Commands ===

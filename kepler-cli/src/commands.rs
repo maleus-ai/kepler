@@ -34,6 +34,9 @@ pub enum Commands {
         /// Output raw log lines without formatting (no timestamp, level, service name, color)
         #[arg(long, conflicts_with = "detach")]
         raw: bool,
+        /// Output logs as JSONL (one JSON object per line, OTEL/Datadog compatible)
+        #[arg(long, conflicts_with_all = ["detach", "raw"])]
+        json: bool,
         /// Stop all services on unhandled failure (foreground mode)
         #[arg(long, conflicts_with = "detach")]
         abort_on_failure: bool,
@@ -114,6 +117,10 @@ pub enum Commands {
         /// Output raw log lines without formatting (no timestamp, level, service name, color)
         #[arg(long)]
         raw: bool,
+
+        /// Output logs as JSONL (one JSON object per line, OTEL/Datadog compatible)
+        #[arg(long, conflicts_with = "raw")]
+        json: bool,
 
         /// Filter logs using a search expression.
         ///

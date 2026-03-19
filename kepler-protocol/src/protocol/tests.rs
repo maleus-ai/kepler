@@ -340,7 +340,7 @@ fn roundtrip_stream_log_entry() {
                 service_id: 0,
                 line: "hello from web".into(),
                 timestamp: 1700000000000,
-                level: Arc::from("out"),
+                level: Arc::from("info"),
                 hook: None,
                 attributes: None,
             },
