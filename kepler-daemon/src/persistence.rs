@@ -34,6 +34,9 @@ pub struct ExpandedConfigSnapshot {
     pub snapshot_time: i64,
     /// Kepler-level environment variables (resolved from CLI env + kepler.environment)
     pub kepler_env: HashMap<String, String>,
+    /// User-defined flags accessible via `kepler.flags` in expressions
+    #[serde(default)]
+    pub kepler_flags: HashMap<String, String>,
     /// UID of the CLI user who loaded this config (for per-request authorization)
     #[serde(default)]
     pub owner_uid: Option<u32>,

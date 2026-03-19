@@ -56,6 +56,7 @@ fn required_rights_start_basic() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -75,7 +76,7 @@ fn required_rights_start_with_all_flags() {
         no_deps: true,
         override_envs: Some(envs),
         hardening: Some("strict".to_string()),
-
+        define_flags: None,
         follow: false,
     };
     let rr = required_rights(&req).unwrap();
@@ -122,6 +123,7 @@ fn required_rights_restart_with_flags() {
         sys_env: None,
         no_deps: true,
         override_envs: Some(envs),
+        define_flags: None,
     };
     let rr = required_rights(&req).unwrap();
     assert_eq!(rr.base, "restart");
@@ -135,6 +137,7 @@ fn required_rights_recreate_with_hardening() {
         config_path: "/test".into(),
         sys_env: None,
         hardening: Some("strict".to_string()),
+        define_flags: None,
     };
     let rr = required_rights(&req).unwrap();
     assert_eq!(rr.base, "recreate");
@@ -147,6 +150,7 @@ fn required_rights_recreate_without_hardening() {
         config_path: "/test".into(),
         sys_env: None,
         hardening: None,
+        define_flags: None,
     };
     let rr = required_rights(&req).unwrap();
     assert_eq!(rr.base, "recreate");
@@ -270,6 +274,7 @@ fn check_rights_basic_start() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -286,6 +291,7 @@ fn check_rights_start_denied() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -304,6 +310,7 @@ fn check_rights_start_with_env_denied() {
         no_deps: false,
         override_envs: Some(envs),
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -322,6 +329,7 @@ fn check_rights_start_with_env_granted() {
         no_deps: false,
         override_envs: Some(envs),
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -410,6 +418,7 @@ fn check_rights_empty_granted_denies_scoped() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
 
         follow: false,
     };
@@ -935,6 +944,7 @@ fn required_rights_run_basic() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
         follow: false,
         start_clean: false,
     };
@@ -954,6 +964,7 @@ fn required_rights_run_with_all_flags() {
         no_deps: true,
         override_envs: Some(envs),
         hardening: Some("strict".to_string()),
+        define_flags: None,
         follow: false,
         start_clean: true,
     };
@@ -975,6 +986,7 @@ fn check_rights_run_basic_allowed() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
         follow: false,
         start_clean: false,
     };
@@ -991,6 +1003,7 @@ fn check_rights_run_denied_without_run_right() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
         follow: false,
         start_clean: false,
     };
@@ -1009,6 +1022,7 @@ fn check_rights_run_with_env_override_denied() {
         no_deps: false,
         override_envs: Some(envs),
         hardening: None,
+            define_flags: None,
         follow: false,
         start_clean: false,
     };
@@ -1027,6 +1041,7 @@ fn check_rights_run_with_env_override_granted() {
         no_deps: false,
         override_envs: Some(envs),
         hardening: None,
+            define_flags: None,
         follow: false,
         start_clean: false,
     };
@@ -1043,6 +1058,7 @@ fn check_rights_run_with_hardening_denied() {
         no_deps: false,
         override_envs: None,
         hardening: Some("strict".to_string()),
+        define_flags: None,
         follow: false,
         start_clean: false,
     };
@@ -1059,6 +1075,7 @@ fn check_rights_run_with_no_deps_denied() {
         no_deps: true,
         override_envs: None,
         hardening: None,
+            define_flags: None,
         follow: false,
         start_clean: false,
     };
@@ -1076,6 +1093,7 @@ fn check_rights_run_start_does_not_grant_run() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
         follow: false,
         start_clean: false,
     };
@@ -1103,6 +1121,7 @@ fn check_rights_run_with_start_clean_denied() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
         follow: false,
         start_clean: true,
     };
@@ -1119,6 +1138,7 @@ fn check_rights_run_with_start_clean_granted() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+            define_flags: None,
         follow: false,
         start_clean: true,
     };

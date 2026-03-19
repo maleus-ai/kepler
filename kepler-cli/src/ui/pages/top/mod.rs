@@ -650,6 +650,7 @@ async fn dispatch_actions(client: &Client, config_path: &PathBuf, app: &mut TopA
                     None,
                     None,
                     false,
+                    None,
                 ) {
                     Ok((_rx, fut)) => match tokio::time::timeout(FETCH_TIMEOUT, fut).await {
                         Ok(Ok(Response::Ok { .. })) => {
@@ -714,7 +715,7 @@ async fn dispatch_actions(client: &Client, config_path: &PathBuf, app: &mut TopA
                 }
             },
             AppAction::RestartServices(services) => {
-                match client.restart(config_path.clone(), services.clone(), None, false, None) {
+                match client.restart(config_path.clone(), services.clone(), None, false, None, None) {
                     Ok((_rx, fut)) => match tokio::time::timeout(FETCH_TIMEOUT, fut).await {
                         Ok(Ok(Response::Ok { .. })) => {
                             app.set_feedback(

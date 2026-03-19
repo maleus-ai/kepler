@@ -218,6 +218,7 @@ impl Client {
         override_envs: Option<HashMap<String, String>>,
         hardening: Option<String>,
         follow: bool,
+        define_flags: Option<HashMap<String, String>>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Start {
             config_path,
@@ -227,6 +228,7 @@ impl Client {
             override_envs,
             hardening,
             follow,
+            define_flags,
         })
     }
 
@@ -241,6 +243,7 @@ impl Client {
         hardening: Option<String>,
         follow: bool,
         start_clean: bool,
+        define_flags: Option<HashMap<String, String>>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Run {
             config_path,
@@ -251,6 +254,7 @@ impl Client {
             hardening,
             follow,
             start_clean,
+            define_flags,
         })
     }
 
@@ -278,6 +282,7 @@ impl Client {
         sys_env: Option<HashMap<String, String>>,
         no_deps: bool,
         override_envs: Option<HashMap<String, String>>,
+        define_flags: Option<HashMap<String, String>>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Restart {
             config_path,
@@ -285,6 +290,7 @@ impl Client {
             sys_env,
             no_deps,
             override_envs,
+            define_flags,
         })
     }
 
@@ -294,11 +300,13 @@ impl Client {
         config_path: PathBuf,
         sys_env: Option<HashMap<String, String>>,
         hardening: Option<String>,
+        define_flags: Option<HashMap<String, String>>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Recreate {
             config_path,
             sys_env,
             hardening,
+            define_flags,
         })
     }
 

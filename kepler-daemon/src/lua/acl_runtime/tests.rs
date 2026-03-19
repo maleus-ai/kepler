@@ -323,7 +323,7 @@ fn context_from_start_request() {
         no_deps: true,
         override_envs: Some(HashMap::from([("KEY".into(), "val".into())])),
         hardening: Some("strict".into()),
-
+        define_flags: None,
         follow: false,
     };
     let ctx = build_authorizer_context(&req, 1000, 1000, Some("user".into()), vec![1000], false).unwrap();

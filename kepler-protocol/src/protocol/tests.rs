@@ -36,7 +36,7 @@ fn roundtrip_envelope_start() {
             no_deps: true,
             override_envs: None,
             hardening: None,
-
+            define_flags: None,
             follow: false,
         },
     };
@@ -118,6 +118,7 @@ fn roundtrip_envelope_restart() {
             sys_env: None,
             no_deps: true,
             override_envs: None,
+            define_flags: None,
         },
     };
     let bytes = encode_envelope(&envelope).unwrap();
@@ -459,7 +460,7 @@ fn request_variant_names() {
             no_deps: false,
             override_envs: None,
             hardening: None,
-
+            define_flags: None,
             follow: false,
         }.variant_name(),
         "Start"
@@ -626,6 +627,7 @@ fn roundtrip_envelope_run_basic() {
             no_deps: false,
             override_envs: None,
             hardening: None,
+            define_flags: None,
             follow: true,
             start_clean: false,
         },
@@ -634,13 +636,14 @@ fn roundtrip_envelope_run_basic() {
     let decoded = decode_envelope(&bytes[4..]).unwrap();
     assert_eq!(decoded.id, 300);
     match decoded.request {
-        Request::Run { config_path, services, sys_env, no_deps, override_envs, hardening, follow, start_clean } => {
+        Request::Run { config_path, services, sys_env, no_deps, override_envs, hardening, define_flags, follow, start_clean } => {
             assert_eq!(config_path, PathBuf::from("/tmp/run.yaml"));
             assert_eq!(services, vec!["web".to_string()]);
             assert!(sys_env.is_none());
             assert!(!no_deps);
             assert!(override_envs.is_none());
             assert!(hardening.is_none());
+            assert!(define_flags.is_none());
             assert!(follow);
             assert!(!start_clean);
         }
@@ -664,6 +667,7 @@ fn roundtrip_envelope_run_with_all_fields() {
             no_deps: true,
             override_envs: Some(envs),
             hardening: Some("strict".into()),
+            define_flags: None,
             follow: false,
             start_clean: true,
         },
@@ -672,7 +676,7 @@ fn roundtrip_envelope_run_with_all_fields() {
     let decoded = decode_envelope(&bytes[4..]).unwrap();
     assert_eq!(decoded.id, 301);
     match decoded.request {
-        Request::Run { config_path, services, sys_env, no_deps, override_envs, hardening, follow, start_clean } => {
+        Request::Run { config_path, services, sys_env, no_deps, override_envs, hardening, define_flags, follow, start_clean } => {
             assert_eq!(config_path, PathBuf::from("/app/kepler.yaml"));
             assert_eq!(services, vec!["api".to_string(), "worker".to_string()]);
             assert!(sys_env.is_some());
@@ -681,6 +685,7 @@ fn roundtrip_envelope_run_with_all_fields() {
             assert!(override_envs.is_some());
             assert_eq!(override_envs.unwrap().get("K").unwrap(), "V");
             assert_eq!(hardening, Some("strict".into()));
+            assert!(define_flags.is_none());
             assert!(!follow);
             assert!(start_clean);
         }
@@ -698,6 +703,7 @@ fn run_variant_name() {
             no_deps: false,
             override_envs: None,
             hardening: None,
+            define_flags: None,
             follow: false,
             start_clean: false,
         }.variant_name(),
@@ -717,6 +723,7 @@ fn roundtrip_envelope_run_empty_services() {
             no_deps: false,
             override_envs: None,
             hardening: None,
+            define_flags: None,
             follow: false,
             start_clean: false,
         },
@@ -730,5 +737,121 @@ fn roundtrip_envelope_run_empty_services() {
             assert!(!start_clean);
         }
         _ => panic!("Expected Run request"),
+    }
+}
+
+// ========================================================================
+// define_flags roundtrip tests
+// ========================================================================
+
+#[test]
+fn roundtrip_start_with_define_flags() {
+    let flags = HashMap::from([
+        ("MODE".to_string(), "prod".to_string()),
+        ("PORT".to_string(), "8080".to_string()),
+    ]);
+    let envelope = RequestEnvelope {
+        id: 400,
+        token: None,
+        request: Request::Start {
+            config_path: PathBuf::from("/test.yaml"),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+            define_flags: Some(flags.clone()),
+            follow: false,
+        },
+    };
+    let bytes = encode_envelope(&envelope).unwrap();
+    let decoded = decode_envelope(&bytes[4..]).unwrap();
+    match decoded.request {
+        Request::Start { define_flags, .. } => {
+            let df = define_flags.expect("define_flags should be Some");
+            assert_eq!(df.get("MODE").unwrap(), "prod");
+            assert_eq!(df.get("PORT").unwrap(), "8080");
+            assert_eq!(df.len(), 2);
+        }
+        _ => panic!("Expected Start request"),
+    }
+}
+
+#[test]
+fn roundtrip_run_with_define_flags() {
+    let flags = HashMap::from([("DEBUG".to_string(), "true".to_string())]);
+    let envelope = RequestEnvelope {
+        id: 401,
+        token: None,
+        request: Request::Run {
+            config_path: PathBuf::from("/test.yaml"),
+            services: vec!["web".into()],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            hardening: None,
+            define_flags: Some(flags),
+            follow: false,
+            start_clean: false,
+        },
+    };
+    let bytes = encode_envelope(&envelope).unwrap();
+    let decoded = decode_envelope(&bytes[4..]).unwrap();
+    match decoded.request {
+        Request::Run { define_flags, .. } => {
+            let df = define_flags.expect("define_flags should be Some");
+            assert_eq!(df.get("DEBUG").unwrap(), "true");
+        }
+        _ => panic!("Expected Run request"),
+    }
+}
+
+#[test]
+fn roundtrip_restart_with_define_flags() {
+    let flags = HashMap::from([("ENV".to_string(), "staging".to_string())]);
+    let envelope = RequestEnvelope {
+        id: 402,
+        token: None,
+        request: Request::Restart {
+            config_path: PathBuf::from("/test.yaml"),
+            services: vec![],
+            sys_env: None,
+            no_deps: false,
+            override_envs: None,
+            define_flags: Some(flags),
+        },
+    };
+    let bytes = encode_envelope(&envelope).unwrap();
+    let decoded = decode_envelope(&bytes[4..]).unwrap();
+    match decoded.request {
+        Request::Restart { define_flags, .. } => {
+            let df = define_flags.expect("define_flags should be Some");
+            assert_eq!(df.get("ENV").unwrap(), "staging");
+        }
+        _ => panic!("Expected Restart request"),
+    }
+}
+
+#[test]
+fn roundtrip_recreate_with_define_flags() {
+    let flags = HashMap::from([("MODE".to_string(), "production".to_string())]);
+    let envelope = RequestEnvelope {
+        id: 403,
+        token: None,
+        request: Request::Recreate {
+            config_path: PathBuf::from("/test.yaml"),
+            sys_env: None,
+            hardening: None,
+            define_flags: Some(flags),
+        },
+    };
+    let bytes = encode_envelope(&envelope).unwrap();
+    let decoded = decode_envelope(&bytes[4..]).unwrap();
+    match decoded.request {
+        Request::Recreate { define_flags, .. } => {
+            let df = define_flags.expect("define_flags should be Some");
+            assert_eq!(df.get("MODE").unwrap(), "production");
+        }
+        _ => panic!("Expected Recreate request"),
     }
 }

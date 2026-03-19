@@ -32,6 +32,8 @@ pub struct ServiceHookParams<'a> {
     pub env: &'a HashMap<String, String>,
     /// Kepler-level environment variables
     pub kepler_env: &'a HashMap<String, String>,
+    /// User-defined flags accessible via `kepler.flags` in expressions
+    pub kepler_flags: &'a HashMap<String, String>,
     /// Service's env_file vars
     pub env_file_vars: &'a HashMap<String, String>,
     pub log_store: Option<&'a LogStoreHandle>,
@@ -378,6 +380,7 @@ pub async fn run_service_hook(
             }),
             hardening: params.hardening,
             kepler_env: params.kepler_env.clone(),
+            kepler_flags: params.kepler_flags.clone(),
             kepler_env_denied: params.kepler_env_denied,
         };
 

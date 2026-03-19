@@ -178,8 +178,9 @@ async fn run() -> Result<()> {
             }
         }
 
-        Commands::Restart { services, wait, timeout, raw: raw_output, follow, no_deps, override_envs, refresh_env } => {
+        Commands::Restart { services, wait, timeout, raw: raw_output, follow, no_deps, override_envs, refresh_env, define } => {
             let override_envs = build_override_envs(override_envs, refresh_env, &sys_env);
+            let define_flags = build_define_flags(define);
             if no_deps && services.is_empty() {
                 eprintln!("Error: --no-deps requires specifying at least one service");
                 std::process::exit(1);
@@ -192,6 +193,7 @@ async fn run() -> Result<()> {
                     Some(sys_env),
                     no_deps,
                     override_envs,
+                    define_flags.clone(),
                 )?;
                 if let Some(timeout_str) = &timeout {
                     let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
@@ -221,6 +223,7 @@ async fn run() -> Result<()> {
                     Some(sys_env),
                     no_deps,
                     override_envs,
+                    define_flags.clone(),
                 )?;
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);
@@ -241,14 +244,16 @@ async fn run() -> Result<()> {
                     Some(sys_env),
                     no_deps,
                     override_envs,
+                    define_flags,
                 )?;
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);
             }
         }
 
-        Commands::Recreate { hardening } => {
-            let (progress_rx, response_future) = client.recreate(canonical_path.clone(), Some(sys_env), hardening)?;
+        Commands::Recreate { hardening, define } => {
+            let define_flags = build_define_flags(define);
+            let (progress_rx, response_future) = client.recreate(canonical_path.clone(), Some(sys_env), hardening, define_flags)?;
             let response = run_with_progress(progress_rx, response_future).await?;
             handle_response(response);
         }
@@ -504,6 +509,22 @@ fn build_override_envs(raw: Vec<String>, refresh_env: bool, sys_env: &HashMap<St
     if map.is_empty() { None } else { Some(map) }
 }
 
+/// Parse `-D KEY=VALUE` pairs into a HashMap (None if empty).
+fn build_define_flags(raw: Vec<String>) -> Option<HashMap<String, String>> {
+    if raw.is_empty() {
+        return None;
+    }
+    let mut map = HashMap::new();
+    for entry in raw {
+        if let Some((key, value)) = entry.split_once('=') {
+            map.insert(key.to_string(), value.to_string());
+        } else {
+            eprintln!("Warning: ignoring invalid --define flag (expected KEY=VALUE): {}", entry);
+        }
+    }
+    if map.is_empty() { None } else { Some(map) }
+}
+
 /// Distinguishes `kepler start` from `kepler run` for the shared launch handler.
 enum LaunchMode {
     Start,
@@ -521,17 +542,18 @@ fn send_launch_request<'a>(
     hardening: Option<String>,
     follow: bool,
     mode: &LaunchMode,
+    define_flags: Option<HashMap<String, String>>,
 ) -> std::result::Result<
     (mpsc::UnboundedReceiver<ServerEvent>, std::pin::Pin<Box<dyn Future<Output = std::result::Result<Response, ClientError>> + 'a>>),
     ClientError,
 > {
     match mode {
         LaunchMode::Start => {
-            let (rx, fut) = client.start(canonical_path, services, Some(sys_env), no_deps, override_envs, hardening, follow)?;
+            let (rx, fut) = client.start(canonical_path, services, Some(sys_env), no_deps, override_envs, hardening, follow, define_flags)?;
             Ok((rx, Box::pin(fut)))
         }
         LaunchMode::Run { start_clean, .. } => {
-            let (rx, fut) = client.run(canonical_path, services, Some(sys_env), no_deps, override_envs, hardening, follow, *start_clean)?;
+            let (rx, fut) = client.run(canonical_path, services, Some(sys_env), no_deps, override_envs, hardening, follow, *start_clean, define_flags)?;
             Ok((rx, Box::pin(fut)))
         }
     }
@@ -551,6 +573,7 @@ async fn handle_launch(
     quiet: bool,
 ) -> Result<()> {
     let override_envs = build_override_envs(args.override_envs, args.refresh_env, &sys_env);
+    let define_flags = build_define_flags(args.define);
     if args.no_deps && args.services.is_empty() {
         eprintln!("Error: --no-deps requires specifying at least one service");
         std::process::exit(1);
@@ -560,7 +583,7 @@ async fn handle_launch(
         // -d --wait: follow inline progress events until ready
         let (progress_rx, fut) = send_launch_request(
             client, canonical_path.clone(), args.services, sys_env,
-            args.no_deps, override_envs, args.hardening, true, &mode,
+            args.no_deps, override_envs, args.hardening, true, &mode, define_flags.clone(),
         )?;
         if let Some(timeout_str) = &args.timeout {
             let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
@@ -584,7 +607,7 @@ async fn handle_launch(
         // -d: fire and forget
         let (_progress_rx, fut) = send_launch_request(
             client, canonical_path, args.services, sys_env,
-            args.no_deps, override_envs, args.hardening, false, &mode,
+            args.no_deps, override_envs, args.hardening, false, &mode, define_flags.clone(),
         )?;
         let response = fut.await?;
         handle_response(response);
@@ -592,7 +615,7 @@ async fn handle_launch(
         // Foreground: inline quiescence detection + log streaming
         let (progress_rx, fut) = send_launch_request(
             client, canonical_path.clone(), args.services.clone(), sys_env,
-            args.no_deps, override_envs, args.hardening, true, &mode,
+            args.no_deps, override_envs, args.hardening, true, &mode, define_flags.clone(),
         )?;
         foreground_with_logs(
             fut,

@@ -437,6 +437,7 @@ services:
         config_dir: PathBuf::from("/home/user/project"),
         snapshot_time: 1234567890,
         kepler_env: sys_env.clone(),
+        kepler_flags: HashMap::new(),
         owner_uid: Some(1000),
         owner_gid: None,
         hardening: None,
@@ -617,4 +618,245 @@ services:
 
     handle2.shutdown(false).await;
     let _ = actor_task2.await;
+}
+
+// ========================================================================
+// kepler_flags (--define / -D) persistence tests
+// ========================================================================
+
+#[tokio::test]
+async fn test_persistence_round_trip_with_kepler_flags() {
+    use kepler_daemon::config::KeplerConfig;
+    use kepler_daemon::persistence::ExpandedConfigSnapshot;
+
+    let temp_dir = TempDir::new().unwrap();
+    let persistence = ConfigPersistence::new(temp_dir.path().to_path_buf());
+
+    let config_yaml = r#"
+services:
+  test:
+    command: ["sleep", "1"]
+"#;
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, config_yaml).unwrap();
+    let sys_env: HashMap<String, String> = HashMap::new();
+    let config = KeplerConfig::load(&config_path, &sys_env).unwrap();
+
+    let flags: HashMap<String, String> = vec![
+        ("MODE".to_string(), "production".to_string()),
+        ("PORT".to_string(), "8080".to_string()),
+    ].into_iter().collect();
+
+    let snapshot = ExpandedConfigSnapshot {
+        config,
+        config_dir: PathBuf::from("/home/user/project"),
+        snapshot_time: 1234567890,
+        kepler_env: sys_env,
+        kepler_flags: flags.clone(),
+        owner_uid: None,
+        owner_gid: None,
+        hardening: None,
+        permission_ceiling: None,
+        service_envs: HashMap::new(),
+        service_working_dirs: HashMap::new(),
+    };
+
+    persistence.save_expanded_config(&snapshot).unwrap();
+    let loaded = persistence.load_expanded_config().unwrap().unwrap();
+
+    assert_eq!(loaded.kepler_flags.get("MODE"), Some(&"production".to_string()));
+    assert_eq!(loaded.kepler_flags.get("PORT"), Some(&"8080".to_string()));
+    assert_eq!(loaded.kepler_flags.len(), 2);
+}
+
+#[tokio::test]
+async fn test_kepler_flags_persisted_in_snapshot_via_actor() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().to_path_buf();
+    let state_dir = config_dir.join(".kepler");
+
+    let config_content = r#"
+kepler:
+  autostart: true
+services:
+  test:
+    command: ["sleep", "infinity"]
+"#;
+    let config_path = config_dir.join("kepler.yaml");
+    std::fs::write(&config_path, config_content).unwrap();
+
+    let cli_env = HashMap::new();
+    let (handle, actor_task) =
+        create_actor_with_state_dir_and_env(config_path.clone(), state_dir.clone(), cli_env)
+            .unwrap();
+
+    // Merge define flags
+    handle.merge_kepler_flags(HashMap::from([
+        ("MODE".to_string(), "debug".to_string()),
+        ("VERBOSE".to_string(), "true".to_string()),
+    ])).await;
+
+    // Verify get_kepler_flags returns what we set
+    let flags = handle.get_kepler_flags().await;
+    assert_eq!(flags.get("MODE"), Some(&"debug".to_string()));
+    assert_eq!(flags.get("VERBOSE"), Some(&"true".to_string()));
+
+    // Take snapshot
+    handle.take_snapshot_if_needed().await.unwrap();
+
+    // Verify snapshot contains flags
+    let config_hash = handle.config_hash().to_string();
+    let persistence = ConfigPersistence::new(state_dir.join("configs").join(&config_hash));
+    let snapshot = persistence.load_expanded_config().unwrap().unwrap();
+    assert_eq!(snapshot.kepler_flags.get("MODE"), Some(&"debug".to_string()));
+    assert_eq!(snapshot.kepler_flags.get("VERBOSE"), Some(&"true".to_string()));
+
+    handle.shutdown(false).await;
+    let _ = actor_task.await;
+}
+
+#[tokio::test]
+async fn test_kepler_flags_restored_from_snapshot() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().to_path_buf();
+    let state_dir = config_dir.join(".kepler");
+
+    let config_content = r#"
+kepler:
+  autostart: true
+services:
+  test:
+    command: ["sleep", "infinity"]
+"#;
+    let config_path = config_dir.join("kepler.yaml");
+    std::fs::write(&config_path, config_content).unwrap();
+
+    // First actor: set flags and take snapshot
+    let (handle1, actor_task1) =
+        create_actor_with_state_dir_and_env(config_path.clone(), state_dir.clone(), HashMap::new())
+            .unwrap();
+
+    handle1.merge_kepler_flags(HashMap::from([
+        ("FLAG_A".to_string(), "value_a".to_string()),
+    ])).await;
+    handle1.take_snapshot_if_needed().await.unwrap();
+    handle1.shutdown(false).await;
+    let _ = actor_task1.await;
+
+    // Second actor: should restore flags from snapshot
+    let (handle2, actor_task2) =
+        create_actor_with_state_dir_and_env(config_path.clone(), state_dir.clone(), HashMap::new())
+            .unwrap();
+
+    assert!(
+        handle2.is_restored_from_snapshot().await,
+        "Should be restored from snapshot"
+    );
+
+    let restored_flags = handle2.get_kepler_flags().await;
+    assert_eq!(
+        restored_flags.get("FLAG_A"),
+        Some(&"value_a".to_string()),
+        "Flags must be restored from snapshot"
+    );
+
+    handle2.shutdown(false).await;
+    let _ = actor_task2.await;
+}
+
+#[tokio::test]
+async fn test_kepler_flags_merge_accumulates() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().to_path_buf();
+    let state_dir = config_dir.join(".kepler");
+
+    let config_content = r#"
+services:
+  test:
+    command: ["sleep", "infinity"]
+"#;
+    let config_path = config_dir.join("kepler.yaml");
+    std::fs::write(&config_path, config_content).unwrap();
+
+    let (handle, actor_task) =
+        create_actor_with_state_dir_and_env(config_path.clone(), state_dir.clone(), HashMap::new())
+            .unwrap();
+
+    // First merge
+    handle.merge_kepler_flags(HashMap::from([
+        ("A".to_string(), "1".to_string()),
+    ])).await;
+
+    // Second merge — should accumulate, not replace
+    handle.merge_kepler_flags(HashMap::from([
+        ("B".to_string(), "2".to_string()),
+    ])).await;
+
+    let flags = handle.get_kepler_flags().await;
+    assert_eq!(flags.get("A"), Some(&"1".to_string()), "First flag should persist");
+    assert_eq!(flags.get("B"), Some(&"2".to_string()), "Second flag should be added");
+    assert_eq!(flags.len(), 2);
+
+    handle.shutdown(false).await;
+    let _ = actor_task.await;
+}
+
+#[tokio::test]
+async fn test_kepler_flags_merge_overwrites_existing_key() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().to_path_buf();
+    let state_dir = config_dir.join(".kepler");
+
+    let config_content = r#"
+services:
+  test:
+    command: ["sleep", "infinity"]
+"#;
+    let config_path = config_dir.join("kepler.yaml");
+    std::fs::write(&config_path, config_content).unwrap();
+
+    let (handle, actor_task) =
+        create_actor_with_state_dir_and_env(config_path.clone(), state_dir.clone(), HashMap::new())
+            .unwrap();
+
+    handle.merge_kepler_flags(HashMap::from([
+        ("MODE".to_string(), "debug".to_string()),
+    ])).await;
+
+    // Overwrite the same key
+    handle.merge_kepler_flags(HashMap::from([
+        ("MODE".to_string(), "release".to_string()),
+    ])).await;
+
+    let flags = handle.get_kepler_flags().await;
+    assert_eq!(flags.get("MODE"), Some(&"release".to_string()), "Last write should win");
+    assert_eq!(flags.len(), 1);
+
+    handle.shutdown(false).await;
+    let _ = actor_task.await;
+}
+
+#[tokio::test]
+async fn test_kepler_flags_initially_empty() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().to_path_buf();
+    let state_dir = config_dir.join(".kepler");
+
+    let config_content = r#"
+services:
+  test:
+    command: ["sleep", "infinity"]
+"#;
+    let config_path = config_dir.join("kepler.yaml");
+    std::fs::write(&config_path, config_content).unwrap();
+
+    let (handle, actor_task) =
+        create_actor_with_state_dir_and_env(config_path.clone(), state_dir.clone(), HashMap::new())
+            .unwrap();
+
+    let flags = handle.get_kepler_flags().await;
+    assert!(flags.is_empty(), "Flags should be empty initially");
+
+    handle.shutdown(false).await;
+    let _ = actor_task.await;
 }

@@ -39,6 +39,9 @@ pub struct StartRunArgs {
     /// Per-config hardening level (none, no-root, strict) [daemon default: no-root]
     #[arg(long)]
     pub hardening: Option<String>,
+    /// Define flags accessible via kepler.flags in expressions (KEY=VALUE, repeatable)
+    #[arg(short = 'D', long = "define", value_name = "KEY=VALUE")]
+    pub define: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -103,12 +106,18 @@ pub enum Commands {
         /// Refresh all system environment variables from the current shell
         #[arg(short = 'r', long)]
         refresh_env: bool,
+        /// Define flags accessible via kepler.flags in expressions (KEY=VALUE, repeatable)
+        #[arg(short = 'D', long = "define", value_name = "KEY=VALUE")]
+        define: Vec<String>,
     },
     /// Recreate config (stop, re-bake config snapshot, start)
     Recreate {
         /// Per-config hardening level (none, no-root, strict) [daemon default: no-root]
         #[arg(long)]
         hardening: Option<String>,
+        /// Define flags accessible via kepler.flags in expressions (KEY=VALUE, repeatable)
+        #[arg(short = 'D', long = "define", value_name = "KEY=VALUE")]
+        define: Vec<String>,
     },
     /// View service logs
     Logs {

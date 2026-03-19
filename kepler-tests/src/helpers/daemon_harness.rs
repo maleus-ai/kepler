@@ -407,10 +407,12 @@ impl TestDaemonHarness {
             &computed_env,
         )
         .await;
+        let empty_flags = HashMap::new();
         let hook_params = ServiceHookParams {
             working_dir: &working_dir,
             env: &computed_env,
             kepler_env: &sys_env,
+            kepler_flags: &empty_flags,
             env_file_vars: &env_file_vars,
             log_store: Some(&ctx.log_store),
             service_user: resolved.user.as_deref(),
@@ -666,10 +668,12 @@ impl TestDaemonHarness {
             .await
             .and_then(|c| c.create_lua_evaluator().ok());
         let kepler_env = self.handle.get_kepler_env().await;
+        let kepler_flags = self.handle.get_kepler_flags().await;
         let hook_params = ServiceHookParams {
             working_dir: &working_dir,
             env: &ctx.env,
             kepler_env: &kepler_env,
+            kepler_flags: &kepler_flags,
             env_file_vars: &ctx.env_file_vars,
             log_store: Some(&ctx.log_store),
             service_user: resolved.user.as_deref(),
@@ -769,10 +773,12 @@ impl TestDaemonHarness {
             .await
             .and_then(|c| c.create_lua_evaluator().ok());
         let kepler_env = self.handle.get_kepler_env().await;
+        let kepler_flags = self.handle.get_kepler_flags().await;
         let hook_params = ServiceHookParams {
             working_dir: &working_dir,
             env: &ctx.env,
             kepler_env: &kepler_env,
+            kepler_flags: &kepler_flags,
             env_file_vars: &ctx.env_file_vars,
             log_store: Some(&ctx.log_store),
             service_user: resolved.user.as_deref(),
@@ -920,10 +926,12 @@ impl TestDaemonHarness {
                     .unwrap_or_else(|| Path::new("."))
                     .to_path_buf();
                 let kepler_env = handle.get_kepler_env().await;
+                let kepler_flags = handle.get_kepler_flags().await;
                 let hook_params = ServiceHookParams {
                     working_dir: &working_dir,
                     env: &ctx.env,
                     kepler_env: &kepler_env,
+                    kepler_flags: &kepler_flags,
                     env_file_vars: &ctx.env_file_vars,
                     log_store: Some(&ctx.log_store),
                     service_user: resolved.user.as_deref(),
@@ -1090,10 +1098,12 @@ impl TestDaemonHarness {
                     .unwrap_or_else(|| Path::new("."))
                     .to_path_buf();
                 let kepler_env = handle.get_kepler_env().await;
+                let kepler_flags = handle.get_kepler_flags().await;
                 let hook_params = ServiceHookParams {
                     working_dir: &working_dir,
                     env: &ctx.env,
                     kepler_env: &kepler_env,
+                    kepler_flags: &kepler_flags,
                     env_file_vars: &ctx.env_file_vars,
                     log_store: Some(&ctx.log_store),
                     service_user: resolved.user.as_deref(),

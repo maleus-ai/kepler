@@ -78,6 +78,8 @@ pub struct ConfigActor {
     event_handler_spawned: bool,
     /// Kepler-level environment variables (resolved from CLI env + kepler.environment)
     kepler_env: HashMap<String, String>,
+    /// User-defined flags accessible via `kepler.flags` in expressions
+    kepler_flags: HashMap<String, String>,
     /// UID of the CLI user who loaded this config
     owner_uid: Option<u32>,
     /// GID of the CLI user who loaded this config
@@ -219,6 +221,7 @@ impl ConfigActor {
             snapshot_taken,
             restored_from_snapshot,
             resolved_kepler_env,
+            restored_kepler_flags,
             owner_uid,
             owner_gid,
             resolved_hardening,
@@ -273,6 +276,7 @@ impl ConfigActor {
                 .unwrap_or(false);
 
             let restored_sys_env = snapshot.kepler_env;
+            let restored_flags = snapshot.kepler_flags;
             let owner_uid = snapshot.owner_uid;
             let owner_gid = snapshot.owner_gid;
             let restored_hardening = snapshot
@@ -309,6 +313,7 @@ impl ConfigActor {
                 true, // snapshot was already taken
                 true, // restored from snapshot
                 restored_sys_env,
+                restored_flags,
                 owner_uid,
                 owner_gid,
                 restored_hardening,
@@ -451,6 +456,7 @@ impl ConfigActor {
                 false, // snapshot not yet taken
                 false, // not restored from snapshot
                 resolved_kepler_env,
+                HashMap::new(), // kepler_flags: empty on fresh load
                 config_owner.map(|(uid, _)| uid),
                 config_owner.map(|(_, gid)| gid),
                 hardening,
@@ -528,6 +534,7 @@ impl ConfigActor {
             restored_from_snapshot,
             event_handler_spawned: false,
             kepler_env: resolved_kepler_env,
+            kepler_flags: restored_kepler_flags,
             owner_uid,
             owner_gid,
             hardening: resolved_hardening,
@@ -714,6 +721,9 @@ impl ConfigActor {
             }
             ConfigCommand::GetKeplerEnv { reply } => {
                 let _ = reply.send(self.kepler_env.clone());
+            }
+            ConfigCommand::GetKeplerFlags { reply } => {
+                let _ = reply.send(self.kepler_flags.clone());
             }
             ConfigCommand::IsServiceRunning {
                 service_name,
@@ -1228,6 +1238,7 @@ impl ConfigActor {
                         config_dir: self.config_dir.clone(),
                         snapshot_time: chrono::Utc::now().timestamp(),
                         kepler_env: self.kepler_env.clone(),
+                        kepler_flags: self.kepler_flags.clone(),
                         owner_uid: self.owner_uid,
                         owner_gid: self.owner_gid,
                         hardening: self.hardening.map(|h| h.to_string()),
@@ -1242,6 +1253,38 @@ impl ConfigActor {
                 }
 
                 // Clear resolved config cache so services re-resolve with new env
+                self.resolved_configs.clear();
+
+                let _ = reply.send(());
+            }
+            ConfigCommand::MergeKeplerFlags { flags, reply } => {
+                // Merge flags into kepler_flags
+                self.kepler_flags.extend(flags);
+
+                // Re-save snapshot only when autostart is enabled
+                if self.snapshot_taken && self.config.global_autostart() {
+                    let snapshot = ExpandedConfigSnapshot {
+                        config: self.config.clone(),
+                        service_envs: Default::default(),
+                        service_working_dirs: Default::default(),
+                        config_dir: self.config_dir.clone(),
+                        snapshot_time: chrono::Utc::now().timestamp(),
+                        kepler_env: self.kepler_env.clone(),
+                        kepler_flags: self.kepler_flags.clone(),
+                        owner_uid: self.owner_uid,
+                        owner_gid: self.owner_gid,
+                        hardening: self.hardening.map(|h| h.to_string()),
+                        permission_ceiling: self
+                            .permission_ceiling
+                            .as_ref()
+                            .map(|s| s.iter().map(|s| s.to_string()).collect()),
+                    };
+                    if let Err(e) = self.persistence.save_expanded_config(&snapshot) {
+                        warn!("Failed to re-save snapshot after MergeKeplerFlags: {}", e);
+                    }
+                }
+
+                // Clear resolved config cache so services re-resolve with new flags
                 self.resolved_configs.clear();
 
                 let _ = reply.send(());
@@ -1293,6 +1336,7 @@ impl ConfigActor {
             config_dir: self.config_dir.clone(),
             snapshot_time: chrono::Utc::now().timestamp(),
             kepler_env: self.kepler_env.clone(),
+            kepler_flags: self.kepler_flags.clone(),
             owner_uid: self.owner_uid,
             owner_gid: self.owner_gid,
             hardening: self.hardening.map(|h| h.to_string()),

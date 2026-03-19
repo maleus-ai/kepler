@@ -161,6 +161,7 @@ Available in all contexts (including `lua:` directive and `autostart.environment
 | Variable | Description |
 |----------|-------------|
 | `kepler.env` | Read-only kepler environment (declared via `autostart.environment`, or full CLI env when autostart is disabled) |
+| `kepler.flags` | Read-only define flags passed via `-D KEY=VALUE` on the CLI. Not injected into service environments. See [CLI Reference — Define Flags](cli-reference.md#define-flags) |
 
 ### Shortcuts and Shared Tables
 
@@ -249,10 +250,10 @@ Within a service, evaluation happens in this order:
 
 | Order | What | Available context |
 |-------|------|-------------------|
-| 1 | `lua:` directive | `kepler.env` only |
-| 2 | `env_file` path `${{ }}$` | `kepler.env` + `service.raw_env` |
-| 3 | `environment` `${{ }}$` / `!lua` | `kepler.env` + `service.raw_env` + `service.env_file` + `service.env` (sequential) |
-| 4 | All other fields `${{ }}$` and `!lua` | `kepler.env` + `service.raw_env` + `service.env_file` + `service.env` + `deps` |
+| 1 | `lua:` directive | `kepler.env`, `kepler.flags` |
+| 2 | `env_file` path `${{ }}$` | `kepler.env`, `kepler.flags` + `service.raw_env` |
+| 3 | `environment` `${{ }}$` / `!lua` | `kepler.env`, `kepler.flags` + `service.raw_env` + `service.env_file` + `service.env` (sequential) |
+| 4 | All other fields `${{ }}$` and `!lua` | `kepler.env`, `kepler.flags` + `service.raw_env` + `service.env_file` + `service.env` + `deps` |
 
 **Sequential environment evaluation:** Each `environment` entry is evaluated in order, and its result is added to the context for subsequent entries:
 
@@ -388,7 +389,7 @@ The Lua environment provides a **restricted subset** of the standard library:
 
 ## Security Model
 
-- **Environment tables are frozen** — `service.env`, `service.raw_env`, `service.env_file`, `hook.env`, `hook.raw_env`, `hook.env_file`, `kepler.env` are read-only via Luau's `table.freeze`
+- **Environment tables are frozen** — `service.env`, `service.raw_env`, `service.env_file`, `hook.env`, `hook.raw_env`, `hook.env_file`, `kepler.env`, `kepler.flags` are read-only via Luau's `table.freeze`
 - **Writes to `service.*` / `hook.*` tables raise runtime errors**
 - **Metatables are protected** from removal
 - **`require()` is blocked** — external module loading is not permitted
