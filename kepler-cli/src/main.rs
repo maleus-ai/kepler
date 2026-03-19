@@ -1406,11 +1406,19 @@ async fn stream_logs(
     let mut quiescent_received = false;
 
     loop {
-        let log_response = client.logs_stream(
-            params.config_path, params.services, last_id,
-            from_end && last_id.is_none(), params.limit, params.no_hooks,
-            params.filter, params.raw, params.tail,
-        ).await;
+        // Select with shutdown so Ctrl+C is responsive even if the daemon
+        // has disconnected and the logs_stream call would hang.
+        let log_response = tokio::select! {
+            biased;
+            _ = &mut shutdown => {
+                return Ok(StreamExitReason::ShutdownRequested);
+            }
+            result = client.logs_stream(
+                params.config_path, params.services, last_id,
+                from_end && last_id.is_none(), params.limit, params.no_hooks,
+                params.filter, params.raw, params.tail,
+            ) => result,
+        };
 
         let has_more_data;
         match log_response {
