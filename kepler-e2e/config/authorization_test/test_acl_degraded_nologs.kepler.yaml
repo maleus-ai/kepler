@@ -2,7 +2,7 @@ kepler:
   acl:
     users:
       testuser2:
-        allow: [start, stop, subscribe, quiescence, status]
+        allow: [start, stop, status]
 
 services:
   degraded-svc:

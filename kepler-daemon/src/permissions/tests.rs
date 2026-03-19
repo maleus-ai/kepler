@@ -55,6 +55,8 @@ fn required_rights_start_basic() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+
+        follow: false,
     };
     let rr = required_rights(&req).unwrap();
     assert_eq!(rr.base, "start");
@@ -72,6 +74,8 @@ fn required_rights_start_with_all_flags() {
         no_deps: true,
         override_envs: Some(envs),
         hardening: Some("strict".to_string()),
+
+        follow: false,
     };
     let rr = required_rights(&req).unwrap();
     assert_eq!(rr.base, "start");
@@ -236,6 +240,8 @@ fn check_rights_basic_start() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+
+        follow: false,
     };
     assert!(check_rights(&granted, &req).is_ok());
 }
@@ -250,6 +256,8 @@ fn check_rights_start_denied() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+
+        follow: false,
     };
     assert!(check_rights(&granted, &req).is_err());
 }
@@ -266,6 +274,8 @@ fn check_rights_start_with_env_denied() {
         no_deps: false,
         override_envs: Some(envs),
         hardening: None,
+
+        follow: false,
     };
     assert!(check_rights(&granted, &req).is_err());
 }
@@ -282,6 +292,8 @@ fn check_rights_start_with_env_granted() {
         no_deps: false,
         override_envs: Some(envs),
         hardening: None,
+
+        follow: false,
     };
     assert!(check_rights(&granted, &req).is_ok());
 }
@@ -368,6 +380,8 @@ fn check_rights_empty_granted_denies_scoped() {
         no_deps: false,
         override_envs: None,
         hardening: None,
+
+        follow: false,
     };
     assert!(check_rights(&granted, &req).is_err());
 }

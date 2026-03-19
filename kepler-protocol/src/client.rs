@@ -224,6 +224,7 @@ impl Client {
         no_deps: bool,
         override_envs: Option<HashMap<String, String>>,
         hardening: Option<String>,
+        follow: bool,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Start {
             config_path,
@@ -232,6 +233,7 @@ impl Client {
             no_deps,
             override_envs,
             hardening,
+            follow,
         })
     }
 

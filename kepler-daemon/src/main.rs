@@ -806,6 +806,7 @@ async fn handle_request(
             no_deps,
             override_envs,
             hardening,
+            follow,
         } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
@@ -829,7 +830,19 @@ async fn handle_request(
                 .start_services(&config_path, &services, sys_env, Some((peer.uid, peer.gid)), Some(progress.clone()), no_deps, override_envs, hardening_level, permission_ceiling)
                 .await
             {
-                Ok(msg) => Response::ok_with_message(msg),
+                Ok(msg) => {
+                    if follow {
+                        // Stream inline progress events until quiescence or client disconnect.
+                        // This eliminates the need for a separate Subscribe request.
+                        if let Some(handle) = registry.get(&config_path) {
+                            if let Some(config) = handle.get_config().await {
+                                let svc_filter = if services.is_empty() { None } else { Some(services) };
+                                forward_state_events(&handle, &config, &svc_filter, &progress).await;
+                            }
+                        }
+                    }
+                    Response::ok_with_message(msg)
+                }
                 Err(e) => Response::error(e.to_string()),
             }
         }
@@ -1389,93 +1402,7 @@ async fn handle_request(
                 None => return Response::error("Config not loaded"),
             };
 
-            // Subscribe FIRST — events during snapshot are buffered in unbounded channel
-            let mut rx = handle.subscribe_state_changes();
-
-            // THEN send initial snapshot as ProgressEvents (no gap possible)
-            for (name, svc_config) in &config.services {
-                if services.as_ref().is_none_or(|s| s.contains(name)) {
-                    let state = handle.get_service_state(name).await;
-                    let has_hc = svc_config.has_healthcheck();
-                    let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
-                    let phase = status_to_phase(state.as_ref(), target);
-                    progress.send(ProgressEvent {
-                        service: name.clone(),
-                        phase,
-                    }).await;
-                }
-            }
-
-            // Re-check Ready/Quiescent in case the signals fired before we subscribed
-            handle.recheck_ready_quiescent().await;
-
-            // Replay any unhandled failures that occurred before we subscribed.
-            // Unlike Ready/Quiescent, UnhandledFailure is a one-time event that
-            // isn't re-emitted by recheck_ready_quiescent, so we scan current
-            // service states and emit for any that qualify.
-            for (name, svc_config) in &config.services {
-                if services.as_ref().is_none_or(|s| s.contains(name)) {
-                    let state = handle.get_service_state(name).await;
-                    if let Some(state) = &state {
-                        let exit_code = state.exit_code;
-                        let is_failure = match state.status {
-                            ServiceStatus::Failed | ServiceStatus::Killed => true,
-                            ServiceStatus::Exited => exit_code.is_some_and(|c| c != 0),
-                            _ => false,
-                        };
-                        if is_failure {
-                            let would_restart = svc_config.restart.as_static()
-                                .cloned()
-                                .unwrap_or_default()
-                                .should_restart_on_exit(exit_code);
-                            if !would_restart && !kepler_daemon::deps::is_failure_handled(name, &config.services) {
-                                progress.send_unhandled_failure(name.clone(), exit_code).await;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Stream config events until client disconnects or channel closes
-            let mut quiescence_handled = false;
-            loop {
-                tokio::select! {
-                    event = rx.recv() => {
-                        match event {
-                            Some(ConfigEvent::StatusChange(change))
-                                if services.as_ref().is_none_or(|s| s.contains(&change.service)) =>
-                            {
-                                let has_hc = config.services.get(&change.service)
-                                    .is_some_and(|s| s.has_healthcheck());
-                                let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
-                                // Fetch full state for skip_reason on Skipped status
-                                let state = handle.get_service_state(&change.service).await;
-                                progress.send(ProgressEvent {
-                                    service: change.service,
-                                    phase: status_to_phase(state.as_ref(), target),
-                                }).await;
-                            }
-                            Some(ConfigEvent::StatusChange(_)) => {} // filtered out
-                            Some(ConfigEvent::Ready) => {
-                                progress.send_ready().await;
-                            }
-                            Some(ConfigEvent::Quiescent) => {
-                                // Guard: Quiescent can arrive more than once
-                                // (e.g. recheck races with the original event).
-                                if !quiescence_handled {
-                                    quiescence_handled = true;
-                                }
-                                progress.send_quiescent().await;
-                            }
-                            Some(ConfigEvent::UnhandledFailure { service, exit_code }) => {
-                                progress.send_unhandled_failure(service, exit_code).await;
-                            }
-                            None => break, // Channel closed (config unloaded)
-                        }
-                    }
-                    _ = progress.closed() => break, // Client disconnected
-                }
-            }
+            forward_state_events(&handle, &config, &services, &progress).await;
             Response::ok_with_message("Subscription ended")
         }
 
@@ -1593,6 +1520,106 @@ async fn handle_request(
             };
 
             Response::ok_with_data(ResponseData::UserRights(rights))
+        }
+    }
+}
+
+/// Forward state-change events to the client until Quiescent or client disconnect.
+///
+/// Shared by `Request::Subscribe` and `Request::Start { follow: true }`.
+/// Sends an initial snapshot, replays unhandled failures, then streams
+/// StatusChange / Ready / Quiescent / UnhandledFailure until done.
+async fn forward_state_events(
+    handle: &kepler_daemon::config_actor::ConfigActorHandle,
+    config: &kepler_daemon::config::KeplerConfig,
+    services: &Option<Vec<String>>,
+    progress: &ProgressSender,
+) {
+    // Subscribe FIRST — events during snapshot are buffered in unbounded channel
+    let mut rx = handle.subscribe_state_changes();
+
+    // THEN send initial snapshot as ProgressEvents (no gap possible)
+    for (name, svc_config) in &config.services {
+        if services.as_ref().is_none_or(|s| s.contains(name)) {
+            let state = handle.get_service_state(name).await;
+            let has_hc = svc_config.has_healthcheck();
+            let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
+            let phase = status_to_phase(state.as_ref(), target);
+            progress.send(ProgressEvent {
+                service: name.clone(),
+                phase,
+            }).await;
+        }
+    }
+
+    // Re-check Ready/Quiescent in case the signals fired before we subscribed
+    handle.recheck_ready_quiescent().await;
+
+    // Replay any unhandled failures that occurred before we subscribed.
+    // Unlike Ready/Quiescent, UnhandledFailure is a one-time event that
+    // isn't re-emitted by recheck_ready_quiescent, so we scan current
+    // service states and emit for any that qualify.
+    for (name, svc_config) in &config.services {
+        if services.as_ref().is_none_or(|s| s.contains(name)) {
+            let state = handle.get_service_state(name).await;
+            if let Some(state) = &state {
+                let exit_code = state.exit_code;
+                let is_failure = match state.status {
+                    ServiceStatus::Failed | ServiceStatus::Killed => true,
+                    ServiceStatus::Exited => exit_code.is_some_and(|c| c != 0),
+                    _ => false,
+                };
+                if is_failure {
+                    let would_restart = svc_config.restart.as_static()
+                        .cloned()
+                        .unwrap_or_default()
+                        .should_restart_on_exit(exit_code);
+                    if !would_restart && !kepler_daemon::deps::is_failure_handled(name, &config.services) {
+                        progress.send_unhandled_failure(name.clone(), exit_code).await;
+                    }
+                }
+            }
+        }
+    }
+
+    // Stream config events until client disconnects or channel closes
+    let mut quiescence_handled = false;
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Some(ConfigEvent::StatusChange(change))
+                        if services.as_ref().is_none_or(|s| s.contains(&change.service)) =>
+                    {
+                        let has_hc = config.services.get(&change.service)
+                            .is_some_and(|s| s.has_healthcheck());
+                        let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
+                        // Fetch full state for skip_reason on Skipped status
+                        let state = handle.get_service_state(&change.service).await;
+                        progress.send(ProgressEvent {
+                            service: change.service,
+                            phase: status_to_phase(state.as_ref(), target),
+                        }).await;
+                    }
+                    Some(ConfigEvent::StatusChange(_)) => {} // filtered out
+                    Some(ConfigEvent::Ready) => {
+                        progress.send_ready().await;
+                    }
+                    Some(ConfigEvent::Quiescent) => {
+                        // Guard: Quiescent can arrive more than once
+                        // (e.g. recheck races with the original event).
+                        if !quiescence_handled {
+                            quiescence_handled = true;
+                        }
+                        progress.send_quiescent().await;
+                    }
+                    Some(ConfigEvent::UnhandledFailure { service, exit_code }) => {
+                        progress.send_unhandled_failure(service, exit_code).await;
+                    }
+                    None => break, // Channel closed (config unloaded)
+                }
+            }
+            _ = progress.closed() => break, // Client disconnected
         }
     }
 }
@@ -2606,6 +2633,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
+
+            follow: false,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_err());
     }
@@ -2626,6 +2655,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
+
+            follow: false,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &req, &cache).await.is_ok());
     }
@@ -2699,6 +2730,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
+
+            follow: false,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_err());
 
@@ -2738,6 +2771,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
+
+            follow: false,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_ok());
 
@@ -2782,6 +2817,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
+
+            follow: false,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_err());
     }
@@ -2817,6 +2854,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
+
+            follow: false,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_err());
 
@@ -2842,6 +2881,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
+
+            follow: false,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_ok());
     }
@@ -2864,6 +2905,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
+
+            follow: false,
         };
         assert!(check_unloaded_config_acl(&auth, state_dir, &start_req, &cache).await.is_ok());
 
@@ -2985,6 +3028,8 @@ mod tests {
             no_deps: false,
             override_envs: None,
             hardening: None,
+
+            follow: false,
         };
 
         // Token with ACL for config A → allowed
