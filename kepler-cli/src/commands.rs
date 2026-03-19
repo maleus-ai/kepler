@@ -149,6 +149,40 @@ pub enum Commands {
     },
     /// Inspect config and service state (JSON output)
     Inspect,
+    /// Live resource monitor (CPU, memory) for services
+    Top {
+        /// Service to monitor
+        #[arg(value_name = "SERVICE")]
+        service: Option<String>,
+        /// Output as JSON instead of interactive TUI
+        #[arg(long)]
+        json: bool,
+        /// Time range for historical data (e.g. "5m", "1h", "24h")
+        #[arg(long)]
+        history: Option<String>,
+        /// TUI refresh interval (e.g. "2s", "500ms"). Default: 2s
+        #[arg(long)]
+        interval: Option<String>,
+
+        /// Filter metrics using a search expression.
+        ///
+        /// Supports field matching, boolean operators, comparisons, and wildcards.
+        ///
+        /// Examples:
+        ///   -F '@service:web'                  Service name match
+        ///   -F '@cpu_percent:>50'               CPU usage above 50%
+        ///   -F '@memory_rss:>1000000'           RSS above 1MB
+        ///   -F '@service:web AND @cpu_percent:>10'  Combined filter
+        ///   -F '@service:web*'                  Wildcard matching
+        #[arg(long, short = 'F', verbatim_doc_comment, allow_hyphen_values = true)]
+        filter: Option<String>,
+
+        /// Treat --filter as a raw SQL WHERE clause instead of DSL.
+        ///
+        /// Requires the 'monitor:search:sql' permission.
+        #[arg(long, requires = "filter")]
+        sql: bool,
+    },
     /// Prune all stopped/orphaned config state directories
     Prune {
         /// Force prune even if services appear running

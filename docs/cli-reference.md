@@ -324,6 +324,40 @@ kepler prune --force      # Force prune even if services appear running
 kepler prune --dry-run    # Show what would be pruned
 ```
 
+### `kepler top`
+
+Live resource monitor (CPU, memory) for services.
+
+```bash
+kepler top                              # Interactive TUI for all services
+kepler top web                          # Monitor a single service
+kepler top --json                       # JSON output (non-interactive)
+kepler top --history 1h                 # Include 1 hour of historical data
+kepler top --interval 500ms             # Refresh every 500ms
+kepler top -F '@cpu_percent:>50'        # Filter with search DSL
+kepler top -F '@service:web AND @memory_rss:>1000000'
+kepler top -F "cpu_percent > 50" --sql  # Raw SQL filter
+```
+
+| Option | Description |
+|--------|-------------|
+| `SERVICE` | Service to monitor (monitors all if not specified) |
+| `--json` | Output as JSON instead of interactive TUI |
+| `--history <DURATION>` | Time range for historical data (e.g. `5m`, `1h`, `24h`) |
+| `--interval <DURATION>` | TUI refresh interval (default: `2s`) |
+| `-F, --filter <EXPR>` | Filter metrics using a search expression (see below) |
+| `--sql` | Treat `--filter` as a raw SQL WHERE clause (requires `monitor:search:sql` right) |
+
+The filter DSL supports the same syntax as log filtering but with monitor-specific fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `@service` | text | Service name |
+| `@timestamp` | integer | Timestamp in milliseconds since Unix epoch |
+| `@cpu_percent` | real | CPU usage percentage |
+| `@memory_rss` | integer | Resident set size in bytes |
+| `@memory_vss` | integer | Virtual memory size in bytes |
+
 ---
 
 ## Signal Handling

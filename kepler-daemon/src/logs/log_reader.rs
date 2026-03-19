@@ -22,7 +22,7 @@ impl LogReader {
     }
 
     /// Get the last N entries (newest, returned in chronological order).
-    pub fn tail(&self, count: usize, services: &[String], no_hooks: bool, filter: Option<&SqlFragment>) -> Vec<LogLine> {
+    pub fn tail(&self, count: usize, services: &[String], no_hooks: bool, filter: Option<&SqlFragment>, after_ts: Option<i64>, before_ts: Option<i64>) -> Vec<LogLine> {
         // Validate raw SQL filters before doing any I/O (DSL-generated ones are safe)
         if let Some(frag) = filter {
             if frag.params.is_empty() {
@@ -42,7 +42,7 @@ impl LogReader {
             filter::apply_filter_safeguards(&conn, filter::FILTER_QUERY_TIMEOUT, &["logs"]);
         }
 
-        let (where_clause, bind) = build_filter(services, no_hooks, filter);
+        let (where_clause, bind) = build_filter(services, no_hooks, filter, after_ts, before_ts);
         let sql = format!(
             "SELECT * FROM (SELECT id, timestamp, service, hook, level, line, attributes \
              FROM logs {where_clause} ORDER BY id DESC LIMIT ?{next}) ORDER BY id ASC",
@@ -54,7 +54,7 @@ impl LogReader {
     }
 
     /// Get the first N entries in chronological order.
-    pub fn head(&self, count: usize, services: &[String], no_hooks: bool, filter: Option<&SqlFragment>) -> Vec<LogLine> {
+    pub fn head(&self, count: usize, services: &[String], no_hooks: bool, filter: Option<&SqlFragment>, after_ts: Option<i64>, before_ts: Option<i64>) -> Vec<LogLine> {
         // Validate raw SQL filters before doing any I/O (DSL-generated ones are safe)
         if let Some(frag) = filter {
             if frag.params.is_empty() {
@@ -74,7 +74,7 @@ impl LogReader {
             filter::apply_filter_safeguards(&conn, filter::FILTER_QUERY_TIMEOUT, &["logs"]);
         }
 
-        let (where_clause, bind) = build_filter(services, no_hooks, filter);
+        let (where_clause, bind) = build_filter(services, no_hooks, filter, after_ts, before_ts);
         let sql = format!(
             "SELECT id, timestamp, service, hook, level, line, attributes \
              FROM logs {where_clause} ORDER BY id ASC LIMIT ?{next}",
@@ -98,6 +98,8 @@ impl LogReader {
         services: &[String],
         no_hooks: bool,
         filter: Option<&SqlFragment>,
+        after_ts: Option<i64>,
+        before_ts: Option<i64>,
     ) -> Result<(Vec<LogLine>, bool), String> {
         // Validate raw SQL filters before doing any I/O (DSL-generated ones are safe)
         if let Some(frag) = filter {
@@ -116,7 +118,7 @@ impl LogReader {
             filter::apply_filter_safeguards(&conn, filter::FILTER_QUERY_TIMEOUT, &["logs"]);
         }
 
-        let (filter_clause, mut bind) = build_filter(services, no_hooks, filter);
+        let (filter_clause, mut bind) = build_filter(services, no_hooks, filter, after_ts, before_ts);
         // Combine id > ? with existing filters
         let where_clause = if filter_clause.is_empty() {
             "WHERE id > ?1".to_string()
@@ -151,8 +153,10 @@ impl LogReader {
         max_bytes: Option<usize>,
         no_hooks: bool,
         filter: Option<&SqlFragment>,
+        after_ts: Option<i64>,
+        before_ts: Option<i64>,
     ) -> Vec<LogLine> {
-        let entries = self.tail(count, services, no_hooks, filter);
+        let entries = self.tail(count, services, no_hooks, filter, after_ts, before_ts);
         match max_bytes {
             Some(budget) => {
                 let mut total = 0usize;
@@ -224,6 +228,8 @@ fn build_filter(
     services: &[String],
     no_hooks: bool,
     filter: Option<&SqlFragment>,
+    after_ts: Option<i64>,
+    before_ts: Option<i64>,
 ) -> (String, Vec<BindValue>) {
     let mut conditions = Vec::new();
     let mut bind = Vec::new();
@@ -246,6 +252,16 @@ fn build_filter(
     if no_hooks {
         // Hook logs use dotted service names like "web.pre_start.0"
         conditions.push("service NOT LIKE '%.%'".to_string());
+    }
+
+    // Timestamp bounds — injected server-side, no `logs:search` right required.
+    if let Some(ts) = after_ts {
+        bind.push(BindValue::Int(ts));
+        conditions.push(format!("timestamp >= ?{}", bind.len()));
+    }
+    if let Some(ts) = before_ts {
+        bind.push(BindValue::Int(ts));
+        conditions.push(format!("timestamp <= ?{}", bind.len()));
     }
 
     // SQL filter fragment — either DSL-generated (with bind params) or raw SQL.

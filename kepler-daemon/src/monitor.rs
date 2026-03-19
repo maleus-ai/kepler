@@ -223,6 +223,7 @@ pub fn open_monitor_db_readonly(state_dir: &Path) -> anyhow::Result<Connection> 
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+    conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(
         "PRAGMA query_only = ON;
          PRAGMA mmap_size = 0;",
@@ -261,36 +262,63 @@ pub fn query_latest(
     Ok(entries)
 }
 
+/// Returns (SELECT clause, GROUP BY clause) for raw or bucketed queries.
+fn bucket_select_clause(bucket_ms: Option<i64>) -> (String, String) {
+    match bucket_ms {
+        Some(b) if b > 0 => (
+            format!(
+                "SELECT (timestamp / {b}) * {b} AS timestamp, service, \
+                 AVG(cpu_percent) AS cpu_percent, MAX(memory_rss) AS memory_rss, \
+                 MAX(memory_vss) AS memory_vss, '[]' AS pids"
+            ),
+            "GROUP BY 1, service".to_string(),
+        ),
+        _ => (
+            "SELECT timestamp, service, cpu_percent, memory_rss, memory_vss, pids".to_string(),
+            String::new(),
+        ),
+    }
+}
+
 /// Query metric rows since a given timestamp, ordered chronologically.
 pub fn query_history(
     conn: &Connection,
     service: Option<&str>,
     since: i64,
     limit: Option<usize>,
+    bucket_ms: Option<i64>,
+    before_ts: Option<i64>,
 ) -> anyhow::Result<Vec<MonitorMetricEntry>> {
     let limit = limit.unwrap_or(10_000);
-    let entries = match service {
-        Some(svc) => {
-            let mut stmt = conn.prepare(
-                "SELECT timestamp, service, cpu_percent, memory_rss, memory_vss, pids
-                 FROM metrics WHERE service = ?1 AND timestamp >= ?2
-                 ORDER BY timestamp ASC LIMIT ?3",
-            )?;
-            stmt.query_map(rusqlite::params![svc, since, limit], parse_metric_row)?
-                .filter_map(|r| r.ok())
-                .collect()
-        }
-        None => {
-            let mut stmt = conn.prepare(
-                "SELECT timestamp, service, cpu_percent, memory_rss, memory_vss, pids
-                 FROM metrics WHERE timestamp >= ?1
-                 ORDER BY timestamp ASC LIMIT ?2",
-            )?;
-            stmt.query_map(rusqlite::params![since, limit], parse_metric_row)?
-                .filter_map(|r| r.ok())
-                .collect()
-        }
-    };
+    let (select, group_by) = bucket_select_clause(bucket_ms);
+
+    let mut conditions = vec!["timestamp >= ?1".to_string()];
+    let mut bind: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(since)];
+
+    if let Some(svc) = service {
+        bind.push(Box::new(svc.to_string()));
+        conditions.push(format!("service = ?{}", bind.len()));
+    }
+    if let Some(ts) = before_ts {
+        bind.push(Box::new(ts));
+        conditions.push(format!("timestamp <= ?{}", bind.len()));
+    }
+
+    bind.push(Box::new(limit as i64));
+    let limit_param = bind.len();
+
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let sql = format!(
+        "{} FROM metrics {} {} ORDER BY 1 ASC LIMIT ?{}",
+        select, where_clause, group_by, limit_param,
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|p| p.as_ref()).collect();
+    let entries: Vec<MonitorMetricEntry> = stmt
+        .query_map(params_refs.as_slice(), parse_metric_row)?
+        .filter_map(|r| r.ok())
+        .collect();
     Ok(entries)
 }
 
@@ -316,8 +344,12 @@ pub fn query_filtered(
     since: Option<i64>,
     limit: Option<usize>,
     frag: &SqlFragment,
+    bucket_ms: Option<i64>,
+    after_ts: Option<i64>,
+    before_ts: Option<i64>,
 ) -> anyhow::Result<Vec<MonitorMetricEntry>> {
     let limit = limit.unwrap_or(10_000);
+    let (select, group_by) = bucket_select_clause(bucket_ms);
     let mut conditions = Vec::new();
     let mut bind: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -328,6 +360,16 @@ pub fn query_filtered(
     if let Some(since_ts) = since {
         bind.push(Box::new(since_ts));
         conditions.push(format!("timestamp >= ?{}", bind.len()));
+    }
+
+    // Timestamp bounds — injected server-side, no `monitor:search` right required.
+    if let Some(ts) = after_ts {
+        bind.push(Box::new(ts));
+        conditions.push(format!("timestamp >= ?{}", bind.len()));
+    }
+    if let Some(ts) = before_ts {
+        bind.push(Box::new(ts));
+        conditions.push(format!("timestamp <= ?{}", bind.len()));
     }
 
     // Integrate filter fragment with shifted bind params
@@ -351,9 +393,8 @@ pub fn query_filtered(
     };
 
     let sql = format!(
-        "SELECT timestamp, service, cpu_percent, memory_rss, memory_vss, pids \
-         FROM metrics {} ORDER BY timestamp ASC LIMIT ?{}",
-        where_clause, limit_param,
+        "{} FROM metrics {} {} ORDER BY 1 ASC LIMIT ?{}",
+        select, where_clause, group_by, limit_param,
     );
 
     // Apply safety safeguards for the user-provided filter

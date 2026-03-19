@@ -1303,7 +1303,7 @@ impl TestLogHelper {
     pub fn tail(&self, count: usize, service: Option<&str>) -> Vec<LogLine> {
         let reader = SqliteLogReader::new(self.store.db_path().to_path_buf(), self.store.storage_mode());
         let services: Vec<String> = service.into_iter().map(String::from).collect();
-        reader.tail(count, &services, false, None)
+        reader.tail(count, &services, false, None, None, None)
     }
 
     /// Clear all logs
@@ -1334,7 +1334,7 @@ impl TestLogHelper {
     pub fn entries_since(&self, since: u64, service: Option<&str>) -> Vec<LogLine> {
         let reader = SqliteLogReader::new(self.store.db_path().to_path_buf(), self.store.storage_mode());
         let services: Vec<String> = service.into_iter().map(String::from).collect();
-        let (entries, _has_more) = reader.after(since as i64, 10000, &services, false, None).unwrap_or_default();
+        let (entries, _has_more) = reader.after(since as i64, 10000, &services, false, None, None, None).unwrap_or_default();
         entries
     }
 }
