@@ -6,6 +6,7 @@ use std::sync::Arc;
 use super::store::open_readonly;
 use super::LogLine;
 use crate::config::StorageMode;
+use crate::query_dsl::{SqlFragment, SqlValue};
 
 /// SQL-based log reader. Creates a fresh read-only connection per query
 /// (required for NFS correctness, cheap on local WAL).
@@ -20,13 +21,27 @@ impl LogReader {
     }
 
     /// Get the last N entries (newest, returned in chronological order).
-    pub fn tail(&self, count: usize, services: &[String], no_hooks: bool) -> Vec<LogLine> {
+    pub fn tail(&self, count: usize, services: &[String], no_hooks: bool, filter: Option<&SqlFragment>) -> Vec<LogLine> {
+        // Validate raw SQL filters before doing any I/O (DSL-generated ones are safe)
+        if let Some(frag) = filter {
+            if frag.params.is_empty() {
+                if super::filter::validate_filter(&frag.sql).is_err() {
+                    return Vec::new();
+                }
+            }
+        }
+
         let conn = match open_readonly(&self.db_path) {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
 
-        let (where_clause, bind) = build_filter(services, no_hooks, None);
+        // Apply authorizer + resource limits when user filter is present
+        if filter.is_some() {
+            super::filter::apply_filter_safeguards(&conn, super::filter::FILTER_QUERY_TIMEOUT);
+        }
+
+        let (where_clause, bind) = build_filter(services, no_hooks, filter);
         let sql = format!(
             "SELECT * FROM (SELECT id, timestamp, service, hook, level, line, attributes \
              FROM logs {where_clause} ORDER BY id DESC LIMIT ?{next}) ORDER BY id ASC",
@@ -38,13 +53,27 @@ impl LogReader {
     }
 
     /// Get the first N entries in chronological order.
-    pub fn head(&self, count: usize, services: &[String], no_hooks: bool) -> Vec<LogLine> {
+    pub fn head(&self, count: usize, services: &[String], no_hooks: bool, filter: Option<&SqlFragment>) -> Vec<LogLine> {
+        // Validate raw SQL filters before doing any I/O (DSL-generated ones are safe)
+        if let Some(frag) = filter {
+            if frag.params.is_empty() {
+                if super::filter::validate_filter(&frag.sql).is_err() {
+                    return Vec::new();
+                }
+            }
+        }
+
         let conn = match open_readonly(&self.db_path) {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
 
-        let (where_clause, bind) = build_filter(services, no_hooks, None);
+        // Apply authorizer + resource limits when user filter is present
+        if filter.is_some() {
+            super::filter::apply_filter_safeguards(&conn, super::filter::FILTER_QUERY_TIMEOUT);
+        }
+
+        let (where_clause, bind) = build_filter(services, no_hooks, filter);
         let sql = format!(
             "SELECT id, timestamp, service, hook, level, line, attributes \
              FROM logs {where_clause} ORDER BY id ASC LIMIT ?{next}",
@@ -58,19 +87,22 @@ impl LogReader {
     /// Position-based pagination: get entries after `after_id`.
     /// Returns `(entries, has_more)`.
     ///
-    /// When `filter` is provided, the raw SQL WHERE fragment is injected into
-    /// the query, protected by the SQLite authorizer and resource limits.
+    /// When `filter` is provided as a [`SqlFragment`], its SQL and bind parameters
+    /// are integrated into the query. The SQLite authorizer and resource limits
+    /// are applied for safety.
     pub fn after(
         &self,
         after_id: i64,
         limit: usize,
         services: &[String],
         no_hooks: bool,
-        filter: Option<&str>,
+        filter: Option<&SqlFragment>,
     ) -> Result<(Vec<LogLine>, bool), String> {
-        // Validate filter before doing any I/O
-        if let Some(f) = filter {
-            super::filter::validate_filter(f)?;
+        // Validate raw SQL filters before doing any I/O (DSL-generated ones are safe)
+        if let Some(frag) = filter {
+            if frag.params.is_empty() {
+                super::filter::validate_filter(&frag.sql)?;
+            }
         }
 
         let conn = match open_readonly(&self.db_path) {
@@ -117,8 +149,9 @@ impl LogReader {
         services: &[String],
         max_bytes: Option<usize>,
         no_hooks: bool,
+        filter: Option<&SqlFragment>,
     ) -> Vec<LogLine> {
-        let entries = self.tail(count, services, no_hooks);
+        let entries = self.tail(count, services, no_hooks, filter);
         match max_bytes {
             Some(budget) => {
                 let mut total = 0usize;
@@ -173,12 +206,23 @@ impl LogReader {
 enum BindValue {
     Text(String),
     Int(i64),
+    Real(f64),
+}
+
+impl From<SqlValue> for BindValue {
+    fn from(v: SqlValue) -> Self {
+        match v {
+            SqlValue::Text(s) => BindValue::Text(s),
+            SqlValue::Integer(i) => BindValue::Int(i),
+            SqlValue::Real(f) => BindValue::Real(f),
+        }
+    }
 }
 
 fn build_filter(
     services: &[String],
     no_hooks: bool,
-    filter: Option<&str>,
+    filter: Option<&SqlFragment>,
 ) -> (String, Vec<BindValue>) {
     let mut conditions = Vec::new();
     let mut bind = Vec::new();
@@ -203,10 +247,14 @@ fn build_filter(
         conditions.push("service NOT LIKE '%.%'".to_string());
     }
 
-    // Raw SQL WHERE fragment — safety enforced by the SQLite authorizer
-    // applied to the connection before prepare().
-    if let Some(f) = filter {
-        conditions.push(format!("({})", f));
+    // SQL filter fragment — either DSL-generated (with bind params) or raw SQL.
+    // Bind param placeholders (?N) are shifted by the number of existing params.
+    if let Some(frag) = filter {
+        let shifted_sql = frag.sql_with_offset(bind.len());
+        conditions.push(format!("({})", shifted_sql));
+        for param in &frag.params {
+            bind.push(BindValue::from(param.clone()));
+        }
     }
 
     if conditions.is_empty() {
@@ -233,6 +281,7 @@ fn query_log_lines(
             match v {
                 BindValue::Text(s) => Box::new(s.clone()),
                 BindValue::Int(i) => Box::new(*i),
+                BindValue::Real(f) => Box::new(*f),
             }
         })
         .collect();

@@ -114,6 +114,28 @@ pub enum Commands {
         /// Output raw log lines without formatting (no timestamp, level, service name, color)
         #[arg(long)]
         raw: bool,
+
+        /// Filter logs using a search expression.
+        ///
+        /// Supports full-text search, field matching, boolean operators,
+        /// wildcards, and JSON attribute queries.
+        ///
+        /// Examples:
+        ///   -F 'error'                           Full-text search
+        ///   -F '@service:web AND @level:error'    Field matching with AND
+        ///   -F '@level:error OR @level:warn'      OR operator
+        ///   -F '-@service:worker'                 Negation
+        ///   -F '@http.status:>400'                JSON attribute comparison
+        ///   -F '"connection timeout"'             Exact phrase search
+        ///   -F '@service:web*'                    Wildcard matching
+        #[arg(long, short = 'F', verbatim_doc_comment, allow_hyphen_values = true)]
+        filter: Option<String>,
+
+        /// Treat --filter as a raw SQL WHERE clause instead of DSL.
+        ///
+        /// Requires the 'logs:search:sql' permission.
+        #[arg(long, requires = "filter")]
+        sql: bool,
     },
     /// List all services and their states
     PS {

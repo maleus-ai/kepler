@@ -33,6 +33,7 @@ fn intern_right_known() {
     assert_eq!(intern_right("start"), Some("start"));
     assert_eq!(intern_right("stop:clean"), Some("stop:clean"));
     assert_eq!(intern_right("logs:search"), Some("logs:search"));
+    assert_eq!(intern_right("logs:search:sql"), Some("logs:search:sql"));
 }
 
 #[test]
@@ -153,7 +154,7 @@ fn required_rights_recreate_without_hardening() {
 }
 
 #[test]
-fn required_rights_logs_with_filter() {
+fn required_rights_logs_with_dsl_filter() {
     let req = Request::LogsStream {
         config_path: "/test".into(),
         services: vec![],
@@ -161,13 +162,35 @@ fn required_rights_logs_with_filter() {
         from_end: false,
         limit: 1000,
         no_hooks: false,
-        filter: Some("level='err'".to_string()),
+        filter: Some("level:err".to_string()),
+        sql: false,
         raw: false,
         tail: false,
     };
     let rr = required_rights(&req).unwrap();
     assert_eq!(rr.base, "logs");
     assert!(rr.sub_rights.contains(&"logs:search"));
+    assert!(!rr.sub_rights.contains(&"logs:search:sql"));
+}
+
+#[test]
+fn required_rights_logs_with_sql_filter() {
+    let req = Request::LogsStream {
+        config_path: "/test".into(),
+        services: vec![],
+        after_id: None,
+        from_end: false,
+        limit: 1000,
+        no_hooks: false,
+        filter: Some("level = 'err'".to_string()),
+        sql: true,
+        raw: false,
+        tail: false,
+    };
+    let rr = required_rights(&req).unwrap();
+    assert_eq!(rr.base, "logs");
+    assert!(rr.sub_rights.contains(&"logs:search"));
+    assert!(rr.sub_rights.contains(&"logs:search:sql"));
 }
 
 #[test]
@@ -180,6 +203,7 @@ fn required_rights_logs_without_filter() {
         limit: 1000,
         no_hooks: false,
         filter: None,
+        sql: false,
         raw: false,
         tail: false,
     };
@@ -387,6 +411,163 @@ fn check_rights_empty_granted_denies_scoped() {
 }
 
 // =========================================================================
+// check_rights — logs:search:sql gating
+// =========================================================================
+
+#[test]
+fn check_rights_logs_dsl_filter_allowed_with_logs_search() {
+    let granted: HashSet<&'static str> = ["logs", "logs:search"].into();
+    let req = Request::LogsStream {
+        config_path: "/test".into(),
+        services: vec![],
+        after_id: None,
+        from_end: false,
+        limit: 1000,
+        no_hooks: false,
+        filter: Some("level:error".to_string()),
+        sql: false,
+        raw: false,
+        tail: false,
+    };
+    assert!(check_rights(&granted, &req).is_ok());
+}
+
+#[test]
+fn check_rights_logs_dsl_filter_denied_without_logs_search() {
+    let granted: HashSet<&'static str> = ["logs"].into();
+    let req = Request::LogsStream {
+        config_path: "/test".into(),
+        services: vec![],
+        after_id: None,
+        from_end: false,
+        limit: 1000,
+        no_hooks: false,
+        filter: Some("level:error".to_string()),
+        sql: false,
+        raw: false,
+        tail: false,
+    };
+    let err = check_rights(&granted, &req).unwrap_err();
+    assert!(err.contains("logs:search"), "expected logs:search denial, got: {}", err);
+}
+
+#[test]
+fn check_rights_logs_sql_filter_allowed_with_both_sub_rights() {
+    let granted: HashSet<&'static str> = ["logs", "logs:search", "logs:search:sql"].into();
+    let req = Request::LogsStream {
+        config_path: "/test".into(),
+        services: vec![],
+        after_id: None,
+        from_end: false,
+        limit: 1000,
+        no_hooks: false,
+        filter: Some("level = 'error'".to_string()),
+        sql: true,
+        raw: false,
+        tail: false,
+    };
+    assert!(check_rights(&granted, &req).is_ok());
+}
+
+#[test]
+fn check_rights_logs_sql_filter_denied_without_sql_sub_right() {
+    // Has logs + logs:search but NOT logs:search:sql
+    let granted: HashSet<&'static str> = ["logs", "logs:search"].into();
+    let req = Request::LogsStream {
+        config_path: "/test".into(),
+        services: vec![],
+        after_id: None,
+        from_end: false,
+        limit: 1000,
+        no_hooks: false,
+        filter: Some("level = 'error'".to_string()),
+        sql: true,
+        raw: false,
+        tail: false,
+    };
+    let err = check_rights(&granted, &req).unwrap_err();
+    assert!(err.contains("logs:search:sql"), "expected logs:search:sql denial, got: {}", err);
+}
+
+#[test]
+fn check_rights_logs_sql_filter_denied_without_any_search_right() {
+    // Has logs only — missing both logs:search and logs:search:sql
+    let granted: HashSet<&'static str> = ["logs"].into();
+    let req = Request::LogsStream {
+        config_path: "/test".into(),
+        services: vec![],
+        after_id: None,
+        from_end: false,
+        limit: 1000,
+        no_hooks: false,
+        filter: Some("level = 'error'".to_string()),
+        sql: true,
+        raw: false,
+        tail: false,
+    };
+    let err = check_rights(&granted, &req).unwrap_err();
+    assert!(err.contains("logs:search"), "expected logs:search denial, got: {}", err);
+}
+
+#[test]
+fn check_rights_logs_sql_sub_right_without_search_still_denied() {
+    // Has logs + logs:search:sql but NOT logs:search — sql needs both
+    let granted: HashSet<&'static str> = ["logs", "logs:search:sql"].into();
+    let req = Request::LogsStream {
+        config_path: "/test".into(),
+        services: vec![],
+        after_id: None,
+        from_end: false,
+        limit: 1000,
+        no_hooks: false,
+        filter: Some("level = 'error'".to_string()),
+        sql: true,
+        raw: false,
+        tail: false,
+    };
+    let err = check_rights(&granted, &req).unwrap_err();
+    assert!(err.contains("logs:search"), "expected logs:search denial, got: {}", err);
+}
+
+#[test]
+fn check_rights_logs_no_filter_allowed_with_base_only() {
+    // No filter — only needs the base "logs" right
+    let granted: HashSet<&'static str> = ["logs"].into();
+    let req = Request::LogsStream {
+        config_path: "/test".into(),
+        services: vec![],
+        after_id: None,
+        from_end: false,
+        limit: 1000,
+        no_hooks: false,
+        filter: None,
+        sql: false,
+        raw: false,
+        tail: false,
+    };
+    assert!(check_rights(&granted, &req).is_ok());
+}
+
+#[test]
+fn check_rights_logs_sql_flag_without_filter_no_extra_rights() {
+    // sql: true but no filter — no sub-rights needed
+    let granted: HashSet<&'static str> = ["logs"].into();
+    let req = Request::LogsStream {
+        config_path: "/test".into(),
+        services: vec![],
+        after_id: None,
+        from_end: false,
+        limit: 1000,
+        no_hooks: false,
+        filter: None,
+        sql: true,
+        raw: false,
+        tail: false,
+    };
+    assert!(check_rights(&granted, &req).is_ok());
+}
+
+// =========================================================================
 // Alias validation
 // =========================================================================
 
@@ -559,6 +740,20 @@ fn orphan_sub_right_detected() {
 #[test]
 fn no_orphan_when_base_present() {
     let rights: HashSet<&'static str> = ["stop", "stop:clean"].into();
+    let warnings = check_orphan_sub_rights(&rights);
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn orphan_logs_search_sql_without_logs() {
+    let rights: HashSet<&'static str> = ["logs:search:sql"].into();
+    let warnings = check_orphan_sub_rights(&rights);
+    assert!(warnings.iter().any(|w| w.contains("logs:search:sql")));
+}
+
+#[test]
+fn no_orphan_logs_search_sql_with_logs() {
+    let rights: HashSet<&'static str> = ["logs", "logs:search", "logs:search:sql"].into();
     let warnings = check_orphan_sub_rights(&rights);
     assert!(warnings.is_empty());
 }

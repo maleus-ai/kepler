@@ -327,6 +327,7 @@ impl Client {
         limit: usize,
         no_hooks: bool,
         filter: Option<&str>,
+        sql: bool,
         raw: bool,
         tail: bool,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
@@ -338,6 +339,7 @@ impl Client {
             limit,
             no_hooks,
             filter: filter.map(String::from),
+            sql,
             raw,
             tail,
         })

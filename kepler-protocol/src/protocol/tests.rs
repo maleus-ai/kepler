@@ -186,6 +186,7 @@ fn roundtrip_envelope_logs_stream() {
             limit: 10000,
             no_hooks: false,
             filter: Some("level='err'".to_string()),
+            sql: false,
             raw: false,
             tail: true,
         },
