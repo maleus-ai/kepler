@@ -152,6 +152,8 @@ pub struct TopApp {
     // Connection state
     pub disconnected: bool,
     pub consecutive_failures: u32,
+    /// Whether monitor data is available (monitor.db exists and is accessible)
+    pub monitor_available: bool,
     // Dashboard focus & metrics refetch
     pub dashboard_focus: DashboardFocus,
     /// Debounced metrics refetch: when set, refetch metrics after this instant
@@ -265,6 +267,7 @@ impl TopApp {
             toggled_services: HashSet::new(),
             disconnected: false,
             consecutive_failures: 0,
+            monitor_available: false,
             dashboard_focus: DashboardFocus::None,
             dashboard_chart_cursor: None,
             dashboard_chart_selection: None,
@@ -344,7 +347,7 @@ impl TopApp {
 
     pub fn available_tabs(&self) -> Vec<Tab> {
         let mut tabs = Vec::new();
-        if self.has_right("monitor") {
+        if self.has_right("monitor") && self.monitor_available {
             tabs.push(Tab::Dashboard);
         }
         if self.has_right("logs") {
