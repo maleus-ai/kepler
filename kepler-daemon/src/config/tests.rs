@@ -166,7 +166,7 @@ services:
 
 #[test]
 fn test_resolve_service_dynamic_user_fallback_to_default() {
-    use crate::lua_eval::EvalContext;
+    use crate::lua::templating_runtime::EvalContext;
     use std::path::PathBuf;
 
     // Dynamic user that resolves to nil → should fall back to default_user
@@ -192,7 +192,7 @@ services:
 
 #[test]
 fn test_resolve_service_dynamic_user_no_fallback_without_default() {
-    use crate::lua_eval::EvalContext;
+    use crate::lua::templating_runtime::EvalContext;
     use std::path::PathBuf;
 
     // Dynamic user that resolves to nil, no default_user → stays None
@@ -215,7 +215,7 @@ services:
 
 #[test]
 fn test_resolve_service_dynamic_user_explicit_overrides_default() {
-    use crate::lua_eval::EvalContext;
+    use crate::lua::templating_runtime::EvalContext;
     use std::path::PathBuf;
 
     // Dynamic user that resolves to an explicit value → default_user is NOT used
@@ -312,7 +312,7 @@ services:
 
 #[test]
 fn test_run_resolves_to_sh_c() {
-    use crate::lua_eval::EvalContext;
+    use crate::lua::templating_runtime::EvalContext;
     use std::path::PathBuf;
 
     let yaml = r#"
@@ -607,7 +607,7 @@ environment:
 
 #[test]
 fn test_environment_map_resolves_correctly() {
-    use crate::lua_eval::{EvalContext, ServiceEvalContext};
+    use crate::lua::templating_runtime::{EvalContext, ServiceEvalContext};
     use std::path::PathBuf;
 
     let yaml = r#"
@@ -640,7 +640,7 @@ services:
 
 #[test]
 fn test_environment_lua_returns_table_as_map() {
-    use crate::lua_eval::{EvalContext, ServiceEvalContext};
+    use crate::lua::templating_runtime::{EvalContext, ServiceEvalContext};
 
     // Top-level !lua returns a Lua table {FOO="bar", PORT="8080"}
     // This should be deserialized as a mapping → EnvironmentEntries
@@ -678,7 +678,7 @@ services:
 
 #[test]
 fn test_environment_expression_returns_table_as_map() {
-    use crate::lua_eval::{EvalContext, ServiceEvalContext};
+    use crate::lua::templating_runtime::{EvalContext, ServiceEvalContext};
 
     // Top-level ${{ }}$ returns a Lua table → deserialized as mapping → EnvironmentEntries
     let yaml = r#"
@@ -714,7 +714,7 @@ services:
 
 #[test]
 fn test_environment_lua_returns_array_of_strings() {
-    use crate::lua_eval::{EvalContext, ServiceEvalContext};
+    use crate::lua::templating_runtime::{EvalContext, ServiceEvalContext};
 
     // Lua returns {"FOO=bar", "PORT=8080"} (array of KEY=VALUE strings)
     // This should be deserialized as a sequence → EnvironmentEntries
@@ -760,11 +760,11 @@ fn permissions_list_form() {
 services:
   svc:
     command: ["./app"]
-    permissions: ["service:start", "config:status"]
+    permissions: ["start", "status"]
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     let perms = config.services["svc"].permissions.as_ref().unwrap();
-    assert_eq!(perms.allow, vec!["service:start", "config:status"]);
+    assert_eq!(perms.allow, vec!["start", "status"]);
     assert!(perms.hardening.is_none());
 }
 
@@ -775,12 +775,12 @@ services:
   svc:
     command: ["./app"]
     permissions:
-      allow: ["service:start", "config:status"]
+      allow: ["start", "status"]
       hardening: "strict"
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     let perms = config.services["svc"].permissions.as_ref().unwrap();
-    assert_eq!(perms.allow, vec!["service:start", "config:status"]);
+    assert_eq!(perms.allow, vec!["start", "status"]);
     assert_eq!(perms.hardening.as_deref(), Some("strict"));
 }
 
@@ -791,11 +791,11 @@ services:
   svc:
     command: ["./app"]
     permissions:
-      allow: ["service:start"]
+      allow: ["start"]
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     let perms = config.services["svc"].permissions.as_ref().unwrap();
-    assert_eq!(perms.allow, vec!["service:start"]);
+    assert_eq!(perms.allow, vec!["start"]);
     assert!(perms.hardening.is_none());
 }
 
@@ -805,11 +805,11 @@ fn permissions_security_alias() {
 services:
   svc:
     command: ["./app"]
-    security: ["service:start"]
+    security: ["start"]
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();
     let perms = config.services["svc"].permissions.as_ref().unwrap();
-    assert_eq!(perms.allow, vec!["service:start"]);
+    assert_eq!(perms.allow, vec!["start"]);
 }
 
 #[test]
@@ -834,10 +834,10 @@ kepler:
   acl:
     users:
       "1000":
-        allow: ["service:start"]
+        allow: ["start"]
     groups:
       "2000":
-        allow: ["config:status"]
+        allow: ["status"]
 
 services:
   svc:
@@ -847,8 +847,8 @@ services:
     let acl = config.kepler.as_ref().unwrap().acl.as_ref().unwrap();
     assert_eq!(acl.users.len(), 1);
     assert_eq!(acl.groups.len(), 1);
-    assert_eq!(acl.users["1000"].allow, vec!["service:start"]);
-    assert_eq!(acl.groups["2000"].allow, vec!["config:status"]);
+    assert_eq!(acl.users["1000"].allow, vec!["start"]);
+    assert_eq!(acl.groups["2000"].allow, vec!["status"]);
 }
 
 #[test]
@@ -858,7 +858,7 @@ kepler:
   acl:
     groups:
       "2000":
-        allow: ["config:status"]
+        allow: ["status"]
 
 services:
   svc:
@@ -909,8 +909,8 @@ fn permissions_and_security_both_present_errors() {
 services:
   svc:
     command: ["./app"]
-    permissions: ["service:start"]
-    security: ["config:status"]
+    permissions: ["start"]
+    security: ["status"]
 "#;
     let result: std::result::Result<KeplerConfig, _> = serde_yaml::from_str(yaml);
     assert!(result.is_err());
@@ -956,7 +956,7 @@ services:
   svc:
     command: ["./app"]
     permissions:
-      allow: ["service:start"]
+      allow: ["start"]
       hardening: "{}"
 "#, level);
         let config: KeplerConfig = serde_yaml::from_str(&yaml).unwrap();
@@ -974,7 +974,7 @@ services:
   svc:
     command: ["./app"]
     permissions:
-      allow: ["service:start"]
+      allow: ["start"]
       hardening: "invalid-level"
 "#;
     let config: KeplerConfig = serde_yaml::from_str(yaml).unwrap();

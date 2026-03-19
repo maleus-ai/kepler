@@ -45,7 +45,7 @@ async fn test_service_with_permissions_gets_socket_path() {
                     marker_path.display()
                 ),
             ])
-            .with_permissions(vec!["service:start"])
+            .with_permissions(vec!["start"])
             .build(),
         )
         .build();
@@ -136,7 +136,7 @@ async fn test_hook_with_permissions_gets_socket_path() {
             "test",
             TestServiceBuilder::new(vec!["sleep".to_string(), "3600".to_string()])
                 .with_hooks(hooks)
-                .with_permissions(vec!["service:start"])
+                .with_permissions(vec!["start"])
                 .build(),
         )
         .build();

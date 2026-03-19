@@ -16,6 +16,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 
 use crate::hardening::HardeningLevel;
+use crate::lua::acl_runtime::RegistryKeyHandle;
 
 /// 256-bit bearer token for process authentication.
 ///
@@ -81,7 +82,7 @@ impl fmt::Debug for Token {
 /// Context stored for each registered token.
 #[derive(Debug, Clone)]
 pub struct TokenContext {
-    /// Expanded capability scopes granted to this process.
+    /// Expanded rights granted to this process.
     pub allow: HashSet<&'static str>,
     /// Hardening floor — spawned configs can't go below this level.
     pub max_hardening: HardeningLevel,
@@ -89,6 +90,10 @@ pub struct TokenContext {
     pub service: String,
     /// Config path (for revocation lifecycle only).
     pub config_path: PathBuf,
+    /// Compiled Lua authorizer for token-authenticated requests.
+    /// Compiled in the ACL Lua VM at service start time.
+    /// Runs before ACL authorizers as an additional rejection filter.
+    pub authorizer: Option<RegistryKeyHandle>,
 }
 
 /// In-memory store mapping tokens to their permission contexts.

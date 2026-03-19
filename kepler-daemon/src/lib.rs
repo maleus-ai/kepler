@@ -19,7 +19,7 @@ pub mod hardening;
 pub mod health;
 pub mod hooks;
 pub mod logs;
-pub mod lua_eval;
+pub mod lua;
 pub mod orchestrator;
 pub mod outputs;
 pub mod permissions;

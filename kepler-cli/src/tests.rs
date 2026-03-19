@@ -304,13 +304,54 @@ async fn test_follow_server_error_breaks_loop() {
     let config_path = PathBuf::from("/fake/config.yaml");
     let mut collected = Vec::new();
 
-    stream_logs(
+    let exit_reason = stream_logs(
         &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
         never_quiescent(),
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
     ).await.unwrap();
 
+    assert_eq!(exit_reason, StreamExitReason::ServerError);
+    assert!(collected.is_empty());
+}
+
+/// PermissionDenied response returns PermissionDenied exit reason.
+#[tokio::test(start_paused = true)]
+async fn test_stream_logs_permission_denied() {
+    let mock = MockClient::new();
+    mock.push_response(Ok(Response::PermissionDenied { message: "missing right 'logs'".to_string() }));
+
+    let config_path = PathBuf::from("/fake/config.yaml");
+    let mut collected = Vec::new();
+
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
+        never_quiescent(),
+        None,
+        |st, entries| collect_batch(&mut collected, st, entries),
+    ).await.unwrap();
+
+    assert_eq!(exit_reason, StreamExitReason::PermissionDenied);
+    assert!(collected.is_empty());
+}
+
+/// Non-permission server error still returns ServerError (not PermissionDenied).
+#[tokio::test(start_paused = true)]
+async fn test_stream_logs_non_permission_error_returns_server_error() {
+    let mock = MockClient::new();
+    mock.push_response(Ok(Response::error("Internal error: database locked")));
+
+    let config_path = PathBuf::from("/fake/config.yaml");
+    let mut collected = Vec::new();
+
+    let exit_reason = stream_logs(
+        &mock, StreamParams { config_path: &config_path, service: None, no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, raw: false, tail: false }, never_shutdown(),
+        never_quiescent(),
+        None,
+        |st, entries| collect_batch(&mut collected, st, entries),
+    ).await.unwrap();
+
+    assert_eq!(exit_reason, StreamExitReason::ServerError);
     assert!(collected.is_empty());
 }
 
@@ -754,9 +795,9 @@ async fn test_quiescence_monitor_suppresses_premature_quiescent() {
     assert!(matches!(signal, QuiescenceSignal::Quiescent));
 }
 
-/// Channel close (subscription ended) always fires quiescence.
+/// Channel close without any events fires SubscribeDenied (subscribe was likely denied).
 #[tokio::test]
-async fn test_quiescence_monitor_channel_close_fires() {
+async fn test_quiescence_monitor_channel_close_no_events_fires_subscribe_denied() {
     let (tx, rx) = mpsc::unbounded_channel();
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
     let seen_nt = Arc::new(AtomicBool::new(false));
@@ -765,6 +806,33 @@ async fn test_quiescence_monitor_channel_close_fires() {
     tokio::spawn(quiescence_monitor(rx, signal_tx, seen_nt, start_ack));
 
     // Send nothing, just close
+    drop(tx);
+
+    let signal = tokio::time::timeout(Duration::from_secs(1), signal_rx.recv())
+        .await
+        .expect("signal should fire on channel close")
+        .expect("channel should not be closed");
+    assert!(matches!(signal, QuiescenceSignal::SubscribeDenied));
+}
+
+/// Channel close after receiving events fires Quiescent (subscription ended normally).
+#[tokio::test]
+async fn test_quiescence_monitor_channel_close_after_events_fires_quiescent() {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    let seen_nt = Arc::new(AtomicBool::new(false));
+    let start_ack = Arc::new(AtomicBool::new(true));
+
+    tokio::spawn(quiescence_monitor(rx, signal_tx, seen_nt, start_ack));
+
+    // Send a progress event, then close
+    let _ = tx.send(ServerEvent::Progress {
+        request_id: 1,
+        event: kepler_protocol::protocol::ProgressEvent {
+            service: "svc".to_string(),
+            phase: ServicePhase::Starting,
+        },
+    });
     drop(tx);
 
     let signal = tokio::time::timeout(Duration::from_secs(1), signal_rx.recv())

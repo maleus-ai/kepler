@@ -1,0 +1,9 @@
+kepler:
+  acl:
+    users:
+      testuser2:
+        allow: [invalid_right]
+
+services:
+  invalid-svc:
+    command: ["sh", "-c", "echo INVALID_SVC_RUNNING; sleep 300"]

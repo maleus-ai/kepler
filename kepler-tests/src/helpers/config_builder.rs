@@ -346,6 +346,7 @@ impl TestServiceBuilder {
         self.permissions = Some(ServicePermissions {
             allow: allow.into_iter().map(|s| s.to_string()).collect(),
             hardening: None,
+            authorize: None,
         });
         self
     }

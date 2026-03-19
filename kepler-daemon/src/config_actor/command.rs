@@ -15,7 +15,7 @@ use crate::watcher::FileWatcherHandle;
 pub type OutputTasks = (Option<JoinHandle<Option<Vec<String>>>>, Option<JoinHandle<Option<Vec<String>>>>);
 use crate::errors::Result;
 use crate::events::{ServiceEvent, ServiceEventReceiver};
-use crate::lua_eval::{ConditionResult, EvalContext};
+use crate::lua::templating_runtime::{ConditionResult, EvalContext};
 use crate::logs::LogStoreHandle;
 use crate::state::{ProcessHandle, ServiceState, ServiceStatus};
 use kepler_protocol::protocol::ServiceInfo;

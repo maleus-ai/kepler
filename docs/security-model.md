@@ -1,6 +1,6 @@
 # Security Model
 
-Kepler's security design: root requirement, group-based access, per-config ACLs, token-based service permissions (via the `permissions` field), environment isolation, sandboxing, and hardening.
+Kepler's security design: root requirement, group-based access, per-config ACLs with Lua authorizers, token-based service permissions (via the `permissions` field), environment isolation, sandboxing, and hardening.
 
 ## Table of Contents
 
@@ -9,6 +9,7 @@ Kepler's security design: root requirement, group-based access, per-config ACLs,
 - [Socket Security](#socket-security)
 - [State Directory Security](#state-directory-security)
 - [Per-Config ACL](#per-config-acl)
+  - [Lua Authorizers](#lua-authorizers)
 - [Filesystem Read Access](#filesystem-read-access)
 - [Service Permissions (Token-Based)](#service-permissions-token-based)
 - [Effective Permissions](#effective-permissions)
@@ -104,99 +105,114 @@ See [Architecture](architecture.md#state-directory-hardening) for implementation
 
 By default, only root and the config owner have access to a config. The config owner is the user who loaded the config (via `kepler start` or `kepler recreate` -- recreating a config transfers ownership to the caller). The `kepler.acl` section allows config owners to grant specific permissions to other `kepler` group members.
 
-> **Migration from pre-ACL versions:** In previous versions, all `kepler` group members had unrestricted access to all configs. With this update, only root and the config owner have access by default. To restore the previous shared-access behavior, add a wildcard ACL:
->
-> ```yaml
-> kepler:
->   acl:
->     groups:
->       kepler:
->         allow: ["*"]
-> ```
-
 ### Access Rules
 
-Scoped operations are requests that require specific permission scopes (e.g., `service:start`, `config:status`). Some operations like `kepler ps --all`, `kepler list`, and `kepler prune` are not governed by per-config ACL scopes — they are always allowed through the ACL gate but may still be restricted by other checks (e.g., `kepler daemon stop` and `kepler prune` are root-only).
+Rights-gated operations are requests that require specific rights (e.g., `start`, `status`). Some operations like `kepler ps --all` and `kepler prune` are not governed by per-config ACL rights — they are always allowed through the ACL gate but may still be restricted by other checks (e.g., `kepler daemon stop` and `kepler prune` are root-only).
 
 1. **Root (UID 0)**: Always has full access -- ACLs are never checked for root
 2. **Config owner** (the user who first loaded the config): Always has full access
 3. **Other `kepler` group members**:
-   - No `acl` section in config → all scoped operations are denied
+   - No `acl` section in config → all rights-gated operations are denied
    - `acl` section present → access restricted to matching user/group rules
-   - No matching rules → all scoped operations are denied
-   - An empty `acl: {}` section behaves the same as no `acl` section -- non-owner group members are denied all scoped operations because no rules match
+   - No matching rules → all rights-gated operations are denied
+   - An empty `acl: {}` section behaves the same as no `acl` section -- non-owner group members are denied all rights-gated operations because no rules match
 4. **Token-based auth**: `effective = Process.allow ∩ ACL(uid, gid)`. Root (uid 0) and config owner have implicit `ACL = *`. See [Effective Permissions](#effective-permissions)
 
 ### Configuration
 
-ACLs are defined under `kepler.acl` with `users` and `groups` sub-sections. Keys can be usernames, group names, or numeric UIDs/GIDs. Values specify the allowed scopes.
+ACLs are defined under `kepler.acl` with `users` and `groups` sub-sections. Keys can be usernames, group names, or numeric UIDs/GIDs. Each rule has an `allow` list and an optional `authorize` Lua authorizer.
 
 ```yaml
 kepler:
   acl:
+    lua: |
+      -- Shared functions available to all authorizers (optional)
+      function is_business_hours()
+        local hour = os.time() % 86400 / 3600
+        return hour >= 9 and hour < 17
+      end
+    aliases:                    # User-defined right bundles (optional)
+      viewer: [status, logs]
+      operator: [start, stop, restart, status, logs]
     users:
       alice:                    # Resolved to UID at config load time
-        allow: [service:start, service:stop, config:status]
+        allow: [operator]       # Expands alias → [start, stop, restart, status, logs]
       1001:                     # Numeric UID
-        allow: [service, config:status]
+        allow: [start, stop, status]
+        authorize: |            # Optional Lua authorizer (can only deny)
+          if request.action == "stop" and not is_business_hours() then
+            return false
+          end
+          return true
     groups:
       developers:               # Resolved to GID at config load time
-        allow: [service:start, config:status]
+        allow: [viewer]         # Expands alias → [status, logs]
       2000:                     # Numeric GID
-        allow: [config:status]
+        allow: [status]
 ```
 
-### Scope Hierarchy
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `lua` | `string` | No | Inline Lua code evaluated in the ACL Lua VM. Defines shared functions for authorizers. Separate from the config's main Lua VM. |
+| `aliases` | `object` | No | Named bundles of rights, expanded at parse time. Cannot shadow built-in aliases (`all`) or known rights. Max expansion depth: 2 levels. |
+| `users` | `object` | No | User rules keyed by username or numeric UID. |
+| `groups` | `object` | No | Group rules keyed by group name or numeric GID. |
 
-ACL scopes use the same hierarchy as [service permissions](#service-permissions-token-based):
+Each rule accepts:
 
-| Level    | Examples                            | Description                           |
-| -------- | ----------------------------------- | ------------------------------------- |
-| Category | `service`, `config`                 | Grants all descendants                |
-| Command  | `service:start`, `config:status`    | Grants that specific operation        |
-| Wildcard | `*`, `service:*`                    | Grants everything at/below that level |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `allow` | `string[]` | Yes | Rights granted to this user/group. Supports aliases. |
+| `authorize` | `string` | No | Lua authorizer source. Called after static rights check. Must return truthy to allow, false/nil to deny. See [Lua Authorizers](#lua-authorizers). |
 
-**Implication rules:**
-- Category implies all descendants: `service` → `service:start`, `service:stop`, `service:restart`, `service:clean`; `logs` → `logs:read`, `logs:search`
-- Command-level implications: `service:clean` → `service:stop`; `logs:search` → `logs:read`
+### Rights
 
-```
-*
-├── service
-│   ├── service:start
-│   ├── service:stop
-│   ├── service:restart
-│   └── service:clean (implies service:stop)
-├── config
-│   ├── config:status
-│   ├── config:inspect
-│   ├── config:recreate
-│   ├── config:hardening
-│   └── config:env
-└── logs
-    ├── logs:read
-    └── logs:search (implies logs:read)
-```
+Rights are flat, explicit identifiers — there are no categories, no implicit cascading, and no hidden expansions.
 
-### Available Scopes
+| Type | Description |
+| ---- | ----------- |
+| Base right | Gates exactly one request type (e.g., `start`, `stop`, `status`) |
+| Sub-right | Gates an optional feature within a request. Format: `base:feature` (e.g., `stop:clean`, `start:env-override`). Meaningless without its base right. |
+| Alias | Named bundle expanded at config parse time. Only `all` is built-in. User-defined aliases go in `kepler.acl.aliases`. |
 
-| Scope                | Grants                                                                |
-| -------------------- | --------------------------------------------------------------------- |
-| `service`            | All service operations                                                |
-| `service:start`      | Start services                                                        |
-| `service:stop`       | Stop services (including with custom signal)                          |
-| `service:restart`    | Restart services                                                      |
-| `service:clean`      | Stop with `--clean` (implies `service:stop`)                          |
-| `config`             | All config operations                                                 |
-| `config:status`      | View config/service status; filters `kepler list` and `kepler ps --all` results |
-| `config:inspect`     | Inspect config                                                        |
-| `config:recreate`    | Recreate config                                                       |
-| `config:hardening`   | Override hardening level (`--hardening` on start and recreate). Only required when the flag is used |
-| `config:env`         | Override environment (`-e` / `--refresh-env` on start and restart). Only required when the flag is used |
-| `logs`               | All log operations (`logs:read` + `logs:search`)                      |
-| `logs:read`          | View service logs                                                     |
-| `logs:search`        | Query logs with filter expressions (implies `logs:read`). See [Log Query Security](#log-query-security) |
-| `*`                  | Everything                                                            |
+### Available Rights
+
+**Base rights:**
+
+| Right        | Grants                                                                |
+| ------------ | --------------------------------------------------------------------- |
+| `start`      | Start services                                                        |
+| `stop`       | Stop services                                                         |
+| `restart`    | Restart services                                                      |
+| `recreate`   | Recreate config                                                       |
+| `status`     | View config/service status; filters `kepler ps --all` results |
+| `inspect`    | Inspect config                                                        |
+| `logs`       | View service logs and subscribe to log streams                        |
+| `subscribe`  | Subscribe to service state changes                                    |
+| `quiescence` | Check if system reached quiescence                                    |
+| `readiness`  | Check if services are ready                                           |
+
+**Sub-rights:**
+
+| Sub-right              | Base      | Grants                                                                |
+| ---------------------- | --------- | --------------------------------------------------------------------- |
+| `start:env-override`   | `start`   | Allow environment variable overrides (`-e`) on start                  |
+| `start:hardening`      | `start`   | Allow `--hardening` flag on start                                     |
+| `start:no-deps`        | `start`   | Allow `--no-deps` flag on start                                       |
+| `stop:clean`           | `stop`    | Allow `--clean` flag on stop                                          |
+| `stop:signal`          | `stop`    | Allow custom signal on stop                                           |
+| `restart:env-override` | `restart` | Allow environment variable overrides on restart                       |
+| `restart:no-deps`      | `restart` | Allow `--no-deps` flag on restart                                     |
+| `recreate:hardening`   | `recreate`| Allow `--hardening` flag on recreate                                  |
+| `logs:search`          | `logs`    | Allow log filter expressions. See [Log Query Security](#log-query-security) |
+
+**Built-in alias:**
+
+| Alias | Expands to |
+| ----- | ---------- |
+| `all` | Every base right + every sub-right |
+
+> **Note:** Rights have no implications. `start` does NOT grant `stop`. A sub-right like `stop:clean` requires `stop` to also be granted — it is meaningless on its own.
 
 ### Rule Matching
 
@@ -204,17 +220,17 @@ When a request arrives from a non-owner group member:
 
 1. The daemon looks up the caller's UID in `acl.users`
 2. The daemon looks up the caller's primary GID and all supplementary GIDs in `acl.groups`
-3. All matching scopes are **unioned** (a user matching both a user rule and a group rule gets the combined scopes)
-4. The request's required scopes are checked against the union
-5. If no rules match at all, all scoped operations are denied
+3. All matching rights are **unioned** (a user matching both a user rule and a group rule gets the combined rights)
+4. The request's required rights are checked against the union
+5. If no rules match at all, all rights-gated operations are denied
 
 ### Global Query Filtering
 
-For requests that return cross-config results (`kepler ps --all`, `kepler list`), the daemon filters results by read access. Non-owner group members only see configs where they have `config:status` scope (granted directly or via the `config` category). Configs without an `acl` section are only visible to root and the config owner.
+For requests that return cross-config results (`kepler ps --all`), the daemon filters results by read access. Non-owner group members only see configs where they have the `status` right. Configs without an `acl` section are only visible to root and the config owner.
 
 ### Daemon-Level Operations
 
-Daemon-level operations (`kepler daemon stop`, `kepler prune`) are restricted to root (UID 0) only. Non-root `kepler` group members cannot shut down the daemon or prune configs. There are no corresponding scopes for these operations -- they are enforced exclusively via UID check.
+Daemon-level operations (`kepler daemon stop`, `kepler prune`) are restricted to root (UID 0) only. Non-root `kepler` group members cannot shut down the daemon or prune configs. There are no corresponding rights for these operations -- they are enforced exclusively via UID check.
 
 ### Cross-Config Limitation
 
@@ -237,10 +253,10 @@ kepler:
   acl:
     groups:
       ops-team:
-        allow: [config:status, logs:read]
+        allow: [status, logs]
 ```
 
-Only the config owner can start/stop services. Members of `ops-team` can view status and logs. Other `kepler` group members are denied all scoped operations.
+Only the config owner can start/stop services. Members of `ops-team` can view status and logs. Other `kepler` group members are denied all rights-gated operations.
 
 #### Operator and viewer roles
 
@@ -249,26 +265,26 @@ kepler:
   acl:
     users:
       alice:
-        allow: [service, config:status, logs]  # Can start/stop + view status + read and search logs
+        allow: [start, stop, restart, status, logs, logs:search]  # Service control + status + logs with search
       bob:
-        allow: [config:status]                 # Can only view status
+        allow: [status]                                            # Can only view status
     groups:
       developers:
-        allow: [config:status, logs:read]      # Can view status and read logs (no search)
+        allow: [status, logs]                                      # Can view status and stream logs (no search)
 ```
 
-Alice gets full service control and log access (including search). Bob can only check status. All developers can read status and logs. The config owner has unrestricted access regardless.
+Alice gets full service control and log access (including search). Bob can only check status. All developers can read status and stream logs. The config owner has unrestricted access regardless.
 
 #### Grant full access to all group members
 
-To allow all `kepler` group members unrestricted access (similar to a shared config), use the `*` wildcard:
+To allow all `kepler` group members unrestricted access (similar to a shared config), use the `all` alias:
 
 ```yaml
 kepler:
   acl:
     groups:
       kepler:
-        allow: ["*"]           # All `kepler` group members get full access
+        allow: [all]           # All `kepler` group members get full access
 
 services:
   app:
@@ -276,6 +292,45 @@ services:
 ```
 
 Without an `acl` section, only root and the config owner can operate on the config.
+
+### Lua Authorizers
+
+Authorizers are Lua functions that run **after** the static rights check passes. They act as rejection filters — all matching authorizers must return `true` for the request to proceed. Authorizers can only deny; they cannot grant access beyond what `allow` already provides.
+
+Authorizers can be defined on ACL user/group rules (`authorize` field) and on service token permissions (`permissions.authorize`). When a request passes the static rights check, authorizers are evaluated in order:
+
+1. **Token authorizer** (if the caller is token-authenticated and `permissions.authorize` is set)
+2. **User ACL authorizer** (if the caller's UID matches a user rule with `authorize`)
+3. **Group ACL authorizers** (all matching group rules with `authorize`, sorted by GID)
+
+Each authorizer receives two read-only tables — `request` (with `action` and `params`) and `caller` (with `uid`, `gid`, `username`, `groups`, `token`):
+
+```yaml
+kepler:
+  acl:
+    lua: |
+      allowed_services = { web = true, api = true }
+      function can_stop(service)
+        return allowed_services[service] == true
+      end
+    users:
+      alice:
+        allow: [start, stop, restart, status]
+        authorize: |
+          if request.action == "stop" then
+            for _, svc in ipairs(request.params.services) do
+              if not can_stop(svc) then return false end
+            end
+          end
+          return true
+```
+
+Key properties:
+- **Authorizers can only deny** — returning `true` does not grant rights beyond `allow`
+- **Static rights are checked first** — if the caller lacks the right, the authorizer never runs
+- **Root bypasses authorizers** — root is never subject to authorizer checks
+
+See [Lua Authorizers](lua-authorizers.md) for the full reference: per-action `request.params` fields, sandbox constraints, shared code, and aliases.
 
 ---
 
@@ -311,14 +366,14 @@ This prevents users from operating on config files they couldn't read directly, 
 
 ## Service Permissions (Token-Based)
 
-The `permissions` field on a service controls what daemon operations a spawned service process can perform. When present, the daemon generates a secure bearer token, registers it with the granted permission scopes, and passes it to the spawned process via the `KEPLER_TOKEN` environment variable. The process presents this token in each request, and the daemon looks up its permissions. See [Effective Permissions](#effective-permissions) for how permission scopes interact with ACLs.
+The `permissions` field on a service controls what daemon operations a spawned service process can perform. When present, the daemon generates a secure bearer token, registers it with the granted rights, and passes it to the spawned process via the `KEPLER_TOKEN` environment variable. The process presents this token in each request, and the daemon looks up its permissions. See [Effective Permissions](#effective-permissions) for how rights interact with ACLs.
 
 > **Backward compatibility:** The field `security` is accepted as an alias for `permissions`.
 
 ### How It Works
 
-1. Config owner defines `permissions` on a service with allowed scopes
-2. At service start, the daemon generates a secure bearer token and registers it with the granted permission scopes
+1. Config owner defines `permissions` on a service with allowed rights
+2. At service start, the daemon generates a secure bearer token and registers it with the granted rights
 3. The daemon sets `KEPLER_TOKEN` (hex-encoded, 64 chars) in the service's environment and spawns the process
 4. The spawned process (and any child processes via `fork()`/`exec()` inheritance) connects to the daemon via the Unix socket, presenting the token in each request
 5. The daemon looks up the token in the permission store and computes [effective permissions](#effective-permissions) for each request
@@ -342,9 +397,9 @@ services:
   orchestrator:
     command: ["./orchestrator"]
     permissions:
-      - service:start
-      - service:stop
-      - config:status
+      - start
+      - stop
+      - status
 ```
 
 **Object form:**
@@ -354,18 +409,24 @@ services:
   orchestrator:
     command: ["./orchestrator"]
     permissions:
-      allow:                          # General capabilities
-        - service:start
-        - service:stop
-        - config:status
-        - logs:read
+      allow:                          # Rights granted to this service's token
+        - start
+        - stop
+        - status
+        - logs
       hardening: no-root              # Hardening floor for configs spawned by this process
+      authorize: |                    # Optional Lua authorizer (can only deny)
+        if request.action == "stop" and request.params.clean then
+          return false                -- deny stop --clean
+        end
+        return true
 ```
 
 | Field       | Type       | Default         | Description                                                                                            |
 | ----------- | ---------- | --------------- | ------------------------------------------------------------------------------------------------------ |
-| `allow`     | `string[]` | required        | Capability scopes for the process. Subject to [permission ceiling](#permission-ceiling-token-inheritance) and [ACL intersection](#effective-permissions) at request time |
+| `allow`     | `string[]` | required        | Rights granted to the process. Subject to [permission ceiling](#permission-ceiling-token-inheritance) and [ACL intersection](#effective-permissions) at request time |
 | `hardening` | `string`   | inherited       | Hardening floor for configs spawned by this process. Cannot exceed the parent config's hardening level |
+| `authorize` | `string`   | none            | Lua authorizer source. Compiled at service start in the ACL Lua VM. Runs before ACL authorizers on each request -- can only deny within the token's rights. See [Lua Authorizers](#lua-authorizers) |
 
 ### Permission Lifecycle
 
@@ -374,7 +435,7 @@ services:
 - **Isolated per-service**: Each service gets its own independent token -- permissions cannot be shared across unrelated services
 - **Inherited by children**: Child processes inherit the `KEPLER_TOKEN` environment variable and share the parent's permissions
 
-Scopes use the same hierarchy as [ACL scopes](#available-scopes).
+Rights use the same set as [ACL rights](#available-rights).
 
 ### Without Permissions Field
 
@@ -392,7 +453,7 @@ Kepler uses a unified authorization model where every request goes through the s
 |---|---|---|
 | **Root** (uid 0, no registration) | `effective = *` | Root always has full access. No ACL check. |
 | **Group** (kepler member, no registration) | `effective = ACL(uid, gid)` | Access controlled entirely by ACL. Config owner has implicit `*`. |
-| **Token-authenticated** (process with `permissions`) | `effective = Process.allow ∩ ACL(uid, gid)` | Both the process permissions AND the ACL must grant the scope. |
+| **Token-authenticated** (process with `permissions`) | `effective = Process.allow ∩ ACL(uid, gid)` | Both the process permissions AND the ACL must grant the right. |
 
 Where `ACL(uid, gid)` resolves to:
 
@@ -400,7 +461,7 @@ Where `ACL(uid, gid)` resolves to:
 |---|---|
 | Root (uid 0) | `*` -- implicit, never checked |
 | Config owner | `*` -- implicit, never checked |
-| User/group with matching ACL rules | Union of all matching scopes |
+| User/group with matching ACL rules | Union of all matching rights |
 | User/group with no matching rules | `∅` (denied) |
 | No `acl` section in config | `∅` (denied) |
 
@@ -421,18 +482,18 @@ kepler:
   acl:
     users:
       bob:
-        allow: [config:status, logs:read]
+        allow: [status, logs]
 ```
 
 ```
-alice → "kepler stop web"   →  effective = *                           → allowed
-bob   → "kepler stop web"   →  effective = {config:status, logs:read}  → denied (needs service:stop)
-bob   → "kepler ps"         →  effective = {config:status, logs:read}  → allowed (needs config:status)
+alice → "kepler stop web"   →  effective = *                → allowed
+bob   → "kepler stop web"   →  effective = {status, logs}   → denied (needs stop)
+bob   → "kepler ps"         →  effective = {status, logs}   → allowed (needs status)
 ```
 
 ### Process ∩ ACL
 
-When a Token-authenticated process sends a request, both layers must agree. The process's permission scopes define the **maximum the process was designed to do**. The ACL defines **what the user is allowed to do on the target config**. The effective permissions are the intersection -- neither layer can escalate beyond the other.
+When a Token-authenticated process sends a request, both layers must agree. The process's granted rights define the **maximum the process was designed to do**. The ACL defines **what the user is allowed to do on the target config**. The effective permissions are the intersection -- neither layer can escalate beyond the other.
 
 ```
 effective = Process.allow ∩ ACL(uid, gid)
@@ -446,7 +507,7 @@ Root and the config owner have `ACL = *`, so the ACL side drops out:
 effective = Process.allow ∩ * = Process.allow
 ```
 
-This is the common case -- a config owner's service gets exactly the scopes declared in `permissions.allow`.
+This is the common case -- a config owner's service gets exactly the rights declared in `permissions.allow`.
 
 #### Process owned by a non-owner user
 
@@ -458,12 +519,12 @@ kepler:
   acl:
     users:
       bob:
-        allow: [service, config:status]
+        allow: [start, stop, restart, status]
 services:
   manager:
     command: ["./manager"]
     permissions:
-      allow: [service:start, service:stop, config:status]
+      allow: [start, stop, status]
 ```
 
 ```yaml
@@ -472,22 +533,22 @@ kepler:
   acl:
     users:
       bob:
-        allow: [config:status]
+        allow: [status]
 ```
 
-Bob starts `outer.kepler.yaml`. The `manager` service gets `Process.allow = {service:start, service:stop, config:status}`. When `manager` connects:
+Bob starts `outer.kepler.yaml`. The `manager` service gets `Process.allow = {start, stop, status}`. When `manager` connects:
 
 **On `inner.kepler.yaml`** (bob's ACL is narrow):
 ```
-effective = {service:start, service:stop, config:status}  ∩  {config:status}
-          = {config:status}
+effective = {start, stop, status}  ∩  {status}
+          = {status}
 → can view status, cannot start/stop
 ```
 
 **On `outer.kepler.yaml`** (bob's ACL is broader):
 ```
-effective = {service:start, service:stop, config:status}  ∩  {service:*, config:status}
-          = {service:start, service:stop, config:status}
+effective = {start, stop, status}  ∩  {start, stop, restart, status}
+          = {start, stop, status}
 → process permissions are the limiting factor
 ```
 
@@ -522,7 +583,7 @@ services:
   orchestrator:
     command: ["./orchestrator"]
     permissions:
-      allow: [service, config:status]
+      allow: [start, stop, restart, status]
 ```
 
 ```yaml
@@ -531,7 +592,7 @@ services:
   worker:
     command: ["./worker"]
     permissions:
-      allow: [service:start, service:stop, config:status, config:inspect]
+      allow: [start, stop, status, inspect]
 ```
 
 ```yaml
@@ -540,29 +601,29 @@ services:
   leaf:
     command: ["./leaf"]
     permissions:
-      allow: [service, config]
+      allow: [all]
 ```
 
 Permission computation at each level:
 
 ```
-orchestrator.allow = expand({service, config:status}) ∩ (no ceiling)
-                   = {service:start, service:stop, service:restart, service:clean, config:status}
+orchestrator.allow = expand({start, stop, restart, status}) ∩ (no ceiling)
+                   = {start, stop, restart, status}
 
-worker.allow       = expand({service:start, service:stop, config:status, config:inspect}) ∩ orchestrator.allow
-                   = {service:start, service:stop, config:status}
-                     # config:inspect cut — not in orchestrator's ceiling
+worker.allow       = expand({start, stop, status, inspect}) ∩ orchestrator.allow
+                   = {start, stop, status}
+                     # inspect cut — not in orchestrator's ceiling
 
-leaf.allow         = expand({service, config}) ∩ worker.allow
-                   = {service:start, service:stop, config:status}
-                     # config:inspect, config:recreate, etc. cut — not in worker's ceiling
+leaf.allow         = expand({all}) ∩ worker.allow
+                   = {start, stop, status}
+                     # everything beyond worker's ceiling is cut
 ```
 
-Even though `leaf` declares `allow: [service, config]`, it can never exceed what `orchestrator` was granted. Each nesting level can only narrow, never widen.
+Even though `leaf` declares `allow: [all]`, it can never exceed what `orchestrator` was granted. Each nesting level can only narrow, never widen.
 
 ### Hardening Floor (Process Constraint)
 
-In addition to scope restriction, token registrations carry a **hardening floor** that constrains which hardening level child configs can use. When a Token-authenticated process starts or recreates a config:
+In addition to rights restriction, token registrations carry a **hardening floor** that constrains which hardening level child configs can use. When a Token-authenticated process starts or recreates a config:
 
 - If `permissions.hardening` is set, the process's registration enforces it as a minimum
 - The child config cannot request a lower hardening level
@@ -588,7 +649,7 @@ services:
   orchestrator:
     command: ["./orchestrator"]
     permissions:
-      allow: [service, config:status]
+      allow: [start, stop, restart, status]
       hardening: no-root
 ```
 
@@ -596,12 +657,19 @@ If the orchestrator tries `kepler start --hardening none inner.kepler.yaml`, the
 
 ### Full Authorization Pipeline
 
-Every request goes through an authorization pipeline. The daemon checks authorization in order: token validity, hardening constraints, filesystem access, then ACL/permission scopes. If any check fails, the request is denied.
+Every request goes through an authorization pipeline. The daemon checks authorization in order: token validity, hardening constraints, filesystem access, static rights check, then Lua authorizers. If any check fails, the request is denied.
 
-- **Root** (UID 0) bypasses all checks
-- **Config owner** bypasses ACL checks (implicit full access)
-- **Group members** are checked against ACL rules
-- **Token-authenticated processes** are checked against both their granted permissions and the ACL (intersection)
+1. **Token validity** -- if a token is present, it must be registered
+2. **Hardening constraints** -- privilege escalation checks
+3. **Filesystem read access** -- caller must be able to read the config file
+4. **Static rights check** -- `effective_rights()` then `check_rights()` against the request
+5. **Lua authorizers** -- token authorizer (if any), then ACL authorizers (if any). Can only deny.
+
+Key bypasses:
+- **Root** (UID 0) bypasses ACL checks and authorizers
+- **Config owner** bypasses ACL checks (implicit full access) but authorizers still run if defined
+- **Group members** are checked against ACL rules, then authorizers
+- **Token-authenticated processes** are checked against both their granted permissions and the ACL (intersection), then authorizers
 
 See [Architecture](architecture.md#authorization-pipeline) for the detailed step-by-step pipeline and flowchart.
 
@@ -615,16 +683,16 @@ kepler:
   acl:
     users:
       bob:
-        allow: [service, config:status, logs]
+        allow: [start, stop, restart, status, logs]
     groups:
       ops-team:
-        allow: [config:status, logs:read]
+        allow: [status, logs]
 
 services:
   deployer:
     command: ["./deployer"]
     permissions:
-      allow: [service:start, service:stop, config:status]
+      allow: [start, stop, status]
       hardening: no-root
 ```
 
@@ -633,17 +701,17 @@ services:
 alice ACL       = * (owner)
 effective       = * → allowed
 
-deployer.allow  = expand({service:start, service:stop, config:status}) ∩ (no ceiling)
-                = {service:start, service:stop, config:status}
+deployer.allow  = expand({start, stop, status}) ∩ (no ceiling)
+                = {start, stop, status}
 ```
 
-**Scenario 2: bob starts the config** (Group auth, ACL grants `service + config:status`)
+**Scenario 2: bob starts the config** (Group auth, ACL grants broad rights)
 ```
-bob ACL         = {service:*, config:status}
-effective       = {service:*, config:status} → start allowed
+bob ACL         = {start, stop, restart, status, logs}
+effective       = {start, stop, restart, status, logs} → start allowed
 
-deployer.allow  = expand({service:start, service:stop, config:status}) ∩ (no ceiling)
-                = {service:start, service:stop, config:status}
+deployer.allow  = expand({start, stop, status}) ∩ (no ceiling)
+                = {start, stop, status}
 ```
 
 Bob uses Group auth (no token registration), so there is no permission ceiling. The deployer gets exactly what `permissions.allow` declares.
@@ -655,14 +723,14 @@ kepler:
   acl:
     users:
       bob:
-        allow: [config:status]
+        allow: [status]
 ```
 
 If bob started `deploy.kepler.yaml`, the deployer runs as bob (uid 1001). When it connects to the daemon and operates on `app.kepler.yaml`:
 ```
 effective = Process.allow ∩ ACL(bob, app.kepler)
-          = {service:start, service:stop, config:status} ∩ {config:status}
-          = {config:status}
+          = {start, stop, status} ∩ {status}
+          = {status}
 → can view status, cannot start/stop
 ```
 
@@ -673,13 +741,13 @@ services:
   worker:
     command: ["./worker"]
     permissions:
-      allow: [service, config]
+      allow: [all]
 ```
 
 ```
-worker.allow = expand({service, config}) ∩ deployer_ceiling
-             = expand({service, config}) ∩ {service:start, service:stop, config:status}
-             = {service:start, service:stop, config:status}
+worker.allow = expand({all}) ∩ deployer_ceiling
+             = (all rights) ∩ {start, stop, status}
+             = {start, stop, status}
 ```
 
 The worker cannot exceed the deployer's ceiling. And `--hardening none` would be rejected because the deployer's hardening floor is `no-root`.
@@ -998,20 +1066,18 @@ See [Lua Scripting](lua-scripting.md) for details.
 
 ## Log Query Security
 
-The `logs:search` scope allows users to filter logs using SQL WHERE expressions that are injected directly into the query. This is a powerful feature -- and because it exposes raw SQL surface area, Kepler enforces multiple defense layers to prevent abuse.
+The `logs:search` sub-right allows users to filter logs using SQL WHERE expressions that are injected directly into the query. This is a powerful feature -- and because it exposes raw SQL surface area, Kepler enforces multiple defense layers to prevent abuse.
 
-### Permission Scopes
+### Permission Rights
 
-Log access is split into two scopes:
+Log access uses a base right and a sub-right:
 
-| Scope | Required for | Description |
+| Right | Required for | Description |
 |-------|-------------|-------------|
-| `logs:read` | `kepler logs`, `kepler logs --follow` | Read logs (no filtering) |
-| `logs:search` | `kepler logs --filter "..."` | Query logs with a SQL WHERE expression |
+| `logs` | `kepler logs`, `kepler logs --follow` | Read and stream logs (no filtering) |
+| `logs:search` | `kepler logs --filter "..."` | Query logs with a SQL WHERE expression. Requires `logs` base right. |
 
-`logs:search` implies `logs:read` -- granting search automatically grants read access. The `logs` category grants both.
-
-**Scope separation rationale:** Plain log reading (`logs:read`) is a read-only operation with no user-controlled SQL. Filtered queries (`logs:search`) inject user-provided expressions into SQL, creating a larger attack surface. Operators who only need to grant log viewing can use `logs:read` without exposing the query interface.
+**Right separation rationale:** Plain log reading (`logs`) is a read-only operation with no user-controlled SQL. Filtered queries (`logs:search`) inject user-provided expressions into SQL, creating a larger attack surface. Operators who only need to grant log viewing can use `logs` without exposing the query interface.
 
 ### How Filters Work
 
@@ -1088,7 +1154,7 @@ Operators granting `logs:search` should be aware of the following residual risks
 
 **Risk:** A user with `logs:search` can write expressive queries against all columns of the `logs` table (`id`, `timestamp`, `service`, `hook`, `level`, `line`, `is_json`). They can extract substrings, filter by patterns, and use JSON functions to drill into structured log lines.
 
-**Mitigation:** This is by design -- `logs:search` is intended for ad-hoc log analysis. Grant `logs:read` (not `logs:search`) to users who should only view raw log output without query capabilities. The authorizer ensures queries cannot reach tables other than `logs`.
+**Mitigation:** This is by design -- `logs:search` is intended for ad-hoc log analysis. Grant `logs` without `logs:search` to users who should only view raw log output without query capabilities. The authorizer ensures queries cannot reach tables other than `logs`.
 
 #### CPU exhaustion via expensive queries
 
@@ -1123,7 +1189,7 @@ kepler:
   acl:
     groups:
       viewers:
-        allow: [config:status, logs:read]    # Can view logs, cannot use --filter
+        allow: [status, logs]              # Can view status and logs, cannot use --filter
 ```
 
 #### Grant full log access including search
@@ -1133,17 +1199,17 @@ kepler:
   acl:
     groups:
       analysts:
-        allow: [config:status, logs:search]  # logs:search implies logs:read
+        allow: [status, logs, logs:search] # logs:search requires logs base right
 ```
 
-#### Grant everything via the logs category
+#### Grant everything via the all alias
 
 ```yaml
 kepler:
   acl:
     groups:
       ops-team:
-        allow: [config:status, logs]         # Equivalent to logs:read + logs:search
+        allow: [all]                       # Every right including logs:search
 ```
 
 ---
@@ -1172,6 +1238,7 @@ See [Privilege Dropping](privilege-dropping.md) for details.
 
 ## See Also
 
+- [Lua Authorizers](lua-authorizers.md) -- Full authorizer API reference (function signature, params, sandbox)
 - [Configuration](configuration.md) -- Full YAML schema reference (`acl`, `permissions` fields)
 - [Privilege Dropping](privilege-dropping.md) -- User/group and resource limits
 - [Environment Variables](environment-variables.md) -- Environment isolation

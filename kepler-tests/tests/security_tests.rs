@@ -600,7 +600,7 @@ fn test_memory_limit_parsing_whitespace() {
 /// Verify that io library is not available in Lua sandbox
 #[test]
 fn test_lua_io_library_blocked() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use kepler_daemon::lua::templating_runtime::{EvalContext, LuaEvaluator};
 
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
@@ -616,7 +616,7 @@ fn test_lua_io_library_blocked() {
 /// Verify that os.execute is not available in Lua sandbox
 #[test]
 fn test_lua_os_execute_blocked() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use kepler_daemon::lua::templating_runtime::{EvalContext, LuaEvaluator};
 
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
@@ -632,7 +632,7 @@ fn test_lua_os_execute_blocked() {
 /// Verify that loadfile is not available in Lua sandbox
 #[test]
 fn test_lua_loadfile_blocked() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use kepler_daemon::lua::templating_runtime::{EvalContext, LuaEvaluator};
 
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
@@ -648,7 +648,7 @@ fn test_lua_loadfile_blocked() {
 /// Verify that dofile is not available in Lua sandbox
 #[test]
 fn test_lua_dofile_blocked() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use kepler_daemon::lua::templating_runtime::{EvalContext, LuaEvaluator};
 
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
@@ -664,7 +664,7 @@ fn test_lua_dofile_blocked() {
 /// Verify that debug library is not available in Lua sandbox
 #[test]
 fn test_lua_debug_library_blocked() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use kepler_daemon::lua::templating_runtime::{EvalContext, LuaEvaluator};
 
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();
@@ -683,7 +683,7 @@ fn test_lua_debug_library_blocked() {
 /// on a frozen table throws a runtime error.
 #[test]
 fn test_lua_rawset_cannot_modify_env() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator, ServiceEvalContext};
+    use kepler_daemon::lua::templating_runtime::{EvalContext, LuaEvaluator, ServiceEvalContext};
     use std::collections::HashMap;
 
     let eval = LuaEvaluator::new().unwrap();
@@ -724,7 +724,7 @@ fn test_lua_rawset_cannot_modify_env() {
 /// Verify that frozen tables are protected from metatable access
 #[test]
 fn test_lua_getmetatable_frozen() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator, ServiceEvalContext};
+    use kepler_daemon::lua::templating_runtime::{EvalContext, LuaEvaluator, ServiceEvalContext};
     use std::collections::HashMap;
 
     let eval = LuaEvaluator::new().unwrap();
@@ -750,7 +750,7 @@ fn test_lua_getmetatable_frozen() {
 /// Verify that service table itself is frozen
 #[test]
 fn test_lua_service_table_frozen() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator, ServiceEvalContext};
+    use kepler_daemon::lua::templating_runtime::{EvalContext, LuaEvaluator, ServiceEvalContext};
 
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext {
@@ -769,7 +769,7 @@ fn test_lua_service_table_frozen() {
 /// Verify that require() is blocked in Lua evaluation
 #[test]
 fn test_lua_require_blocked() {
-    use kepler_daemon::lua_eval::{EvalContext, LuaEvaluator};
+    use kepler_daemon::lua::templating_runtime::{EvalContext, LuaEvaluator};
 
     let eval = LuaEvaluator::new().unwrap();
     let ctx = EvalContext::default();

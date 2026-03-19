@@ -29,7 +29,7 @@ use crate::hardening::HardeningLevel;
 use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
 use crate::deps::{check_dependency_satisfied, get_start_order, get_stop_order, is_condition_unreachable_by_policy, is_dependency_permanently_unsatisfied, is_transient_satisfaction};
-use crate::lua_eval::{EvalContext, LuaEvaluator, OwnerEvalContext, ServiceEvalContext};
+use crate::lua::templating_runtime::{EvalContext, LuaEvaluator, OwnerEvalContext, ServiceEvalContext};
 use crate::events::{RestartReason, ServiceEvent};
 
 /// Shared Lua evaluator for cross-service global state within a single config.
@@ -40,7 +40,7 @@ use crate::health::spawn_health_checker;
 use crate::hooks::{
     run_service_hook, ServiceHookParams, ServiceHookType,
 };
-use crate::lua_eval::DepInfo;
+use crate::lua::templating_runtime::DepInfo;
 use crate::logs::LogWriter;
 use crate::process::{spawn_service, stop_service, ProcessExitEvent, SpawnServiceParams};
 use crate::state::ServiceStatus;
@@ -2488,10 +2488,9 @@ impl ServiceOrchestrator {
         resolved: &crate::config::ServiceConfig,
     ) -> Result<(), OrchestratorError> {
         if let Some(permissions) = &resolved.permissions {
-            let allow_set: HashSet<String> = permissions.allow.iter().cloned().collect();
-            let expanded = crate::permissions::expand_scopes(&allow_set)
+            let expanded = crate::permissions::expand_allow(&permissions.allow, &std::collections::HashMap::new())
                 .map_err(|e| OrchestratorError::SpawnFailed(
-                    format!("invalid permission scopes: {}", e),
+                    format!("invalid permission rights: {}", e),
                 ))?;
 
             // Apply permission ceiling: child cannot exceed caller's capabilities
@@ -2510,11 +2509,26 @@ impl ServiceOrchestrator {
                 None => self.effective_hardening(handle),
             };
 
+            // Compile token authorizer in the ACL Lua VM
+            let authorizer = match &permissions.authorize {
+                Some(source) => {
+                    let acl = handle.acl()
+                        .expect("ACL should always be available");
+                    Some(acl.compile_token_authorizer(source).await.map_err(|e| {
+                        OrchestratorError::SpawnFailed(
+                            format!("failed to compile token authorizer for '{}': {}", service_name, e),
+                        )
+                    })?)
+                }
+                None => None,
+            };
+
             let token_ctx = TokenContext {
                 allow: effective_allow,
                 max_hardening,
                 service: service_name.to_string(),
                 config_path: handle.config_path().to_path_buf(),
+                authorizer,
             };
 
             let guard = crate::token_store::ServiceTokenGuard::new(
