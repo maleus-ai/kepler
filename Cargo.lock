@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-cli"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "arboard",
  "chrono",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-daemon"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-e2e"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "pretty_assertions",
@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-exec"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "kepler-unix",
  "libc",
@@ -1176,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-protocol"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "bincode",
  "dashmap 6.1.0",
@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-tests"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "dashmap 5.5.3",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "kepler-unix"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "libc",
  "nix",
