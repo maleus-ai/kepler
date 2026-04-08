@@ -1486,17 +1486,27 @@ async fn stream_logs(
     loop {
         // Select with shutdown so Ctrl+C is responsive even if the daemon
         // has disconnected and the logs_stream call would hang.
+        // Timeout prevents indefinite stall if a response is lost or delayed.
         let log_response = tokio::select! {
             biased;
             _ = &mut shutdown => {
                 return Ok(StreamExitReason::ShutdownRequested);
             }
-            result = client.logs_stream(
-                params.config_path, params.services, last_id,
-                from_end && last_id.is_none(), params.limit, params.no_hooks,
-                params.filter, params.sql, params.raw, params.tail,
-                None, None,
-            ) => result,
+            result = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.logs_stream(
+                    params.config_path, params.services, last_id,
+                    from_end && last_id.is_none(), params.limit, params.no_hooks,
+                    params.filter, params.sql, params.raw, params.tail,
+                    None, None,
+                ),
+            ) => match result {
+                Ok(inner) => inner,
+                Err(_) => {
+                    // RPC timed out — retry on next iteration
+                    continue;
+                }
+            },
         };
 
         let has_more_data;
