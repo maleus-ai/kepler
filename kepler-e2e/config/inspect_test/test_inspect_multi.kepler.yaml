@@ -1,0 +1,5 @@
+services:
+  svc-a:
+    command: ["sh", "-c", "echo Running A; sleep 300"]
+  svc-b:
+    command: ["sh", "-c", "echo Running B; sleep 300"]

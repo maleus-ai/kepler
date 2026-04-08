@@ -291,8 +291,16 @@ async fn run() -> Result<()> {
             unreachable!("Prune commands are handled by early return above")
         }
 
-        Commands::Inspect => {
-            let (_progress_rx, response_future) = client.inspect(canonical_path)?;
+        Commands::Inspect { services, services_section, environment, flags } => {
+            // If no section flags specified, include all sections
+            let no_filter = !services_section && !environment && !flags && services.is_empty();
+            let include_services = no_filter || services_section || !services.is_empty();
+            let include_environment = no_filter || environment;
+            let include_flags = no_filter || flags;
+
+            let (_progress_rx, response_future) = client.inspect(
+                canonical_path, services, include_services, include_environment, include_flags,
+            )?;
             let response = response_future.await?;
             match response {
                 Response::Ok { data: Some(ResponseData::Inspect(json)), .. } => {

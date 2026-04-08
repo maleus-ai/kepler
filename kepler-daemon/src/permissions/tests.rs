@@ -242,6 +242,10 @@ fn required_rights_simple_requests() {
 
     let inspect = Request::Inspect {
         config_path: "/test".into(),
+        services: vec![],
+        include_services: false,
+        include_environment: false,
+        include_flags: false,
     };
     assert_eq!(required_rights(&inspect).unwrap().base, "inspect");
 

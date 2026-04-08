@@ -187,7 +187,7 @@ Rights are flat, explicit identifiers — there are no categories, no implicit c
 | `restart`    | Restart services                                                  |
 | `recreate`   | Recreate config                                                   |
 | `status`     | View config/service status; filters `kepler ps --all` results     |
-| `inspect`    | Inspect config                                                    |
+| `inspect`    | Inspect config (base info only; sub-rights unlock sections)       |
 | `logs`       | View service logs and subscribe to log streams                    |
 | `subscribe`  | Subscribe to service state changes                                |
 | `quiescence` | Check if system reached quiescence                                |
@@ -209,6 +209,9 @@ Rights are flat, explicit identifiers — there are no categories, no implicit c
 | `restart:env-override` | `restart`  | Allow environment variable overrides on restart                                                         |
 | `restart:no-deps`      | `restart`  | Allow `--no-deps` flag on restart                                                                       |
 | `recreate:hardening`   | `recreate` | Allow `--hardening` flag on recreate                                                                    |
+| `inspect:services`     | `inspect`  | Include services section in inspect output                                                              |
+| `inspect:environment`  | `inspect`  | Include environment (top-level and per-service) in inspect output                                       |
+| `inspect:flags`        | `inspect`  | Include user-defined flags in inspect output                                                            |
 | `logs:search`          | `logs`     | Allow log filter expressions (DSL). See [Log Query Security](#log-query-security)                       |
 | `logs:search:sql`      | `logs`     | Allow raw SQL filter expressions. Requires `logs:search`. See [Log Query Security](#log-query-security) |
 | `monitor:search`       | `monitor`  | Allow monitor metric filter expressions (DSL). Same security model as `logs:search`                     |

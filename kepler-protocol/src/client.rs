@@ -393,8 +393,12 @@ impl Client {
     pub fn inspect(
         &self,
         config_path: PathBuf,
+        services: Vec<String>,
+        include_services: bool,
+        include_environment: bool,
+        include_flags: bool,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
-        self.send_request(Request::Inspect { config_path })
+        self.send_request(Request::Inspect { config_path, services, include_services, include_environment, include_flags })
     }
 
     /// Check if all services are quiescent (settled — nothing more will change)

@@ -680,7 +680,7 @@ fn extract_config_path(request: &Request) -> Option<&PathBuf> {
         | Request::CheckReadiness { config_path, .. }
         | Request::UserRights { config_path, .. }
         | Request::MonitorMetrics { config_path, .. } => Some(config_path),
-        Request::Inspect { config_path } => Some(config_path),
+        Request::Inspect { config_path, .. } => Some(config_path),
         Request::Status { config_path } => config_path.as_ref(),
         _ => None,
     }
@@ -1479,31 +1479,51 @@ async fn handle_request(
             Response::ok_with_message("Subscription ended")
         }
 
-        Request::Inspect { config_path } => {
+        Request::Inspect { config_path, services, include_services, include_environment, include_flags } => {
             let config_path = match canonicalize_config_path(config_path) {
                 Ok(p) => p,
                 Err(e) => return Response::error(e.to_string()),
             };
+
+            // Compute effective rights to gate sections
+            let effective_rights = if let Some(handle) = registry.get(&config_path) {
+                kepler_daemon::acl::effective_rights(&auth_ctx, handle.owner_uid(), handle.acl())
+                    .ok().flatten()
+            } else if let Some(state_dir) = compute_state_dir(&config_path) {
+                get_unloaded_acl_entry(&state_dir, &unloaded_acl_cache).ok()
+                    .and_then(|entry| {
+                        kepler_daemon::acl::effective_rights(&auth_ctx, entry.owner_uid, entry.acl.as_ref())
+                            .ok().flatten()
+                    })
+            } else {
+                None
+            };
+            let rights = effective_rights.unwrap_or_default();
+
+            // Intersect requested sections with granted sub-rights
+            let show_services = include_services && rights.contains("inspect:services");
+            let show_environment = include_environment && rights.contains("inspect:environment");
+            let show_flags = include_flags && rights.contains("inspect:flags");
 
             let config_hash = compute_config_hash(&config_path);
 
             // Try to get data from loaded config actor, otherwise fall back to disk
             let (config, services_status, kepler_env, kepler_flags, state_dir) = if let Some(handle) = registry.get(&config_path) {
                 let config = handle.get_config().await;
-                let status = handle.get_service_status(None).await.unwrap_or_default();
-                let env = handle.get_kepler_env().await;
-                let flags = handle.get_kepler_flags().await;
+                let status = if show_services { handle.get_service_status(None).await.unwrap_or_default() } else { HashMap::new() };
+                let env = if show_environment { Some(handle.get_kepler_env().await) } else { None };
+                let flags = if show_flags { Some(handle.get_kepler_flags().await) } else { None };
                 let dir = handle.get_state_dir().await;
-                (config, status, Some(env), Some(flags), dir)
+                (config, status, env, flags, dir)
             } else if let Some(dir) = compute_state_dir(&config_path) {
                 // Config not loaded — read from persisted snapshot on disk
                 let persistence = ConfigPersistence::new(dir.clone());
                 let snapshot = persistence.load_expanded_config().ok().flatten();
 
                 let config = snapshot.as_ref().map(|s| s.config.clone());
-                let env = snapshot.as_ref().map(|s| s.kepler_env.clone());
-                let flags = snapshot.as_ref().map(|s| s.kepler_flags.clone());
-                let status = read_persisted_status(&dir);
+                let env = if show_environment { snapshot.as_ref().map(|s| s.kepler_env.clone()) } else { None };
+                let flags = if show_flags { snapshot.as_ref().map(|s| s.kepler_flags.clone()) } else { None };
+                let status = if show_services { read_persisted_status(&dir) } else { HashMap::new() };
                 (config, status, env, flags, dir)
             } else {
                 return Response::error("Config not loaded and no state directory found");
@@ -1511,42 +1531,58 @@ async fn handle_request(
 
             let state_dir_str = state_dir.to_string_lossy().to_string();
 
-            // Build per-service data
-            let mut services_json = serde_json::Map::new();
-
-            if let Some(ref config) = config {
-                for (name, raw_config) in &config.services {
-                    let service_data = build_inspect_service(
-                        name, Some(raw_config), services_status.get(name), &state_dir,
-                    );
-                    services_json.insert(name.clone(), service_data);
-                }
-            }
-
-            // Include services from status that aren't in config (edge case: config changed on disk)
-            for (name, info) in &services_status {
-                if !services_json.contains_key(name) {
-                    let service_data = build_inspect_service(
-                        name, None, Some(info), &state_dir,
-                    );
-                    services_json.insert(name.clone(), service_data);
-                }
-            }
-
             let kepler_value = config.as_ref()
                 .and_then(|c| c.kepler.as_ref())
                 .and_then(|k| serde_json::to_value(k).ok())
                 .unwrap_or(serde_json::Value::Null);
 
-            let result = serde_json::json!({
+            // Base info — always included
+            let mut result = serde_json::json!({
                 "config_path": config_path.to_string_lossy(),
                 "config_hash": config_hash,
                 "state_dir": state_dir_str,
                 "kepler": kepler_value,
-                "environment": kepler_env,
-                "flags": kepler_flags,
-                "services": services_json,
             });
+            let obj = result.as_object_mut().unwrap();
+
+            // Services section — gated by inspect:services
+            if show_services {
+                let mut services_json = serde_json::Map::new();
+                let filter_services = !services.is_empty();
+
+                if let Some(ref config) = config {
+                    for (name, raw_config) in &config.services {
+                        if filter_services && !services.contains(name) { continue; }
+                        let service_data = build_inspect_service(
+                            name, Some(raw_config), services_status.get(name), &state_dir, show_environment,
+                        );
+                        services_json.insert(name.clone(), service_data);
+                    }
+                }
+
+                // Include services from status that aren't in config
+                for (name, info) in &services_status {
+                    if filter_services && !services.contains(name) { continue; }
+                    if !services_json.contains_key(name) {
+                        let service_data = build_inspect_service(
+                            name, None, Some(info), &state_dir, show_environment,
+                        );
+                        services_json.insert(name.clone(), service_data);
+                    }
+                }
+
+                obj.insert("services".into(), serde_json::Value::Object(services_json));
+            }
+
+            // Environment — gated by inspect:environment
+            if show_environment {
+                obj.insert("environment".into(), serde_json::to_value(&kepler_env).unwrap_or_default());
+            }
+
+            // Flags — gated by inspect:flags
+            if show_flags {
+                obj.insert("flags".into(), serde_json::to_value(&kepler_flags).unwrap_or_default());
+            }
 
             match serde_json::to_string_pretty(&result) {
                 Ok(json) => Response::ok_with_data(ResponseData::Inspect(json)),
@@ -1808,10 +1844,19 @@ fn build_inspect_service(
     raw_config: Option<&kepler_daemon::config::RawServiceConfig>,
     info: Option<&ServiceInfo>,
     state_dir: &Path,
+    show_environment: bool,
 ) -> serde_json::Value {
-    let config_value = raw_config
+    let mut config_value = raw_config
         .and_then(|c| serde_json::to_value(c).ok())
         .unwrap_or(serde_json::Value::Null);
+
+    // Strip environment from service config if not authorized
+    if !show_environment {
+        if let Some(obj) = config_value.as_object_mut() {
+            obj.remove("environment");
+            obj.remove("env_file");
+        }
+    }
 
     let state_value = info
         .and_then(|i| serde_json::to_value(i).ok())
@@ -2412,7 +2457,7 @@ mod tests {
             fail_reason: None,
         };
 
-        let result = build_inspect_service("web", Some(&config), Some(&info), tmp.path());
+        let result = build_inspect_service("web", Some(&config), Some(&info), tmp.path(), true);
 
         // Check structure has all three top-level keys
         assert!(result.get("config").is_some());
@@ -2450,7 +2495,7 @@ mod tests {
             tmp.path(), "web", "pre_start", "step1", &hook_outputs
         ).unwrap();
 
-        let result = build_inspect_service("web", None, None, tmp.path());
+        let result = build_inspect_service("web", None, None, tmp.path(), true);
         let outputs = result.get("outputs").unwrap();
 
         // Process outputs
@@ -2473,7 +2518,7 @@ mod tests {
         ]);
         kepler_daemon::outputs::write_process_outputs(tmp.path(), "svc", &process_outputs).unwrap();
 
-        let result = build_inspect_service("svc", None, None, tmp.path());
+        let result = build_inspect_service("svc", None, None, tmp.path(), true);
         let outputs = result.get("outputs").unwrap();
         let big_val = outputs["process"]["big"].as_str().unwrap();
         assert!(big_val.ends_with("... (truncated)"));
@@ -2496,7 +2541,7 @@ mod tests {
             fail_reason: None,
         };
 
-        let result = build_inspect_service("orphan", None, Some(&info), tmp.path());
+        let result = build_inspect_service("orphan", None, Some(&info), tmp.path(), true);
 
         // Config should be null when not provided
         assert_eq!(result["config"], serde_json::Value::Null);
@@ -2510,7 +2555,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config = kepler_daemon::config::RawServiceConfig::default();
 
-        let result = build_inspect_service("new_svc", Some(&config), None, tmp.path());
+        let result = build_inspect_service("new_svc", Some(&config), None, tmp.path(), true);
 
         // State should be null when not provided
         assert_eq!(result["state"], serde_json::Value::Null);
@@ -2583,7 +2628,7 @@ mod tests {
         let mut services_json = serde_json::Map::new();
         for (name, raw_config) in &loaded_config.services {
             let service_data = build_inspect_service(
-                name, Some(raw_config), loaded_status.get(name), &state_dir,
+                name, Some(raw_config), loaded_status.get(name), &state_dir, true,
             );
             services_json.insert(name.clone(), service_data);
         }
@@ -2627,7 +2672,7 @@ mod tests {
 
         // Build inspect for services found only in status (no config)
         let service_data = build_inspect_service(
-            "worker", None, status.get("worker"), &state_dir,
+            "worker", None, status.get("worker"), &state_dir, true,
         );
         assert_eq!(service_data["config"], serde_json::Value::Null);
         assert_eq!(service_data["state"]["status"], "exited");
@@ -2637,12 +2682,33 @@ mod tests {
     fn test_inspect_empty_outputs() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let result = build_inspect_service("svc", None, None, tmp.path());
+        let result = build_inspect_service("svc", None, None, tmp.path(), true);
         let outputs = result.get("outputs").unwrap();
 
         // Empty but present
         assert_eq!(outputs["process"], serde_json::json!({}));
         assert_eq!(outputs["hooks"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_inspect_service_hides_environment_when_not_authorized() {
+        use kepler_daemon::config::{RawServiceConfig, ConfigValue, EnvironmentEntries};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = RawServiceConfig::default();
+        config.environment = ConfigValue::Static(EnvironmentEntries(vec![
+            ConfigValue::Static("FOO=bar".to_string()),
+        ]));
+
+        // With show_environment = true, environment is present
+        let result = build_inspect_service("svc", Some(&config), None, tmp.path(), true);
+        let config_val = result.get("config").unwrap();
+        assert!(config_val.get("environment").is_some(), "environment should be present when authorized");
+
+        // With show_environment = false, environment is stripped
+        let result = build_inspect_service("svc", Some(&config), None, tmp.path(), false);
+        let config_val = result.get("config").unwrap();
+        assert!(config_val.get("environment").is_none(), "environment should be absent when not authorized");
     }
 
     // =========================================================================
