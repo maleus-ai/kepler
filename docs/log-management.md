@@ -78,7 +78,10 @@ services:
 | `retention.on_start` | `clear\|retain` | `retain` | global + per-service | Log behavior on service start |
 | `retention.on_stop` | `clear\|retain` | `clear` | global + per-service | Log behavior on service stop |
 | `retention.on_restart` | `clear\|retain` | `retain` | global + per-service | Log behavior on restart |
-| `retention.on_exit` | `clear\|retain` | `retain` | global + per-service | Log behavior on process exit |
+| `retention.on_exit` | `clear\|retain` | `retain` | global + per-service | Log behavior on process exit (sugar for setting both `on_success` and `on_failure`) |
+| `retention.on_success` | `clear\|retain` | `retain` | global + per-service | Log behavior on process exit with code 0. Mutually exclusive with `on_exit` |
+| `retention.on_failure` | `clear\|retain` | `retain` | global + per-service | Log behavior on process exit with non-zero code. Mutually exclusive with `on_exit` |
+| `retention.on_skipped` | `clear\|retain` | `retain` | global + per-service | Log behavior when service is skipped (e.g. `if:` condition is false) |
 
 ---
 
@@ -126,7 +129,8 @@ logs:
     on_start: retain      # Keep logs from previous runs on start
     on_stop: clear        # Clear logs when service is stopped
     on_restart: retain    # Keep logs across restarts
-    on_exit: retain       # Keep logs when process exits
+    on_exit: retain       # Keep logs when process exits (sugar for on_success + on_failure)
+    on_skipped: retain    # Keep logs when service is skipped (if: condition false)
 ```
 
 | Event | Default | Description |
@@ -134,7 +138,12 @@ logs:
 | `on_start` | `retain` | When service starts |
 | `on_stop` | `clear` | When service is manually stopped |
 | `on_restart` | `retain` | When service restarts |
-| `on_exit` | `retain` | When process exits naturally |
+| `on_exit` | `retain` | When process exits (sets both `on_success` and `on_failure`) |
+| `on_success` | `retain` | When process exits with code 0. Mutually exclusive with `on_exit` |
+| `on_failure` | `retain` | When process exits with non-zero code. Mutually exclusive with `on_exit` |
+| `on_skipped` | `retain` | When service is skipped (`if:` condition evaluates to false) |
+
+`on_exit` is sugar for setting both `on_success` and `on_failure` to the same value. You cannot use `on_exit` together with `on_success` or `on_failure`.
 
 ---
 
