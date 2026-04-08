@@ -25,7 +25,7 @@ pub type ShutdownTx = mpsc::Sender<()>;
 pub use kepler_unix::credentials::PeerCredentials;
 
 /// Bounded channel capacity for the per-connection writer task.
-const WRITER_CHANNEL_CAPACITY: usize = 256;
+const WRITER_CHANNEL_CAPACITY: usize = 16384;
 
 /// Default maximum number of concurrent connections.
 const DEFAULT_MAX_CONNECTIONS: usize = 1024;
