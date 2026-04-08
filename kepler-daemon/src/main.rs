@@ -1488,21 +1488,23 @@ async fn handle_request(
             let config_hash = compute_config_hash(&config_path);
 
             // Try to get data from loaded config actor, otherwise fall back to disk
-            let (config, services_status, kepler_env, state_dir) = if let Some(handle) = registry.get(&config_path) {
+            let (config, services_status, kepler_env, kepler_flags, state_dir) = if let Some(handle) = registry.get(&config_path) {
                 let config = handle.get_config().await;
                 let status = handle.get_service_status(None).await.unwrap_or_default();
                 let env = handle.get_kepler_env().await;
+                let flags = handle.get_kepler_flags().await;
                 let dir = handle.get_state_dir().await;
-                (config, status, Some(env), dir)
+                (config, status, Some(env), Some(flags), dir)
             } else if let Some(dir) = compute_state_dir(&config_path) {
                 // Config not loaded — read from persisted snapshot on disk
                 let persistence = ConfigPersistence::new(dir.clone());
                 let snapshot = persistence.load_expanded_config().ok().flatten();
 
                 let config = snapshot.as_ref().map(|s| s.config.clone());
-                let env = snapshot.map(|s| s.kepler_env);
+                let env = snapshot.as_ref().map(|s| s.kepler_env.clone());
+                let flags = snapshot.as_ref().map(|s| s.kepler_flags.clone());
                 let status = read_persisted_status(&dir);
-                (config, status, env, dir)
+                (config, status, env, flags, dir)
             } else {
                 return Response::error("Config not loaded and no state directory found");
             };
@@ -1542,6 +1544,7 @@ async fn handle_request(
                 "state_dir": state_dir_str,
                 "kepler": kepler_value,
                 "environment": kepler_env,
+                "flags": kepler_flags,
                 "services": services_json,
             });
 
