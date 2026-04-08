@@ -204,6 +204,18 @@ pub enum Request {
     Inspect {
         /// Path to the config file
         config_path: PathBuf,
+        /// Services to include (empty = all, when services section is requested)
+        #[serde(default)]
+        services: Vec<String>,
+        /// Include services section
+        #[serde(default)]
+        include_services: bool,
+        /// Include environment (top-level + per-service)
+        #[serde(default)]
+        include_environment: bool,
+        /// Include flags
+        #[serde(default)]
+        include_flags: bool,
     },
     /// Check if all services are quiescent (settled — nothing more will change)
     CheckQuiescence {

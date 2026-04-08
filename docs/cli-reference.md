@@ -377,12 +377,30 @@ See [Service Lifecycle](service-lifecycle.md) for all status states.
 Inspect config and runtime state as JSON. Requires a running daemon. Works even when the config is not loaded in memory (e.g. `autostart: false`), falling back to persisted state on disk.
 
 ```bash
-kepler inspect                   # Inspect the current config
-kepler -f other.yaml inspect     # Inspect a specific config
-kepler inspect | jq .services    # Pipe to jq for filtering
+kepler inspect                         # All sections you have permission for
+kepler inspect backend frontend        # Only specific services
+kepler inspect --flags                 # Only flags
+kepler inspect --environment           # Only environment
+kepler inspect --services              # Only services section (all services)
+kepler inspect backend --flags --env   # Combine: specific service + flags
+kepler -f other.yaml inspect           # Inspect a specific config
+kepler inspect | jq .services          # Pipe to jq for filtering
 ```
 
+**Section flags:**
+
+| Flag              | Short | Description                                        |
+| ----------------- | ----- | -------------------------------------------------- |
+| `--services`      | `-s`  | Include the services section                       |
+| `--environment`   |       | Include environment (top-level and per-service)    |
+| `--flags`         |       | Include user-defined flags (`-D KEY=VALUE`)        |
+| `[SERVICE...]`    |       | Filter to specific services (implies `--services`) |
+
+When no section flags are specified, all sections the caller has permission for are included.
+
 **Output structure:**
+
+Base info (always included):
 
 | Field                             | Description                                                                             |
 | --------------------------------- | --------------------------------------------------------------------------------------- |
@@ -390,12 +408,30 @@ kepler inspect | jq .services    # Pipe to jq for filtering
 | `config_hash`                     | SHA-256 hash used to locate the state directory                                         |
 | `state_dir`                       | Full path to the state directory (`/var/lib/kepler/configs/<hash>`)                     |
 | `kepler`                          | Global kepler configuration (`default_inherit_env`, `logs`, `timeout`, `autostart`)     |
-| `environment`                     | Resolved environment variables passed to services. `null` if config was never started   |
+
+Gated by `inspect:services` sub-right:
+
+| Field                             | Description                                                                             |
+| --------------------------------- | --------------------------------------------------------------------------------------- |
 | `services.<name>.config`          | Raw parsed service config (static values resolved, dynamic shown as expressions)        |
 | `services.<name>.state`           | Runtime state: `status`, `pid`, `started_at`, `stopped_at`, `exit_code`, `signal`, etc. |
 | `services.<name>.outputs.path`    | Filesystem path to the service outputs directory                                        |
 | `services.<name>.outputs.process` | Process output captures (`::output::KEY=VALUE`)                                         |
 | `services.<name>.outputs.hooks`   | Hook step outputs (`hook_name -> step_name -> {key: value}`)                            |
+
+Gated by `inspect:environment` sub-right:
+
+| Field                             | Description                                                                             |
+| --------------------------------- | --------------------------------------------------------------------------------------- |
+| `environment`                     | Resolved environment variables passed to services. `null` if config was never started   |
+
+When `inspect:environment` is not granted, per-service `environment` and `env_file` fields are also stripped from the service config.
+
+Gated by `inspect:flags` sub-right:
+
+| Field                             | Description                                                                             |
+| --------------------------------- | --------------------------------------------------------------------------------------- |
+| `flags`                           | User-defined flags set via `-D KEY=VALUE` at start time                                 |
 
 Individual output values longer than 512 characters are truncated with a `"... (truncated)"` suffix.
 

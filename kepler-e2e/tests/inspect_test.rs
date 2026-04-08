@@ -1,79 +1,207 @@
 //! E2E tests for `kepler inspect`
 //!
-//! Tests that inspect output includes kepler.flags defined via -D.
+//! Tests section scoping (--flags, --environment, --services-section, service names)
+//! and that the default inspect returns all sections for the config owner.
 
 use kepler_e2e::{E2eHarness, E2eResult};
 use std::time::Duration;
 
 const TEST_MODULE: &str = "inspect_test";
 
-/// Test that inspect output includes flags passed via -D at start time
-#[tokio::test]
-async fn test_inspect_includes_flags() -> E2eResult<()> {
+/// Helper: start daemon, start services, return harness + config path string
+async fn setup(config_name: &str) -> E2eResult<(E2eHarness, String)> {
     let mut harness = E2eHarness::new().await?;
-    let config_path = harness.load_config(TEST_MODULE, "test_inspect_flags")?;
-    let config_str = config_path.to_str().unwrap();
-
+    let config_path = harness.load_config(TEST_MODULE, config_name)?;
+    let config_str = config_path.to_str().unwrap().to_string();
     harness.start_daemon().await?;
+    Ok((harness, config_str))
+}
 
-    // Start with flags
-    let output = harness
-        .run_cli(&["-f", config_str, "start", "-d", "-D", "MY_FLAG=hello", "-D", "OTHER=world"])
-        .await?;
+/// Default inspect (no flags) returns all sections for the owner
+#[tokio::test]
+async fn test_inspect_default_returns_all_sections() -> E2eResult<()> {
+    let (mut harness, config_str) = setup("test_inspect_flags").await?;
+
+    let output = harness.run_cli(&["-f", &config_str, "start", "-d"]).await?;
     output.assert_success();
 
+    let config_path = std::path::PathBuf::from(&config_str);
     harness
         .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
         .await?;
 
-    // Inspect and check flags are present
-    let output = harness.run_cli(&["-f", config_str, "inspect"]).await?;
+    let output = harness.run_cli(&["-f", &config_str, "inspect"]).await?;
     output.assert_success();
 
     let json: serde_json::Value = serde_json::from_str(&output.stdout)
         .expect("inspect output should be valid JSON");
 
-    let flags = &json["flags"];
-    assert_eq!(flags["MY_FLAG"], "hello", "MY_FLAG should be 'hello', got: {}", flags);
-    assert_eq!(flags["OTHER"], "world", "OTHER should be 'world', got: {}", flags);
+    // Base info always present
+    assert!(json.get("config_path").is_some(), "config_path should be present");
+    assert!(json.get("config_hash").is_some(), "config_hash should be present");
+    assert!(json.get("state_dir").is_some(), "state_dir should be present");
+    assert!(json.get("kepler").is_some(), "kepler section should be present");
+
+    // All sections included for owner
+    assert!(json.get("services").is_some(), "services should be present for owner");
+    assert!(json.get("environment").is_some(), "environment should be present for owner");
+    assert!(json.get("flags").is_some(), "flags should be present for owner");
 
     harness.stop_daemon().await?;
-
     Ok(())
 }
 
-/// Test that inspect output has null flags when none are defined
+/// --flags returns only flags section
 #[tokio::test]
-async fn test_inspect_no_flags() -> E2eResult<()> {
-    let mut harness = E2eHarness::new().await?;
-    let config_path = harness.load_config(TEST_MODULE, "test_inspect_flags")?;
-    let config_str = config_path.to_str().unwrap();
+async fn test_inspect_flags_only() -> E2eResult<()> {
+    let (mut harness, config_str) = setup("test_inspect_flags").await?;
 
-    harness.start_daemon().await?;
-
-    // Start without flags
-    let output = harness.run_cli(&["-f", config_str, "start", "-d"]).await?;
+    let output = harness
+        .run_cli(&["-f", &config_str, "start", "-d", "-D", "MY_FLAG=hello"])
+        .await?;
     output.assert_success();
 
+    let config_path = std::path::PathBuf::from(&config_str);
     harness
         .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
         .await?;
 
-    // Inspect — flags should be present but empty
-    let output = harness.run_cli(&["-f", config_str, "inspect"]).await?;
+    let output = harness.run_cli(&["-f", &config_str, "inspect", "--flags"]).await?;
     output.assert_success();
 
     let json: serde_json::Value = serde_json::from_str(&output.stdout)
         .expect("inspect output should be valid JSON");
 
-    let flags = &json["flags"];
-    assert!(
-        flags.is_object() && flags.as_object().unwrap().is_empty(),
-        "flags should be an empty object when none defined, got: {}",
-        flags
-    );
+    // Base info always present
+    assert!(json.get("config_path").is_some());
+    assert!(json.get("kepler").is_some());
+
+    // Only flags section, not services or environment
+    assert!(json.get("flags").is_some(), "flags should be present");
+    assert_eq!(json["flags"]["MY_FLAG"], "hello");
+    assert!(json.get("services").is_none(), "services should NOT be present with --flags only");
+    assert!(json.get("environment").is_none(), "environment should NOT be present with --flags only");
 
     harness.stop_daemon().await?;
+    Ok(())
+}
 
+/// --environment returns only environment section
+#[tokio::test]
+async fn test_inspect_environment_only() -> E2eResult<()> {
+    let (mut harness, config_str) = setup("test_inspect_flags").await?;
+
+    let output = harness.run_cli(&["-f", &config_str, "start", "-d"]).await?;
+    output.assert_success();
+
+    let config_path = std::path::PathBuf::from(&config_str);
+    harness
+        .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
+        .await?;
+
+    let output = harness.run_cli(&["-f", &config_str, "inspect", "--environment"]).await?;
+    output.assert_success();
+
+    let json: serde_json::Value = serde_json::from_str(&output.stdout)
+        .expect("inspect output should be valid JSON");
+
+    assert!(json.get("environment").is_some(), "environment should be present");
+    assert!(json.get("services").is_none(), "services should NOT be present");
+    assert!(json.get("flags").is_none(), "flags should NOT be present");
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Passing service names returns only those services
+#[tokio::test]
+async fn test_inspect_specific_service() -> E2eResult<()> {
+    let (mut harness, config_str) = setup("test_inspect_multi").await?;
+
+    let output = harness.run_cli(&["-f", &config_str, "start", "-d"]).await?;
+    output.assert_success();
+
+    let config_path = std::path::PathBuf::from(&config_str);
+    harness
+        .wait_for_service_status(&config_path, "svc-a", "running", Duration::from_secs(10))
+        .await?;
+
+    // Inspect only svc-a
+    let output = harness.run_cli(&["-f", &config_str, "inspect", "svc-a"]).await?;
+    output.assert_success();
+
+    let json: serde_json::Value = serde_json::from_str(&output.stdout)
+        .expect("inspect output should be valid JSON");
+
+    let services = json.get("services").expect("services should be present");
+    assert!(services.get("svc-a").is_some(), "svc-a should be present");
+    assert!(services.get("svc-b").is_none(), "svc-b should NOT be present");
+
+    // No flags/env since only service filter was specified
+    assert!(json.get("flags").is_none(), "flags should NOT be present");
+    assert!(json.get("environment").is_none(), "environment should NOT be present");
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Combining service name with --flags returns both
+#[tokio::test]
+async fn test_inspect_service_and_flags() -> E2eResult<()> {
+    let (mut harness, config_str) = setup("test_inspect_multi").await?;
+
+    let output = harness
+        .run_cli(&["-f", &config_str, "start", "-d", "-D", "MODE=debug"])
+        .await?;
+    output.assert_success();
+
+    let config_path = std::path::PathBuf::from(&config_str);
+    harness
+        .wait_for_service_status(&config_path, "svc-a", "running", Duration::from_secs(10))
+        .await?;
+
+    let output = harness.run_cli(&["-f", &config_str, "inspect", "svc-a", "--flags"]).await?;
+    output.assert_success();
+
+    let json: serde_json::Value = serde_json::from_str(&output.stdout)
+        .expect("inspect output should be valid JSON");
+
+    // Both services (filtered) and flags present
+    let services = json.get("services").expect("services should be present");
+    assert!(services.get("svc-a").is_some());
+    assert!(services.get("svc-b").is_none());
+    assert_eq!(json["flags"]["MODE"], "debug");
+    assert!(json.get("environment").is_none(), "environment should NOT be present");
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// --services-section without service names returns all services
+#[tokio::test]
+async fn test_inspect_services_section_all() -> E2eResult<()> {
+    let (mut harness, config_str) = setup("test_inspect_multi").await?;
+
+    let output = harness.run_cli(&["-f", &config_str, "start", "-d"]).await?;
+    output.assert_success();
+
+    let config_path = std::path::PathBuf::from(&config_str);
+    harness
+        .wait_for_service_status(&config_path, "svc-a", "running", Duration::from_secs(10))
+        .await?;
+
+    let output = harness.run_cli(&["-f", &config_str, "inspect", "--services"]).await?;
+    output.assert_success();
+
+    let json: serde_json::Value = serde_json::from_str(&output.stdout)
+        .expect("inspect output should be valid JSON");
+
+    let services = json.get("services").expect("services should be present");
+    assert!(services.get("svc-a").is_some(), "svc-a should be present");
+    assert!(services.get("svc-b").is_some(), "svc-b should be present");
+    assert!(json.get("flags").is_none());
+    assert!(json.get("environment").is_none());
+
+    harness.stop_daemon().await?;
     Ok(())
 }

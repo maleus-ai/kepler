@@ -545,7 +545,14 @@ pub fn build_authorizer_context(
             params.insert("services".into(), ParamValue::StringList(svcs));
             ("subscribe", params)
         }
-        Request::Inspect { .. } => ("inspect", HashMap::new()),
+        Request::Inspect { services, include_services, include_environment, include_flags, .. } => {
+            let mut params = HashMap::new();
+            params.insert("services".into(), ParamValue::StringList(services.clone()));
+            params.insert("include_services".into(), ParamValue::Bool(*include_services));
+            params.insert("include_environment".into(), ParamValue::Bool(*include_environment));
+            params.insert("include_flags".into(), ParamValue::Bool(*include_flags));
+            ("inspect", params)
+        }
         Request::Status {
             config_path: Some(_),
         } => ("status", HashMap::new()),

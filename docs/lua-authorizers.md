@@ -118,7 +118,26 @@ Get service status for a specific config. No params.
 
 ### `inspect`
 
-Inspect config and runtime state. No params.
+Inspect config and runtime state.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `services` | `string[]` | Services requested (empty table = all) |
+| `include_services` | `boolean` | Whether services section was requested |
+| `include_environment` | `boolean` | Whether environment section was requested |
+| `include_flags` | `boolean` | Whether flags section was requested |
+
+Example: block inspect without specifying services:
+
+```lua
+authorize: |
+  if request.action == 'inspect' then
+    if #request.params.services == 0 and request.params.include_services then
+      return false
+    end
+  end
+  return true
+```
 
 ### `logs`
 

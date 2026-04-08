@@ -182,7 +182,20 @@ pub enum Commands {
         json: bool,
     },
     /// Inspect config and service state (JSON output)
-    Inspect,
+    Inspect {
+        /// Show only specific service(s)
+        #[arg(value_name = "SERVICE")]
+        services: Vec<String>,
+        /// Include services section
+        #[arg(short, long = "services")]
+        services_section: bool,
+        /// Include environment (top-level and per-service)
+        #[arg(long, alias = "env")]
+        environment: bool,
+        /// Include flags
+        #[arg(long)]
+        flags: bool,
+    },
     /// Live resource monitor (CPU, memory) for services
     Top {
         /// Service to monitor
