@@ -205,3 +205,71 @@ async fn test_inspect_services_section_all() -> E2eResult<()> {
     harness.stop_daemon().await?;
     Ok(())
 }
+
+/// Inspect with --environment shows resolved runtime environment per service
+#[tokio::test]
+async fn test_inspect_resolved_service_environment() -> E2eResult<()> {
+    let (mut harness, config_str) = setup("test_inspect_env").await?;
+
+    let output = harness.run_cli(&["-f", &config_str, "start", "-d"]).await?;
+    output.assert_success();
+
+    let config_path = std::path::PathBuf::from(&config_str);
+    harness
+        .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
+        .await?;
+
+    // Inspect with --environment to see resolved env
+    let output = harness.run_cli(&["-f", &config_str, "inspect", "test-service", "--environment"]).await?;
+    output.assert_success();
+
+    let json: serde_json::Value = serde_json::from_str(&output.stdout)
+        .expect("inspect output should be valid JSON");
+
+    let services = json.get("services").expect("services should be present");
+    let svc = services.get("test-service").expect("test-service should be present");
+
+    // Config should show the raw environment entries
+    let config_env = svc.get("config").and_then(|c| c.get("environment"));
+    assert!(config_env.is_some(), "config.environment should show raw config");
+
+    // Resolved environment should contain the actual KEY=VALUE pairs
+    let resolved = svc.get("environment").expect("resolved environment should be present");
+    assert_eq!(resolved["FOO"], "bar", "resolved env should have FOO=bar");
+    assert_eq!(resolved["HELLO"], "world", "resolved env should have HELLO=world");
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Without --environment, services don't include resolved environment
+#[tokio::test]
+async fn test_inspect_no_resolved_env_without_flag() -> E2eResult<()> {
+    let (mut harness, config_str) = setup("test_inspect_env").await?;
+
+    let output = harness.run_cli(&["-f", &config_str, "start", "-d"]).await?;
+    output.assert_success();
+
+    let config_path = std::path::PathBuf::from(&config_str);
+    harness
+        .wait_for_service_status(&config_path, "test-service", "running", Duration::from_secs(10))
+        .await?;
+
+    // Inspect with only service name (no --environment)
+    let output = harness.run_cli(&["-f", &config_str, "inspect", "test-service"]).await?;
+    output.assert_success();
+
+    let json: serde_json::Value = serde_json::from_str(&output.stdout)
+        .expect("inspect output should be valid JSON");
+
+    let svc = &json["services"]["test-service"];
+
+    // Config environment is always present (raw config is not gated)
+    assert!(svc["config"]["environment"].is_array(), "config.environment should always be present");
+
+    // Resolved environment should NOT be present without --environment flag
+    assert!(svc.get("environment").is_none(), "resolved environment should not be present without --environment");
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
