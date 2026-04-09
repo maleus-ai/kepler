@@ -421,11 +421,12 @@ Gated by `inspect:services` sub-right:
 
 Gated by `inspect:environment` sub-right:
 
-| Field                             | Description                                                                             |
-| --------------------------------- | --------------------------------------------------------------------------------------- |
-| `environment`                     | Resolved environment variables passed to services. `null` if config was never started   |
+| Field                                | Description                                                                                 |
+| ------------------------------------ | ------------------------------------------------------------------------------------------- |
+| `environment`                        | Resolved kepler-level environment variables. `null` if config was never started              |
+| `services.<name>.environment`        | Resolved runtime environment the service process runs with (all variables after resolution)  |
 
-When `inspect:environment` is not granted, per-service `environment` and `env_file` fields are also stripped from the service config.
+Note: `services.<name>.config.environment` always shows the raw config (may contain `!lua` blocks or `${{ }}$` expressions). The `services.<name>.environment` field shows the actual resolved values. The resolved environment is only available when the config is loaded in memory.
 
 Gated by `inspect:flags` sub-right:
 

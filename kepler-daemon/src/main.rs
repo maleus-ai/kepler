@@ -1550,11 +1550,19 @@ async fn handle_request(
                 let mut services_json = serde_json::Map::new();
                 let filter_services = !services.is_empty();
 
+                // Fetch resolved env per service when environment is authorized and config is loaded
+                let loaded_handle = if show_environment { registry.get(&config_path) } else { None };
+
                 if let Some(ref config) = config {
                     for (name, raw_config) in &config.services {
                         if filter_services && !services.contains(name) { continue; }
+                        let resolved_env = if let Some(ref h) = loaded_handle {
+                            h.get_service_state(name).await.map(|s| s.computed_env)
+                        } else {
+                            None
+                        };
                         let service_data = build_inspect_service(
-                            name, Some(raw_config), services_status.get(name), &state_dir, show_environment,
+                            name, Some(raw_config), services_status.get(name), &state_dir, resolved_env.as_ref(),
                         );
                         services_json.insert(name.clone(), service_data);
                     }
@@ -1564,8 +1572,13 @@ async fn handle_request(
                 for (name, info) in &services_status {
                     if filter_services && !services.contains(name) { continue; }
                     if !services_json.contains_key(name) {
+                        let resolved_env = if let Some(ref h) = loaded_handle {
+                            h.get_service_state(name).await.map(|s| s.computed_env)
+                        } else {
+                            None
+                        };
                         let service_data = build_inspect_service(
-                            name, None, Some(info), &state_dir, show_environment,
+                            name, None, Some(info), &state_dir, resolved_env.as_ref(),
                         );
                         services_json.insert(name.clone(), service_data);
                     }
@@ -1844,19 +1857,11 @@ fn build_inspect_service(
     raw_config: Option<&kepler_daemon::config::RawServiceConfig>,
     info: Option<&ServiceInfo>,
     state_dir: &Path,
-    show_environment: bool,
+    resolved_env: Option<&HashMap<String, String>>,
 ) -> serde_json::Value {
-    let mut config_value = raw_config
+    let config_value = raw_config
         .and_then(|c| serde_json::to_value(c).ok())
         .unwrap_or(serde_json::Value::Null);
-
-    // Strip environment from service config if not authorized
-    if !show_environment {
-        if let Some(obj) = config_value.as_object_mut() {
-            obj.remove("environment");
-            obj.remove("env_file");
-        }
-    }
 
     let state_value = info
         .and_then(|i| serde_json::to_value(i).ok())
@@ -1882,11 +1887,21 @@ fn build_inspect_service(
         "hooks": hooks_json,
     });
 
-    serde_json::json!({
+    let mut service_obj = serde_json::json!({
         "config": config_value,
         "state": state_value,
         "outputs": outputs_value,
-    })
+    });
+
+    // Resolved runtime environment (gated by inspect:environment)
+    if let Some(env) = resolved_env {
+        service_obj.as_object_mut().unwrap().insert(
+            "environment".into(),
+            serde_json::to_value(env).unwrap_or_default(),
+        );
+    }
+
+    service_obj
 }
 
 /// Compute the sha256 hash for a config path (same algorithm as ConfigActor::create).
@@ -2457,7 +2472,7 @@ mod tests {
             fail_reason: None,
         };
 
-        let result = build_inspect_service("web", Some(&config), Some(&info), tmp.path(), true);
+        let result = build_inspect_service("web", Some(&config), Some(&info), tmp.path(), None);
 
         // Check structure has all three top-level keys
         assert!(result.get("config").is_some());
@@ -2495,7 +2510,7 @@ mod tests {
             tmp.path(), "web", "pre_start", "step1", &hook_outputs
         ).unwrap();
 
-        let result = build_inspect_service("web", None, None, tmp.path(), true);
+        let result = build_inspect_service("web", None, None, tmp.path(), None);
         let outputs = result.get("outputs").unwrap();
 
         // Process outputs
@@ -2518,7 +2533,7 @@ mod tests {
         ]);
         kepler_daemon::outputs::write_process_outputs(tmp.path(), "svc", &process_outputs).unwrap();
 
-        let result = build_inspect_service("svc", None, None, tmp.path(), true);
+        let result = build_inspect_service("svc", None, None, tmp.path(), None);
         let outputs = result.get("outputs").unwrap();
         let big_val = outputs["process"]["big"].as_str().unwrap();
         assert!(big_val.ends_with("... (truncated)"));
@@ -2541,7 +2556,7 @@ mod tests {
             fail_reason: None,
         };
 
-        let result = build_inspect_service("orphan", None, Some(&info), tmp.path(), true);
+        let result = build_inspect_service("orphan", None, Some(&info), tmp.path(), None);
 
         // Config should be null when not provided
         assert_eq!(result["config"], serde_json::Value::Null);
@@ -2555,7 +2570,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config = kepler_daemon::config::RawServiceConfig::default();
 
-        let result = build_inspect_service("new_svc", Some(&config), None, tmp.path(), true);
+        let result = build_inspect_service("new_svc", Some(&config), None, tmp.path(), None);
 
         // State should be null when not provided
         assert_eq!(result["state"], serde_json::Value::Null);
@@ -2628,7 +2643,7 @@ mod tests {
         let mut services_json = serde_json::Map::new();
         for (name, raw_config) in &loaded_config.services {
             let service_data = build_inspect_service(
-                name, Some(raw_config), loaded_status.get(name), &state_dir, true,
+                name, Some(raw_config), loaded_status.get(name), &state_dir, None,
             );
             services_json.insert(name.clone(), service_data);
         }
@@ -2672,7 +2687,7 @@ mod tests {
 
         // Build inspect for services found only in status (no config)
         let service_data = build_inspect_service(
-            "worker", None, status.get("worker"), &state_dir, true,
+            "worker", None, status.get("worker"), &state_dir, None,
         );
         assert_eq!(service_data["config"], serde_json::Value::Null);
         assert_eq!(service_data["state"]["status"], "exited");
@@ -2682,7 +2697,7 @@ mod tests {
     fn test_inspect_empty_outputs() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let result = build_inspect_service("svc", None, None, tmp.path(), true);
+        let result = build_inspect_service("svc", None, None, tmp.path(), None);
         let outputs = result.get("outputs").unwrap();
 
         // Empty but present
@@ -2691,7 +2706,23 @@ mod tests {
     }
 
     #[test]
-    fn test_inspect_service_hides_environment_when_not_authorized() {
+    fn test_inspect_service_resolved_environment() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Without resolved_env, no environment field in service object
+        let result = build_inspect_service("svc", None, None, tmp.path(), None);
+        assert!(result.get("environment").is_none(), "no environment when resolved_env is None");
+
+        // With resolved_env, environment field is present
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let result = build_inspect_service("svc", None, None, tmp.path(), Some(&env));
+        let env_val = result.get("environment").expect("environment should be present");
+        assert_eq!(env_val["FOO"], "bar");
+    }
+
+    #[test]
+    fn test_inspect_service_config_always_includes_raw_environment() {
         use kepler_daemon::config::{RawServiceConfig, ConfigValue, EnvironmentEntries};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2700,15 +2731,10 @@ mod tests {
             ConfigValue::Static("FOO=bar".to_string()),
         ]));
 
-        // With show_environment = true, environment is present
-        let result = build_inspect_service("svc", Some(&config), None, tmp.path(), true);
+        // Config environment is always present (even without resolved_env)
+        let result = build_inspect_service("svc", Some(&config), None, tmp.path(), None);
         let config_val = result.get("config").unwrap();
-        assert!(config_val.get("environment").is_some(), "environment should be present when authorized");
-
-        // With show_environment = false, environment is stripped
-        let result = build_inspect_service("svc", Some(&config), None, tmp.path(), false);
-        let config_val = result.get("config").unwrap();
-        assert!(config_val.get("environment").is_none(), "environment should be absent when not authorized");
+        assert!(config_val.get("environment").is_some(), "config.environment should always be present");
     }
 
     // =========================================================================

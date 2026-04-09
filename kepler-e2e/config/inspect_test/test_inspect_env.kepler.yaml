@@ -1,0 +1,6 @@
+services:
+  test-service:
+    command: ["sh", "-c", "echo Running; sleep 300"]
+    environment:
+      - FOO=bar
+      - HELLO=world
