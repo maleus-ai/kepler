@@ -986,7 +986,7 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<()> {
         DaemonCommands::Status => {
             if !Client::is_daemon_running(&daemon_socket).await {
                 println!("Daemon is not running");
-                return Ok(());
+                std::process::exit(1);
             }
 
             println!("Daemon is running");
