@@ -111,11 +111,58 @@ async fn test_daemon_status_when_stopped() -> E2eResult<()> {
     let output = harness.daemon_status().await?;
 
     // Status command should indicate daemon is not running
-    // (exit code might still be 0, but message should indicate not running)
     assert!(
-        output.stdout_contains("not running") || output.stderr_contains("not running") || !output.success(),
+        output.stdout_contains("not running") || output.stderr_contains("not running"),
         "Daemon status should indicate not running. stdout: {}, stderr: {}",
         output.stdout, output.stderr
+    );
+
+    // Exit code should be non-zero when daemon is not running
+    assert!(
+        !output.success(),
+        "Daemon status should exit with non-zero code when not running. exit_code: {}",
+        output.exit_code
+    );
+
+    Ok(())
+}
+
+/// Test that daemon status exits with code 0 when running and non-zero when stopped
+#[tokio::test]
+async fn test_daemon_status_exit_code() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    // When daemon is not running, exit code should be non-zero
+    let output = harness.daemon_status().await?;
+    assert!(
+        !output.success(),
+        "Daemon status should exit with non-zero code when not running. exit_code: {}",
+        output.exit_code
+    );
+
+    // Start the daemon
+    harness.start_daemon().await?;
+
+    // When daemon is running, exit code should be 0
+    let output = harness.daemon_status().await?;
+    assert!(
+        output.success(),
+        "Daemon status should exit with code 0 when running. exit_code: {}, stderr: {}",
+        output.exit_code, output.stderr
+    );
+
+    // Stop the daemon
+    harness.stop_daemon().await?;
+
+    // Give time for cleanup
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // After stopping, exit code should be non-zero again
+    let output = harness.daemon_status().await?;
+    assert!(
+        !output.success(),
+        "Daemon status should exit with non-zero code after daemon is stopped. exit_code: {}",
+        output.exit_code
     );
 
     Ok(())
