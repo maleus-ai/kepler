@@ -1,0 +1,13 @@
+services:
+  user-exists-svc:
+    command: !lua |
+      local existing = os.user_exists("testuser1")
+      local missing = os.user_exists("__kepler_nonexistent_user_xyz__")
+      local by_uid = os.user_exists(0)
+      return {
+        "sh", "-c",
+        "echo EXISTING=" .. tostring(existing) ..
+        "; echo MISSING=" .. tostring(missing) ..
+        "; echo BY_UID=" .. tostring(by_uid) ..
+        "; sleep 300"
+      }

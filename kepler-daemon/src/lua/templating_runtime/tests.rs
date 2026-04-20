@@ -1198,6 +1198,132 @@ fn test_os_getgroups_other_user_errors_hardening_strict() {
     assert!(result.is_err(), "os.getgroups('0') should error with strict hardening when owner uid is 1000");
 }
 
+// --- os.user_exists() tests ---
+
+#[test]
+fn test_os_user_exists_no_arg_errors() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result = eval.eval::<Value>(r#"return os.user_exists()"#, &ctx, "test");
+    assert!(result.is_err(), "os.user_exists() with no argument should error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("expected a username or uid"),
+        "Error should mention missing argument: {}",
+        err
+    );
+}
+
+#[test]
+fn test_os_user_exists_root_returns_true() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result: Value = eval
+        .eval(r#"return os.user_exists("root")"#, &ctx, "test")
+        .unwrap();
+    assert!(matches!(result, Value::Boolean(true)), "root should exist, got: {:?}", result);
+}
+
+#[test]
+fn test_os_user_exists_uid_zero_returns_true() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    // Numeric uid as string
+    let result: Value = eval
+        .eval(r#"return os.user_exists("0")"#, &ctx, "test")
+        .unwrap();
+    assert!(matches!(result, Value::Boolean(true)), "uid 0 should exist, got: {:?}", result);
+
+    // Numeric uid as number
+    let result: Value = eval
+        .eval(r#"return os.user_exists(0)"#, &ctx, "test")
+        .unwrap();
+    assert!(matches!(result, Value::Boolean(true)), "uid 0 (number) should exist, got: {:?}", result);
+}
+
+#[test]
+fn test_os_user_exists_nonexistent_returns_false() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result: Value = eval
+        .eval(
+            r#"return os.user_exists("__kepler_nonexistent_user_xyz__")"#,
+            &ctx,
+            "test",
+        )
+        .unwrap();
+    assert!(
+        matches!(result, Value::Boolean(false)),
+        "nonexistent user should return false, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_os_user_exists_nonexistent_uid_returns_false() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    // Use a very high uid unlikely to exist
+    let result: Value = eval
+        .eval(r#"return os.user_exists(4294967290)"#, &ctx, "test")
+        .unwrap();
+    assert!(
+        matches!(result, Value::Boolean(false)),
+        "nonexistent uid should return false, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_os_user_exists_ignores_hardening() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext {
+        hardening: super::HardeningLevel::Strict,
+        owner: Some(super::OwnerEvalContext {
+            uid: 1000,
+            gid: 1000,
+            user: Some("testuser".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    // Existence checks are not restricted by hardening
+    let result: Value = eval
+        .eval(r#"return os.user_exists("root")"#, &ctx, "test")
+        .unwrap();
+    assert!(
+        matches!(result, Value::Boolean(true)),
+        "os.user_exists('root') should succeed even under strict hardening"
+    );
+}
+
+#[test]
+fn test_os_user_exists_available_in_inline_expr() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result = eval
+        .eval_inline_expr(r#"type(os.user_exists)"#, &ctx, "test")
+        .unwrap();
+    assert_eq!(result.as_str().unwrap().to_string(), "function");
+}
+
+#[test]
+fn test_os_user_exists_available_in_condition() {
+    let eval = LuaEvaluator::new().unwrap();
+    let ctx = EvalContext::default();
+
+    let result = eval
+        .eval_condition("os.user_exists('root')", &ctx)
+        .unwrap();
+    assert!(result.value, "os.user_exists('root') should be truthy in condition");
+}
+
 #[test]
 fn test_os_clock_still_works_metatable_fallback() {
     let eval = LuaEvaluator::new().unwrap();
