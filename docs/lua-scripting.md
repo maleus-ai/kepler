@@ -361,6 +361,28 @@ Calling `os.getgroups()` without an argument raises an error.
 
 See [Security Model — Kepler Group Stripping](security-model.md#kepler-group-stripping) for a practical example using `os.getgroups()` to filter supplementary groups.
 
+### `os.user_exists()`
+
+Check whether a system user is resolvable via NSS (passwd/LDAP/etc.):
+
+| Function | Description |
+|----------|-------------|
+| `os.user_exists(user)` | Returns `true` if the given username or uid resolves, `false` otherwise |
+
+```yaml
+services:
+  app:
+    command: !lua |
+      if not os.user_exists("postgres") then
+        error("postgres user must exist on the host")
+      end
+      return {"/usr/bin/myapp"}
+```
+
+Accepts either a username string (`"postgres"`) or a uid as a number (`1000`) or string (`"1000"`). Calling `os.user_exists()` without an argument raises an error.
+
+Unlike `os.getgroups()`, `os.user_exists()` is a simple boolean check and is **not** subject to hardening restrictions.
+
 ---
 
 ## Sandbox Restrictions
@@ -378,6 +400,7 @@ The Lua environment provides a **restricted subset** of the standard library:
 | `json` — JSON parse/stringify | |
 | `yaml` — YAML parse/stringify | |
 | `os.getgroups` — Supplementary group query | |
+| `os.user_exists` — User existence check | |
 
 **No filesystem access**: Scripts cannot read, write, or modify files on disk.
 

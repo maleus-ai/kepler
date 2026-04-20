@@ -256,6 +256,52 @@ async fn test_os_getgroups_blocked_strict_other_user() -> E2eResult<()> {
     Ok(())
 }
 
+// =========================================================================
+// os.user_exists()
+// =========================================================================
+
+/// os.user_exists() returns true for existing users, false for missing ones,
+/// and accepts numeric uids as well.
+#[tokio::test]
+async fn test_os_user_exists() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_os_user_exists")?;
+
+    harness.start_daemon().await?;
+
+    let config_str = config_path.to_str().unwrap();
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_str, "start", "-d"]).await?;
+    output.assert_success();
+
+    harness
+        .wait_for_service_status(&config_path, "user-exists-svc", "running", Duration::from_secs(10))
+        .await?;
+
+    let logs = harness
+        .wait_for_log_content(&config_path, "EXISTING=", Duration::from_secs(5))
+        .await?;
+    let stdout = &logs.stdout;
+
+    assert!(
+        stdout.contains("EXISTING=true"),
+        "testuser1 should exist. stdout: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("MISSING=false"),
+        "nonexistent user should return false. stdout: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("BY_UID=true"),
+        "uid 0 (root) should exist. stdout: {}",
+        stdout
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
 /// os.getgroups(own_user) succeeds with --hardening strict
 #[tokio::test]
 async fn test_os_getgroups_allowed_strict_self() -> E2eResult<()> {

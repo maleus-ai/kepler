@@ -478,6 +478,41 @@ impl LuaEvaluator {
             })?;
             os_table.set("getgroups", getgroups_fn)?;
 
+            // os.user_exists(user) — returns true if the user is resolvable via
+            // NSS (passwd/LDAP/etc.), false otherwise. Accepts either a username
+            // string or a numeric uid (as string or number). Unlike os.getgroups,
+            // this is a simple boolean existence check and is not subject to
+            // hardening restrictions.
+            let user_exists_fn = self.lua.create_function(|_, user_spec: mlua::Value| {
+                let spec = match user_spec {
+                    mlua::Value::String(s) => s.to_str()?.to_string(),
+                    mlua::Value::Integer(i) => i.to_string(),
+                    mlua::Value::Number(n) => (n as i64).to_string(),
+                    mlua::Value::Nil => {
+                        return Err(mlua::Error::RuntimeError(
+                            "os.user_exists: expected a username or uid argument".to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(
+                            "os.user_exists: expected a string or number argument".to_string(),
+                        ));
+                    }
+                };
+
+                let exists = if let Ok(uid) = spec.parse::<u32>() {
+                    nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+                        .ok()
+                        .flatten()
+                        .is_some()
+                } else {
+                    nix::unistd::User::from_name(&spec).ok().flatten().is_some()
+                };
+
+                Ok(exists)
+            })?;
+            os_table.set("user_exists", user_exists_fn)?;
+
             // Fallback to global os table (os.clock, os.date, etc.)
             if let Ok(global_os) = self.lua.globals().get::<Table>("os") {
                 let os_meta = self.lua.create_table()?;
