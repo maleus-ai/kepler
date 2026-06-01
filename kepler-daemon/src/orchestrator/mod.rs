@@ -1908,49 +1908,81 @@ impl ServiceOrchestrator {
             }
         }
 
+        // Run the start phase. If anything fails, mirror start_single_service_with_evaluator
+        // and mark the service as Failed with a reason — otherwise the status would remain
+        // Stopped (posted by stop_service above), masking the failure.
+        if let Err(e) = self.execute_restart_start_phase(&handle, service_name).await {
+            // Write error to service stderr log so it's visible via `kepler logs`.
+            // Skip for hook errors — they already wrote to stderr in run_service_hook.
+            if !matches!(e, OrchestratorError::HookFailed(_))
+                && let Some(ref log_store) = handle.get_log_store().await {
+                    let writer = LogWriter::new(log_store, service_name, "error");
+                    writer.write(&e.to_string());
+                }
+            if let Err(err) = handle.set_service_status_with_reason(
+                service_name, ServiceStatus::Failed, None, Some(e.to_string()),
+            ).await {
+                warn!("Failed to set {} to Failed: {}", service_name, err);
+            }
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    /// Start phase of a restart — runs after the service has been stopped.
+    ///
+    /// Split out so the caller can uniformly turn any error from this phase into
+    /// a `Failed` status with reason, rather than leaving the `Stopped` status
+    /// posted by `stop_service`.
+    async fn execute_restart_start_phase(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+    ) -> Result<(), OrchestratorError> {
         // Increment restart count before hooks so pre_start sees the updated value
         if let Err(e) = handle.increment_restart_count(service_name).await {
             warn!("Failed to increment restart count for {}: {}", service_name, e);
         }
 
         // Re-resolve service config with updated restart_count
-        let ctx = self.re_resolve_service(&handle, service_name, None).await?;
+        let ctx = self.re_resolve_service(handle, service_name, None).await?;
 
         // Emit Start event (restart includes a start)
         handle.emit_event(service_name, ServiceEvent::Start).await;
 
         // Create new token guard before pre_start hooks
         if let Some(resolved) = ctx.resolved_config.as_ref() {
-            self.create_service_token_guard(&handle, service_name, resolved).await?;
+            self.create_service_token_guard(handle, service_name, resolved).await?;
         }
 
         // Run pre_start hook (runs on every start, including restarts)
-        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, &None, Some(&handle))
+        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, &None, Some(handle))
             .await
         {
-            self.revoke_service_token_guard(&handle, service_name).await;
+            self.revoke_service_token_guard(handle, service_name).await;
             return Err(e);
         }
 
         // Apply on_start log retention
-        self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Start)
+        self.apply_retention(handle, service_name, &ctx, LifecycleEvent::Start)
             .await;
 
         // Spawn the service
-        self.spawn_service(&handle, service_name, &ctx).await?;
+        self.spawn_service(handle, service_name, &ctx).await?;
 
         // Run post_start hook (after process spawned)
-        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart, &None, Some(&handle)).await {
+        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart, &None, Some(handle)).await {
             warn!("Hook post_start failed for {}: {}", service_name, e);
         }
 
         // Run post_restart hook (after restart complete)
-        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart, &None, Some(&handle)).await {
+        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart, &None, Some(handle)).await {
             warn!("Hook post_restart failed for {}: {}", service_name, e);
         }
 
         // Spawn auxiliary tasks (health checker, file watcher)
-        self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
+        self.spawn_auxiliary_tasks(handle, service_name, &ctx).await;
 
         Ok(())
     }

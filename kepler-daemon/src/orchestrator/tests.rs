@@ -512,6 +512,75 @@ fn current_resolved_user() -> crate::user::ResolvedUser {
     crate::user::resolve_user(&uid.as_raw().to_string()).unwrap()
 }
 
+// ---------------------------------------------------------------------------
+// restart_single_service — Failed status on pre_start hook failure
+// ---------------------------------------------------------------------------
+
+/// Symmetric to `test_start_services_restarts_failed_service`: if the
+/// `pre_start` hook fails during a restart, the service must end up in
+/// `Failed` (with a fail_reason) — not `Stopped` (the status posted by
+/// the intermediate stop phase).
+#[tokio::test]
+async fn test_restart_single_service_sets_failed_on_pre_start_failure() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    let config_yaml = r#"
+services:
+  svc1:
+    command: ["sleep", "60"]
+    hooks:
+      pre_start:
+        run: "exit 2"
+"#;
+    std::fs::write(&config_path, config_yaml).unwrap();
+    let kepler_state_dir = temp_dir.path().join(".kepler");
+
+    let (orch, handle) = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: caller holds ENV_LOCK
+        unsafe { std::env::set_var("KEPLER_DAEMON_PATH", &kepler_state_dir) };
+
+        let registry = Arc::new(ConfigRegistry::new());
+        let (exit_tx, _) = mpsc::channel(32);
+        let (restart_tx, _) = mpsc::channel(32);
+        let log_notifiers: super::LogNotifiers = Arc::new(dashmap::DashMap::new());
+        let token_store = Arc::new(crate::token_store::TokenStore::new());
+        let orch = ServiceOrchestrator::new(
+            registry, exit_tx, restart_tx, log_notifiers, HardeningLevel::None, None, token_store,
+            crate::containment::ContainmentManager::detect(),
+        );
+        let handle = orch
+            .registry()
+            .get_or_create(config_path.clone(), Some(std::env::vars().collect()), None, None, None)
+            .await
+            .unwrap();
+        (orch, handle)
+    };
+
+    // Simulate a service that was running so restart's stop phase has work to do
+    // (no actual process — stop_service handles that gracefully).
+    handle.set_service_status("svc1", ServiceStatus::Running).await.unwrap();
+
+    let result = orch.restart_single_service(&config_path, "svc1").await;
+    assert!(result.is_err(), "restart should propagate the pre_start hook error, got {:?}", result);
+
+    let state = handle
+        .get_service_state("svc1")
+        .await
+        .expect("svc1 state should exist");
+    assert_eq!(
+        state.status,
+        ServiceStatus::Failed,
+        "status should be Failed after pre_start hook failure, not {:?}",
+        state.status,
+    );
+    assert!(
+        state.fail_reason.as_ref().is_some_and(|r| !r.is_empty()),
+        "fail_reason should be populated, got {:?}",
+        state.fail_reason,
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn test_inject_user_identity_sets_all_four_vars() {
