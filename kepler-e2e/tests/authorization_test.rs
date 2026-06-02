@@ -1037,6 +1037,51 @@ async fn test_lua_authorizer_error_denies_and_logs() -> E2eResult<()> {
     Ok(())
 }
 
+/// Lua authorizer can read the targeted config file path via `request.config_path`.
+/// The authorizer fails closed unless `request.config_path` points at this config,
+/// so a successful `ps` proves the path was delivered; `stop` is denied by the
+/// action branch that only runs once config_path is validated.
+#[tokio::test]
+async fn test_lua_authorizer_reads_config_path() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_acl_config_path")?;
+
+    harness.start_daemon().await?;
+
+    // testuser1 (owner) starts the service — owner bypasses authorizers.
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "start", "-d"]).await?;
+    output.assert_success();
+    harness.wait_for_service_status(&config_path, "cfgpath-svc", "running", Duration::from_secs(10)).await?;
+
+    // testuser2 views status: allowed only because request.config_path was present
+    // AND matched the expected suffix (otherwise the authorizer error()s → deny).
+    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "ps"]).await?;
+    output.assert_success();
+    assert!(
+        output.stdout_contains("cfgpath-svc"),
+        "testuser2 should see service when config_path is delivered. stdout: {}", output.stdout
+    );
+
+    // testuser2 stop: denied by the action branch that runs after config_path is
+    // validated — proving the authorizer evaluated with config_path populated.
+    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "stop"]).await?;
+    assert!(!output.success(), "stop should be denied by the config_path-aware authorizer");
+    assert!(
+        output.stderr_contains("permission denied") || output.stderr_contains("denied"),
+        "Should mention denial. stderr: {}", output.stderr
+    );
+
+    // The authorizer must NOT have hit its fail-closed error() branches.
+    let daemon_logs = harness.daemon_logs();
+    assert!(
+        !daemon_logs.contains("config_path missing") && !daemon_logs.contains("unexpected config_path"),
+        "Authorizer should have received a valid config_path. daemon_logs: {}", daemon_logs
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
 // =========================================================================
 // CLI degraded mode: partial permissions
 // =========================================================================

@@ -75,6 +75,48 @@ fn test_clear_snapshot() {
 }
 
 #[test]
+fn test_load_state_quarantines_corrupted_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let persistence = ConfigPersistence::new(temp_dir.path().to_path_buf());
+
+    // Write invalid JSON to state.json
+    std::fs::write(persistence.state_path(), "not valid json {{{").unwrap();
+
+    // Loading should succeed with None (fresh state) and not error out
+    let result = persistence.load_state().unwrap();
+    assert!(result.is_none(), "Corrupted state should load as None");
+
+    // The original state.json must have been moved aside
+    assert!(
+        !persistence.state_path().exists(),
+        "Corrupted state.json should have been renamed away"
+    );
+
+    // A quarantined copy should exist with the corrupted contents preserved
+    let quarantined: Vec<_> = std::fs::read_dir(temp_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("state.json.corrupted."))
+        .collect();
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "Expected exactly one quarantined file, found: {:?}",
+        quarantined
+    );
+    let preserved = std::fs::read_to_string(temp_dir.path().join(&quarantined[0])).unwrap();
+    assert_eq!(preserved, "not valid json {{{");
+}
+
+#[test]
+fn test_load_state_none_when_missing() {
+    let temp_dir = TempDir::new().unwrap();
+    let persistence = ConfigPersistence::new(temp_dir.path().to_path_buf());
+    assert!(persistence.load_state().unwrap().is_none());
+}
+
+#[test]
 fn test_permission_ceiling_round_trip() {
     let yaml = r#"
 config:

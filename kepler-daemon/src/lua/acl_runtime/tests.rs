@@ -11,6 +11,7 @@ fn make_context(action: &'static str) -> AuthorizerContext {
         groups: vec![1000],
         is_token: false,
         params,
+        config_path: Some("/etc/kepler/app.kepler".into()),
     }
 }
 
@@ -332,6 +333,37 @@ fn context_from_start_request() {
     assert!(matches!(ctx.params.get("no_deps"), Some(ParamValue::Bool(true))));
     assert!(matches!(ctx.params.get("hardening"), Some(ParamValue::String(s)) if s == "strict"));
     assert!(matches!(ctx.params.get("override_envs"), Some(ParamValue::StringMap(_))));
+    assert_eq!(ctx.config_path.as_deref(), Some("/test"));
+}
+
+#[test]
+fn context_status_all_configs_has_no_config_path() {
+    // `Status { config_path: None }` is a rights-free request — no authorizer context.
+    let req = Request::Status { config_path: None };
+    assert!(build_authorizer_context(&req, 1000, 1000, None, vec![1000], false).is_none());
+}
+
+#[test]
+fn request_table_has_config_path() {
+    let lua = create_acl_lua_vm().unwrap();
+    let ctx = make_context("start");
+    let tbl = build_request_table(&lua, &ctx).unwrap();
+    let path: String = tbl.get("config_path").unwrap();
+    assert_eq!(path, "/etc/kepler/app.kepler");
+}
+
+#[test]
+fn authorizer_can_read_config_path() {
+    let lua = create_acl_lua_vm().unwrap();
+    let ctx = make_context("start");
+    let key = compile_authorizer(
+        &lua,
+        "return request.config_path == '/etc/kepler/app.kepler'",
+    )
+    .unwrap();
+    let handle = RegistryKeyHandle(Arc::new(key));
+    let result = evaluate_authorizers(&lua, &[handle], &ctx);
+    assert!(result.is_ok());
 }
 
 #[test]

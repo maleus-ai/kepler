@@ -556,3 +556,117 @@ fn base_and_sub_right_together_allows_feature() {
     };
     assert!(resolved.check_access(1000, 1000, &req).is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Authorizer integration: `request.config_path` flows from Request → decision
+// ---------------------------------------------------------------------------
+
+/// Build an AclConfig with a single user-scoped Lua authorizer.
+fn make_acl_with_authorizer(uid: u32, rights: Vec<&str>, authorize: &str) -> AclConfig {
+    let mut users = HashMap::new();
+    users.insert(
+        uid.to_string(),
+        AclRule {
+            allow: rights.into_iter().map(String::from).collect(),
+            authorize: Some(authorize.to_string()),
+        },
+    );
+    AclConfig {
+        lua: None,
+        aliases: HashMap::new(),
+        users,
+        groups: HashMap::new(),
+    }
+}
+
+/// Build a `Request::Start` targeting a specific config path.
+fn start_request(config_path: &str) -> Request {
+    Request::Start {
+        config_path: config_path.into(),
+        services: vec![],
+        sys_env: None,
+        no_deps: false,
+        override_envs: None,
+        hardening: None,
+        define_flags: None,
+        follow: false,
+    }
+}
+
+/// Drive the full path main.rs uses: build the authorizer context from a real
+/// Request, then evaluate the compiled ACL authorizers against it.
+async fn run_authorizers(acl: &ResolvedAcl, uid: u32, gid: u32, request: &Request) -> Result<(), String> {
+    let context = crate::lua::acl_runtime::build_authorizer_context(
+        request,
+        uid,
+        gid,
+        None,
+        vec![gid],
+        false,
+    )
+    .expect("request should produce an authorizer context");
+    acl.check_authorizers(uid, gid, None, context).await
+}
+
+#[tokio::test]
+async fn authorizer_allows_when_config_path_matches() {
+    // Authorizer only allows requests targeting the app config by path.
+    let acl_cfg = make_acl_with_authorizer(
+        1000,
+        vec!["start"],
+        "return request.config_path == '/etc/kepler/app.kepler.yaml'",
+    );
+    let mut acl = ResolvedAcl::from_config(&acl_cfg).unwrap();
+    acl.init_authorizers().unwrap();
+
+    let req = start_request("/etc/kepler/app.kepler.yaml");
+    assert!(
+        run_authorizers(&acl, 1000, 1000, &req).await.is_ok(),
+        "authorizer should allow when request.config_path matches"
+    );
+}
+
+#[tokio::test]
+async fn authorizer_denies_when_config_path_mismatches() {
+    // Same authorizer, but the request targets a different config.
+    let acl_cfg = make_acl_with_authorizer(
+        1000,
+        vec!["start"],
+        "return request.config_path == '/etc/kepler/app.kepler.yaml'",
+    );
+    let mut acl = ResolvedAcl::from_config(&acl_cfg).unwrap();
+    acl.init_authorizers().unwrap();
+
+    let req = start_request("/etc/kepler/other.kepler.yaml");
+    assert!(
+        run_authorizers(&acl, 1000, 1000, &req).await.is_err(),
+        "authorizer should deny when request.config_path does not match"
+    );
+}
+
+#[tokio::test]
+async fn authorizer_sees_config_path_suffix() {
+    // A realistic authorizer that branches on a path property rather than an
+    // exact match (paths are deployment-specific).
+    let acl_cfg = make_acl_with_authorizer(
+        1000,
+        vec!["start"],
+        "return request.config_path ~= nil \
+            and string.match(request.config_path, '%.kepler%.yaml$') ~= nil",
+    );
+    let mut acl = ResolvedAcl::from_config(&acl_cfg).unwrap();
+    acl.init_authorizers().unwrap();
+
+    assert!(
+        run_authorizers(&acl, 1000, 1000, &start_request("/srv/web.kepler.yaml"))
+            .await
+            .is_ok(),
+        "authorizer should allow a config_path ending in .kepler.yaml"
+    );
+    assert!(
+        run_authorizers(&acl, 1000, 1000, &start_request("/srv/web.txt"))
+            .await
+            .is_err(),
+        "authorizer should deny a config_path with an unexpected suffix"
+    );
+}

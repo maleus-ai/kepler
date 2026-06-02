@@ -314,7 +314,7 @@ Authorizers can be defined on ACL user/group rules (`authorize` field) and on se
 2. **User ACL authorizer** (if the caller's UID matches a user rule with `authorize`)
 3. **Group ACL authorizers** (all matching group rules with `authorize`, sorted by GID)
 
-Each authorizer receives two read-only tables — `request` (with `action` and `params`) and `caller` (with `uid`, `gid`, `username`, `groups`, `token`):
+Each authorizer receives two read-only tables — `request` (with `action`, `config_path`, and `params`) and `caller` (with `uid`, `gid`, `username`, `groups`, `token`):
 
 ```yaml
 kepler:
@@ -341,7 +341,7 @@ Key properties:
 - **Static rights are checked first** — if the caller lacks the right, the authorizer never runs
 - **Root bypasses authorizers** — root is never subject to authorizer checks
 
-See [Lua Authorizers](lua-authorizers.md) for the full reference: per-action `request.params` fields, sandbox constraints, shared code, and aliases.
+See [Lua Authorizers](lua-authorizers.md) for the full reference: the `request.config_path` field, per-action `request.params` fields, sandbox constraints, shared code, and aliases.
 
 ---
 
