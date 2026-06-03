@@ -1,0 +1,22 @@
+kepler:
+  acl:
+    users:
+      testuser2:
+        allow: [start, stop, status, logs, subscribe, quiescence]
+        authorize: |
+          -- The daemon must expose the targeted config file path (`-f <path>`)
+          -- to authorizers as request.config_path. If it is missing or points
+          -- somewhere unexpected, fail closed.
+          if request.config_path == nil then
+            error("config_path missing from authorizer request")
+          end
+          if not string.match(request.config_path, "test_acl_config_path%.kepler%.yaml$") then
+            error("unexpected config_path: " .. tostring(request.config_path))
+          end
+          -- config_path is correctly populated: allow read actions, deny stop.
+          if request.action == 'stop' then return false end
+          return true
+
+services:
+  cfgpath-svc:
+    command: ["sh", "-c", "echo CFGPATH_SVC_RUNNING; sleep 300"]

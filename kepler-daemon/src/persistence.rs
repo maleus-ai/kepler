@@ -155,8 +155,32 @@ impl ConfigPersistence {
                 Ok(Some(state))
             }
             Err(e) => {
-                warn!("Failed to parse state.json, ignoring: {}", e);
+                // The state file is corrupted and cannot be parsed. Quarantine it
+                // by renaming it aside so it can be inspected later, then return
+                // None so a fresh state.json is generated on the next save.
+                warn!("Failed to parse state.json: {}", e);
+                self.quarantine_corrupted_state(&path);
                 Ok(None)
+            }
+        }
+    }
+
+    /// Rename a corrupted state file aside as `state.json.corrupted.<timestamp>`.
+    ///
+    /// Best-effort: failures are logged but never propagated, since the caller
+    /// always falls back to a fresh state regardless.
+    fn quarantine_corrupted_state(&self, path: &Path) {
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "state.json".to_string());
+        let corrupted_name = format!("{}.corrupted.{}", file_name, timestamp);
+        let corrupted_path = path.with_file_name(&corrupted_name);
+
+        match std::fs::rename(path, &corrupted_path) {
+            Ok(()) => {
+                warn!("Quarantined corrupted state file to {:?}; a fresh state will be generated", corrupted_path);
+            }
+            Err(e) => {
+                warn!("Failed to quarantine corrupted state file {:?}: {}", path, e);
             }
         }
     }

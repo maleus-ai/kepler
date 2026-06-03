@@ -55,7 +55,21 @@ Authorizer source is wrapped as `function(request, caller) ... end`. The two arg
 | Field | Type | Description |
 |-------|------|-------------|
 | `action` | `string` | The action being performed (see [Request Params Reference](#request-params-reference)) |
+| `config_path` | `string?` | Absolute path to the config file the request targets (the CLI `-f <path>`, canonicalized). `nil` for the rare request that targets no specific config |
 | `params` | `table` | Action-specific parameters (see [Request Params Reference](#request-params-reference)) |
+
+Every authorizer-evaluated request targets a specific config, so `request.config_path`
+is populated for all of them. It is the daemon-resolved (canonicalized) path, not the
+raw string the caller typed. Example — restrict an action to a known config location:
+
+```lua
+authorize: |
+  if request.action == 'stop'
+    and request.config_path == '/etc/kepler/critical.kepler.yaml' then
+    return false
+  end
+  return true
+```
 
 ### The `caller` Table
 

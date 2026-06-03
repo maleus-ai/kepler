@@ -89,6 +89,8 @@ pub struct AuthorizerContext {
     pub is_token: bool,
     /// Request-specific parameters (includes `services`).
     pub params: HashMap<String, ParamValue>,
+    /// Config file path the request targets (`-f <path>`), if any.
+    pub config_path: Option<String>,
 }
 
 /// Simple value type for authorizer parameters.
@@ -158,6 +160,9 @@ fn compile_authorizer(lua: &Lua, source: &str) -> LuaResult<mlua::RegistryKey> {
 fn build_request_table(lua: &Lua, ctx: &AuthorizerContext) -> LuaResult<LuaTable> {
     let tbl = lua.create_table()?;
     tbl.set("action", ctx.action)?;
+    if let Some(ref path) = ctx.config_path {
+        tbl.set("config_path", path.as_str())?;
+    }
 
     // params
     let params = lua.create_table()?;
@@ -447,6 +452,35 @@ impl AclLuaHandle {
 ///
 /// Returns `None` for rights-free requests (Ping, ListConfigs, etc.) since
 /// those never reach the authorizer.
+/// Extract the targeted config file path from a request, if it carries one.
+fn request_config_path(request: &Request) -> Option<String> {
+    use Request::*;
+    let path = match request {
+        Start { config_path, .. }
+        | Run { config_path, .. }
+        | Stop { config_path, .. }
+        | Restart { config_path, .. }
+        | Recreate { config_path, .. }
+        | LogsStream { config_path, .. }
+        | SubscribeLogs { config_path, .. }
+        | Subscribe { config_path, .. }
+        | Inspect { config_path, .. }
+        | CheckQuiescence { config_path, .. }
+        | CheckReadiness { config_path, .. }
+        | UserRights { config_path, .. }
+        | MonitorMetrics { config_path, .. } => config_path,
+        Status {
+            config_path: Some(path),
+        } => path,
+        Status { config_path: None }
+        | Shutdown
+        | Ping
+        | ListConfigs
+        | Prune { .. } => return None,
+    };
+    Some(path.to_string_lossy().into_owned())
+}
+
 pub fn build_authorizer_context(
     request: &Request,
     uid: u32,
@@ -586,6 +620,7 @@ pub fn build_authorizer_context(
         groups,
         is_token,
         params,
+        config_path: request_config_path(request),
     })
 }
 
