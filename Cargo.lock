@@ -1184,6 +1184,7 @@ dependencies = [
  "kepler-unix",
  "nix",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

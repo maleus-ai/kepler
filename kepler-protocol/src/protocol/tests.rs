@@ -855,3 +855,35 @@ fn roundtrip_recreate_with_define_flags() {
         _ => panic!("Expected Recreate request"),
     }
 }
+
+// ========================================================================
+// ConfigStatus.log_degraded backward compatibility
+// ========================================================================
+
+/// A `ConfigStatus` payload from an older daemon (no `log_degraded` key) must
+/// still deserialize, defaulting `log_degraded` to false.
+#[test]
+fn config_status_deserializes_without_log_degraded() {
+    let json = r#"{
+        "config_path": "/app/kepler.yaml",
+        "config_hash": "abc123",
+        "services": {}
+    }"#;
+    let parsed: ConfigStatus = serde_json::from_str(json).unwrap();
+    assert_eq!(parsed.config_path, "/app/kepler.yaml");
+    assert!(!parsed.log_degraded, "missing log_degraded must default to false");
+}
+
+/// `log_degraded` round-trips when present.
+#[test]
+fn config_status_roundtrips_log_degraded() {
+    let status = ConfigStatus {
+        config_path: "/app/kepler.yaml".to_string(),
+        config_hash: "abc123".to_string(),
+        services: std::collections::HashMap::new(),
+        log_degraded: true,
+    };
+    let json = serde_json::to_string(&status).unwrap();
+    let parsed: ConfigStatus = serde_json::from_str(&json).unwrap();
+    assert!(parsed.log_degraded);
+}

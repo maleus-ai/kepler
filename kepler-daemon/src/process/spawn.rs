@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::OnceLock;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
@@ -11,6 +12,13 @@ use tracing::{debug, info, warn};
 use super::CommandSpec;
 use crate::errors::{DaemonError, Result};
 use crate::logs::{LogStoreHandle, LogWriter};
+
+/// Max consecutive read errors tolerated on a captured stream before giving up.
+/// A read error does not close the pipe fd, so we retry rather than permanently
+/// ending capture; the cap stops a persistent error from hot-spinning.
+const MAX_CAPTURE_READ_RETRIES: u32 = 5;
+/// Backoff between capture read retries (keeps a persistent error from spinning).
+const CAPTURE_READ_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Cached result of kepler-exec binary lookup.
 /// `Some(path)` = found, `None` = not found (will fall back to fork).
@@ -283,37 +291,68 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
     Ok((cmd, program.clone()))
 }
 
-/// Spawn a task that reads and discards all lines from a stream.
+/// Strip a single trailing `\n` (and a preceding `\r`, if present) from a line
+/// buffer read via `read_until(b'\n', ...)`, matching the newline trimming that
+/// `AsyncBufReadExt::lines()` performs.
+fn strip_trailing_newline(buf: &mut Vec<u8>) {
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+    }
+}
+
+/// Spawn a task that reads and discards all output from a stream.
 /// Prevents the child process from blocking on a full pipe buffer.
+///
+/// Reads raw bytes (not UTF-8 lines) so that non-UTF-8 output cannot abort the
+/// drain early and leave the child blocked writing to a full pipe.
 fn spawn_drain_task(
     stream: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         if let Some(stream) = stream {
-            let reader = BufReader::new(stream);
-            let mut lines = reader.lines();
-            while let Ok(Some(_)) = lines.next_line().await {}
+            let mut reader = BufReader::new(stream);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break, // EOF or I/O error
+                    Ok(_) => {}              // discard
+                }
+            }
         }
     })
 }
 
 /// Spawn a task that collects all output from a stream into a String.
+///
+/// Reads raw bytes and lossily decodes each line, so non-UTF-8 output is
+/// preserved (as U+FFFD) instead of truncating the collected output.
 fn spawn_collect_task(
     stream: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
 ) -> JoinHandle<String> {
     tokio::spawn(async move {
-        let mut buf = String::new();
+        let mut out = String::new();
         if let Some(stream) = stream {
-            let reader = BufReader::new(stream);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if !buf.is_empty() {
-                    buf.push('\n');
+            let mut reader = BufReader::new(stream);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break, // EOF or I/O error
+                    Ok(_) => {
+                        strip_trailing_newline(&mut buf);
+                        if !out.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str(&String::from_utf8_lossy(&buf));
+                    }
                 }
-                buf.push_str(&line);
             }
         }
-        buf
+        out
     })
 }
 
@@ -353,9 +392,53 @@ fn spawn_capture_task(
                 None
             };
 
-            let reader = BufReader::new(stream);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            // Read raw bytes (not UTF-8 lines): a single invalid-UTF-8 byte must
+            // not return an Err that silently ends capture and freezes this
+            // service's logs. Invalid bytes are lossily decoded to U+FFFD; a
+            // genuine I/O error is logged before ending the loop.
+            let mut reader = BufReader::new(stream);
+            let mut buf = Vec::new();
+            // Consecutive read errors. A read error does NOT close the pipe fd,
+            // so retry (bounded, with backoff) instead of permanently ending
+            // capture — one transient hiccup (more likely under GVisor's syscall
+            // emulation) must not silence a service's logs until it restarts.
+            // Reset on any successful read.
+            let mut read_errors: u32 = 0;
+            loop {
+                // NOTE: `buf` is cleared only after a line is successfully
+                // extracted (below), NOT at the top of the loop. On a transient
+                // read error mid-line, read_until leaves the partial bytes it
+                // already read in `buf`; keeping them means the retry's
+                // read_until appends the rest and we emit the whole line intact
+                // instead of splitting/dropping it.
+                let line = match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        read_errors = 0;
+                        strip_trailing_newline(&mut buf);
+                        let line = String::from_utf8_lossy(&buf).into_owned();
+                        buf.clear();
+                        line
+                    }
+                    Err(e) => {
+                        read_errors += 1;
+                        if read_errors > MAX_CAPTURE_READ_RETRIES {
+                            warn!(
+                                "[{}] ending log capture after {} consecutive read errors: {}",
+                                service_name, read_errors, e
+                            );
+                            break;
+                        }
+                        warn!(
+                            "[{}] log capture read error (retry {}/{}): {}",
+                            service_name, read_errors, MAX_CAPTURE_READ_RETRIES, e
+                        );
+                        tokio::time::sleep(CAPTURE_READ_RETRY_BACKOFF).await;
+                        // Do NOT clear `buf` — preserve the partial line for retry.
+                        continue;
+                    }
+                };
+
                 // Check for ::output:: marker
                 if let Some(ref mut cap) = captured
                     && let Some(kv) = line.strip_prefix("::output::") {
@@ -559,4 +642,155 @@ pub async fn spawn_detached(
         stdout_task,
         stderr_task,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tempfile::TempDir;
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    use crate::config::StorageMode;
+    use crate::logs::{DEFAULT_BATCH_SIZE, SqliteLogReader};
+
+    /// An `AsyncRead` that replays a scripted sequence of results: each `Ok`
+    /// delivers a chunk of bytes, each `Err` surfaces a (transient) read error
+    /// exactly once, and the end of the script is EOF. Models a flaky pipe.
+    struct ScriptedReader {
+        steps: VecDeque<std::io::Result<&'static [u8]>>,
+    }
+
+    impl AsyncRead for ScriptedReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            match self.steps.pop_front() {
+                Some(Ok(bytes)) => {
+                    buf.put_slice(bytes);
+                    Poll::Ready(Ok(()))
+                }
+                Some(Err(e)) => Poll::Ready(Err(e)),
+                None => Poll::Ready(Ok(())), // EOF
+            }
+        }
+    }
+
+    /// A transient read error mid-stream must NOT permanently end capture: the
+    /// line emitted after the error must still be stored (the pipe fd stays
+    /// valid across a read error, so the loop retries instead of giving up).
+    #[tokio::test]
+    async fn capture_recovers_from_transient_read_error() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("logs").join("logs.db");
+
+        let store = LogStoreHandle::spawn(
+            db_path.clone(),
+            Duration::from_millis(5),
+            DEFAULT_BATCH_SIZE,
+            StorageMode::Local,
+            None,
+            None,
+            Duration::from_secs(3600),
+        );
+
+        let reader = ScriptedReader {
+            steps: VecDeque::from(vec![
+                Ok(b"before_error\n".as_slice()),
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "transient pipe error")),
+                Ok(b"after_error\n".as_slice()),
+            ]),
+        };
+
+        let handle = spawn_capture_task(
+            Some(reader),
+            Some(store.clone()),
+            "svc".to_string(),
+            "info",
+            None,
+            true,  // should_store
+            false, // log_to_tracing
+            None,  // output_capture
+        );
+        let _ = handle.await;
+        store.wait_flush_sync();
+
+        let log_reader = SqliteLogReader::new(db_path, StorageMode::Local);
+        let lines: Vec<String> = log_reader
+            .tail(100, &["svc".to_string()], false, None, None, None)
+            .into_iter()
+            .map(|e| e.line)
+            .collect();
+
+        assert!(
+            lines.iter().any(|l| l == "before_error"),
+            "line before the error should be captured; got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l == "after_error"),
+            "line AFTER a transient read error must still be captured \
+             (capture must retry, not end); got {lines:?}"
+        );
+    }
+
+    /// A transient read error that lands MID-LINE must not split or drop the
+    /// line: the partial bytes already read are preserved and the retry
+    /// completes the line, so it is stored whole.
+    #[tokio::test]
+    async fn capture_preserves_partial_line_across_mid_line_read_error() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("logs").join("logs.db");
+
+        let store = LogStoreHandle::spawn(
+            db_path.clone(),
+            Duration::from_millis(5),
+            DEFAULT_BATCH_SIZE,
+            StorageMode::Local,
+            None,
+            None,
+            Duration::from_secs(3600),
+        );
+
+        // "partial_" arrives, then a transient error mid-line, then "rest\n".
+        let reader = ScriptedReader {
+            steps: VecDeque::from(vec![
+                Ok(b"partial_".as_slice()),
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "transient mid-line")),
+                Ok(b"rest\n".as_slice()),
+            ]),
+        };
+
+        let handle = spawn_capture_task(
+            Some(reader),
+            Some(store.clone()),
+            "svc".to_string(),
+            "info",
+            None,
+            true,
+            false,
+            None,
+        );
+        let _ = handle.await;
+        store.wait_flush_sync();
+
+        let log_reader = SqliteLogReader::new(db_path, StorageMode::Local);
+        let lines: Vec<String> = log_reader
+            .tail(100, &["svc".to_string()], false, None, None, None)
+            .into_iter()
+            .map(|e| e.line)
+            .collect();
+
+        assert!(
+            lines.iter().any(|l| l == "partial_rest"),
+            "a mid-line read error must not split the line; expected 'partial_rest', got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l == "rest"),
+            "the line must not be split into a truncated 'rest'; got {lines:?}"
+        );
+    }
 }

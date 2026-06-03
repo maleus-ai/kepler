@@ -151,10 +151,15 @@ impl ConfigRegistry {
 
         futures::future::join_all(handles.iter().map(|h| async {
             let services = h.get_service_status(None).await.unwrap_or_default();
+            let log_degraded = match h.get_log_store().await {
+                Some(store) => store.is_degraded(),
+                None => false,
+            };
             ConfigStatus {
                 config_path: h.config_path().to_string_lossy().to_string(),
                 config_hash: h.config_hash().to_string(),
                 services,
+                log_degraded,
             }
         }))
         .await
