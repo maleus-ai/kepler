@@ -1237,10 +1237,15 @@ async fn handle_request(
                     .collect();
                 let configs = futures::future::join_all(visible_handles.iter().map(|h| async {
                     let services = h.get_service_status(None).await.unwrap_or_default();
+                    let log_degraded = match h.get_log_store().await {
+                        Some(store) => store.is_degraded(),
+                        None => false,
+                    };
                     kepler_protocol::protocol::ConfigStatus {
                         config_path: h.config_path().to_string_lossy().to_string(),
                         config_hash: h.config_hash().to_string(),
                         services,
+                        log_degraded,
                     }
                 })).await;
                 Response::ok_with_data(ResponseData::MultiConfigStatus(configs))
@@ -1536,12 +1541,25 @@ async fn handle_request(
                 .and_then(|k| serde_json::to_value(k).ok())
                 .unwrap_or(serde_json::Value::Null);
 
+            // Log-store health (operational; not gated). `degraded` is true when
+            // the writer cannot persist logs even after reopening its connection
+            // (e.g. a persistent NFS/disk error) — previously a silent failure.
+            let logs_degraded = if let Some(handle) = registry.get(&config_path) {
+                match handle.get_log_store().await {
+                    Some(store) => store.is_degraded(),
+                    None => false,
+                }
+            } else {
+                false
+            };
+
             // Base info — always included
             let mut result = serde_json::json!({
                 "config_path": config_path.to_string_lossy(),
                 "config_hash": config_hash,
                 "state_dir": state_dir_str,
                 "kepler": kepler_value,
+                "logs": { "degraded": logs_degraded },
             });
             let obj = result.as_object_mut().unwrap();
 

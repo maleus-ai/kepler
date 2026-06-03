@@ -196,6 +196,8 @@ impl MonitorHandle {
 
 const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+/// Connection reopen+retry attempts on a failed flush before dropping the batch.
+const MAX_FLUSH_REOPEN_ATTEMPTS: u32 = 3;
 
 const METRICS_DELETE_SQL: &str =
     "DELETE FROM metrics WHERE rowid IN (SELECT rowid FROM metrics WHERE timestamp < ?1 ORDER BY timestamp LIMIT ?2)";
@@ -216,6 +218,10 @@ struct MonitorWriterActor {
     cleanup_interval: Duration,
     last_cleanup: Instant,
     cleanup_has_more: bool,
+    /// DB path + storage mode, retained so the connection can be reopened after
+    /// a persistent write error (e.g. NFS stale file handle).
+    db_path: std::path::PathBuf,
+    storage_mode: StorageMode,
 }
 
 impl MonitorWriterActor {
@@ -247,6 +253,8 @@ impl MonitorWriterActor {
             cleanup_interval,
             last_cleanup: Instant::now(),
             cleanup_has_more: false,
+            db_path,
+            storage_mode,
         })
     }
 
@@ -419,37 +427,100 @@ impl MonitorWriterActor {
             return;
         }
 
-        let result = (|| -> Result<(), rusqlite::Error> {
-            let tx = self.conn.transaction()?;
-            {
-                let mut stmt = tx.prepare_cached(
-                    "INSERT INTO metrics (timestamp, service, cpu_percent, memory_rss, memory_vss, pids)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                )?;
-
-                for (timestamp, metrics) in self.batch.drain(..) {
-                    for m in metrics {
-                        let pids_json =
-                            serde_json::to_string(&m.pids).unwrap_or_else(|_| "[]".to_string());
-                        stmt.execute(params![
-                            timestamp,
-                            m.service,
-                            m.cpu_percent,
-                            m.memory_rss,
-                            m.memory_vss,
-                            pids_json,
-                        ])?;
+        // Reopen-and-retry on write error: an NFS stale file handle poisons the
+        // open fd until reopened, so the previous "warn + drop, never reopen"
+        // path silently froze metric persistence after a single NFS hiccup. The
+        // batch is not drained until a commit succeeds, so a retry re-inserts
+        // the same samples. (As in the log store, an ambiguous durable-then-Err
+        // commit can duplicate a sample — we favor no-loss over no-duplicates.)
+        let mut last_err: Option<rusqlite::Error> = None;
+        let mut stored = false;
+        let mut discarding = false;
+        for attempt in 0..=MAX_FLUSH_REOPEN_ATTEMPTS {
+            // Honor discard(): on clean shutdown it sets the discard flag and
+            // interrupts the in-flight write. Retrying/reopening would defeat the
+            // interrupt and recreate monitor.db (reopen uses OPEN_CREATE) in the
+            // state dir being deleted.
+            if self.discard_flag() {
+                discarding = true;
+                break;
+            }
+            match self.try_write_batch() {
+                Ok(()) => {
+                    stored = true;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < MAX_FLUSH_REOPEN_ATTEMPTS {
+                        tracing::warn!(
+                            "monitor flush failed (attempt {}), reopening connection",
+                            attempt + 1
+                        );
+                        if let Err(reopen_err) = self.reopen_connection() {
+                            tracing::warn!("monitor: reopen after flush error failed: {}", reopen_err);
+                        }
                     }
                 }
             }
-            tx.commit()?;
-            Ok(())
-        })();
-
-        if let Err(e) = result {
-            tracing::warn!("Failed to flush monitor batch: {}", e);
-            self.batch.clear();
         }
+
+        if !discarding && let Some(e) = last_err {
+            if stored {
+                tracing::info!("monitor: flush recovered after reopening connection");
+            } else {
+                tracing::error!("monitor: dropping batch after {} failed flush attempts: {}", MAX_FLUSH_REOPEN_ATTEMPTS + 1, e);
+            }
+        }
+        // Either persisted, discarded, or unrecoverable — drop the (now-stale) batch.
+        self.batch.clear();
+    }
+
+    /// Insert the current batch in one transaction WITHOUT draining it, so the
+    /// batch survives for a retry if the commit fails.
+    fn try_write_batch(&mut self) -> Result<(), rusqlite::Error> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO metrics (timestamp, service, cpu_percent, memory_rss, memory_vss, pids)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+
+            for (timestamp, metrics) in &self.batch {
+                for m in metrics {
+                    let pids_json =
+                        serde_json::to_string(&m.pids).unwrap_or_else(|_| "[]".to_string());
+                    stmt.execute(params![
+                        timestamp,
+                        m.service,
+                        m.cpu_percent,
+                        m.memory_rss,
+                        m.memory_vss,
+                        pids_json,
+                    ])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Drop the current write connection and open a fresh one — the only thing
+    /// that clears an NFS stale file handle. Refreshes the shared interrupt
+    /// handle so shutdown_discard() keeps targeting the live connection.
+    fn reopen_connection(&mut self) -> Result<(), rusqlite::Error> {
+        let conn = Connection::open_with_flags(
+            &self.db_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        db_cleanup::setup_writer_connection(&conn, self.storage_mode)?;
+        create_schema(&conn)?;
+
+        *self.shutdown_token.interrupt_handle.lock() = Some(conn.get_interrupt_handle());
+        self.conn = conn;
+        Ok(())
     }
 
     fn discard(&mut self) {
@@ -590,8 +661,8 @@ mod tests {
     #[test]
     fn flush_batch_inserts_metrics() {
         use super::{MonitorWriterActor, ServiceMetrics, MonitorShutdownToken};
+        use crate::config::StorageMode;
         use std::sync::Arc;
-        use std::sync::atomic::AtomicBool;
         use std::time::{Duration, Instant};
 
         let conn = Connection::open_in_memory().unwrap();
@@ -609,6 +680,8 @@ mod tests {
             cleanup_interval: Duration::from_secs(60),
             last_cleanup: Instant::now(),
             cleanup_has_more: false,
+            db_path: std::path::PathBuf::from(":memory:"),
+            storage_mode: StorageMode::Local,
         };
 
         // Push metrics into the batch
@@ -653,6 +726,7 @@ mod tests {
     #[test]
     fn no_retention_means_no_cleanup() {
         use super::{MonitorWriterActor, MonitorShutdownToken};
+        use crate::config::StorageMode;
         use std::sync::Arc;
         use std::time::{Duration, Instant};
 
@@ -671,6 +745,8 @@ mod tests {
             cleanup_interval: Duration::from_secs(60),
             last_cleanup: Instant::now() - Duration::from_secs(120), // well past interval
             cleanup_has_more: false,
+            db_path: std::path::PathBuf::from(":memory:"),
+            storage_mode: StorageMode::Local,
         };
 
         // With retention_period = None, should_cleanup must return false

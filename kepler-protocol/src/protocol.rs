@@ -431,6 +431,12 @@ pub struct ConfigStatus {
     pub config_hash: String,
     /// Services in this config
     pub services: HashMap<String, ServiceInfo>,
+    /// True when the log-store writer is currently unable to persist logs —
+    /// every flush is failing even after reopening the connection (e.g. a
+    /// persistent NFS/disk error). `#[serde(default)]` keeps older clients and
+    /// snapshots compatible.
+    #[serde(default)]
+    pub log_degraded: bool,
 }
 
 /// Information about a loaded config

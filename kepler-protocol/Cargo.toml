@@ -20,6 +20,7 @@ dashmap = "6.1.0"
 
 [dev-dependencies]
 tempfile = "3.10"
+serde_json = "1.0"
 
 # Unix-specific functionality
 [target.'cfg(unix)'.dependencies]

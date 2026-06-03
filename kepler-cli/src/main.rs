@@ -1380,6 +1380,20 @@ fn print_multi_config_table(configs: &[ConfigStatus]) {
 
     let table = Table::new(rows).with(Style::blank()).to_string();
     println!("{table}");
+
+    // Surface log-persistence degradation: the writer is failing to store logs
+    // even after reopening its connection, so logs are being dropped.
+    let degraded: Vec<String> = configs
+        .iter()
+        .filter(|c| c.log_degraded)
+        .map(|c| abbreviate_path(&c.config_path))
+        .collect();
+    if !degraded.is_empty() {
+        eprintln!(
+            "\n⚠  Log persistence DEGRADED (logs being dropped) for: {}",
+            degraded.join(", ")
+        );
+    }
 }
 
 

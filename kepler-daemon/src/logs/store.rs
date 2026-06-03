@@ -38,6 +38,25 @@ pub(crate) struct InsertEntry {
     pub attributes: Option<String>,
 }
 
+/// Flags shared between the actor and its handles.
+///
+/// `Arc`-backed so a clone shares the same atomics. Cheap to clone.
+#[derive(Clone, Default)]
+struct SharedFlags {
+    /// Set when the writer cannot persist a batch even after reopening the
+    /// connection. Lets `kepler status`/callers observe "log persistence
+    /// degraded" instead of logs silently vanishing.
+    degraded: Arc<AtomicBool>,
+    /// Test-only fault-injection seam: when set, the next flush write fails as
+    /// if the open file descriptor were a stale NFS handle (ESTALE), and keeps
+    /// failing until the connection is reopened. This models the one error
+    /// class that is *persistent* on an open fd yet cleared by reopening —
+    /// the real-world cause of permanent log dropout that cannot be reproduced
+    /// hermetically without a real NFS mount.
+    #[cfg(test)]
+    inject_fail_until_reopen: Arc<AtomicBool>,
+}
+
 /// Cloneable handle to the LogStore actor.
 #[derive(Clone)]
 pub struct LogStoreHandle {
@@ -50,6 +69,8 @@ pub struct LogStoreHandle {
     discard_flag: Arc<AtomicBool>,
     /// SQLite interrupt handle — abort any running query from another thread.
     interrupt_handle: Option<Arc<std::sync::Mutex<rusqlite::InterruptHandle>>>,
+    /// Health/degraded flag and test fault-injection, shared with the actor.
+    flags: SharedFlags,
 }
 
 impl std::fmt::Debug for LogStoreHandle {
@@ -76,17 +97,22 @@ impl LogStoreHandle {
         let (tx, rx) = std::sync::mpsc::channel();
         let pending_count = Arc::new(AtomicU64::new(0));
         let discard_flag = Arc::new(AtomicBool::new(false));
+        let flags = SharedFlags::default();
 
         // Wait for the actor thread to finish creating the database schema
         // before returning the handle. This prevents readers from seeing an
         // empty database (no `logs` table) if they query before schema creation.
-        // The actor sends back the SQLite interrupt handle so we can abort
-        // long-running queries from another thread during shutdown_discard().
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<rusqlite::InterruptHandle>(1);
+        // The actor sends back a shared, mutable interrupt handle so we can
+        // abort long-running queries from another thread during
+        // shutdown_discard() — shared so it can be refreshed if the actor
+        // reopens its connection after a write error.
+        let (ready_tx, ready_rx) =
+            std::sync::mpsc::sync_channel::<Arc<std::sync::Mutex<rusqlite::InterruptHandle>>>(1);
 
         let actor_db_path = db_path.clone();
         let actor_pending = Arc::clone(&pending_count);
         let actor_discard = Arc::clone(&discard_flag);
+        let actor_flags = flags.clone();
         std::thread::Builder::new()
             .name("log-store".into())
             .spawn(move || {
@@ -101,6 +127,7 @@ impl LogStoreHandle {
                     actor_discard,
                     retention_period,
                     cleanup_interval,
+                    actor_flags,
                 ) {
                     Ok(a) => a,
                     Err(e) => {
@@ -109,7 +136,10 @@ impl LogStoreHandle {
                         return;
                     }
                 };
-                let _ = ready_tx.send(actor.conn.get_interrupt_handle());
+                let shared_interrupt =
+                    Arc::new(std::sync::Mutex::new(actor.conn.get_interrupt_handle()));
+                actor.interrupt_handle = Some(Arc::clone(&shared_interrupt));
+                let _ = ready_tx.send(shared_interrupt);
                 actor.run();
                 drop(actor);
             })
@@ -117,10 +147,9 @@ impl LogStoreHandle {
 
         // Block until schema is created (or thread panics/errors).
         // If the actor failed to start, ready_tx is dropped and we get None.
-        let interrupt_handle = ready_rx.recv().ok()
-            .map(|h| Arc::new(std::sync::Mutex::new(h)));
+        let interrupt_handle = ready_rx.recv().ok();
 
-        Self { tx, db_path, storage_mode, pending_count, discard_flag, interrupt_handle }
+        Self { tx, db_path, storage_mode, pending_count, discard_flag, interrupt_handle, flags }
     }
 
     /// Send a write command (non-blocking, drops entry on disconnect).
@@ -135,6 +164,20 @@ impl LogStoreHandle {
     /// flushed to SQLite (still in the channel or batch buffer).
     pub fn has_pending(&self) -> bool {
         self.pending_count.load(Ordering::Relaxed) > 0
+    }
+
+    /// Returns `true` if the writer is currently unable to persist logs — every
+    /// flush is failing even after reopening the connection. Surfaces the
+    /// previously-silent "logs vanish on a persistent NFS/disk error" failure.
+    pub fn is_degraded(&self) -> bool {
+        self.flags.degraded.load(Ordering::Relaxed)
+    }
+
+    /// Test-only fault-injection seam: make every flush write fail (as if the
+    /// open fd were a stale NFS handle) until the actor reopens its connection.
+    #[cfg(test)]
+    pub fn test_inject_fail_until_reopen(&self) {
+        self.flags.inject_fail_until_reopen.store(true, Ordering::Relaxed);
     }
 
     /// Path to the SQLite database file.
@@ -213,6 +256,12 @@ impl LogStoreHandle {
 
 pub const DEFAULT_BATCH_SIZE: usize = 4096;
 
+/// How many times to reopen the connection and retry a failed flush before
+/// giving up and dropping the batch. A persistent NFS stale-fd error is only
+/// cleared by reopening, so one reopen+retry usually recovers; a few attempts
+/// absorbs transient errors without spinning forever on a truly dead disk.
+const MAX_FLUSH_REOPEN_ATTEMPTS: u32 = 3;
+
 const LOG_DELETE_SQL: &str =
     "DELETE FROM logs WHERE id IN (SELECT id FROM logs WHERE timestamp < ?1 ORDER BY timestamp LIMIT ?2)";
 
@@ -229,6 +278,15 @@ struct LogStoreActor {
     cleanup_interval: Duration,
     last_cleanup: Instant,
     cleanup_has_more: bool,
+    /// DB path + storage mode, retained so the connection can be reopened after
+    /// a persistent write error (e.g. NFS stale file handle).
+    db_path: PathBuf,
+    storage_mode: StorageMode,
+    /// Shared interrupt handle, refreshed on reopen so shutdown_discard() keeps
+    /// pointing at the live connection.
+    interrupt_handle: Option<Arc<std::sync::Mutex<rusqlite::InterruptHandle>>>,
+    /// Degraded flag + test fault-injection, shared with the handle.
+    flags: SharedFlags,
 }
 
 impl LogStoreActor {
@@ -243,6 +301,7 @@ impl LogStoreActor {
         discard_flag: Arc<AtomicBool>,
         retention_period: Option<Duration>,
         cleanup_interval: Duration,
+        flags: SharedFlags,
     ) -> Result<Self, rusqlite::Error> {
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
@@ -283,6 +342,10 @@ impl LogStoreActor {
             cleanup_interval,
             last_cleanup: Instant::now(),
             cleanup_has_more: false,
+            db_path: db_path.to_path_buf(),
+            storage_mode,
+            interrupt_handle: None,
+            flags,
         })
     }
 
@@ -565,37 +628,94 @@ impl LogStoreActor {
 
     fn flush_batch(&mut self) {
         if self.batch.is_empty() {
+            // Idle re-validation: if a previous flush gave up and marked us
+            // degraded, but persistence has since recovered, clear the flag so
+            // `is_degraded()` doesn't report a false "DEGRADED" forever when the
+            // producing service has gone quiet (no further batches to flush).
+            // A successful reopen means the FS/fd is healthy again — and reopen
+            // is the only thing that clears a stale NFS fd. Skip during discard.
+            if self.flags.degraded.load(Ordering::Relaxed)
+                && !self.discard_flag.load(Ordering::Relaxed)
+                && self.reopen_connection().is_ok()
+            {
+                self.flags.degraded.store(false, Ordering::Relaxed);
+                tracing::info!("log store: persistence healthy again (revalidated while idle)");
+            }
             return;
         }
 
         let count = self.batch.len() as u64;
 
-        let result = (|| -> Result<(), rusqlite::Error> {
-            let tx = self.conn.transaction()?;
-            {
-                let mut stmt = tx.prepare_cached(
-                    "INSERT INTO logs (timestamp, service, hook, level, line, attributes) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                )?;
-
-                for entry in self.batch.drain(..) {
-                    stmt.execute(params![
-                        entry.timestamp,
-                        entry.service,
-                        entry.hook,
-                        entry.level,
-                        entry.line,
-                        entry.attributes,
-                    ])?;
+        // Try to persist; on a write error, reopen the connection and retry the
+        // SAME batch. A persistent NFS stale file handle (ESTALE -> SQLITE_IOERR
+        // under synchronous=FULL) keeps failing on the open fd forever but is
+        // cleared by reopening — so the previous "warn + drop, never reopen"
+        // behavior meant a single NFS hiccup silently froze all logging until
+        // daemon restart. The batch is NOT drained until a commit succeeds, so
+        // a retry re-inserts the same entries (no data loss on recovery).
+        //
+        // Trade-off: if a commit returns an error *after* the rows were already
+        // made durable (an ambiguous IO error during COMMIT finalization), the
+        // retry re-inserts them and they appear twice (the logs table has no
+        // unique key). We deliberately favor no-loss over no-duplicates for
+        // logs; duplicates are rare and far less harmful than dropped lines.
+        let mut last_err: Option<rusqlite::Error> = None;
+        let mut stored = false;
+        let mut discarding = false;
+        for attempt in 0..=MAX_FLUSH_REOPEN_ATTEMPTS {
+            // Honor shutdown_discard(): it sets discard_flag and interrupts the
+            // in-flight INSERT (which surfaces here as an error). Retrying or
+            // reopening would defeat the interrupt, re-persist the batch the
+            // caller asked to drop, and — since reopen uses OPEN_CREATE —
+            // recreate the DB in a state dir that is being deleted.
+            if self.discard_flag.load(Ordering::Relaxed) {
+                discarding = true;
+                break;
+            }
+            match self.try_write_batch() {
+                Ok(()) => {
+                    stored = true;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < MAX_FLUSH_REOPEN_ATTEMPTS {
+                        tracing::warn!(
+                            "log store flush failed (attempt {}), reopening connection",
+                            attempt + 1
+                        );
+                        if let Err(reopen_err) = self.reopen_connection() {
+                            tracing::warn!("log store: reopen after flush error failed: {}", reopen_err);
+                        }
+                    }
                 }
             }
-            tx.commit()?;
-            Ok(())
-        })();
+        }
 
-        if let Err(e) = result {
-            tracing::warn!("Failed to flush log batch: {}", e);
+        if stored {
             self.batch.clear();
+            if self.flags.degraded.swap(false, Ordering::Relaxed) {
+                tracing::info!("log store: flush recovered, persistence healthy again");
+            }
+        } else if discarding {
+            // Discard in progress: drop the batch quietly. This is not a
+            // persistence failure, so do not raise the degraded flag — the whole
+            // state directory is about to be deleted.
+            self.batch.clear();
+        } else {
+            // Could not persist even after reopening. Drop the batch to avoid
+            // unbounded memory growth, but raise the degraded flag so the
+            // failure is observable instead of silent.
+            if let Some(e) = last_err {
+                tracing::error!(
+                    "log store: dropping {} entries after {} failed flush attempts: {}",
+                    count,
+                    MAX_FLUSH_REOPEN_ATTEMPTS + 1,
+                    e
+                );
+            }
+            self.batch.clear();
+            self.flags.degraded.store(true, Ordering::Relaxed);
         }
 
         self.pending_count.fetch_sub(count, Ordering::Relaxed);
@@ -604,6 +724,77 @@ impl LogStoreActor {
             log_notify.notify_waiters();
         }
     }
+
+    /// Insert the current batch in a single transaction WITHOUT draining it, so
+    /// the batch survives for a retry if the commit fails.
+    fn try_write_batch(&mut self) -> Result<(), rusqlite::Error> {
+        // Test-only seam: simulate a stale-fd write failure until reopen.
+        #[cfg(test)]
+        if self.flags.inject_fail_until_reopen.load(Ordering::Relaxed) {
+            return Err(injected_stale_fd_error());
+        }
+
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO logs (timestamp, service, hook, level, line, attributes) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+
+            for entry in &self.batch {
+                stmt.execute(params![
+                    entry.timestamp,
+                    entry.service,
+                    entry.hook,
+                    entry.level,
+                    entry.line,
+                    entry.attributes,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Drop the current write connection and open a fresh one. This is the only
+    /// thing that clears an NFS stale file handle (the fd is poisoned until the
+    /// file is reopened). The shared interrupt handle is refreshed so
+    /// shutdown_discard() keeps targeting the live connection.
+    fn reopen_connection(&mut self) -> Result<(), rusqlite::Error> {
+        let conn = Connection::open_with_flags(
+            &self.db_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        crate::db_cleanup::setup_writer_connection(&conn, self.storage_mode)?;
+        create_schema(&conn)?;
+
+        if let Some(ref shared) = self.interrupt_handle {
+            if let Ok(mut guard) = shared.lock() {
+                *guard = conn.get_interrupt_handle();
+            }
+        }
+
+        self.conn = conn;
+
+        // A freshly reopened connection has a valid fd, so the simulated
+        // stale-fd condition is cleared — mirroring real ESTALE-then-reopen.
+        #[cfg(test)]
+        self.flags.inject_fail_until_reopen.store(false, Ordering::Relaxed);
+
+        Ok(())
+    }
+}
+
+/// Build a fake `SQLITE_IOERR` failure used by the test fault-injection seam to
+/// model an NFS stale file handle.
+#[cfg(test)]
+fn injected_stale_fd_error() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+        Some("injected stale-fd failure (test)".to_string()),
+    )
 }
 
 // ============================================================================
@@ -650,6 +841,195 @@ pub fn open_readonly(db_path: &Path) -> Result<Connection, rusqlite::Error> {
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, params};
+
+    use std::time::Duration;
+
+    use super::{DEFAULT_BATCH_SIZE, LogStoreHandle};
+    use crate::config::StorageMode;
+    use crate::logs::{LogWriter, SqliteLogReader};
+
+    /// Read all stored log lines for the test service, newest-first order.
+    fn stored_lines(db_path: &std::path::Path) -> Vec<String> {
+        let reader = SqliteLogReader::new(db_path.to_path_buf(), StorageMode::Nfs);
+        reader
+            .tail(1000, &[], false, None, None, None)
+            .into_iter()
+            .map(|e| e.line)
+            .collect()
+    }
+
+    /// A persistent write error (modeled as an NFS stale file handle that fails
+    /// every write until the connection is reopened) must NOT permanently stop
+    /// log persistence: the store should reopen its connection, retry the
+    /// in-flight batch, and resume storing logs — and report `is_degraded()`
+    /// only while actually broken.
+    ///
+    /// Before the fix, the actor never reopened the connection, so the injected
+    /// fault never cleared: every subsequent flush failed and the DB stopped
+    /// gaining rows forever. With `MAX_FLUSH_REOPEN_ATTEMPTS = 0` this test
+    /// reproduces that red behavior; with the default (3) it goes green.
+    #[test]
+    fn flush_recovers_by_reopening_after_persistent_write_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("logs").join("logs.db");
+
+        let store = LogStoreHandle::spawn(
+            db_path.clone(),
+            Duration::from_millis(5),
+            DEFAULT_BATCH_SIZE,
+            StorageMode::Nfs,
+            None,
+            None,
+            Duration::from_secs(3600),
+        );
+
+        // Baseline: a normal write is stored, store is healthy.
+        LogWriter::new(&store, "svc", "info").write("A_before_fault");
+        store.wait_flush_sync();
+        assert!(
+            stored_lines(&db_path).iter().any(|l| l == "A_before_fault"),
+            "baseline write should be stored"
+        );
+        assert!(!store.is_degraded(), "store should start healthy");
+
+        // Simulate a persistent stale-fd error: every write fails until reopen.
+        store.test_inject_fail_until_reopen();
+
+        // This flush fails, then (with the fix) reopens + retries, clearing the
+        // injected fault and persisting the in-flight batch.
+        LogWriter::new(&store, "svc", "info").write("B_during_fault");
+        store.wait_flush_sync();
+
+        // A later write must also land — proving the store recovered rather than
+        // silently dropping every subsequent batch forever.
+        LogWriter::new(&store, "svc", "info").write("C_after_fault");
+        store.wait_flush_sync();
+
+        let lines = stored_lines(&db_path);
+        assert!(
+            lines.iter().any(|l| l == "C_after_fault"),
+            "store must reopen and resume persisting logs after a stale-fd error; got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l == "B_during_fault"),
+            "the batch in flight during the fault must be retried, not dropped; got {lines:?}"
+        );
+        assert!(
+            !store.is_degraded(),
+            "store should report healthy again after recovery"
+        );
+
+        store.shutdown();
+    }
+
+    /// When the discard flag is set (stop --clean / prune), a failing flush must
+    /// NOT reopen/retry: doing so would defeat shutdown_discard()'s interrupt,
+    /// re-persist the discarded batch, and recreate the DB in a state dir being
+    /// deleted. The batch is dropped quietly and `degraded` is not raised.
+    #[test]
+    fn flush_honors_discard_without_reopening() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("logs.db");
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let pending = Arc::new(AtomicU64::new(0));
+        let discard = Arc::new(AtomicBool::new(false));
+        let flags = super::SharedFlags::default();
+
+        let mut actor = super::LogStoreActor::new(
+            &db_path,
+            rx,
+            Duration::from_millis(5),
+            DEFAULT_BATCH_SIZE,
+            StorageMode::Local,
+            None,
+            Arc::clone(&pending),
+            Arc::clone(&discard),
+            None,
+            Duration::from_secs(3600),
+            flags.clone(),
+        )
+        .unwrap();
+
+        actor.batch.push(super::InsertEntry {
+            timestamp: 1,
+            service: "svc".to_string(),
+            hook: None,
+            level: "info",
+            line: "should_be_discarded".to_string(),
+            attributes: None,
+        });
+        pending.fetch_add(1, Ordering::Relaxed);
+
+        // Simulate shutdown_discard(): discard flag set, and writes failing as an
+        // interrupted INSERT would. `inject_fail_until_reopen` staying true after
+        // the flush proves reopen() was never called.
+        discard.store(true, Ordering::Relaxed);
+        flags.inject_fail_until_reopen.store(true, Ordering::Relaxed);
+
+        actor.flush_batch();
+
+        assert!(actor.batch.is_empty(), "batch should be dropped during discard");
+        assert!(
+            !flags.degraded.load(Ordering::Relaxed),
+            "discard is not a persistence degradation"
+        );
+        assert!(
+            flags.inject_fail_until_reopen.load(Ordering::Relaxed),
+            "reopen must NOT run during discard (a reopen would clear this flag)"
+        );
+
+        let reader = SqliteLogReader::new(db_path, StorageMode::Local);
+        let lines = reader.tail(100, &[], false, None, None, None);
+        assert!(
+            lines.is_empty(),
+            "no rows should be persisted during discard; got {:?}",
+            lines.iter().map(|e| &e.line).collect::<Vec<_>>()
+        );
+    }
+
+    /// Once `degraded` is set, an idle flush (empty batch) must re-validate and
+    /// clear it when persistence has recovered, so `is_degraded()` does not
+    /// report a false "DEGRADED" forever after the producing service goes quiet.
+    #[test]
+    fn idle_flush_revalidates_and_clears_degraded() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("logs.db");
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let flags = super::SharedFlags::default();
+
+        let mut actor = super::LogStoreActor::new(
+            &db_path,
+            rx,
+            Duration::from_millis(5),
+            DEFAULT_BATCH_SIZE,
+            StorageMode::Local,
+            None,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Duration::from_secs(3600),
+            flags.clone(),
+        )
+        .unwrap();
+
+        // A prior flush gave up and marked us degraded; the batch is now empty
+        // (producer quiet) and the FS is healthy.
+        flags.degraded.store(true, Ordering::Relaxed);
+        assert!(actor.batch.is_empty());
+
+        actor.flush_batch(); // empty-batch path -> idle re-validation -> reopen ok
+
+        assert!(
+            !flags.degraded.load(Ordering::Relaxed),
+            "idle flush should re-validate and clear a stale degraded flag once healthy"
+        );
+    }
 
     const BATCHED_DELETE_SQL: &str =
         "DELETE FROM logs WHERE id IN (SELECT id FROM logs WHERE timestamp < ?1 ORDER BY timestamp LIMIT ?2)";
