@@ -2809,7 +2809,8 @@ impl ServiceOrchestrator {
             config_hash: handle.config_hash().to_string(),
         };
 
-        let process_handle = match spawn_service(spawn_params).await {
+        let gate_t0 = std::time::Instant::now(); // TEMP measurement
+        let (process_handle, spawn_gate) = match spawn_service(spawn_params).await {
             Ok(ph) => ph,
             Err(e) => {
                 // Spawn failed — clean up the cgroup created by prepare_spawn
@@ -2828,6 +2829,13 @@ impl ServiceOrchestrator {
         let _ = handle
             .set_service_status(service_name, ServiceStatus::Running)
             .await;
+
+        // Registration complete — a process that already exited may now be
+        // reported. Released last so `handle_exit` always sees the stored
+        // handle (for output capture tasks) and a status it can transition
+        // from. See `SpawnGate`.
+        info!("GATEDBG registration for {} took {:?}", service_name, gate_t0.elapsed());
+        spawn_gate.release();
 
         Ok(())
     }

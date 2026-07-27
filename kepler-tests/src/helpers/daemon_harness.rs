@@ -497,7 +497,7 @@ impl TestDaemonHarness {
             containment: self.containment.clone(),
             config_hash: self.handle.config_hash().to_string(),
         };
-        let process_handle = spawn_service(spawn_params).await?;
+        let (process_handle, spawn_gate) = spawn_service(spawn_params).await?;
 
         // Store the handle
         self.handle
@@ -516,6 +516,9 @@ impl TestDaemonHarness {
             .handle
             .set_service_status(service_name, ServiceStatus::Running)
             .await;
+
+        // Registration done — allow the exit event through (see SpawnGate)
+        spawn_gate.release();
 
         // Run post_start hook
         run_service_hook(
@@ -1024,7 +1027,7 @@ impl TestDaemonHarness {
                     containment: containment.clone(),
                     config_hash: handle.config_hash().to_string(),
                 };
-                if let Ok(process_handle) = spawn_service(spawn_params).await {
+                if let Ok((process_handle, spawn_gate)) = spawn_service(spawn_params).await {
                     handle
                         .store_process_handle(&event.service_name, process_handle)
                         .await;
@@ -1039,6 +1042,8 @@ impl TestDaemonHarness {
                     let _ = handle
                         .set_service_status(&event.service_name, ServiceStatus::Running)
                         .await;
+                    // Registration done — allow the exit event through (see SpawnGate)
+                    spawn_gate.release();
                     // Note: PID is already set by spawn_service
                     let _ = handle.increment_restart_count(&event.service_name).await;
                 }
@@ -1244,7 +1249,7 @@ impl TestDaemonHarness {
                         containment: containment.clone(),
                         config_hash: handle.config_hash().to_string(),
                     };
-                    if let Ok(process_handle) = spawn_service(spawn_params).await {
+                    if let Ok((process_handle, spawn_gate)) = spawn_service(spawn_params).await {
                         handle
                             .store_process_handle(&event.service_name, process_handle)
                             .await;
@@ -1259,6 +1264,8 @@ impl TestDaemonHarness {
                         let _ = handle
                             .set_service_status(&event.service_name, ServiceStatus::Running)
                             .await;
+                        // Registration done — allow the exit event through (see SpawnGate)
+                        spawn_gate.release();
                         let _ = handle.increment_restart_count(&event.service_name).await;
                     }
                 } else {
