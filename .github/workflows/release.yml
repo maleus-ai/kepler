@@ -26,9 +26,9 @@ on:
         type: boolean
         default: true
       macos-x86_64:
-        description: "x86_64-apple-darwin"
+        description: "x86_64-apple-darwin (DEPRECATED — not built for releases)"
         type: boolean
-        default: true
+        default: false
       macos-aarch64:
         description: "aarch64-apple-darwin"
         type: boolean
@@ -61,11 +61,14 @@ jobs:
           if [[ "${{ github.event_name }}" == "push" || "${{ inputs.linux-musl-aarch64 }}" == "true" ]]; then
             add '{"target":"aarch64-unknown-linux-musl","runner":"blacksmith-4vcpu-ubuntu-2204","packages":"pkg-config make","musl-toolchain":"aarch64-linux-musl-cross","env":{"CC_aarch64_unknown_linux_musl":"/opt/musl-cross/bin/aarch64-linux-musl-gcc","CXX_aarch64_unknown_linux_musl":"/opt/musl-cross/bin/aarch64-linux-musl-g++","CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER":"/opt/musl-cross/bin/aarch64-linux-musl-gcc"}}'
           fi
-          if [[ "${{ github.event_name }}" == "push" || "${{ inputs.macos-x86_64 }}" == "true" ]]; then
+          # Intel macOS is deprecated: not built for tagged releases, only on an
+          # explicit workflow_dispatch opt-in. GitHub is retiring its Intel macOS
+          # runners and Blacksmith offers Apple Silicon only.
+          if [[ "${{ inputs.macos-x86_64 }}" == "true" ]]; then
             add '{"target":"x86_64-apple-darwin","runner":"macos-15-intel","packages":"","musl-toolchain":"","env":{}}'
           fi
           if [[ "${{ github.event_name }}" == "push" || "${{ inputs.macos-aarch64 }}" == "true" ]]; then
-            add '{"target":"aarch64-apple-darwin","runner":"macos-15","packages":"","musl-toolchain":"","env":{}}'
+            add '{"target":"aarch64-apple-darwin","runner":"blacksmith-6vcpu-macos-15","packages":"","musl-toolchain":"","env":{}}'
           fi
 
           echo "matrix={\"include\":$TARGETS}" >> "$GITHUB_OUTPUT"
