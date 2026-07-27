@@ -26,6 +26,9 @@ pub fn log_query_dsl() -> QueryDsl {
         .field(Field::text("message").alias("line").fts())
         .field(Field::text("hook"))
         .field(Field::int("timestamp"))
+        // Row ID — unique and monotonic, the cursor for keyset pagination
+        // (`@id:>1234`). Exposed in `logs --json` output as `id`.
+        .field(Field::int("id"))
         .attributes("attributes")
         .build()
 }

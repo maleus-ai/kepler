@@ -1345,21 +1345,33 @@ async fn handle_request(
 
             let reader = SqliteLogReader::new(db_path, storage_mode);
 
-            let (entries, has_more, last_id) = if tail {
-                // Tail mode: return last `limit` entries in chronological order
-                let entries = reader.tail(limit, &services, no_hooks, filter.as_ref(), after_ts, before_ts);
-                let last_id = entries.last().map(|e| e.id).unwrap_or(0);
-                (entries, has_pending, last_id)
-            } else {
-                // Determine the starting position
-                let effective_after_id = match after_id {
-                    Some(id) => id,
-                    None if from_end => reader.max_id(),
-                    None => 0,
+            // Never serialize more than one chunk into a single response — the
+            // client pages forward via `after_id` for the rest. Without this, a
+            // large `limit` (e.g. `--tail 100000`) would build one huge frame.
+            let chunk = limit.min(kepler_protocol::protocol::STREAM_CHUNK_SIZE);
+
+            let (entries, has_more, last_id) = {
+                // Tail mode: resolve the start of the "last `limit` entries"
+                // window, then read forward from it like any other cursor read.
+                // The client caps the total at `limit`.
+                let effective_after_id = if tail {
+                    match reader.tail_start_id(limit, &services, no_hooks, filter.as_ref(), after_ts, before_ts) {
+                        // `- 1` because `after` is exclusive and the window is inclusive
+                        Ok(Some(start_id)) => start_id - 1,
+                        // Fewer matches than requested — the window is the whole log
+                        Ok(None) => 0,
+                        Err(e) => return Response::error(format!("invalid filter: {}", e)),
+                    }
+                } else {
+                    match after_id {
+                        Some(id) => id,
+                        None if from_end => reader.max_id(),
+                        None => 0,
+                    }
                 };
 
                 // Read entries
-                let (entries, has_more) = match reader.after(effective_after_id, limit, &services, no_hooks, filter.as_ref(), after_ts, before_ts) {
+                let (entries, has_more) = match reader.after(effective_after_id, chunk, &services, no_hooks, filter.as_ref(), after_ts, before_ts) {
                     Ok(r) => r,
                     Err(e) => return Response::error(format!("invalid filter: {}", e)),
                 };

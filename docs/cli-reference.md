@@ -458,8 +458,8 @@ kepler logs -F "level = 'err'" --sql   # Raw SQL filter
 | Flag                  | Description                                                                        |
 | --------------------- | ---------------------------------------------------------------------------------- |
 | `--follow`            | Stream new logs continuously                                                       |
-| `--head <N>`          | Show first N lines                                                                 |
-| `--tail <N>`          | Show last N lines                                                                  |
+| `--head <N>`          | Print the first N entries, then exit (applied after `--filter`)                    |
+| `--tail <N>`          | Print the last N entries, then exit (applied after `--filter`)                     |
 | `--no-hook`           | Exclude hook log output                                                            |
 | `--raw`               | Output raw log lines without formatting (no timestamp, level, service name, color) |
 | `-F, --filter <EXPR>` | Filter logs using a [search expression](log-management.md#log-filtering)           |

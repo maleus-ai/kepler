@@ -713,10 +713,17 @@ For follow mode, the client subscribes to `SubscribeLogs` notifications and issu
 **Modes:**
 | Mode   | CLI Flag   | Behavior                                |
 | ------ | ---------- | --------------------------------------- |
-| head   | `--head`   | Return first N lines (one-shot)         |
-| tail   | `--tail`   | Return last N lines (one-shot)          |
+| head   | `--head`   | Return the first N entries, then exit   |
+| tail   | `--tail`   | Return the last N entries, then exit    |
 | all    | (default)  | Stream all existing logs, then exit     |
 | follow | `--follow` | Stream existing + new logs continuously |
+
+All four modes share the `after_id` cursor loop above. `--head N` and `--tail N`
+cap the total entries the client prints; they are not per-response sizes. A tail
+request resolves the start of the "last N" window server-side
+(`LogReader::tail_start_id`) and the client pages forward from there, so only the
+first request sets the `tail` flag. Responses are capped at
+`STREAM_CHUNK_SIZE` entries so a large count never builds one oversized frame.
 
 ### Relevant Files
 

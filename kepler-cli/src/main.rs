@@ -227,7 +227,7 @@ async fn run() -> Result<()> {
                 )?;
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);
-                match handle_logs(&client, canonical_path, log_services, true, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, false, false, raw_output, false, None, false).await {
+                match handle_logs(&client, canonical_path, log_services, true, None, false, false, raw_output, false, None, false).await {
                     Ok(()) => {}
                     Err(CliError::PermissionDenied(_)) => {
                         if !cli.quiet {
@@ -270,11 +270,11 @@ async fn run() -> Result<()> {
             sql,
         } => {
             let (is_tail, lines) = if let Some(n) = head {
-                (false, n)
+                (false, Some(n))
             } else if let Some(n) = tail {
-                (true, n)
+                (true, Some(n))
             } else {
-                (false, kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE)
+                (false, None)
             };
             handle_logs(&client, canonical_path, services, follow, lines, is_tail, no_hook, raw_output, json_output, filter, sql).await?;
         }
@@ -1476,8 +1476,12 @@ struct StreamParams<'a> {
     sql: bool,
     /// Raw mode: only fetch and output log line content.
     raw: bool,
-    /// Tail mode: return last `limit` entries (one-shot).
+    /// Tail mode: the window is the last `limit` entries. The first request
+    /// resolves that window server-side; the rest page forward from it.
     tail: bool,
+    /// Stop after this many entries in total (`--head N` / `--tail N`).
+    /// `None` drains until the stream ends — the default for `kepler logs`.
+    max_total: Option<usize>,
 }
 
 /// Unified log streaming loop with client-side position tracking.
@@ -1504,8 +1508,18 @@ async fn stream_logs(
     tokio::pin!(shutdown);
     tokio::pin!(quiescence);
     let mut quiescent_received = false;
+    let mut remaining = params.max_total;
 
     loop {
+        // Only the first request is a tail request: it resolves the window.
+        // Once we have a cursor, we page forward like any other read.
+        let tail_request = params.tail && last_id.is_none();
+        // Don't ask for more than we're allowed to print.
+        let request_limit = match remaining {
+            Some(n) if !tail_request => n.min(params.limit),
+            _ => params.limit,
+        };
+
         // Select with shutdown so Ctrl+C is responsive even if the daemon
         // has disconnected and the logs_stream call would hang.
         // Timeout prevents indefinite stall if a response is lost or delayed.
@@ -1518,8 +1532,8 @@ async fn stream_logs(
                 Duration::from_secs(5),
                 client.logs_stream(
                     params.config_path, params.services, last_id,
-                    from_end && last_id.is_none(), params.limit, params.no_hooks,
-                    params.filter, params.sql, params.raw, params.tail,
+                    from_end && last_id.is_none(), request_limit, params.no_hooks,
+                    params.filter, params.sql, params.raw, tail_request,
                     None, None,
                 ),
             ) => match result {
@@ -1537,18 +1551,31 @@ async fn stream_logs(
                 Response::Ok {
                     data: Some(ResponseData::LogStream(LogStreamData {
                         service_table,
-                        entries,
+                        mut entries,
                         last_id: new_last_id,
                         has_more,
                     })),
                     ..
                 } => {
                     last_id = Some(new_last_id);
+                    // A batch can overshoot the total when the server rounds up
+                    // to its own chunk size — print only what we still owe.
+                    let exhausted = match remaining {
+                        Some(n) => {
+                            entries.truncate(n);
+                            remaining = Some(n - entries.len());
+                            entries.len() == n
+                        }
+                        None => false,
+                    };
                     // has_more but empty entries means data is pending flush —
                     // treat as "no more readable data" so we wait for notification
                     has_more_data = has_more && !entries.is_empty();
                     if !entries.is_empty() {
                         on_batch(&service_table, &entries);
+                    }
+                    if exhausted {
+                        break;
                     }
                 }
                 Response::PermissionDenied { .. } => {
@@ -1710,6 +1737,8 @@ fn write_log_batch_json(service_table: &[Arc<str>], entries: &[StreamLogEntry]) 
     for entry in entries {
         let service_name = &service_table[entry.service_id as usize];
         let mut obj = serde_json::Map::new();
+        // Row ID — stable, monotonic cursor for pagination (`--sql -F 'id > <last>'`).
+        obj.insert("id".into(), serde_json::Value::from(entry.id));
         if let Some(dt) = DateTime::<Utc>::from_timestamp_millis(entry.timestamp) {
             obj.insert("timestamp".into(), serde_json::Value::String(
                 dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -1842,6 +1871,7 @@ async fn follow_logs_until_quiescent(
             sql: false,
             raw,
             tail: false,
+            max_total: None,
         },
         async { let _ = tokio::signal::ctrl_c().await; },
         quiescence_wrapper,
@@ -1954,7 +1984,8 @@ async fn handle_logs(
     config_path: PathBuf,
     services: Vec<String>,
     follow: bool,
-    lines: usize,
+    // Explicit `--head N` / `--tail N` count. `None` = no limit.
+    lines: Option<usize>,
     tail: bool,
     no_hooks: bool,
     raw: bool,
@@ -1968,6 +1999,11 @@ async fn handle_logs(
     let mut cached_ts_str = String::new();
 
     let stream_mode = if follow { StreamMode::UntilQuiescent } else { StreamMode::All };
+
+    // `--head N` / `--tail N` are one-shot: stop once N entries are printed.
+    // When following, N only sizes the initial window — the stream continues.
+    let max_total = if follow { None } else { lines };
+    let limit = lines.unwrap_or(kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE);
 
     // Subscribe to log-available notifications for follow modes
     let log_notify_rx = if stream_mode != StreamMode::All {
@@ -1983,11 +2019,12 @@ async fn handle_logs(
             services: &services,
             no_hooks,
             mode: stream_mode,
-            limit: lines,
+            limit,
             filter: filter.as_deref(),
             sql,
             raw,
             tail,
+            max_total,
         },
         std::future::pending(),
         std::future::pending(),
