@@ -1,0 +1,3 @@
+services:
+  looper:
+    command: ["sh", "-c", "echo RESTART_MARKER; sleep 300"]

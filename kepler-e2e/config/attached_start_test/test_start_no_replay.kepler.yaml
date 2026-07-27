@@ -1,0 +1,3 @@
+services:
+  once:
+    command: ["sh", "-c", "echo START_MARKER; exit 0"]
