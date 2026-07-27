@@ -26,6 +26,10 @@ curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.
 curl -sSfL https://raw.githubusercontent.com/maleus-ai/kepler/master/get-kepler.sh | bash -s v0.11.0
 ```
 
+Prebuilt binaries are published for Linux (gnu/musl, x86_64/aarch64) and macOS on
+Apple Silicon. Intel macOS (`x86_64-apple-darwin`) is deprecated and no longer
+built as of v0.16.0 — build from source on those machines.
+
 Or build from source (requires Rust 1.85+):
 
 ```bash

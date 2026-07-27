@@ -104,6 +104,9 @@ detect_target() {
             ;;
         Darwin)
             case "$arch" in
+                # Intel macOS is deprecated: releases from v0.16.0 on ship Apple
+                # Silicon only. Older tags still have an x86_64 tarball, so the
+                # target is still resolved and the download decides.
                 x86_64)  echo "x86_64-apple-darwin" ;;
                 arm64)   echo "aarch64-apple-darwin" ;;
                 *)
@@ -190,7 +193,16 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 # Download
 info "Downloading ${TARBALL}..."
-download "$DOWNLOAD_URL" "${TMPDIR}/${TARBALL}"
+if ! download "$DOWNLOAD_URL" "${TMPDIR}/${TARBALL}"; then
+    error "Failed to download ${TARBALL}"
+    if [[ "$ARCH" == "x86_64-apple-darwin" ]]; then
+        error "Intel macOS builds are no longer published (deprecated as of v0.16.0)."
+        error "Build from source instead: https://github.com/${REPO}#installation"
+    else
+        error "Check https://github.com/${REPO}/releases for available versions"
+    fi
+    exit 1
+fi
 
 # Extract
 info "Extracting..."
