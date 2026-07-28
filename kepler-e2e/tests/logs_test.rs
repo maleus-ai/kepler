@@ -674,3 +674,94 @@ async fn test_logs_dsl_filter() -> E2eResult<()> {
 
     Ok(())
 }
+
+/// `--head N` / `--tail N` must return exactly N entries, and `@id` must work
+/// as a pagination cursor across pages.
+///
+/// Regression: `--head N` used to treat N as a per-request batch size and kept
+/// paging until the whole log was printed.
+#[tokio::test]
+async fn test_logs_entry_limits_and_pagination() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_logs_entry_limits")?;
+    let config_str = config_path.to_str().unwrap().to_string();
+
+    harness.start_daemon().await?;
+    harness.start_services(&config_path).await?.assert_success();
+    harness
+        .wait_for_service_status(&config_path, "bulk-logger", "running", Duration::from_secs(10))
+        .await?;
+    // All 200 lines are written before this marker.
+    harness
+        .wait_for_log_content(&config_path, "BULK_DONE", Duration::from_secs(10))
+        .await?;
+
+    // Raw mode: one log entry per output line, so counting is exact.
+    // The service writes LINE_00001..LINE_06000 followed by BULK_DONE — 6001 entries.
+    let raw_lines = |out: &str| -> Vec<String> {
+        out.lines().filter(|l| !l.trim().is_empty()).map(|s| s.to_string()).collect()
+    };
+
+    // --head N returns the FIRST N entries, and only N.
+    let head = harness
+        .run_cli(&["-f", &config_str, "logs", "--head", "10", "--raw"])
+        .await?;
+    head.assert_success();
+    let head_lines = raw_lines(&head.stdout);
+    assert_eq!(head_lines.len(), 10, "--head 10 should print 10 entries, got: {}", head.stdout);
+    assert_eq!(head_lines[0], "LINE_00001");
+    assert_eq!(head_lines[9], "LINE_00010");
+
+    // --tail N returns the LAST N entries, chronologically, and only N.
+    let tail = harness
+        .run_cli(&["-f", &config_str, "logs", "--tail", "10", "--raw"])
+        .await?;
+    tail.assert_success();
+    let tail_lines = raw_lines(&tail.stdout);
+    assert_eq!(tail_lines.len(), 10, "--tail 10 should print 10 entries, got: {}", tail.stdout);
+    assert_eq!(tail_lines[0], "LINE_05992");
+    assert_eq!(tail_lines[9], "BULK_DONE");
+
+    // A count larger than STREAM_CHUNK_SIZE (5000) still returns exactly N, in
+    // order: the daemon splits it across responses and the client pages through.
+    let big = harness
+        .run_cli(&["-f", &config_str, "logs", "--tail", "5500", "--raw"])
+        .await?;
+    big.assert_success();
+    let big_lines = raw_lines(&big.stdout);
+    assert_eq!(big_lines.len(), 5500, "--tail 5500 should print 5500 entries");
+    assert_eq!(big_lines[0], "LINE_00502");
+    assert_eq!(big_lines[5499], "BULK_DONE");
+
+    // Forward pagination with the @id cursor from --json output.
+    let json_ids = |out: &str| -> Vec<i64> {
+        out.lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v.get("id").and_then(|i| i.as_i64()))
+            .collect()
+    };
+
+    let page1 = harness
+        .run_cli(&["-f", &config_str, "logs", "--head", "5", "--json"])
+        .await?;
+    page1.assert_success();
+    let ids1 = json_ids(&page1.stdout);
+    assert_eq!(ids1.len(), 5, "page 1 should have 5 entries. stdout: {}", page1.stdout);
+
+    let cursor = ids1.last().copied().unwrap();
+    let cursor_filter = format!("@id:>{}", cursor);
+    let page2 = harness
+        .run_cli(&["-f", &config_str, "logs", "--head", "5", "-F", &cursor_filter, "--json"])
+        .await?;
+    page2.assert_success();
+    let ids2 = json_ids(&page2.stdout);
+    assert_eq!(ids2.len(), 5, "page 2 should have 5 entries. stdout: {}", page2.stdout);
+    assert!(
+        ids2.iter().all(|id| *id > cursor),
+        "page 2 must start after the cursor: {:?} vs {}",
+        ids2, cursor
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}

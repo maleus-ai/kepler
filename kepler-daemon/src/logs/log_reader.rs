@@ -85,6 +85,76 @@ impl LogReader {
         query_log_lines(&conn, &sql, &bind, Some(count as i64)).unwrap_or_default()
     }
 
+    /// Resolve the first ID of the "last `count` entries" window.
+    ///
+    /// Returns the ID of the `count`-th entry counted back from the newest, or
+    /// `None` when fewer than `count` entries match (the window starts at the
+    /// beginning of the log). Callers page forward from this ID with [`after`],
+    /// which keeps `--tail N` chunked instead of materializing N rows at once.
+    ///
+    /// The `OFFSET` still walks `count` entries of the rowid B-tree — it is
+    /// O(count), not a seek — but decodes a single row rather than all of them
+    /// (~14x faster than the equivalent `tail()` at 100k, and no large frame).
+    /// A keyset cursor can't replace it: this *is* the anchor a cursor needs,
+    /// and IDs are not dense enough (retention pruning, filters) to compute it
+    /// arithmetically from `max_id`.
+    pub fn tail_start_id(
+        &self,
+        count: usize,
+        services: &[String],
+        no_hooks: bool,
+        filter: Option<&SqlFragment>,
+        after_ts: Option<i64>,
+        before_ts: Option<i64>,
+    ) -> Result<Option<i64>, String> {
+        if count == 0 {
+            return Ok(None);
+        }
+
+        // Validate raw SQL filters before doing any I/O (DSL-generated ones are safe)
+        if let Some(frag) = filter {
+            if frag.params.is_empty() {
+                filter::validate_filter(&frag.sql)?;
+            }
+        }
+
+        let conn = match open_readonly(&self.db_path) {
+            Ok(c) => c,
+            Err(_) => return Ok(None),
+        };
+
+        if filter.is_some() {
+            filter::apply_filter_safeguards(&conn, filter::FILTER_QUERY_TIMEOUT, &["logs"]);
+        }
+
+        let (where_clause, mut bind) = build_filter(services, no_hooks, filter, after_ts, before_ts);
+        let sql = format!(
+            "SELECT id FROM logs {where_clause} ORDER BY id DESC LIMIT 1 OFFSET ?{next}",
+            where_clause = where_clause,
+            next = bind.len() + 1,
+        );
+        bind.push(BindValue::Int((count - 1) as i64));
+
+        let params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = bind
+            .iter()
+            .map(|v| -> Box<dyn rusqlite::types::ToSql> {
+                match v {
+                    BindValue::Text(s) => Box::new(s.clone()),
+                    BindValue::Int(i) => Box::new(*i),
+                    BindValue::Real(f) => Box::new(*f),
+                }
+            })
+            .collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+
+        // Query errors (e.g. missing table during a startup race) mean "no window",
+        // matching the other readers — only filter validation errors propagate.
+        Ok(conn
+            .query_row(&sql, params_refs.as_slice(), |row| row.get::<_, i64>(0))
+            .ok())
+    }
+
     /// Position-based pagination: get entries after `after_id`.
     /// Returns `(entries, has_more)`.
     ///

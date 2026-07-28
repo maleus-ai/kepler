@@ -526,9 +526,14 @@ async fn test_start_specific_restarts_exited_service() -> E2eResult<()> {
 
 /// `kepler start` (foreground/attached mode) on a oneshot service must display
 /// the current run's log output. Reproduces the bug where the second foreground
-/// start showed only historical logs and missed the new run's output because
-/// the CLI received a premature Quiescent signal (from the subscription recheck)
-/// before the Start request was processed by the daemon.
+/// start missed the new run's output because the CLI received a premature
+/// Quiescent signal (from the subscription recheck) before the Start request was
+/// processed by the daemon.
+///
+/// Each run emits a unique token, so "showed the current run" is asserted
+/// directly rather than by counting accumulated lines. Attached start streams
+/// only the current run — earlier runs stay in the log database but are not
+/// replayed — so a missed run now shows up as zero markers.
 #[tokio::test]
 async fn test_foreground_start_shows_current_run_output() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -537,57 +542,47 @@ async fn test_foreground_start_shows_current_run_output() -> E2eResult<()> {
 
     harness.start_daemon().await?;
 
-    // First foreground start — oneshot runs and exits, CLI should show the marker
-    let output = harness
-        .run_cli_with_timeout(
-            &["-f", config_str, "start"],
-            Duration::from_secs(10),
-        )
-        .await?;
-    output.assert_success();
-    let count_1 = count_marker(&output.stdout, "FOREGROUND_MARKER");
-    assert_eq!(
-        count_1, 1,
-        "First foreground start should show 1 log line. stdout:\n{}",
-        output.stdout
-    );
+    let marker_tokens = |stdout: &str| -> Vec<String> {
+        stdout
+            .split_whitespace()
+            .filter(|w| w.starts_with("FOREGROUND_MARKER_"))
+            .map(|w| w.to_string())
+            .collect()
+    };
 
-    // Wait for service to fully settle
-    harness
-        .wait_for_service_status(&config_path, "oneshot", "exited", Duration::from_secs(5))
-        .await?;
+    let mut seen: Vec<String> = Vec::new();
 
-    // Second foreground start — must show the NEW run's output (2 lines total:
-    // 1 from first run + 1 from this run). The bug showed only 1 line (old).
-    let output = harness
-        .run_cli_with_timeout(
-            &["-f", config_str, "start"],
-            Duration::from_secs(10),
-        )
-        .await?;
-    output.assert_success();
-    let count_2 = count_marker(&output.stdout, "FOREGROUND_MARKER");
-    assert_eq!(
-        count_2, 2,
-        "Second foreground start should show 2 log lines (old + new). \
-         Got {} — if 1, the current run's output was missed. stdout:\n{}",
-        count_2, output.stdout
-    );
+    for run in 1..=3 {
+        let output = harness
+            .run_cli_with_timeout(&["-f", config_str, "start"], Duration::from_secs(10))
+            .await?;
+        output.assert_success();
 
-    // Third foreground start — same pattern, 3 lines total
-    let output = harness
-        .run_cli_with_timeout(
-            &["-f", config_str, "start"],
-            Duration::from_secs(10),
-        )
-        .await?;
-    output.assert_success();
-    let count_3 = count_marker(&output.stdout, "FOREGROUND_MARKER");
-    assert_eq!(
-        count_3, 3,
-        "Third foreground start should show 3 log lines. Got {}. stdout:\n{}",
-        count_3, output.stdout
-    );
+        let tokens = marker_tokens(&output.stdout);
+        assert_eq!(
+            tokens.len(),
+            1,
+            "Foreground start #{} should show exactly this run's line. \
+             Got {} — 0 means the current run's output was missed, >1 means \
+             earlier runs were replayed. stdout:\n{}",
+            run,
+            tokens.len(),
+            output.stdout
+        );
+        assert!(
+            !seen.contains(&tokens[0]),
+            "Foreground start #{} replayed a previous run's line ({}). stdout:\n{}",
+            run,
+            tokens[0],
+            output.stdout
+        );
+        seen.push(tokens[0].clone());
+
+        // Wait for the service to fully settle before the next start
+        harness
+            .wait_for_service_status(&config_path, "oneshot", "exited", Duration::from_secs(5))
+            .await?;
+    }
 
     harness.stop_daemon().await?;
     Ok(())

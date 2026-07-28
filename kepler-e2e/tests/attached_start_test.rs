@@ -195,3 +195,77 @@ async fn test_restart_follow_blocks() -> E2eResult<()> {
 
     Ok(())
 }
+
+/// Attached `kepler start` must stream only the current run's logs.
+///
+/// Regression: the stream started at entry ID 0, so every previous run stored
+/// in the log database was replayed before the new output.
+#[tokio::test]
+async fn test_attached_start_does_not_replay_previous_run() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_start_no_replay")?;
+    let config_str = config_path.to_str().unwrap().to_string();
+
+    harness.start_daemon().await?;
+
+    // Run 1: the service prints once and exits, so the attached start returns
+    // when quiescence is reached.
+    let run1 = harness
+        .run_cli_with_timeout(&["-f", &config_str, "start"], Duration::from_secs(20))
+        .await?;
+    assert_eq!(
+        run1.stdout.matches("START_MARKER").count(),
+        1,
+        "run 1 should print the marker once. stdout: {}",
+        run1.stdout
+    );
+
+    // Run 2: the service is restarted and prints again — run 1's entry is still
+    // in the log database but must not be streamed.
+    let run2 = harness
+        .run_cli_with_timeout(&["-f", &config_str, "start"], Duration::from_secs(20))
+        .await?;
+    assert_eq!(
+        run2.stdout.matches("START_MARKER").count(),
+        1,
+        "run 2 should print only the new line, not replay run 1. stdout: {}",
+        run2.stdout
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// `kepler restart --follow` must stream only the restarted run's logs.
+#[tokio::test]
+async fn test_restart_follow_does_not_replay_previous_run() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_restart_follow_no_replay")?;
+    let config_str = config_path.to_str().unwrap().to_string();
+
+    harness.start_daemon().await?;
+
+    // First run writes one marker.
+    harness.start_services(&config_path).await?.assert_success();
+    harness
+        .wait_for_log_content(&config_path, "RESTART_MARKER", Duration::from_secs(10))
+        .await?;
+
+    // `restart --follow` streams until interrupted — run it in the background,
+    // give the restarted service time to log, then stop it and read the output.
+    let mut child = harness.spawn_cli_background(&["-f", &config_str, "restart", "--follow"])?;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let _ = child.kill();
+    let output = child.wait_with_output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    assert_eq!(
+        stdout.matches("RESTART_MARKER").count(),
+        1,
+        "restart --follow should print only the restarted run's line. stdout: {}",
+        stdout
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}

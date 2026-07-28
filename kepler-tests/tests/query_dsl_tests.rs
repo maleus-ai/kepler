@@ -422,6 +422,132 @@ fn dsl_syntax_error() {
 }
 
 // ============================================================================
+// Row ID (pagination cursor) tests
+// ============================================================================
+
+/// Query logs using a DSL filter and return the row IDs of matching entries.
+fn query_ids(reader: &SqliteLogReader, dsl: &str, limit: usize) -> Vec<i64> {
+    let frag = log_query_dsl().parse(dsl, 0).expect("DSL parse failed");
+    let (entries, _) = reader
+        .after(0, limit, &[], false, Some(&frag), None, None)
+        .expect("query failed");
+    entries.into_iter().map(|e| e.id).collect()
+}
+
+#[test]
+fn dsl_id_filters_on_row_id() {
+    let temp = TempDir::new().unwrap();
+    let (store, reader) = setup_log_store(temp.path());
+
+    for i in 0..5 {
+        write_log(&store, "web", &format!("line {}", i), "info");
+    }
+
+    let all = query_ids(&reader, "@service:web", 100);
+    assert_eq!(all.len(), 5);
+
+    // `@id` resolves to the logs.id column, not the JSON attributes fallback.
+    let after_second = query_ids(&reader, &format!("@id:>{}", all[1]), 100);
+    assert_eq!(after_second, all[2..].to_vec());
+}
+
+#[test]
+fn dsl_id_cursor_paginates_without_gaps_or_overlap() {
+    let temp = TempDir::new().unwrap();
+    let (store, reader) = setup_log_store(temp.path());
+
+    for i in 0..7 {
+        let level = if i % 2 == 0 { "error" } else { "info" };
+        write_log(&store, "web", &format!("line {}", i), level);
+    }
+
+    let expected = query_ids(&reader, "@level:error", 100);
+    assert_eq!(expected.len(), 4);
+
+    // Walk forward in pages of 2 using the last ID of each page as the cursor.
+    let mut seen = Vec::new();
+    let mut cursor: Option<i64> = None;
+    loop {
+        let query = match cursor {
+            Some(id) => format!("@level:error AND @id:>{}", id),
+            None => "@level:error".to_string(),
+        };
+        let page = query_ids(&reader, &query, 2);
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.len() <= 2);
+        cursor = page.last().copied();
+        seen.extend(page);
+    }
+
+    assert_eq!(seen, expected);
+}
+
+// ============================================================================
+// Tail window resolution (`--tail N`)
+// ============================================================================
+
+#[test]
+fn tail_start_id_resolves_window_and_pages_forward() {
+    let temp = TempDir::new().unwrap();
+    let (store, reader) = setup_log_store(temp.path());
+
+    // 9 matching lines interleaved with non-matching ones.
+    for i in 0..9 {
+        write_log(&store, "web", &format!("err {}", i), "error");
+        write_log(&store, "web", &format!("noise {}", i), "info");
+    }
+
+    let frag = log_query_dsl().parse("@level:error", 0).unwrap();
+    let all = query_ids(&reader, "@level:error", 100);
+    assert_eq!(all.len(), 9);
+
+    // `--tail 4`: the window starts at the 4th entry counted from the newest.
+    let start = reader
+        .tail_start_id(4, &[], false, Some(&frag), None, None)
+        .unwrap()
+        .expect("window start");
+    assert_eq!(start, all[5]);
+
+    // Reading forward from it yields exactly the last 4, chronologically —
+    // the filter is applied before the window, so noise never takes a slot.
+    let (entries, _) = reader
+        .after(start - 1, 4, &[], false, Some(&frag), None, None)
+        .unwrap();
+    assert_eq!(entries.iter().map(|e| e.id).collect::<Vec<_>>(), all[5..].to_vec());
+
+    // Chunked reads from the same start reassemble into the same window.
+    let (first, has_more) = reader.after(start - 1, 2, &[], false, Some(&frag), None, None).unwrap();
+    assert!(has_more);
+    let cursor = first.last().unwrap().id;
+    let (second, _) = reader.after(cursor, 2, &[], false, Some(&frag), None, None).unwrap();
+    let chunked: Vec<i64> = first.iter().chain(second.iter()).map(|e| e.id).collect();
+    assert_eq!(chunked, all[5..].to_vec());
+}
+
+#[test]
+fn tail_start_id_saturates_when_fewer_matches_than_requested() {
+    let temp = TempDir::new().unwrap();
+    let (store, reader) = setup_log_store(temp.path());
+
+    write_log(&store, "web", "err 0", "error");
+    write_log(&store, "web", "err 1", "error");
+
+    let frag = log_query_dsl().parse("@level:error", 0).unwrap();
+    // Asking for more than exists means "start at the beginning".
+    assert_eq!(
+        reader.tail_start_id(100, &[], false, Some(&frag), None, None).unwrap(),
+        None
+    );
+    // A zero count has no window.
+    assert_eq!(
+        reader.tail_start_id(0, &[], false, Some(&frag), None, None).unwrap(),
+        None
+    );
+}
+
+// ============================================================================
 // DSL → SQL authorizer safety test
 // ============================================================================
 

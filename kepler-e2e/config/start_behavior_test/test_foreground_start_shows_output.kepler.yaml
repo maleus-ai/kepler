@@ -1,4 +1,6 @@
 services:
   oneshot:
-    command: ["sh", "-c", "echo FOREGROUND_MARKER; exit 0"]
+    # Unique token per run, so a replayed line from an earlier run is
+    # distinguishable from this run's output.
+    command: ["sh", "-c", "echo FOREGROUND_MARKER_$(date +%s%N); exit 0"]
     restart: "no"

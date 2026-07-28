@@ -5,19 +5,28 @@ use kepler_protocol::protocol::{StreamLogEntry, ProgressEvent};
 
 type ClientResult = std::result::Result<Response, ClientError>;
 
+/// A recorded `logs_stream` call: `(after_id, limit, tail)`.
+type RecordedCall = (Option<i64>, usize, bool);
+
 struct MockClient {
     responses: std::sync::Mutex<VecDeque<ClientResult>>,
+    calls: std::sync::Mutex<Vec<RecordedCall>>,
 }
 
 impl MockClient {
     fn new() -> Self {
         Self {
             responses: std::sync::Mutex::new(VecDeque::new()),
+            calls: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     fn push_response(&self, resp: ClientResult) {
         self.responses.lock().unwrap().push_back(resp);
+    }
+
+    fn calls(&self) -> Vec<RecordedCall> {
+        self.calls.lock().unwrap().clone()
     }
 }
 
@@ -26,17 +35,18 @@ impl FollowClient for MockClient {
         &self,
         _config_path: &Path,
         _services: &[String],
-        _after_id: Option<i64>,
+        after_id: Option<i64>,
         _from_end: bool,
-        _limit: usize,
+        limit: usize,
         _no_hooks: bool,
         _filter: Option<&str>,
         _sql: bool,
         _raw: bool,
-        _tail: bool,
+        tail: bool,
         _after_ts: Option<i64>,
         _before_ts: Option<i64>,
     ) -> std::result::Result<Response, ClientError> {
+        self.calls.lock().unwrap().push((after_id, limit, tail));
         self.responses
             .lock()
             .unwrap()
@@ -50,6 +60,10 @@ impl FollowClient for MockClient {
 // ========================================================================
 
 fn stream_response(entries: &[(&str, &str)], has_more: bool) -> ClientResult {
+    stream_response_with_last_id(entries, has_more, 0)
+}
+
+fn stream_response_with_last_id(entries: &[(&str, &str)], has_more: bool, last_id: i64) -> ClientResult {
     // Build service table and compact entries
     let mut service_table: Vec<Arc<str>> = Vec::new();
     let mut service_map: HashMap<&str, u16> = HashMap::new();
@@ -81,7 +95,7 @@ fn stream_response(entries: &[(&str, &str)], has_more: bool) -> ClientResult {
         LogStreamData {
             service_table,
             entries: compact_entries,
-            last_id: 0,
+            last_id,
             has_more,
         },
     )))
@@ -134,7 +148,7 @@ async fn test_follow_reads_and_exits_on_quiescence() {
 
     // Fire quiescence after we've collected 3 lines
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, never_shutdown(),
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, never_shutdown(),
         async { let _ = rx.await; },
         None,
         |st, entries| {
@@ -164,7 +178,7 @@ async fn test_follow_drains_logs_after_quiescence() {
 
     // Quiescence fires immediately — but logs should still be drained
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, never_shutdown(),
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, never_shutdown(),
         async {},  // quiescence fires immediately
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
@@ -189,7 +203,7 @@ async fn test_follow_continues_without_quiescence() {
     let mut tx = Some(tx);
 
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, never_shutdown(),
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, never_shutdown(),
         async { let _ = rx.await; },
         None,
         |st, entries| {
@@ -226,7 +240,7 @@ async fn test_follow_shutdown_stops_reads() {
 
     // Shutdown resolves immediately — the biased select picks it up before the first read
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, async {},
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, async {},
         never_quiescent(),
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
@@ -257,7 +271,7 @@ async fn test_follow_shutdown_after_n_reads() {
 
     // Trigger shutdown after 3 batches are collected
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false },
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None },
         async move { notify_clone.notified().await },
         never_quiescent(),
         None,
@@ -288,7 +302,7 @@ async fn test_follow_daemon_disconnect_exits() {
     let mut collected = Vec::new();
 
     stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, never_shutdown(),
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, never_shutdown(),
         never_quiescent(),
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
@@ -308,7 +322,7 @@ async fn test_follow_server_error_breaks_loop() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, never_shutdown(),
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, never_shutdown(),
         never_quiescent(),
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
@@ -328,7 +342,7 @@ async fn test_stream_logs_permission_denied() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, never_shutdown(),
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, never_shutdown(),
         never_quiescent(),
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
@@ -348,7 +362,7 @@ async fn test_stream_logs_non_permission_error_returns_server_error() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, never_shutdown(),
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, never_shutdown(),
         never_quiescent(),
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
@@ -356,6 +370,91 @@ async fn test_stream_logs_non_permission_error_returns_server_error() {
 
     assert_eq!(exit_reason, StreamExitReason::ServerError);
     assert!(collected.is_empty());
+}
+
+// ========================================================================
+// Entry limits (--head N / --tail N)
+// ========================================================================
+
+/// Helper: run a one-shot (non-follow) stream and return the collected lines.
+async fn run_one_shot(mock: &MockClient, limit: usize, tail: bool, max_total: Option<usize>) -> Vec<String> {
+    let config_path = PathBuf::from("/fake/config.yaml");
+    let mut collected = Vec::new();
+    stream_logs(
+        mock,
+        StreamParams {
+            config_path: &config_path, services: &[], no_hooks: false,
+            mode: StreamMode::All, limit, filter: None, sql: false,
+            raw: false, tail, max_total, start_after_id: None,
+        },
+        never_shutdown(), never_quiescent(), None,
+        |st, entries| collect_batch(&mut collected, st, entries),
+    ).await.unwrap();
+    collected
+}
+
+/// `--head N` stops at N entries even when the server reports more data.
+/// Regression: `limit` used to be a per-batch size only, so the loop drained
+/// the whole log in batches of N.
+#[tokio::test(start_paused = true)]
+async fn test_head_stops_at_max_total() {
+    let mock = MockClient::new();
+    mock.push_response(stream_response(&[("svc", "line-1"), ("svc", "line-2")], true));
+    mock.push_response(stream_response(&[("svc", "line-3"), ("svc", "line-4")], true));
+    mock.push_response(stream_response(&[("svc", "line-5")], false));
+
+    let collected = run_one_shot(&mock, 3, false, Some(3)).await;
+
+    assert_eq!(collected, vec!["line-1", "line-2", "line-3"]);
+    // Stopped after the second request — never asked for the third batch.
+    assert_eq!(mock.calls().len(), 2);
+}
+
+/// A batch larger than what is still owed is truncated, not overshot.
+#[tokio::test(start_paused = true)]
+async fn test_head_truncates_oversized_batch() {
+    let mock = MockClient::new();
+    mock.push_response(stream_response(&[("svc", "line-1"), ("svc", "line-2"), ("svc", "line-3")], true));
+
+    let collected = run_one_shot(&mock, 2, false, Some(2)).await;
+
+    assert_eq!(collected, vec!["line-1", "line-2"]);
+    assert_eq!(mock.calls().len(), 1);
+}
+
+/// Bare `kepler logs` has no total and must still drain every batch.
+#[tokio::test(start_paused = true)]
+async fn test_no_max_total_drains_all_batches() {
+    let mock = MockClient::new();
+    mock.push_response(stream_response(&[("svc", "line-1"), ("svc", "line-2")], true));
+    mock.push_response(stream_response(&[("svc", "line-3"), ("svc", "line-4")], true));
+    mock.push_response(stream_response(&[("svc", "line-5")], false));
+
+    let collected = run_one_shot(&mock, 2, false, None).await;
+
+    assert_eq!(collected.len(), 5);
+}
+
+/// `--tail N` asks for the window once, then pages forward with the cursor.
+/// Regression: every request used to set `tail`, and the server's tail query
+/// ignores `after_id`, so a re-request replayed the same window.
+#[tokio::test(start_paused = true)]
+async fn test_tail_requests_window_once_then_pages_forward() {
+    let mock = MockClient::new();
+    mock.push_response(stream_response_with_last_id(&[("svc", "line-1"), ("svc", "line-2")], true, 42));
+    mock.push_response(stream_response_with_last_id(&[("svc", "line-3"), ("svc", "line-4")], true, 44));
+
+    let collected = run_one_shot(&mock, 4, true, Some(4)).await;
+
+    assert_eq!(collected, vec!["line-1", "line-2", "line-3", "line-4"]);
+
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 2);
+    // First request resolves the window: no cursor, tail set, full count.
+    assert_eq!(calls[0], (None, 4, true));
+    // Second request is an ordinary forward read from the cursor, asking only
+    // for what is still owed.
+    assert_eq!(calls[1], (Some(42), 2, false));
 }
 
 // ========================================================================
@@ -373,7 +472,7 @@ async fn test_follow_empty_exits_on_quiescence() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, never_shutdown(),
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, never_shutdown(),
         async {},  // quiescence fires immediately
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
@@ -394,7 +493,7 @@ async fn test_follow_shutdown_returns_immediately() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, async {},
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, async {},
         never_quiescent(),
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
@@ -628,7 +727,7 @@ async fn test_follow_config_not_loaded_retries_then_starts() {
     let (tx, rx) = oneshot::channel::<()>();
     let mut tx = Some(tx);
     stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, never_shutdown(),
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, never_shutdown(),
         async { let _ = rx.await; },
         None,
         |st, entries| {
@@ -653,7 +752,7 @@ async fn test_follow_config_not_loaded_exits_on_quiescence() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, never_shutdown(),
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, never_shutdown(),
         async {},  // quiescence fires immediately (config was unloaded)
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
@@ -673,7 +772,7 @@ async fn test_follow_config_not_loaded_shutdown() {
     let mut collected = Vec::new();
 
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, async {},  // shutdown fires immediately
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, async {},  // shutdown fires immediately
         never_quiescent(),
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
@@ -694,7 +793,7 @@ async fn test_follow_shutdown_handles_starting_services() {
 
     // Shutdown resolves immediately — biased select picks it up before any read
     let exit_reason = stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, async {},
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, async {},
         never_quiescent(),
         None,
         |st, entries| collect_batch(&mut collected, st, entries),
@@ -717,7 +816,7 @@ async fn test_follow_exits_on_quiescence() {
     let (tx, rx) = oneshot::channel::<()>();
     let mut tx = Some(tx);
     stream_logs(
-        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false }, never_shutdown(),
+        &mock, StreamParams { config_path: &config_path, services: &[], no_hooks: false, mode: StreamMode::UntilQuiescent, limit: kepler_protocol::protocol::MAX_STREAM_BATCH_SIZE, filter: None, sql: false, raw: false, tail: false, max_total: None, start_after_id: None }, never_shutdown(),
         async { let _ = rx.await; },
         None,
         |st, entries| {
@@ -929,4 +1028,45 @@ fn test_build_define_flags_duplicate_key_last_wins() {
     let map = result.expect("should be Some");
     assert_eq!(map.get("KEY").unwrap(), "second");
     assert_eq!(map.len(), 1);
+}
+
+/// `start_after_id` seeds the cursor, so the first request skips prior entries
+/// instead of starting at the beginning of the log.
+#[tokio::test(start_paused = true)]
+async fn test_start_after_id_anchors_first_request() {
+    let mock = MockClient::new();
+    mock.push_response(stream_response(&[("svc", "new-1")], false));
+
+    let collected = run_one_shot_anchored(&mock, Some(77)).await;
+
+    assert_eq!(collected, vec!["new-1"]);
+    assert_eq!(mock.calls()[0].0, Some(77), "first request must carry the anchor");
+}
+
+/// Without an anchor the stream starts at the beginning, as `kepler logs` needs.
+#[tokio::test(start_paused = true)]
+async fn test_no_anchor_starts_from_beginning() {
+    let mock = MockClient::new();
+    mock.push_response(stream_response(&[("svc", "old-1")], false));
+
+    let collected = run_one_shot_anchored(&mock, None).await;
+
+    assert_eq!(collected, vec!["old-1"]);
+    assert_eq!(mock.calls()[0].0, None, "first request must have no cursor");
+}
+
+async fn run_one_shot_anchored(mock: &MockClient, start_after_id: Option<i64>) -> Vec<String> {
+    let config_path = PathBuf::from("/fake/config.yaml");
+    let mut collected = Vec::new();
+    stream_logs(
+        mock,
+        StreamParams {
+            config_path: &config_path, services: &[], no_hooks: false,
+            mode: StreamMode::All, limit: 100, filter: None, sql: false,
+            raw: false, tail: false, max_total: None, start_after_id,
+        },
+        never_shutdown(), never_quiescent(), None,
+        |st, entries| collect_batch(&mut collected, st, entries),
+    ).await.unwrap();
+    collected
 }

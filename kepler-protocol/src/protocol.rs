@@ -14,6 +14,14 @@ pub const MAX_LINES_ONE_SHOT: usize = 10_000;
 /// Maximum entries per stream batch (secondary cap; byte budget is the primary limit)
 pub const MAX_STREAM_BATCH_SIZE: usize = 50_000;
 
+/// Maximum entries the daemon puts in a single `LogStream` response.
+///
+/// Responses are not size-capped (see `encode_server_message`), so an
+/// unclamped `limit` would serialize the whole result set into one frame.
+/// The client keeps paginating via `after_id` while `has_more` is set, so
+/// this only controls how much is in flight at once.
+pub const STREAM_CHUNK_SIZE: usize = 5_000;
+
 fn default_stream_limit() -> usize { MAX_STREAM_BATCH_SIZE }
 
 /// Request sent from CLI to daemon

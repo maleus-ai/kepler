@@ -55,11 +55,15 @@ kepler:
     interval: 1s # Sample every 5 seconds
     retention_period: 24h # Keep 24 hours of history (omit to keep forever)
   logs:
+    retention_period: "7d"
     retention:
-      on_stop: clear
-      on_start: clear
-      on_restart: clear
-      on_exit: clear
+      # Keep everything in memory unless the config is started fresh which only happens
+      # If it was stopped then started
+      on_start: retain
+      on_skipped: retain
+      on_stop: retain
+      on_restart: retain
+      on_exit: retain
 
 services:
   # ═══════════════════════════════════════════════════════════════════════════

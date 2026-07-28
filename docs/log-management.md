@@ -184,8 +184,16 @@ kepler logs backend             # Logs for a specific service
 |------|----------|----------|
 | All | (default) | Stream all existing logs, then exit |
 | Follow | `--follow` | Stream existing + new logs continuously |
-| Head | `--head N` | Return first N lines (one-shot) |
-| Tail | `--tail N` | Return last N lines (one-shot) |
+| Head | `--head N` | Return the first N entries, then exit |
+| Tail | `--tail N` | Return the last N entries, then exit |
+
+`--head` and `--tail` bound the total number of entries printed, not the size of
+each fetch. Any filter is applied first, so `--tail 20 -F '@level:error'` returns
+the last 20 *matching* entries. Large counts are fetched in chunks and streamed
+as they arrive rather than assembled into a single response.
+
+Combined with `--follow`, the count only sizes the initial window: `kepler logs
+--follow --tail 20` prints the last 20 entries and then keeps streaming.
 
 Logs from multiple services are merged chronologically and displayed with service-colored output.
 
@@ -239,6 +247,8 @@ All field matching requires the `@` prefix. Reserved field names map directly to
 | `@level` | `level` | `@level:error` |
 | `@message` | `line` | `@message:hello` |
 | `@hook` | `hook` | `@hook:pre_start` |
+| `@timestamp` | `timestamp` | `@timestamp:>1753600000000` |
+| `@id` | `id` | `@id:>41230` |
 
 Field names are case-insensitive (`@Service:web` and `@SERVICE:web` both work).
 
@@ -246,6 +256,15 @@ Field names are case-insensitive (`@Service:web` and `@SERVICE:web` both work).
 kepler logs -F '@service:web'               # logs from the "web" service
 kepler logs -F '@level:err'                 # stderr logs only
 kepler logs -F '@hook:pre_start'            # logs from the pre_start hook
+```
+
+`@id` is the row ID: unique and monotonically increasing, unlike `@timestamp`, which
+can repeat within the same millisecond. It is emitted as `id` by `kepler logs --json`,
+which makes it the cursor to use for pagination:
+
+```bash
+kepler logs --head 50 -F '@level:error' --json              # first page
+kepler logs --head 50 -F '@level:error AND @id:>41230' --json  # next page, cursor = last id
 ```
 
 ### Attribute Search
