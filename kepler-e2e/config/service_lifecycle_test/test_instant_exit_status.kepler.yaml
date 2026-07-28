@@ -1,0 +1,6 @@
+services:
+  # Exits as fast as the kernel allows — typically before the spawner has
+  # finished registering the process, which is the race this config exercises.
+  instant:
+    command: ["true"]
+    restart: "no"

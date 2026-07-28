@@ -232,3 +232,36 @@ async fn test_ps_shows_all_services() -> E2eResult<()> {
 
     Ok(())
 }
+
+/// A service that exits before the spawner finishes registering it must still
+/// reach a terminal status.
+///
+/// Regression: the process monitor could deliver the exit event while the start
+/// path was still running, so `handle_exit` set `Exited` and the start path then
+/// overwrote it with `Running` — the service stayed `Running` forever with no
+/// process behind it. Repeated because the window is timing-dependent.
+#[tokio::test]
+async fn test_instant_exit_reaches_terminal_status() -> E2eResult<()> {
+    for attempt in 1..=10 {
+        let mut harness = E2eHarness::new().await?;
+        let config_path = harness.load_config(TEST_MODULE, "test_instant_exit_status")?;
+
+        harness.start_daemon().await?;
+        harness.start_services(&config_path).await?.assert_success();
+
+        let result = harness
+            .wait_for_service_status(&config_path, "instant", "exited", Duration::from_secs(10))
+            .await;
+
+        harness.stop_daemon().await?;
+
+        if let Err(e) = result {
+            panic!(
+                "attempt {}: a service that exited immediately never reached 'exited' \
+                 (stuck in the status the start path published): {:?}",
+                attempt, e
+            );
+        }
+    }
+    Ok(())
+}

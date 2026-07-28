@@ -52,8 +52,50 @@ pub struct SpawnServiceParams<'a> {
     pub config_hash: String,
 }
 
-/// Spawn a service process with signal-based monitoring
-pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHandle> {
+/// How long the process monitor waits for [`SpawnGate`] before reporting an
+/// exit regardless.
+///
+/// This is a liveness backstop against a caller that never releases the gate,
+/// not a tuning knob: the two outcomes are asymmetric. Firing late costs a
+/// bounded delay in reporting an exit, and says so in the log. Firing early
+/// re-opens the race the gate exists to close, silently. So it is set well
+/// above any legitimate registration.
+///
+/// Measured over ~1960 registrations across four full e2e runs pinned to 2 CPUs:
+/// median 1.6ms, p99 5.3ms, max 9ms in warm runs. A single cold-start outlier
+/// of 16.8s (first run after a rebuild, never reproduced) is why this is not
+/// single-digit seconds.
+const SPAWN_GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Gate that holds back a service's exit event until the caller has finished
+/// registering the spawned process.
+///
+/// A short-lived process can exit before `spawn_service` even returns. Without
+/// this gate the exit event races the start path: `handle_exit` would look for
+/// output capture tasks before the `ProcessHandle` is stored (losing captured
+/// `::output::` values) and set the terminal status before the start path sets
+/// `Running` (leaving the service stuck in `Running` forever).
+///
+/// Dropping the gate releases the exit event — the start path always releases
+/// it, on success or failure, and a dropped gate never blocks the monitor.
+pub struct SpawnGate(oneshot::Sender<()>);
+
+impl SpawnGate {
+    /// Release the exit event. Dropping the gate does the same thing; calling
+    /// this makes the ordering requirement visible at the call site.
+    pub fn release(self) {
+        // Err just means the monitor is already gone (process reaped and task
+        // finished, or the service was stopped) — nothing to release.
+        let _ = self.0.send(());
+    }
+}
+
+/// Spawn a service process with signal-based monitoring.
+///
+/// Returns the process handle and a [`SpawnGate`]. The caller MUST store the
+/// handle and publish the running status before releasing (or dropping) the
+/// gate — see [`SpawnGate`].
+pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<(ProcessHandle, SpawnGate)> {
     let SpawnServiceParams {
         service_name,
         spec,
@@ -115,6 +157,9 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
     // Create shutdown channel for graceful stop (round-trip: request → reply)
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<ShutdownRequest>();
 
+    // Gate the exit event on the caller finishing registration (see SpawnGate)
+    let (gate_tx, gate_rx) = oneshot::channel::<()>();
+
     // Spawn process monitor with the Child (signal-based monitoring)
     let config_path = handle.config_path().to_path_buf();
     let service_name_clone = service_name.to_string();
@@ -130,6 +175,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
             exit_tx,
             containment,
             config_hash,
+            gate_rx,
         )
         .await;
     });
@@ -145,7 +191,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<ProcessHand
         debug!("FD count after spawning service {}: {}", service_name, fd_count);
     }
 
-    Ok(process_handle)
+    Ok((process_handle, SpawnGate(gate_tx)))
 }
 
 /// Monitor a process using signal-based waiting (child.wait())
@@ -160,6 +206,7 @@ async fn monitor_process(
     exit_tx: mpsc::Sender<ProcessExitEvent>,
     containment: ContainmentManager,
     config_hash: String,
+    spawn_gate: oneshot::Receiver<()>,
 ) {
     // Use tokio::select! to wait for either process exit or shutdown signal
     tokio::select! {
@@ -182,6 +229,22 @@ async fn monitor_process(
                 "Service {} exited with code {:?} signal {:?}",
                 service_name, exit_code, signal
             );
+
+            // Wait for the spawner to finish registering this process before the
+            // exit is announced. A process can exit before `spawn_service`
+            // returns; delivering the event first would race the start path.
+            // An Err means the gate was dropped (start path finished or failed),
+            // which is exactly the "go ahead" signal.
+            //
+            // Bounded: a caller that never releases the gate must not strand the
+            // service in a non-terminal status — the very bug this prevents.
+            // Reporting late is recoverable; never reporting is not.
+            if tokio::time::timeout(SPAWN_GATE_TIMEOUT, spawn_gate).await.is_err() {
+                warn!(
+                    "Spawn gate for {} not released within {:?}; reporting exit anyway",
+                    service_name, SPAWN_GATE_TIMEOUT
+                );
+            }
 
             // Send exit event with overflow handling
             let event = ProcessExitEvent {
