@@ -101,7 +101,13 @@ The install script performs the following steps:
 ./install.sh --no-systemd   # Skip systemd service installation
 ./install.sh --no-build     # Skip build, use existing target/release binaries
 ./install.sh --uninstall    # Remove binaries and systemd service
+./install.sh --jemalloc-lg-page 16   # aarch64: build jemalloc for 64K pages (runs on 4K/16K/64K kernels)
 ```
+
+jemalloc bakes the page size in at build time, using the build host's page size by default.
+aarch64 Linux kernels may use 4K, 16K or 64K pages, so a binary built on one page size aborts
+on another with `<jemalloc>: Unsupported system page size`. `--jemalloc-lg-page 16` produces a
+binary that runs on all three.
 
 ---
 

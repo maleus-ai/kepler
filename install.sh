@@ -89,6 +89,9 @@ Options:
   --no-systemd      Alias for --no-service (backwards compatibility)
   --no-build        Skip cargo build (use existing target/release binaries)
   --features LIST   Extra cargo features (comma-separated, e.g. "jemalloc,dhat-heap")
+  --jemalloc-lg-page N
+                    Build jemalloc with --with-lg-page=N instead of the build host's page
+                    size (e.g. 16 = 64K pages, runs on 4K/16K/64K aarch64 kernels)
   --debug           Set RUST_LOG=debug in the service (visible in journalctl / log file)
   --uninstall       Remove Kepler binaries and service
   -h, --help        Show this help
@@ -100,6 +103,7 @@ OPT_SERVICE="yes"
 OPT_UNINSTALL=false
 OPT_BUILD=true
 OPT_FEATURES=""
+OPT_JEMALLOC_LG_PAGE=""
 OPT_DEBUG=false
 
 while [[ $# -gt 0 ]]; do
@@ -114,6 +118,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --features)
             OPT_FEATURES="$2"
+            shift 2
+            ;;
+        --jemalloc-lg-page)
+            OPT_JEMALLOC_LG_PAGE="$2"
             shift 2
             ;;
         --debug)
@@ -211,6 +219,10 @@ if $OPT_BUILD; then
     if ! command -v cargo >/dev/null 2>&1; then
         error "cargo not found. Install Rust via https://rustup.rs/"
         exit 1
+    fi
+    if [[ -n "$OPT_JEMALLOC_LG_PAGE" ]]; then
+        export JEMALLOC_SYS_WITH_LG_PAGE="$OPT_JEMALLOC_LG_PAGE"
+        info "Building jemalloc with --with-lg-page=${OPT_JEMALLOC_LG_PAGE}"
     fi
     CARGO_ARGS=(build --release --manifest-path "${SCRIPT_DIR}/Cargo.toml")
     if [[ -n "$OPT_FEATURES" ]]; then
