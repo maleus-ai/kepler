@@ -69,8 +69,8 @@ pub(crate) fn spawn_collector(
 
             // A tree walk needs every process in the table, so scan the whole
             // system; with cgroups the PID set is already known and a targeted
-            // refresh is enough. Refreshing once per tick (rather than once per
-            // service) also keeps sysinfo's CPU deltas over a single interval.
+            // refresh is enough. One refresh per tick, so sysinfo's CPU deltas
+            // span one collection interval.
             let refresh_kind = ProcessRefreshKind::nothing().with_memory().with_cpu();
             if needs_full_scan {
                 sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
@@ -145,8 +145,8 @@ pub(crate) fn spawn_collector(
 }
 
 /// Parent and process-group relations of every live process, built once per
-/// sample so a `getpgid` syscall is spent once per process rather than once
-/// per process and per service.
+/// sample so `getpgid` costs one syscall per process rather than one per
+/// process and per service.
 struct ProcessIndex {
     /// Children of each PID.
     children: HashMap<u32, Vec<u32>>,
@@ -223,30 +223,33 @@ mod tests {
     /// group is only reachable through the parent chain.
     #[test]
     fn service_tree_unions_group_members_and_parent_chain() {
-        // 100  leader, group 100
-        //  └ 101  direct child, still in the group
-        //     └ 102  grandchild that called setsid(), now its own group
-        //  ⋮
-        //   1  init
-        //  ├ 103  re-parented after a double fork, still in group 100
-        //  └ 200  unrelated: another group, another parent
+        let init = 1;
+        let (leader, child, grandchild) = (100, 101, 102);
+        let reparented_into_init = 103;
+        let unrelated = 200;
+
         let index = ProcessIndex {
-            children: HashMap::from([(100, vec![101]), (101, vec![102]), (1, vec![103, 200])]),
+            children: HashMap::from([
+                (leader, vec![child]),
+                (child, vec![grandchild]),
+                (init, vec![reparented_into_init, unrelated]),
+            ]),
             group_members: HashMap::from([
-                (100, vec![100, 101, 103]),
-                (102, vec![102]),
-                (200, vec![200]),
+                (leader, vec![leader, child, reparented_into_init]),
+                // Its own group: it called setsid().
+                (grandchild, vec![grandchild]),
+                (unrelated, vec![unrelated]),
             ]),
         };
 
-        let mut pids = collect_service_tree(&index, 100);
+        let mut pids = collect_service_tree(&index, leader);
         pids.sort_unstable();
 
-        assert_eq!(pids, vec![100, 101, 102, 103]);
+        assert_eq!(pids, vec![leader, child, grandchild, reparented_into_init]);
     }
 
-    /// A service whose processes have all exited between the scan and the walk
-    /// still yields its leader, so the sample is skipped rather than mis-summed.
+    /// A leader the scan did not see yields itself alone, never another
+    /// service's PIDs.
     #[test]
     fn service_tree_of_unknown_leader_is_the_leader_alone() {
         let index = ProcessIndex {
@@ -257,9 +260,9 @@ mod tests {
         assert_eq!(collect_service_tree(&index, 100), vec![100]);
     }
 
-    /// End-to-end over a real process tree: the regression this guards is a
-    /// walk that returns only the leader, which is what a service's memory
-    /// looked like on every host without cgroup containment.
+    /// End-to-end over a real process tree, against the failure mode the walk
+    /// exists to prevent: returning the leader alone, which under-reports every
+    /// forking service on hosts without cgroup containment.
     #[cfg(unix)]
     #[test]
     fn service_tree_finds_real_children_and_their_memory() {
@@ -279,7 +282,7 @@ mod tests {
         let mut sys = System::new();
         let refresh_kind = ProcessRefreshKind::nothing().with_memory().with_cpu();
         let mut pids = Vec::new();
-        // The shells need a moment to fork; poll rather than sleep a fixed delay.
+        // The shells need a moment to fork.
         for _ in 0..60 {
             std::thread::sleep(std::time::Duration::from_millis(50));
             sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);

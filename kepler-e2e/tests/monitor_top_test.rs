@@ -261,11 +261,10 @@ async fn test_top_json_single_service() -> E2eResult<()> {
 
 /// Test that `kepler top --json` accounts for a service's child processes.
 ///
-/// Without cgroup containment the collector has to reconstruct the process tree
-/// from the service's leader PID; a broken walk reports the leader alone, which
-/// silently under-reports every forking service. `forking` keeps two child
-/// shells alive, so its sample must cover several PIDs and more memory than the
-/// single-process `solo`.
+/// A service's sample covers its whole process tree, and when that breaks it
+/// breaks the same way on any host: the leader alone, silently under-reporting
+/// every forking service. `forking` keeps two child shells alive, so it must
+/// report several PIDs and more memory than the single-process `solo`.
 #[tokio::test]
 async fn test_top_json_counts_child_processes() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
