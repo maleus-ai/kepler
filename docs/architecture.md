@@ -760,7 +760,7 @@ The **collector** periodically samples CPU/memory metrics via sysinfo/cgroups an
 
 For each running service, the collector:
 
-1. **Enumerates PIDs** — Uses cgroup v2 (if available) to get all PIDs in the service's cgroup, or falls back to the main PID + sysinfo process tree walking
+1. **Enumerates PIDs** — Uses cgroup v2 (if available) to get all PIDs in the service's cgroup. Otherwise falls back to reconstructing the tree from the service's main PID, unioning process group membership (which catches descendants re-parented by a double fork) with the sysinfo parent chain (which catches descendants that left the group via `setsid()`)
 2. **Refreshes process info** — Calls `sysinfo` to get current CPU and memory stats for the enumerated PIDs
 3. **Aggregates** — Sums CPU percentage, RSS memory, and virtual memory across the entire process tree
 4. **Sends** — Sends all service metrics to the writer thread through the channel

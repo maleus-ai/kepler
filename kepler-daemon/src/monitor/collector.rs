@@ -4,11 +4,13 @@
 //! sysinfo / cgroups, and sends them to the writer thread through a channel.
 //!
 //! The collector first tries to enumerate PIDs from cgroups (via the
-//! containment manager). If no cgroup PIDs are found, it falls back to
-//! the service's main PID from the service state and walks the process
-//! tree via sysinfo to find descendants.
+//! containment manager). If no cgroup PIDs are found, it falls back to the
+//! service's main PID from the service state and reconstructs the process
+//! tree from a full system scan — see `collect_service_tree`.
 
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use std::collections::HashMap;
+
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::task::JoinHandle;
 
 use crate::config::MonitorConfig;
@@ -17,6 +19,14 @@ use crate::containment::ContainmentManager;
 
 use super::ServiceMetrics;
 use super::writer::MonitorCommand;
+
+/// How a service's PID set is obtained for one sample.
+enum PidSource {
+    /// The service's cgroup listed these PIDs — authoritative, no walk needed.
+    Cgroup(Vec<u32>),
+    /// No cgroup: the tree has to be reconstructed from this leader PID.
+    Tree { leader: u32 },
+}
 
 /// Spawn the metric collector loop. Exits when the writer channel disconnects.
 pub(crate) fn spawn_collector(
@@ -37,35 +47,62 @@ pub(crate) fn spawn_collector(
                 continue;
             }
 
+            // Resolve where each service's PIDs come from before refreshing, so
+            // the refresh can be scoped to what is actually needed.
+            let mut sources: Vec<(String, PidSource)> = Vec::new();
+            let mut needs_full_scan = false;
+            for service_name in &running {
+                let cgroup_pids = containment.enumerate_service_pids(&config_hash, service_name);
+                if !cgroup_pids.is_empty() {
+                    sources.push((service_name.clone(), PidSource::Cgroup(cgroup_pids)));
+                } else if let Some(state) = handle.get_service_state(service_name).await
+                    && let Some(leader) = state.pid
+                {
+                    needs_full_scan = true;
+                    sources.push((service_name.clone(), PidSource::Tree { leader }));
+                }
+            }
+
+            if sources.is_empty() {
+                continue;
+            }
+
+            // A tree walk needs every process in the table, so scan the whole
+            // system; with cgroups the PID set is already known and a targeted
+            // refresh is enough. Refreshing once per tick (rather than once per
+            // service) also keeps sysinfo's CPU deltas over a single interval.
+            let refresh_kind = ProcessRefreshKind::nothing().with_memory().with_cpu();
+            if needs_full_scan {
+                sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+            } else {
+                let known: Vec<Pid> = sources
+                    .iter()
+                    .flat_map(|(_, source)| match source {
+                        PidSource::Cgroup(pids) => pids.as_slice(),
+                        PidSource::Tree { .. } => &[],
+                    })
+                    .map(|&pid| Pid::from_u32(pid))
+                    .collect();
+                sys.refresh_processes_specifics(
+                    ProcessesToUpdate::Some(&known),
+                    true,
+                    refresh_kind,
+                );
+            }
+
+            let index = needs_full_scan.then(|| ProcessIndex::build(&sys));
+
             let now = chrono::Utc::now().timestamp_millis();
             let mut all_metrics = Vec::new();
 
-            for service_name in &running {
-                // Get PIDs from cgroup, or fall back to stored PID
-                let mut pids =
-                    containment.enumerate_service_pids(&config_hash, service_name);
-                if pids.is_empty() {
-                    // Fallback: get the main PID from service state
-                    if let Some(state) = handle.get_service_state(service_name).await {
-                        if let Some(pid) = state.pid {
-                            pids.push(pid);
-                            // Also collect child processes via sysinfo
-                            collect_descendants(&sys, pid, &mut pids);
-                        }
-                    }
-                }
-
-                if pids.is_empty() {
-                    continue;
-                }
-
-                // Refresh only the processes we care about
-                let pids_to_update: Vec<Pid> =
-                    pids.iter().map(|&p| Pid::from_u32(p)).collect();
-                sys.refresh_processes(
-                    ProcessesToUpdate::Some(&pids_to_update),
-                    true,
-                );
+            for (service_name, source) in sources {
+                let pids = match source {
+                    PidSource::Cgroup(pids) => pids,
+                    PidSource::Tree { leader } => match &index {
+                        Some(index) => collect_service_tree(index, leader),
+                        None => vec![leader],
+                    },
+                };
 
                 let mut total_cpu: f32 = 0.0;
                 let mut total_rss: u64 = 0;
@@ -80,7 +117,7 @@ pub(crate) fn spawn_collector(
                 }
 
                 all_metrics.push(ServiceMetrics {
-                    service: service_name.clone(),
+                    service: service_name,
                     cpu_percent: total_cpu,
                     memory_rss: total_rss,
                     memory_vss: total_vss,
@@ -107,16 +144,176 @@ pub(crate) fn spawn_collector(
     })
 }
 
-/// Collect descendant PIDs by walking sysinfo's process tree.
-fn collect_descendants(sys: &System, parent_pid: u32, result: &mut Vec<u32>) {
-    let parent = Pid::from_u32(parent_pid);
-    for (pid, proc_info) in sys.processes() {
-        if let Some(ppid) = proc_info.parent() {
-            if ppid == parent && !result.contains(&pid.as_u32()) {
-                let child_pid = pid.as_u32();
-                result.push(child_pid);
-                collect_descendants(sys, child_pid, result);
+/// Parent and process-group relations of every live process, built once per
+/// sample so a `getpgid` syscall is spent once per process rather than once
+/// per process and per service.
+struct ProcessIndex {
+    /// Children of each PID.
+    children: HashMap<u32, Vec<u32>>,
+    /// Members of each process group.
+    group_members: HashMap<u32, Vec<u32>>,
+}
+
+impl ProcessIndex {
+    /// Build the index from a `System` refreshed with `ProcessesToUpdate::All`.
+    fn build(sys: &System) -> Self {
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut group_members: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for (pid, proc_info) in sys.processes() {
+            let pid = pid.as_u32();
+            if let Some(ppid) = proc_info.parent() {
+                children.entry(ppid.as_u32()).or_default().push(pid);
+            }
+            if let Some(pgid) = kepler_unix::process_tree::process_group_id(pid) {
+                group_members.entry(pgid).or_default().push(pid);
             }
         }
+
+        ProcessIndex {
+            children,
+            group_members,
+        }
+    }
+}
+
+/// Enumerate a service's processes from its leader PID, for hosts where cgroup
+/// containment is unavailable.
+///
+/// Two relations are unioned because neither is complete on its own. Services
+/// are spawned as their own process-group leader, so group membership catches
+/// descendants that a double fork re-parented away from the leader; the parent
+/// chain catches descendants that left the group through `setpgid`/`setsid`.
+/// A descendant that did both is invisible to either — only cgroups track those.
+fn collect_service_tree(index: &ProcessIndex, leader: u32) -> Vec<u32> {
+    let mut pids = vec![leader];
+    if let Some(members) = index.group_members.get(&leader) {
+        for &pid in members {
+            if pid != leader {
+                pids.push(pid);
+            }
+        }
+    }
+
+    // Breadth-first over a growing worklist: descending from the group members
+    // too, since a child that left the group may still have descendants.
+    let mut next = 0;
+    while next < pids.len() {
+        let parent = pids[next];
+        next += 1;
+        let Some(children) = index.children.get(&parent) else {
+            continue;
+        };
+        for &child in children {
+            if child != parent && !pids.contains(&child) {
+                pids.push(child);
+            }
+        }
+    }
+
+    pids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two relations must cover for each other: a descendant re-parented to
+    /// init is only reachable through the process group, and one that left the
+    /// group is only reachable through the parent chain.
+    #[test]
+    fn service_tree_unions_group_members_and_parent_chain() {
+        // 100  leader, group 100
+        //  └ 101  direct child, still in the group
+        //     └ 102  grandchild that called setsid(), now its own group
+        //  ⋮
+        //   1  init
+        //  ├ 103  re-parented after a double fork, still in group 100
+        //  └ 200  unrelated: another group, another parent
+        let index = ProcessIndex {
+            children: HashMap::from([(100, vec![101]), (101, vec![102]), (1, vec![103, 200])]),
+            group_members: HashMap::from([
+                (100, vec![100, 101, 103]),
+                (102, vec![102]),
+                (200, vec![200]),
+            ]),
+        };
+
+        let mut pids = collect_service_tree(&index, 100);
+        pids.sort_unstable();
+
+        assert_eq!(pids, vec![100, 101, 102, 103]);
+    }
+
+    /// A service whose processes have all exited between the scan and the walk
+    /// still yields its leader, so the sample is skipped rather than mis-summed.
+    #[test]
+    fn service_tree_of_unknown_leader_is_the_leader_alone() {
+        let index = ProcessIndex {
+            children: HashMap::new(),
+            group_members: HashMap::new(),
+        };
+
+        assert_eq!(collect_service_tree(&index, 100), vec![100]);
+    }
+
+    /// End-to-end over a real process tree: the regression this guards is a
+    /// walk that returns only the leader, which is what a service's memory
+    /// looked like on every host without cgroup containment.
+    #[cfg(unix)]
+    #[test]
+    fn service_tree_finds_real_children_and_their_memory() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
+        // Two levels deep. `wait` keeps each shell alive, which also stops it
+        // from exec'ing into its last command and collapsing the tree.
+        let mut leader = Command::new("sh")
+            .arg("-c")
+            .arg("sh -c 'sleep 30 & wait' & wait")
+            .process_group(0)
+            .spawn()
+            .expect("spawn test process tree");
+        let leader_pid = leader.id();
+
+        let mut sys = System::new();
+        let refresh_kind = ProcessRefreshKind::nothing().with_memory().with_cpu();
+        let mut pids = Vec::new();
+        // The shells need a moment to fork; poll rather than sleep a fixed delay.
+        for _ in 0..60 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+            pids = collect_service_tree(&ProcessIndex::build(&sys), leader_pid);
+            if pids.len() >= 3 {
+                break;
+            }
+        }
+
+        let _ = kepler_unix::process_tree::force_kill_process_tree(leader_pid);
+        let _ = leader.wait();
+
+        assert!(
+            pids.len() >= 3,
+            "expected the leader, its child shell and the grandchild sleep, got {:?}",
+            pids
+        );
+        assert!(pids.contains(&leader_pid), "leader missing from {:?}", pids);
+
+        let leader_rss = sys
+            .process(Pid::from_u32(leader_pid))
+            .expect("leader still in the process table")
+            .memory();
+        let tree_rss: u64 = pids
+            .iter()
+            .filter_map(|&pid| sys.process(Pid::from_u32(pid)))
+            .map(|proc_info| proc_info.memory())
+            .sum();
+
+        assert!(
+            tree_rss > leader_rss,
+            "tree RSS {} should exceed the leader's own {}",
+            tree_rss,
+            leader_rss
+        );
     }
 }

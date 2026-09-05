@@ -1,0 +1,19 @@
+# Config for testing that `kepler top` accounts for a service's child processes.
+#
+# `solo` runs as a single process; `forking` keeps a shell alive with two child
+# shells of its own, so its metrics must cover more PIDs and more memory.
+kepler:
+  monitor:
+    interval: 1s
+
+services:
+  solo:
+    command: ["sh", "-c", "while true; do sleep 1; done"]
+
+  forking:
+    command:
+      [
+        "sh",
+        "-c",
+        "sh -c 'while true; do sleep 1; done' & sh -c 'while true; do sleep 1; done' & wait",
+      ]

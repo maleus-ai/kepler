@@ -259,6 +259,70 @@ async fn test_top_json_single_service() -> E2eResult<()> {
     Ok(())
 }
 
+/// Test that `kepler top --json` accounts for a service's child processes.
+///
+/// Without cgroup containment the collector has to reconstruct the process tree
+/// from the service's leader PID; a broken walk reports the leader alone, which
+/// silently under-reports every forking service. `forking` keeps two child
+/// shells alive, so its sample must cover several PIDs and more memory than the
+/// single-process `solo`.
+#[tokio::test]
+async fn test_top_json_counts_child_processes() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_top_counts_child_processes")?;
+
+    harness.start_daemon().await?;
+    harness.start_services_wait(&config_path).await?;
+
+    // Wait for monitor samples
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let output = harness
+        .run_cli(&["-f", config_path.to_str().unwrap(), "top", "--json"])
+        .await?;
+
+    assert!(
+        output.success(),
+        "kepler top --json should succeed. stderr: {}",
+        output.stderr
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&output.stdout).unwrap_or_else(|e| {
+        panic!("Failed to parse JSON: {}. stdout: {}", e, output.stdout)
+    });
+    let obj = json.as_object().expect("JSON output should be an object");
+
+    let forking_pids = obj["forking"]["pids"]
+        .as_array()
+        .expect("forking should have a 'pids' array");
+    assert!(
+        forking_pids.len() >= 3,
+        "forking should report its leader and both child shells, got {} PID(s): {}",
+        forking_pids.len(),
+        output.stdout
+    );
+
+    let forking_rss = obj["forking"]["memory_rss"]
+        .as_u64()
+        .expect("forking memory_rss should be u64");
+    let solo_rss = obj["solo"]["memory_rss"]
+        .as_u64()
+        .expect("solo memory_rss should be u64");
+    assert!(
+        forking_rss > solo_rss,
+        "forking ({} B over {} PIDs) should use more memory than solo ({} B): {}",
+        forking_rss,
+        forking_pids.len(),
+        solo_rss,
+        output.stdout
+    );
+
+    // Cleanup
+    let _ = harness.stop_services(&config_path).await;
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
 /// Test that `kepler top --json` returns an error when monitoring is not configured.
 ///
 /// Uses a config without `kepler.monitor` and verifies the command fails

@@ -131,9 +131,9 @@ When stopping or killing a service, Kepler needs to terminate not just the main 
 
 **Fallback behavior (process groups):**
 
-When cgroups are not available, Kepler uses `process_group(0)` at spawn so the child becomes its own process group leader. Signals are sent to the entire group via `killpg()`. This works well for most workloads but has limitations:
+When cgroups are not available, Kepler uses `process_group(0)` at spawn so the child becomes its own process group leader. Signals are sent to the entire group via `killpg()`. The same group also identifies which processes belong to a service when `kepler top` attributes CPU and memory, combined there with a walk of the parent chain. This works well for most workloads but has limitations:
 
-- Processes that call `setsid()` or change their process group escape the group and won't receive signals.
+- Processes that call `setsid()` or change their process group escape the group and won't receive signals. They still count towards the service's metrics as long as they remain reachable through the parent chain — a process that both leaves the group and is re-parented is invisible to either.
 - Orphan recovery requires PID validation (checking UID and start time to avoid killing a reused PID), which is less reliable than cgroup enumeration.
 
 > **When are cgroups unavailable?** Common scenarios include: running inside an unprivileged Docker container (no write access to `/sys/fs/cgroup`), systems using cgroup v1 only, and non-Linux platforms. The fallback is automatic and requires no configuration.
