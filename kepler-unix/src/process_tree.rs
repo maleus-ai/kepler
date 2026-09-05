@@ -43,6 +43,44 @@ pub fn force_kill_process_tree(pid: u32) -> Result<(), nix::Error> {
     killpg(Pid::from_raw(pid as i32), Signal::SIGKILL)
 }
 
+/// Process group a PID belongs to, or `None` if the process is gone.
+///
+/// Services are spawned as their own group leader (`configure_process_tree`), so a
+/// service's group id equals its main PID. Group membership therefore identifies a
+/// service's descendants even after a double fork re-parents them away from it.
+#[cfg(unix)]
+pub fn process_group_id(pid: u32) -> Option<u32> {
+    nix::unistd::getpgid(Some(Pid::from_raw(pid as i32)))
+        .ok()
+        .map(|pgid| pgid.as_raw() as u32)
+}
+
+#[cfg(not(unix))]
+pub fn process_group_id(_pid: u32) -> Option<u32> {
+    None
+}
+
+/// PIDs currently in the given process group, the leader included.
+///
+/// Walks `/proc` and asks the kernel for each PID's group, rather than trusting a
+/// parent chain: a descendant re-parented by a double fork keeps its group but
+/// loses its ancestry.
+#[cfg(target_os = "linux")]
+pub fn process_group_members(pgid: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|&pid| process_group_id(pid) == Some(pgid))
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn process_group_members(_pgid: u32) -> Vec<u32> {
+    Vec::new()
+}
+
 /// Check whether a process is still alive (signal 0 existence check).
 #[cfg(unix)]
 pub fn process_is_alive(pid: u32) -> bool {
@@ -75,3 +113,7 @@ pub fn get_process_info(pid: u32) -> Option<ProcessInfo> {
 pub fn get_daemon_uid() -> u32 {
     nix::unistd::getuid().as_raw()
 }
+
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod tests;

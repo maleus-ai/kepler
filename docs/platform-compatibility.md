@@ -124,7 +124,7 @@ When stopping or killing a service, Kepler needs to terminate not just the main 
 **How it works (cgroup v2):**
 
 1. **Detection** — At startup, the daemon checks for `/sys/fs/cgroup/cgroup.controllers` (unified hierarchy) and verifies it can create and write to `/sys/fs/cgroup/kepler/`. If either check fails, the daemon falls back to process groups.
-2. **Spawn** — Before spawning a service, a cgroup directory is created at `/sys/fs/cgroup/kepler/<config_hash>/<service_name>`. After spawn, the child PID is written to `cgroup.procs`, which causes all future descendants to inherit the cgroup.
+2. **Spawn** — Before spawning a service, a cgroup directory is created at `/sys/fs/cgroup/kepler/<config_hash>/<service_name>`. After spawn, the child PID is written to `cgroup.procs`, and everything it forks from then on inherits the cgroup. Whatever it forked before that write stays behind — a `cgroup.procs` write moves one process, never its existing children — so Kepler then sweeps the service's process group into the cgroup, repeating until a pass finds nothing new.
 3. **Kill** — On kernel 5.14+, writing `1` to `cgroup.kill` atomically kills all processes in the cgroup. On older kernels, Kepler enumerates `cgroup.procs` and sends `SIGKILL` to each PID, retrying up to 3 times to handle fork races.
 4. **Cleanup** — After a service stops, the cgroup directory is removed. If it returns `EBUSY` (processes still lingering), Kepler kills them and retries.
 5. **Orphan recovery** — On daemon restart, Kepler enumerates any surviving cgroup entries from the previous instance and kills orphaned processes without needing PID validation (the cgroup is the source of truth).

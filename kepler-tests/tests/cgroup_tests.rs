@@ -67,6 +67,59 @@ async fn test_cgroup_created_on_spawn() {
     harness.stop_service("cg-test").await.unwrap();
 }
 
+/// A service that forks immediately must still have its whole tree in its cgroup.
+///
+/// The daemon can only move the leader into the cgroup once `spawn` has returned
+/// it a PID, and a `cgroup.procs` write never carries a process's existing
+/// children with it. Anything forked before that write therefore stays in the
+/// daemon's cgroup unless the spawn path reclaims the process group — which is
+/// what this asserts, with a service that forks as fast as a shell can.
+#[tokio::test]
+async fn test_cgroup_contains_processes_forked_before_registration() {
+    if !require_cgroupv2() {
+        eprintln!("Skipping: REQUIRE_CGROUPV2 not set");
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = TestConfigBuilder::new()
+        .add_service(
+            "cg-forking",
+            TestServiceBuilder::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "sleep 3600 & sleep 3600 & wait".to_string(),
+            ])
+            .build(),
+        )
+        .build();
+
+    let harness = TestDaemonHarness::new(config, temp_dir.path())
+        .await
+        .unwrap();
+
+    harness.start_service("cg-forking").await.unwrap();
+    wait_for_running(harness.handle(), "cg-forking", Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let config_hash = harness.handle().config_hash().to_string();
+    let cgroup_path = kepler_unix::cgroup::service_cgroup_path(
+        &std::path::PathBuf::from("/sys/fs/cgroup/kepler"),
+        &config_hash,
+        "cg-forking",
+    );
+
+    let pids = kepler_unix::cgroup::enumerate_cgroup_pids(&cgroup_path);
+    assert!(
+        pids.len() >= 3,
+        "cgroup should hold the shell and both sleeps, got {:?}",
+        pids,
+    );
+
+    harness.stop_service("cg-forking").await.unwrap();
+}
+
 /// Start then stop a service, verify its cgroup directory is cleaned up.
 #[tokio::test]
 async fn test_cgroup_cleanup_after_stop() {

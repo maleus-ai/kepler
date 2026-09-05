@@ -18,6 +18,9 @@ const KILL_CGROUP_RETRIES: usize = 3;
 /// Sleep between kill_cgroup retries to let the kernel reap processes.
 const KILL_CGROUP_RETRY_DELAY: Duration = Duration::from_millis(50);
 
+/// Max passes for the process group sweep in `register_process_group`.
+const REGISTER_SWEEP_PASSES: usize = 3;
+
 /// Sleep after killing cgroup processes before retrying rmdir.
 const CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(50);
 
@@ -96,20 +99,60 @@ impl ContainmentManager {
         }
     }
 
-    /// Register a PID in the service's cgroup after spawn.
-    pub fn register_pid(&self, config_hash: &str, service_name: &str, pid: u32) {
-        if let ContainmentStrategy::CgroupV2 { ref kepler_root } = self.inner.strategy {
-            let cgroup_path =
-                kepler_unix::cgroup::service_cgroup_path(kepler_root, config_hash, service_name);
-            if let Err(e) = kepler_unix::cgroup::add_pid_to_cgroup(&cgroup_path, pid) {
-                warn!(
-                    "Failed to add PID {} to cgroup {:?}: {}",
-                    pid, cgroup_path, e
-                );
-            } else {
-                debug!("Added PID {} to cgroup {:?}", pid, cgroup_path);
+    /// Move a freshly spawned service's process group into its cgroup.
+    ///
+    /// A `cgroup.procs` write migrates one process and never its existing children,
+    /// so whatever the service forks between the spawn and this call is left behind
+    /// in the daemon's own cgroup — invisible to `enumerate_service_pids` and to
+    /// `cgroup.kill` alike. The leader is its own group leader
+    /// (`configure_process_tree`), so its process group is exactly the set to
+    /// reclaim. Sweeping it repeats because a process not yet moved can fork while
+    /// the sweep runs; once a process is in the cgroup its children inherit it, so
+    /// each pass has strictly less to catch and the sweep settles.
+    pub fn register_process_group(&self, config_hash: &str, service_name: &str, leader_pid: u32) {
+        let ContainmentStrategy::CgroupV2 { ref kepler_root } = self.inner.strategy else {
+            return;
+        };
+        let cgroup_path =
+            kepler_unix::cgroup::service_cgroup_path(kepler_root, config_hash, service_name);
+
+        if let Err(e) = kepler_unix::cgroup::add_pid_to_cgroup(&cgroup_path, leader_pid) {
+            warn!(
+                "Failed to add PID {} to cgroup {:?}: {}",
+                leader_pid, cgroup_path, e
+            );
+            return;
+        }
+        debug!("Added PID {} to cgroup {:?}", leader_pid, cgroup_path);
+
+        let mut moved = std::collections::HashSet::from([leader_pid]);
+        for _ in 0..REGISTER_SWEEP_PASSES {
+            let stragglers: Vec<u32> = kepler_unix::process_tree::process_group_members(leader_pid)
+                .into_iter()
+                .filter(|pid| !moved.contains(pid))
+                .collect();
+            if stragglers.is_empty() {
+                return;
+            }
+            for pid in stragglers {
+                moved.insert(pid);
+                // A member that exited before we reached it is expected, not a fault.
+                match kepler_unix::cgroup::add_pid_to_cgroup(&cgroup_path, pid) {
+                    Ok(()) => debug!(
+                        "Moved straggler PID {} of service {} into cgroup {:?}",
+                        pid, service_name, cgroup_path
+                    ),
+                    Err(e) => debug!(
+                        "Could not move straggler PID {} into cgroup {:?}: {}",
+                        pid, cgroup_path, e
+                    ),
+                }
             }
         }
+        debug!(
+            "Process group sweep for {}/{} still finding new PIDs after {} passes",
+            config_hash, service_name, REGISTER_SWEEP_PASSES
+        );
     }
 
     /// Send a signal to a service's process tree (graceful shutdown).
@@ -126,8 +169,8 @@ impl ContainmentManager {
     ///
     /// With cgroup v2: kills the entire cgroup **and** the process group.
     /// The cgroup kill catches processes that forked between enumerate and kill,
-    /// while killpg catches children that forked before `register_pid` moved
-    /// the leader into the cgroup (they inherit the parent's original cgroup).
+    /// while killpg catches whatever `register_process_group` failed to reclaim
+    /// into the cgroup at spawn.
     /// With fallback: SIGKILL via killpg only.
     pub async fn force_kill_service(&self, config_hash: &str, service_name: &str, pid: u32) {
         if let ContainmentStrategy::CgroupV2 { ref kepler_root } = self.inner.strategy {

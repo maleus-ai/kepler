@@ -144,9 +144,9 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<(ProcessHan
         service_name, pid
     );
 
-    // Register PID in cgroup (if using cgroup v2)
+    // Register the process group in the cgroup (if using cgroup v2)
     if let Some(pid) = pid {
-        containment.register_pid(&config_hash, service_name, pid);
+        containment.register_process_group(&config_hash, service_name, pid);
     }
 
     // Store the PID in state immediately after spawning
