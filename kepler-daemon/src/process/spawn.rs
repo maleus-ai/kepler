@@ -170,7 +170,13 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
     }
 
     let program = &spec.program_and_args[0];
-    let needs_wrapper = spec.user.is_some() || spec.limits.is_some() || spec.no_new_privileges;
+    // A cgroup to join also requires the wrapper: joining has to happen before
+    // exec, and the daemon's own Command deliberately avoids pre_exec so Rust
+    // can use posix_spawnp (see kepler-exec's module docs).
+    let needs_wrapper = spec.user.is_some()
+        || spec.limits.is_some()
+        || spec.no_new_privileges
+        || spec.cgroup_path.is_some();
 
     let mut cmd;
     #[cfg(unix)]
@@ -236,6 +242,13 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
 
         if spec.no_new_privileges {
             wrapper_args.push("--no-new-privileges".to_string());
+        }
+
+        // Let kepler-exec join the cgroup before exec'ing, so the service is
+        // already inside it when it starts forking.
+        if let Some(ref cgroup) = spec.cgroup_path {
+            wrapper_args.push("--cgroup".to_string());
+            wrapper_args.push(cgroup.to_string_lossy().to_string());
         }
 
         wrapper_args.push("--".to_string());

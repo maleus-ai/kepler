@@ -1,0 +1,13 @@
+# A service with exactly one process and no children.
+#
+# Guards the regression the union fix could introduce: the collector now merges
+# PIDs from two sources (the cgroup and the process tree), so a PID present in
+# both must not be counted twice. `exec` replaces the shell, so memhog IS the
+# service — one PID, ~200 MB, never 400 MB.
+kepler:
+  monitor:
+    interval: 1s
+
+services:
+  solo:
+    command: ["sh", "-c", "exec memhog 200"]

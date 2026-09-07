@@ -34,6 +34,23 @@ fn test_hash(label: &str) -> String {
     format!("test_{}_{}", label, std::process::id())
 }
 
+/// Helper: move a PID out of a service cgroup so the directory can be rmdir'd.
+///
+/// Once controllers are enabled for a cgroup's children, that cgroup refuses to
+/// hold processes itself (cgroup v2 "no internal processes" rule). Since the
+/// monitor now enables the `memory` controller, the namespace root can no longer
+/// be used as a parking spot — use the `init` sub-cgroup the test entrypoint
+/// creates, falling back to the root when it is absent.
+fn move_pid_out_of_service_cgroup(pid: u32) -> io::Result<()> {
+    let init_procs = PathBuf::from("/sys/fs/cgroup/init/cgroup.procs");
+    let target = if init_procs.exists() {
+        init_procs
+    } else {
+        PathBuf::from("/sys/fs/cgroup/cgroup.procs")
+    };
+    std::fs::write(&target, pid.to_string())
+}
+
 /// Helper: forcibly clean up a service cgroup (kill processes first if needed).
 fn force_cleanup_service_cgroup(cgroup: &Path) {
     let _ = kill_cgroup(cgroup);
@@ -63,10 +80,8 @@ fn test_cgroupv2_required_when_env_set() {
         "our PID should be in cgroup"
     );
 
-    // Can't rmdir a cgroup with processes in it — move ourselves back
-    // to the root cgroup first
-    let root_procs = PathBuf::from("/sys/fs/cgroup/cgroup.procs");
-    std::fs::write(&root_procs, std::process::id().to_string()).unwrap();
+    // Can't rmdir a cgroup with processes in it — move ourselves out first
+    move_pid_out_of_service_cgroup(std::process::id()).unwrap();
 
     // Give the kernel time to finish migrating all threads out of the cgroup
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -146,6 +161,150 @@ fn test_kill_cgroup_with_children() {
     let pids_after = enumerate_cgroup_pids(&cgroup);
     assert!(pids_after.is_empty(), "all processes should be dead, got {:?}", pids_after);
 
+    force_cleanup_service_cgroup(&cgroup);
+    let _ = remove_config_cgroup(&root, &hash);
+}
+
+/// Sum the RSS of a set of PIDs by reading `/proc/<pid>/status`, in bytes.
+///
+/// Not cfg-gated: its only caller is gated at runtime by `require_cgroupv2()`,
+/// and gating the function too would break compilation of that caller elsewhere.
+fn sum_process_rss(pids: &[u32]) -> u64 {
+    pids.iter()
+        .filter_map(|pid| {
+            let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+            let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
+            let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+            Some(kb * 1024)
+        })
+        .sum()
+}
+
+/// The memory controller must be delegated all the way down to the service
+/// leaf, otherwise `memory.current` does not exist and the monitor silently
+/// falls back to summing per-process RSS.
+#[test]
+fn test_memory_current_readable() {
+    let root = match require_cgroupv2() {
+        Some(r) => r,
+        None => return,
+    };
+
+    let hash = test_hash("memcurrent");
+    let cgroup = create_service_cgroup(&root, &hash, "mem-svc").unwrap();
+
+    let usage = read_memory_current(&cgroup);
+    assert!(
+        usage.is_some(),
+        "memory.current should be readable at {:?}. \
+         leaf cgroup.controllers={:?}, config-level cgroup.subtree_control={:?}, \
+         root cgroup.subtree_control={:?}",
+        cgroup,
+        std::fs::read_to_string(cgroup.join("cgroup.controllers")),
+        std::fs::read_to_string(root.join(&hash).join("cgroup.subtree_control")),
+        std::fs::read_to_string(root.join("cgroup.subtree_control")),
+    );
+
+    force_cleanup_service_cgroup(&cgroup);
+    let _ = remove_config_cgroup(&root, &hash);
+}
+
+/// A process that allocates and then forks **without exec'ing** shares its
+/// pages copy-on-write. Summing per-process RSS counts those shared pages once
+/// per process; `memory.current` counts them once, which is the whole reason
+/// the monitor prefers it.
+///
+/// This models a pre-fork server (gunicorn, unicorn, php-fpm): load data, then
+/// fork N workers. The RSS sum reports roughly (N+1)x the real footprint.
+#[test]
+fn test_memory_current_does_not_double_count_cow() {
+    let root = match require_cgroupv2() {
+        Some(r) => r,
+        None => return,
+    };
+
+    let hash = test_hash("cow");
+    let cgroup = create_service_cgroup(&root, &hash, "cow-svc").unwrap();
+
+    // Allocate ~60 MB, then fork two children that block opening a FIFO nobody
+    // writes to. Opening a FIFO for reading is a blocking syscall, not an exec,
+    // so the children keep sharing the parent's pages copy-on-write — which is
+    // exactly the situation being measured. (A background `read` without the
+    // redirect would not work: POSIX gives background commands in a
+    // non-interactive shell /dev/null on stdin, so they would hit EOF and exit.)
+    //
+    // The leading sleep gives us time to move the parent into the cgroup before
+    // it forks, since children inherit the cgroup at fork time.
+    let fifo = format!("/tmp/kepler_cow_fifo_{}", std::process::id());
+    let marker = format!("/tmp/kepler_cow_ready_{}", std::process::id());
+    let script = format!(
+        "sleep 0.5; mkfifo {f}; \
+         x=$(head -c 60000000 /dev/zero | tr '\\0' 'a'); \
+         ( read l < {f} ) & ( read l < {f} ) & \
+         touch {m}; read l < {f}",
+        f = fifo,
+        m = marker,
+    );
+
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .spawn()
+        .expect("failed to spawn sh");
+
+    add_pid_to_cgroup(&cgroup, child.id()).unwrap();
+
+    // Wait on a marker file the script touches once the allocation is done and
+    // both children are forked. Counting PIDs is not a usable readiness signal
+    // here: the `head | tr` pipeline of the command substitution transiently
+    // puts three processes in the cgroup while the variable is still filling.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !std::path::Path::new(&marker).exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "workload never signalled readiness"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let pids = enumerate_cgroup_pids(&cgroup);
+    assert!(
+        pids.len() >= 3,
+        "expected parent + 2 forked children in the cgroup, got {:?}",
+        pids
+    );
+
+    let rss_sum = sum_process_rss(&pids);
+    let cgroup_usage = read_memory_current(&cgroup).expect("memory.current should be readable");
+
+    eprintln!(
+        "{} processes: RSS sum = {} MB, memory.current = {} MB (~60 MB really allocated)",
+        pids.len(),
+        rss_sum / 1024 / 1024,
+        cgroup_usage / 1024 / 1024,
+    );
+
+    // The kernel's accounting must be close to what was really allocated...
+    assert!(
+        cgroup_usage > 40 * 1024 * 1024 && cgroup_usage < 100 * 1024 * 1024,
+        "memory.current should be near the 60 MB actually allocated, got {} MB",
+        cgroup_usage / 1024 / 1024,
+    );
+
+    // ...while the RSS sum inflates it by roughly the number of processes.
+    assert!(
+        rss_sum > cgroup_usage + 40 * 1024 * 1024,
+        "RSS sum ({} MB) should visibly over-count vs memory.current ({} MB) — \
+         if this fails, the children exec'd instead of staying COW-shared and \
+         the test no longer proves anything",
+        rss_sum / 1024 / 1024,
+        cgroup_usage / 1024 / 1024,
+    );
+
+    let _ = kill_cgroup(&cgroup);
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&fifo);
+    let _ = std::fs::remove_file(&marker);
     force_cleanup_service_cgroup(&cgroup);
     let _ = remove_config_cgroup(&root, &hash);
 }

@@ -1,0 +1,16 @@
+# A service whose memory lives entirely in a forked child.
+#
+# The `sh` parent stays tiny (~1-3 MB) while `memhog` holds 200 MB. If the
+# monitor only accounts for the main PID, memory_rss comes out around 1-3 MB
+# instead of 200+ MB — two orders of magnitude apart, so the assertion is a
+# clean threshold rather than a fuzzy comparison.
+#
+# The child is forked immediately after exec, which is what makes it race the
+# daemon's cgroup registration (see docs/plans/monitor-child-processes-ram.md).
+kepler:
+  monitor:
+    interval: 1s
+
+services:
+  forker:
+    command: ["sh", "-c", "memhog 200 & wait"]
