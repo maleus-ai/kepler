@@ -98,7 +98,7 @@ impl SpawnGate {
 pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<(ProcessHandle, SpawnGate)> {
     let SpawnServiceParams {
         service_name,
-        spec,
+        mut spec,
         log_store,
         handle,
         exit_tx,
@@ -126,6 +126,12 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<(ProcessHan
 
     // Prepare cgroup before spawning (creates cgroup directory if using cgroup v2)
     containment.prepare_spawn(&config_hash, service_name);
+
+    // Hand the cgroup to kepler-exec so the process joins it before exec'ing.
+    // Registering the PID after spawn (below) is a fallback for the paths where
+    // the wrapper is not used: by then the service may already have forked, and
+    // migrating a PID does not bring its children along.
+    spec.cgroup_path = containment.service_cgroup_path(&config_hash, service_name);
 
     // Spawn the command detached for monitoring
     let result = spawn_detached(

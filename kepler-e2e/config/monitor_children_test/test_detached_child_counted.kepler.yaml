@@ -1,0 +1,13 @@
+# A service whose memory-holding process is orphaned and re-parented to init.
+#
+# The inner `sh` forks memhog and exits immediately, so memhog's parent is gone
+# and a process-tree walk from the service's main PID can no longer reach it.
+# Only the cgroup still knows memhog belongs to this service — which is why the
+# collector unions both sources instead of treating the tree walk as sufficient.
+kepler:
+  monitor:
+    interval: 1s
+
+services:
+  detached:
+    command: ["sh", "-c", "sh -c 'memhog 200 &' ; sleep 3600"]

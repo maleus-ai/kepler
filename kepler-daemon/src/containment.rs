@@ -78,6 +78,42 @@ impl ContainmentManager {
         }
     }
 
+    /// Current memory usage of a service's cgroup, in bytes (for monitoring).
+    ///
+    /// Uses the kernel's own accounting (`memory.current` minus reclaimable
+    /// page cache), which — unlike summing per-process RSS — never double-counts
+    /// pages shared between a parent and its forked children.
+    ///
+    /// Returns `None` when cgroup v2 is not active or the memory controller is
+    /// not delegated to us; callers fall back to summing per-process RSS.
+    pub fn service_memory_current(&self, config_hash: &str, service_name: &str) -> Option<u64> {
+        if let ContainmentStrategy::CgroupV2 { ref kepler_root } = self.inner.strategy {
+            let cgroup_path =
+                kepler_unix::cgroup::service_cgroup_path(kepler_root, config_hash, service_name);
+            kepler_unix::cgroup::read_memory_current(&cgroup_path)
+        } else {
+            None
+        }
+    }
+
+    /// Path of a service's cgroup, if cgroup v2 containment is active.
+    ///
+    /// Handed to `kepler-exec` so the process joins the cgroup *before* exec.
+    /// Returns `None` under the process-group fallback, where there is nothing
+    /// to join.
+    pub fn service_cgroup_path(
+        &self,
+        config_hash: &str,
+        service_name: &str,
+    ) -> Option<std::path::PathBuf> {
+        match self.inner.strategy {
+            ContainmentStrategy::CgroupV2 { ref kepler_root } => Some(
+                kepler_unix::cgroup::service_cgroup_path(kepler_root, config_hash, service_name),
+            ),
+            ContainmentStrategy::ProcessGroup => None,
+        }
+    }
+
     /// Prepare for spawning a service (creates cgroup directory if applicable).
     pub fn prepare_spawn(&self, config_hash: &str, service_name: &str) {
         if let ContainmentStrategy::CgroupV2 { ref kepler_root } = self.inner.strategy {

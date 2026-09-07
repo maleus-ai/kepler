@@ -6,6 +6,12 @@ edition = "2024"
 [lib]
 path = "src/lib.rs"
 
+# Test workload used by the monitoring tests. An explicit [[bin]] is required
+# because the explicit [lib] above disables target auto-discovery.
+[[bin]]
+name = "memhog"
+path = "src/bin/memhog.rs"
+
 [[test]]
 name = "stop_clean_test"
 path = "tests/stop_clean_test.rs"

@@ -760,10 +760,38 @@ The **collector** periodically samples CPU/memory metrics via sysinfo/cgroups an
 
 For each running service, the collector:
 
-1. **Enumerates PIDs** — Uses cgroup v2 (if available) to get all PIDs in the service's cgroup, or falls back to the main PID + sysinfo process tree walking
-2. **Refreshes process info** — Calls `sysinfo` to get current CPU and memory stats for the enumerated PIDs
-3. **Aggregates** — Sums CPU percentage, RSS memory, and virtual memory across the entire process tree
+1. **Refreshes process info** — One full `sysinfo` refresh per cycle, before anything else. A targeted refresh only updates processes already in the table and never inserts new ones, so the tree walk below would be unable to discover a child
+2. **Enumerates PIDs** — Unions two sources (see below), then deduplicates
+3. **Aggregates** — Sums CPU percentage and virtual memory across the process tree. Memory comes from the cgroup when available (see below), otherwise from summing per-process RSS
 4. **Sends** — Sends all service metrics to the writer thread through the channel
+
+#### PID Enumeration
+
+PIDs come from two sources that are **unioned**, not tried in order. Neither is complete on its own:
+
+| Source | Catches | Misses |
+| ------ | ------- | ------ |
+| The service's cgroup (`cgroup.procs`) | Processes that detached and were re-parented to init | Anything that is not a cgroup member |
+| Process-tree walk from the service's main PID | Descendants regardless of cgroup membership | Processes whose parent has exited |
+
+The two sets overlap, so the union is deduplicated — a PID counted twice would double its RSS and CPU contribution. The tree walk tracks visited subtrees separately from collected PIDs: a PID can already be present because the cgroup listed it, and the walk must still descend into its children.
+
+On platforms without cgroups, only the tree walk yields anything.
+
+#### Memory Accounting
+
+`memory_rss` has two possible sources, in order of preference:
+
+1. **cgroup v2 (`memory.current` minus `inactive_file`)** — the kernel's own accounting, used whenever cgroup v2 is active, the `memory` controller has been delegated to Kepler's cgroup hierarchy, *and* the cgroup demonstrably contains every enumerated PID. This is the "working set" formula used by Docker and Kubernetes; subtracting `inactive_file` keeps a service that merely reads large files from appearing to hold that data resident.
+2. **Sum of per-process RSS via sysinfo** — the fallback on non-Linux platforms, when cgroup v2 is unavailable, when the `memory` controller is not delegated, or when some enumerated PID is outside the cgroup.
+
+That last condition matters: `memory.current` accounts for cgroup members and nothing else, so a process outside the cgroup would vanish from the total entirely. Between over-reporting shared pages and under-reporting a whole process, the RSS sum is the safer answer.
+
+The cgroup source is preferred because summing per-process RSS **double-counts pages shared through `fork()` copy-on-write**. A pre-fork server (gunicorn, unicorn, php-fpm) that loads data and then forks N workers reports roughly (N+1)x its real footprint under the RSS sum: measured at 384 MB reported for 96 MB actually allocated with 3 forked workers. The cgroup figure has no such flaw and covers every process in the cgroup without enumerating PIDs.
+
+For the controller to be delegated, `memory` must appear in `cgroup.subtree_control` at each level above the service cgroup. Kepler enables it on its own levels (`/sys/fs/cgroup/kepler/` and `/sys/fs/cgroup/kepler/<config_hash>/`) but never modifies the system root cgroup — on a systemd host, `/sys/fs/cgroup/cgroup.subtree_control` already delegates `memory`, so this works out of the box. Where it does not, Kepler silently falls back to the RSS sum.
+
+`memory_vss` always comes from summing per-process virtual memory: cgroups have no virtual-memory equivalent.
 
 ### Storage
 
@@ -774,7 +802,7 @@ Metrics are stored in `<state_dir>/monitor.db` using SQLite (WAL mode on local f
 | `timestamp`   | `INTEGER` | Unix epoch milliseconds                  |
 | `service`     | `TEXT`    | Service name                             |
 | `cpu_percent` | `REAL`    | Total CPU usage across process tree      |
-| `memory_rss`  | `INTEGER` | Total RSS memory in bytes                |
+| `memory_rss`  | `INTEGER` | Memory in bytes (cgroup working set, or summed RSS — see above) |
 | `memory_vss`  | `INTEGER` | Total virtual memory in bytes            |
 | `pids`        | `TEXT`    | JSON array of PIDs (e.g., `[1234,1235]`) |
 

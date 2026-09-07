@@ -25,6 +25,13 @@ pub struct CommandSpec {
     pub clear_env: bool,
     /// Whether to set PR_SET_NO_NEW_PRIVS on the spawned process
     pub no_new_privileges: bool,
+    /// cgroup the process must join *before* exec'ing (Linux cgroup v2 only).
+    ///
+    /// Joining after spawn is too late: the service may already have forked, and
+    /// migrating a PID into a cgroup does not move its existing children, so
+    /// those stay in the daemon's cgroup forever. Handing the path to
+    /// `kepler-exec` lets it join while it is still the only process.
+    pub cgroup_path: Option<PathBuf>,
 }
 
 impl CommandSpec {
@@ -45,6 +52,7 @@ impl CommandSpec {
             limits: None,
             clear_env: true, // Secure default
             no_new_privileges: true, // Secure default
+            cgroup_path: None,
         }
     }
 
@@ -66,6 +74,7 @@ impl CommandSpec {
             limits,
             clear_env: true, // Secure default
             no_new_privileges: true, // Secure default
+            cgroup_path: None,
         }
     }
 
@@ -90,6 +99,7 @@ impl CommandSpec {
             limits,
             clear_env,
             no_new_privileges,
+            cgroup_path: None,
         }
     }
 

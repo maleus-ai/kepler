@@ -30,7 +30,9 @@ Kepler runs on all Unix platforms, but some security and hardening features depe
 | **CPU time limit** (`limits.cpu_time`)       |  Yes  |      Yes      |    Partial    |       Yes        |
 | **File descriptor limit** (`limits.max_fds`) |  Yes  |      Yes      |      Yes      |       Yes        |
 | **FD cleanup** (close inherited fds)         |  Yes  |      Yes      |      Yes      |       Yes        |
-| **Process containment** (cgroup v2)          |  Yes  | No (fallback) | No (fallback) |  No (fallback)   |
+| **Process containment** (cgroup v2)          | Yes\* | No (fallback) | No (fallback) |  No (fallback)   |
+
+\* cgroup v2 additionally requires the daemon to be able to create and write `/sys/fs/cgroup/kepler/`, which in practice means running as root on a host with the unified hierarchy mounted. A non-root daemon, or one in an unprivileged container, silently uses the process-group fallback instead — check the daemon log for `Process containment:` to see which strategy is active.
 
 **Legend:**
 - **Yes** — Fully supported and enforced

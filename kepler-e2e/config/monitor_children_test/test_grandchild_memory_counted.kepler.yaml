@@ -1,0 +1,10 @@
+# Same idea as test_child_memory_counted, but the memory lives two levels down.
+# Exercises the recursion in the collector's process-tree walk: a monitor that
+# only looks at direct children would miss this.
+kepler:
+  monitor:
+    interval: 1s
+
+services:
+  nested:
+    command: ["sh", "-c", "sh -c 'memhog 200 & wait' & wait"]

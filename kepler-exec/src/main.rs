@@ -21,6 +21,7 @@ fn main() {
     let mut rlimit_cpu: Option<u64> = None;
     let mut rlimit_nofile: Option<u64> = None;
     let mut no_new_privileges = false;
+    let mut cgroup_path: Option<String> = None;
 
     let mut i = 0;
     let mut cmd_start = None;
@@ -47,6 +48,10 @@ fn main() {
                 i += 1;
                 rlimit_nofile = Some(parse_u64_arg(&args, i, "--rlimit-nofile"));
             }
+            "--cgroup" => {
+                i += 1;
+                cgroup_path = Some(parse_string_arg(&args, i, "--cgroup"));
+            }
             "--no-new-privileges" => {
                 no_new_privileges = true;
             }
@@ -72,6 +77,24 @@ fn main() {
 
     let program = &args[cmd_start];
     let cmd_args = &args[cmd_start + 1..];
+
+    // Join the service's cgroup while this process is still alone and still
+    // root. Both orderings matter:
+    //
+    //   - Before exec: writing a PID into `cgroup.procs` migrates only that one
+    //     process, never its existing children. If the daemon did it after
+    //     spawning, anything the service forked in the meantime would stay in
+    //     the daemon's cgroup for good — invisible to monitoring and to
+    //     `cgroup.kill`. Here there is nothing forked yet.
+    //   - Before dropping privileges: `cgroup.procs` is owned by root.
+    //
+    // Best-effort — a cgroup problem must never stop a service from starting.
+    if let Some(ref path) = cgroup_path {
+        let procs = std::path::Path::new(path).join("cgroup.procs");
+        if let Err(e) = std::fs::write(&procs, process::id().to_string()) {
+            eprintln!("kepler-exec: warning: could not join cgroup {}: {}", path, e);
+        }
+    }
 
     // Apply resource limits before dropping privileges
     apply_rlimits(rlimit_as, rlimit_cpu, rlimit_nofile);
