@@ -182,6 +182,59 @@ async fn test_non_owner_denied_restart_without_acl() -> E2eResult<()> {
     Ok(())
 }
 
+/// Non-owner is denied `start -d --wait` and `run -d --wait` without ACL, and the
+/// CLI exits non-zero. A denied launch closes the progress stream in the same
+/// instant the response lands, so a waiter that stops on the closed stream
+/// alone reports success for services that were never started.
+#[tokio::test]
+async fn test_non_owner_denied_launch_wait_without_acl() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_config_a")?;
+
+    harness.start_daemon().await?;
+
+    // Start as testuser1
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "start", "-d"]).await?;
+    output.assert_success();
+
+    harness.wait_for_service_status(&config_path, "auth-svc-a", "running", Duration::from_secs(10)).await?;
+
+    for command in ["start", "run"] {
+        let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), command, "-d", "--wait"]).await?;
+        assert!(!output.success(), "Non-owner `{} -d --wait` should exit non-zero. stdout: {} stderr: {}", command, output.stdout, output.stderr);
+        assert!(output.stderr_contains("permission denied"), "`{} -d --wait` should mention permission denied. stderr: {}", command, output.stderr);
+    }
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Same denial on a config the daemon has not loaded since its restart: the ACL
+/// check then reads the owner from the persisted state instead of the registry.
+#[tokio::test]
+async fn test_non_owner_denied_launch_wait_on_unloaded_config() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_config_a")?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "start", "-d"]).await?;
+    output.assert_success();
+
+    harness.wait_for_service_status(&config_path, "auth-svc-a", "running", Duration::from_secs(10)).await?;
+
+    // No autostart: the restarted daemon keeps the state on disk but does not reload the config.
+    harness.kill_daemon().await?;
+    harness.start_daemon().await?;
+
+    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "run", "-d", "--wait"]).await?;
+    assert!(!output.success(), "Non-owner `run -d --wait` on an unloaded config should exit non-zero. stdout: {} stderr: {}", output.stdout, output.stderr);
+    assert!(output.stderr_contains("permission denied"), "Should mention permission denied. stderr: {}", output.stderr);
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
 // =========================================================================
 // Owner and root can perform read operations; non-owner is denied
 // =========================================================================
