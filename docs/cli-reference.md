@@ -114,7 +114,7 @@ kepler start --hardening strict          # Start with per-config hardening
 | `--abort-on-failure`              | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`)                                                                      |
 | `--no-abort-on-failure`           | Don't stop services on unhandled failure (requires `--wait`)                                                                                               |
 | `--hardening <LEVEL>`             | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening)          |
-| `--force`                         | As root, take ownership of another user's config without the confirmation prompt; the warning is still printed. See [Root Owner Takeover](#root-owner-takeover) |
+| `--force`                         | As root, take ownership of another user's config without the confirmation prompt shown on a terminal. See [Root Owner Takeover](#root-owner-takeover) |
 
 **Behavior by mode:**
 
@@ -171,7 +171,7 @@ kepler run --hardening strict           # Run with per-config hardening
 | `--abort-on-failure`              | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`)                      |
 | `--no-abort-on-failure`           | Don't stop services on unhandled failure (requires `--wait`)                                               |
 | `--hardening <LEVEL>`             | Per-config hardening level: `none`, `no-root`, `strict`. See [Per-Config Hardening](#per-config-hardening) |
-| `--force`                         | As root, take ownership of another user's config without the confirmation prompt; the warning is still printed. See [Root Owner Takeover](#root-owner-takeover) |
+| `--force`                         | As root, take ownership of another user's config without the confirmation prompt shown on a terminal. See [Root Owner Takeover](#root-owner-takeover) |
 
 **Key differences from `start`:**
 
@@ -280,7 +280,7 @@ kepler recreate -D MODE=production       # Recreate with defined flags
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--hardening <LEVEL>`          | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening) |
 | `-D, --define <KEY=VALUE>`     | Define a flag accessible via `kepler.flags` in expressions (repeatable). See [Define Flags](#define-flags)                                        |
-| `--force`                      | As root, take ownership of another user's config without the confirmation prompt; the warning is still printed. See [Root Owner Takeover](#root-owner-takeover) |
+| `--force`                      | As root, take ownership of another user's config without the confirmation prompt shown on a terminal. See [Root Owner Takeover](#root-owner-takeover) |
 
 This is equivalent to running `kepler stop --clean` followed by `kepler start`, but also re-bakes the config snapshot in between.
 
@@ -294,7 +294,7 @@ Loading a config records its caller as the config's owner. The owner is what gra
 
 1. Always print a warning naming the displaced owner.
 2. On a terminal (stdin and stderr are TTYs), ask `Take ownership as root? [y/N]`. Anything but `y` / `yes` aborts with exit code 1.
-3. With `--force`, skip the prompt and proceed — the warning is still printed.
+3. With `--force`, skip the prompt and proceed.
 4. Without a terminal, proceed after the warning.
 
 ```bash

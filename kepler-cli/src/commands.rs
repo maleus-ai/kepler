@@ -42,7 +42,7 @@ pub struct StartRunArgs {
     /// Define flags accessible via kepler.flags in expressions (KEY=VALUE, repeatable)
     #[arg(short = 'D', long = "define", value_name = "KEY=VALUE")]
     pub define: Vec<String>,
-    /// As root, take ownership of a config owned by another user without the confirmation prompt (the warning is still printed; -f is reserved for --file)
+    /// As root, take ownership of a config owned by another user without the confirmation prompt shown on a terminal (-f is reserved for --file)
     #[arg(long)]
     pub force: bool,
 }
@@ -121,7 +121,7 @@ pub enum Commands {
         /// Define flags accessible via kepler.flags in expressions (KEY=VALUE, repeatable)
         #[arg(short = 'D', long = "define", value_name = "KEY=VALUE")]
         define: Vec<String>,
-        /// As root, take ownership of a config owned by another user without the confirmation prompt (the warning is still printed; -f is reserved for --file)
+        /// As root, take ownership of a config owned by another user without the confirmation prompt shown on a terminal (-f is reserved for --file)
         #[arg(long)]
         force: bool,
     },
