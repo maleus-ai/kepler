@@ -1684,8 +1684,10 @@ async fn handle_request(
         }
 
         Request::ConfigOwner { config_path } => {
-            // Owner UIDs of other users' configs are not exposed to non-root callers
-            if !matches!(auth_ctx, kepler_daemon::auth::AuthContext::Root { .. }) {
+            // Owner UIDs of other users' configs are not exposed to non-root callers.
+            // Checked on the UID, not the auth kind: a root process holding a token
+            // authenticates as `Token { uid: 0 }` and can still take over any config.
+            if auth_ctx.uid() != 0 {
                 warn!("Non-root user (UID {}) attempted to query a config owner", auth_ctx.uid());
                 return Response::PermissionDenied {
                     message: "Permission denied: only root can query a config owner".to_string(),

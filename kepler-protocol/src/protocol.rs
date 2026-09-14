@@ -242,7 +242,6 @@ pub enum Request {
         config_path: PathBuf,
     },
     /// Query the recorded owner of a config and whether it is loaded (root only).
-    /// Lets the CLI warn before a root launch takes ownership of another user's config.
     ConfigOwner {
         /// Path to the config file
         config_path: PathBuf,

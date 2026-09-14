@@ -151,6 +151,47 @@ async fn test_root_recreate_warns() -> E2eResult<()> {
     Ok(())
 }
 
+/// A root process holding a service token authenticates as a token caller, not as
+/// root — its takeover must warn all the same.
+#[tokio::test]
+async fn test_root_service_with_token_warns() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let target_path = harness.load_config(TEST_MODULE, "test_takeover")?;
+    let target = target_path.to_str().unwrap().to_string();
+    start_as_testuser1(&mut harness, &target_path).await?;
+
+    let kepler_bin = harness.kepler_bin().to_str().unwrap().to_string();
+    let result_file = harness.state_dir().join("token_takeover_result.txt");
+    let result = result_file.to_str().unwrap().to_string();
+    let controller_path = harness.create_named_config(
+        "token_controller.kepler.yaml",
+        &format!(
+            r#"services:
+  controller:
+    command:
+      - "sh"
+      - "-c"
+      - |
+        '{kepler_bin}' -f '{target}' run -d --wait > '{result}' 2>&1
+        echo "EXIT_CODE=$?" >> '{result}'
+        sleep 300
+    permissions: [run]
+"#
+        ),
+    )?;
+
+    let output = harness.run_cli(&["-f", controller_path.to_str().unwrap(), "start", "-d"]).await?;
+    output.assert_success();
+
+    harness.wait_for_file_content(&result_file, "EXIT_CODE=", Duration::from_secs(15)).await?;
+    let content = std::fs::read_to_string(&result_file)?;
+    assert!(content.contains("EXIT_CODE=0"), "Token-authenticated run should succeed. Result: {}", content);
+    assert!(content.contains(WARNING), "Token-authenticated root takeover should warn. Result: {}", content);
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
 /// A root `start` on a config the daemon already holds does not reload it, so the
 /// owner is untouched and there is nothing to warn about.
 #[tokio::test]

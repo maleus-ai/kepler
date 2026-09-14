@@ -607,7 +607,8 @@ async fn confirm_owner_takeover(
     let (_progress_rx, response_future) = client.config_owner(config_path.to_path_buf())?;
     let info = match response_future.await {
         Ok(Response::Ok { data: Some(ResponseData::ConfigOwner(info)), .. }) => info,
-        // A daemon without the query cannot tell: launch as before
+        // Only a failed query lands here (lost connection, a path the daemon cannot
+        // resolve): the launch request that follows hits the same failure and reports it
         _ => return Ok(()),
     };
     let Some(uid) = displaced_owner(&info, takeover) else {
