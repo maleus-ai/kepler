@@ -5,7 +5,7 @@ mod ui;
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use kepler_daemon::Daemon;
 use kepler_protocol::{
     client::Client,
     errors::ClientError,
-    protocol::{ConfigStatus, StreamLogEntry, LogStreamData, Response, ResponseData, ServerEvent, ServiceInfo, ServicePhase, ServiceTarget},
+    protocol::{ConfigOwnerInfo, ConfigStatus, StreamLogEntry, LogStreamData, Response, ResponseData, ServerEvent, ServiceInfo, ServicePhase, ServiceTarget},
 };
 use tokio::sync::mpsc;
 use tabled::{Table, Tabled};
@@ -158,10 +158,12 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Commands::Start { args } => {
+            confirm_owner_takeover(&client, &canonical_path, OwnerTakeover::IfUnloaded, args.force).await?;
             handle_launch(&client, canonical_path, sys_env, args, LaunchMode::Start, cli.quiet).await?;
         }
 
         Commands::Run { args, start_clean, clean } => {
+            confirm_owner_takeover(&client, &canonical_path, OwnerTakeover::Always, args.force).await?;
             handle_launch(&client, canonical_path, sys_env, args, LaunchMode::Run { start_clean, clean }, cli.quiet).await?;
         }
 
@@ -254,7 +256,8 @@ async fn run() -> Result<()> {
             }
         }
 
-        Commands::Recreate { hardening, define } => {
+        Commands::Recreate { hardening, define, force } => {
+            confirm_owner_takeover(&client, &canonical_path, OwnerTakeover::Always, force).await?;
             let define_flags = build_define_flags(define);
             let (progress_rx, response_future) = client.recreate(canonical_path.clone(), Some(sys_env), hardening, define_flags)?;
             let response = run_with_progress(progress_rx, response_future).await?;
@@ -534,6 +537,109 @@ fn build_define_flags(raw: Vec<String>) -> Option<HashMap<String, String>> {
         }
     }
     if map.is_empty() { None } else { Some(map) }
+}
+
+/// Which configs a launch command reloads — a reload records its caller as the owner.
+#[derive(Clone, Copy)]
+enum OwnerTakeover {
+    /// `start` only loads a config the daemon does not already hold
+    IfUnloaded,
+    /// `run` and `recreate` reload the config every time
+    Always,
+}
+
+/// The owner a root launch would displace, if any.
+///
+/// The recorded owner is what grants access to an unloaded config and the user
+/// its services without `user:` run as, so a root reload locks that user out.
+fn displaced_owner(info: &ConfigOwnerInfo, takeover: OwnerTakeover) -> Option<u32> {
+    let reloads = match takeover {
+        OwnerTakeover::IfUnloaded => !info.loaded,
+        OwnerTakeover::Always => true,
+    };
+    match info.owner_uid {
+        Some(uid) if uid != 0 && reloads => Some(uid),
+        _ => None,
+    }
+}
+
+/// Reads a yes/no answer from one line; only `y` or `yes` accepts.
+fn read_confirmation(mut reader: impl std::io::BufRead) -> bool {
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// `UID 1001 (snivel)`, or `UID 1001` when the UID has no passwd entry.
+fn describe_uid(uid: u32) -> String {
+    // SAFETY: getpwuid returns NULL or a pointer to a static passwd record,
+    // which is copied out before any other passwd call can overwrite it.
+    let name = unsafe {
+        let pw = libc::getpwuid(uid);
+        if pw.is_null() {
+            None
+        } else {
+            std::ffi::CStr::from_ptr((*pw).pw_name).to_str().ok().map(str::to_owned)
+        }
+    };
+    match name {
+        Some(name) => format!("UID {} ({})", uid, name),
+        None => format!("UID {}", uid),
+    }
+}
+
+/// Before a root launch reloads a config owned by another user, warns — always —
+/// then asks for confirmation on a terminal unless `--force` is given. Without a
+/// terminal the launch proceeds after the warning. Exits 1 when the operator declines.
+async fn confirm_owner_takeover(
+    client: &Client,
+    config_path: &Path,
+    takeover: OwnerTakeover,
+    force: bool,
+) -> Result<()> {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+
+    let (_progress_rx, response_future) = client.config_owner(config_path.to_path_buf())?;
+    let info = match response_future.await {
+        Ok(Response::Ok { data: Some(ResponseData::ConfigOwner(info)), .. }) => info,
+        // A daemon without the query cannot tell: launch as before
+        _ => return Ok(()),
+    };
+    let Some(uid) = displaced_owner(&info, takeover) else {
+        return Ok(());
+    };
+
+    let owner = describe_uid(uid);
+    eprintln!(
+        "{} {} is owned by {}. Launching it as root makes root its owner: {} loses access to it unless an ACL grants it, and its services without `user:` run as root.",
+        "Warning:".yellow().bold(),
+        config_path.display(),
+        owner,
+        owner,
+    );
+
+    if force {
+        eprintln!("Taking ownership as root (--force).");
+        return Ok(());
+    }
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        return Ok(());
+    }
+
+    eprint!("Take ownership as root? [y/N] ");
+    let _ = std::io::stderr().flush();
+    if read_confirmation(std::io::stdin().lock()) {
+        eprintln!("Taking ownership as root (confirmed).");
+        Ok(())
+    } else {
+        eprintln!("Aborted.");
+        std::process::exit(1);
+    }
 }
 
 /// Distinguishes `kepler start` from `kepler run` for the shared launch handler.

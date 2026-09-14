@@ -241,6 +241,12 @@ pub enum Request {
         /// Path to the config file
         config_path: PathBuf,
     },
+    /// Query the recorded owner of a config and whether it is loaded (root only).
+    /// Lets the CLI warn before a root launch takes ownership of another user's config.
+    ConfigOwner {
+        /// Path to the config file
+        config_path: PathBuf,
+    },
     /// Query monitoring metrics (CPU, memory) for services
     MonitorMetrics {
         /// Path to the config file
@@ -295,6 +301,7 @@ impl Request {
             Request::CheckQuiescence { .. } => "CheckQuiescence",
             Request::CheckReadiness { .. } => "CheckReadiness",
             Request::UserRights { .. } => "UserRights",
+            Request::ConfigOwner { .. } => "ConfigOwner",
             Request::MonitorMetrics { .. } => "MonitorMetrics",
         }
     }
@@ -368,8 +375,20 @@ pub enum ResponseData {
     CheckResult(bool),
     /// Effective rights for the calling user on a config
     UserRights(Vec<String>),
+    /// Recorded owner of a config
+    ConfigOwner(ConfigOwnerInfo),
     /// Monitoring metrics entries
     MonitorMetrics(Vec<MonitorMetricEntry>),
+}
+
+/// Recorded owner of a config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigOwnerInfo {
+    /// UID recorded as owner; `None` when the config has never been loaded
+    pub owner_uid: Option<u32>,
+    /// Whether the daemon currently holds the config. A `start` only takes
+    /// ownership of a config it has to load; `run` and `recreate` always reload.
+    pub loaded: bool,
 }
 
 /// A single monitoring metrics sample for one service.

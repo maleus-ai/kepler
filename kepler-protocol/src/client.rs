@@ -433,6 +433,14 @@ impl Client {
         self.send_request(Request::UserRights { config_path })
     }
 
+    /// Query the recorded owner of a config (root only).
+    pub fn config_owner(
+        &self,
+        config_path: PathBuf,
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.send_request(Request::ConfigOwner { config_path })
+    }
+
     /// Check if all services are ready (reached target state)
     pub fn check_readiness(
         &self,

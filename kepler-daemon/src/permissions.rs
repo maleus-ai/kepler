@@ -246,6 +246,8 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
         Request::ListConfigs => None,
         Request::Shutdown => None,
         Request::Prune { .. } => None,
+        // Root-only, gated in the handler like Shutdown and Prune
+        Request::ConfigOwner { .. } => None,
         Request::Status { config_path: None } => None,
         // UserRights computes effective rights — requires FS read access but no ACL gate
         Request::UserRights { .. } => None,
