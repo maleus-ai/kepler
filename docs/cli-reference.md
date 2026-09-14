@@ -114,6 +114,7 @@ kepler start --hardening strict          # Start with per-config hardening
 | `--abort-on-failure`              | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`)                                                                      |
 | `--no-abort-on-failure`           | Don't stop services on unhandled failure (requires `--wait`)                                                                                               |
 | `--hardening <LEVEL>`             | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening)          |
+| `--force`                         | As root, take ownership of another user's config without the confirmation prompt shown on a terminal. See [Root Owner Takeover](#root-owner-takeover) |
 
 **Behavior by mode:**
 
@@ -170,6 +171,7 @@ kepler run --hardening strict           # Run with per-config hardening
 | `--abort-on-failure`              | Stop all services on unhandled failure (foreground mode only, incompatible with `-d`)                      |
 | `--no-abort-on-failure`           | Don't stop services on unhandled failure (requires `--wait`)                                               |
 | `--hardening <LEVEL>`             | Per-config hardening level: `none`, `no-root`, `strict`. See [Per-Config Hardening](#per-config-hardening) |
+| `--force`                         | As root, take ownership of another user's config without the confirmation prompt shown on a terminal. See [Root Owner Takeover](#root-owner-takeover) |
 
 **Key differences from `start`:**
 
@@ -278,10 +280,31 @@ kepler recreate -D MODE=production       # Recreate with defined flags
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--hardening <LEVEL>`          | Per-config hardening level: `none`, `no-root`, `strict`. Effective level = max(daemon, config). See [Per-Config Hardening](#per-config-hardening) |
 | `-D, --define <KEY=VALUE>`     | Define a flag accessible via `kepler.flags` in expressions (repeatable). See [Define Flags](#define-flags)                                        |
+| `--force`                      | As root, take ownership of another user's config without the confirmation prompt shown on a terminal. See [Root Owner Takeover](#root-owner-takeover) |
 
 This is equivalent to running `kepler stop --clean` followed by `kepler start`, but also re-bakes the config snapshot in between.
 
 See [Configuration](configuration.md#config-immutability) for details on the baking process.
+
+### Root Owner Takeover
+
+Loading a config records its caller as the config's owner. The owner is what grants access to the config once the daemon no longer holds it (after a daemon restart, for instance), and the user its services without `user:` run as. When root loads a config another user owns, root becomes the owner: that user loses access to the config unless an ACL grants it — and only finds out the next time they need it.
+
+`kepler start` (on a config the daemon does not hold), `kepler run` and `kepler recreate` all load the config. Run as root on a config owned by another user, they:
+
+1. Always print a warning naming the displaced owner.
+2. On a terminal (stdin and stderr are TTYs), ask `Take ownership as root? [y/N]`. Anything but `y` / `yes` aborts with exit code 1.
+3. With `--force`, skip the prompt and proceed.
+4. Without a terminal, proceed after the warning.
+
+```bash
+$ sudo kepler -f apps/backend/test.kepler.yaml run -d --wait
+Warning: /repo/apps/backend/test.kepler.yaml is owned by UID 1001 (snivel). Launching it as root makes root its owner: UID 1001 (snivel) loses access to it unless an ACL grants it, and its services without `user:` run as root.
+Take ownership as root? [y/N] n
+Aborted.
+```
+
+`--force` is long-form only: `-f` is the global `--file` option.
 
 ### Per-Config Hardening
 

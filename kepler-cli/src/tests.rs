@@ -1070,3 +1070,41 @@ async fn run_one_shot_anchored(mock: &MockClient, start_after_id: Option<i64>) -
     ).await.unwrap();
     collected
 }
+
+// ============================================================================
+// Root owner takeover
+// ============================================================================
+
+fn owner_info(owner_uid: Option<u32>, loaded: bool) -> ConfigOwnerInfo {
+    ConfigOwnerInfo { owner_uid, loaded }
+}
+
+#[test]
+fn test_run_and_recreate_displace_another_owner_even_when_loaded() {
+    assert_eq!(displaced_owner(&owner_info(Some(1001), true), OwnerTakeover::Always), Some(1001));
+    assert_eq!(displaced_owner(&owner_info(Some(1001), false), OwnerTakeover::Always), Some(1001));
+}
+
+#[test]
+fn test_start_displaces_another_owner_only_when_it_loads_the_config() {
+    assert_eq!(displaced_owner(&owner_info(Some(1001), false), OwnerTakeover::IfUnloaded), Some(1001));
+    assert_eq!(displaced_owner(&owner_info(Some(1001), true), OwnerTakeover::IfUnloaded), None);
+}
+
+#[test]
+fn test_no_takeover_of_a_root_owned_or_never_loaded_config() {
+    for takeover in [OwnerTakeover::Always, OwnerTakeover::IfUnloaded] {
+        assert_eq!(displaced_owner(&owner_info(Some(0), false), takeover), None);
+        assert_eq!(displaced_owner(&owner_info(None, false), takeover), None);
+    }
+}
+
+#[test]
+fn test_confirmation_accepts_only_yes() {
+    for accepted in ["y\n", "Y\n", "yes\n", " YES \n"] {
+        assert!(read_confirmation(accepted.as_bytes()), "{:?} should accept", accepted);
+    }
+    for declined in ["\n", "n\n", "no\n", "yep\n", ""] {
+        assert!(!read_confirmation(declined.as_bytes()), "{:?} should decline", declined);
+    }
+}

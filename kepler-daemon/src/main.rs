@@ -1683,6 +1683,37 @@ async fn handle_request(
             Response::ok_with_data(ResponseData::UserRights(rights))
         }
 
+        Request::ConfigOwner { config_path } => {
+            // Owner UIDs of other users' configs are not exposed to non-root callers.
+            // Checked on the UID, not the auth kind: a root process holding a token
+            // authenticates as `Token { uid: 0 }` and can still take over any config.
+            if auth_ctx.uid() != 0 {
+                warn!("Non-root user (UID {}) attempted to query a config owner", auth_ctx.uid());
+                return Response::PermissionDenied {
+                    message: "Permission denied: only root can query a config owner".to_string(),
+                };
+            }
+            let config_path = match canonicalize_config_path(config_path) {
+                Ok(p) => p,
+                Err(e) => return Response::error(e.to_string()),
+            };
+
+            let info = match registry.get(&config_path) {
+                Some(handle) => kepler_protocol::protocol::ConfigOwnerInfo {
+                    owner_uid: handle.owner_uid(),
+                    loaded: true,
+                },
+                None => kepler_protocol::protocol::ConfigOwnerInfo {
+                    owner_uid: compute_state_dir(&config_path)
+                        .and_then(|state_dir| get_unloaded_acl_entry(&state_dir, &unloaded_acl_cache).ok())
+                        .and_then(|entry| entry.owner_uid),
+                    loaded: false,
+                },
+            };
+
+            Response::ok_with_data(ResponseData::ConfigOwner(info))
+        }
+
         Request::MonitorMetrics { config_path, service, since, limit, filter, sql, bucket_ms, after_ts, before_ts } => {
             // Convert filter to SqlFragment: parse DSL or wrap raw SQL
             let filter = match filter {
