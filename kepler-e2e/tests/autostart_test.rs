@@ -12,6 +12,29 @@ use std::time::Duration;
 
 const TEST_MODULE: &str = "autostart_test";
 
+/// Waits until the config's `state.json` records `service` as initialized.
+async fn wait_for_persisted_service_initialized(
+    harness: &E2eHarness,
+    config_path: &std::path::Path,
+    service: &str,
+    timeout: Duration,
+) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        let initialized = harness
+            .get_config_state_dir(config_path)
+            .and_then(|dir| std::fs::read_to_string(dir.join("state.json")).ok())
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|state| state["services"][service]["initialized"].as_bool())
+            .unwrap_or(false);
+        if initialized {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("state.json never recorded service '{}' as initialized within {:?}", service, timeout);
+}
+
 /// Config with autostart: true. After daemon kill+restart, service should be respawned.
 #[tokio::test]
 async fn test_autostart_enabled_respawns_on_restart() -> E2eResult<()> {
@@ -701,6 +724,11 @@ async fn test_autostart_disabled_preserves_initialized_across_restart() -> E2eRe
         "Init hook should fire once on first start. Content: {}",
         content
     );
+
+    // The daemon persists `initialized` only after the service is spawned, so the
+    // STARTED marker can land before it. Killing the daemon in that window loses
+    // the flag and legitimately re-fires the hook — wait for the persisted state.
+    wait_for_persisted_service_initialized(&harness, &config_path, "init-service", Duration::from_secs(5)).await;
 
     // Kill daemon abruptly (simulates systemctl stop / crash)
     harness.kill_daemon().await?;
