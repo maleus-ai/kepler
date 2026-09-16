@@ -1214,7 +1214,11 @@ async fn test_grace_period_allows_graceful_shutdown() {
     let marker_path = marker.marker_path("running");
     let exit_marker_path = marker.marker_path("exited");
 
-    // Service that traps SIGTERM and exits cleanly
+    // Service that traps SIGTERM and exits cleanly. `sleep` runs in the background
+    // under `wait`: the shell defers a trap until its foreground command exits, so
+    // a foreground `sleep` that misses the group SIGTERM (e.g. still between fork
+    // and exec) holds the trap until the grace period ends; `wait` is interrupted
+    // by the trapped signal instead.
     let config = TestConfigBuilder::new()
         .add_service(
             "test",
@@ -1222,7 +1226,11 @@ async fn test_grace_period_allows_graceful_shutdown() {
                 "sh".to_string(),
                 "-c".to_string(),
                 format!(
-                    "trap 'echo done >> {} && exit 0' TERM; echo running >> {} && sleep 3600",
+                    "trap 'echo done >> {} && exit 0' TERM\n\
+                     # keeps the service alive until the signal arrives\n\
+                     sleep 3600 &\n\
+                     echo running >> {}\n\
+                     wait",
                     exit_marker_path.display(),
                     marker_path.display()
                 ),
