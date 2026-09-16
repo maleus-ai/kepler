@@ -1226,7 +1226,11 @@ async fn test_grace_period_allows_graceful_shutdown() {
                 "sh".to_string(),
                 "-c".to_string(),
                 format!(
-                    "trap 'echo done >> {} && exit 0' TERM; sleep 3600 & echo running >> {}; wait",
+                    "trap 'echo done >> {} && exit 0' TERM\n\
+                     # keeps the service alive until the signal arrives\n\
+                     sleep 3600 &\n\
+                     echo running >> {}\n\
+                     wait",
                     exit_marker_path.display(),
                     marker_path.display()
                 ),
