@@ -688,6 +688,19 @@ async fn foreground_with_logs(
     }
 }
 
+/// Exits with status 1 when the daemon refused or failed the launch; a transport
+/// error (e.g. the daemon went away) propagates to the caller.
+fn check_launch_response(result: std::result::Result<Response, ClientError>) -> Result<()> {
+    match result {
+        Ok(Response::Error { message } | Response::PermissionDenied { message }) => {
+            eprintln!("Error: {}", message);
+            std::process::exit(1);
+        }
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Wait for all services to reach their target state (Started or Healthy) using
 /// inline progress events from `Start { follow: true }`.
 ///
@@ -850,7 +863,13 @@ async fn wait_until_ready(
                         }
                     }
                     None => {
-                        // Channel closed — start handler returned the response
+                        // Channel closed: the request left the pending map, so its
+                        // response is already resolved. The select is biased towards
+                        // this branch, so a denied or failed launch lands here first —
+                        // the response must be checked before reporting readiness.
+                        if !start_done {
+                            check_launch_response((&mut start_future).await)?;
+                        }
                         break;
                     }
                 }
@@ -858,11 +877,7 @@ async fn wait_until_ready(
             result = &mut start_future, if !start_done => {
                 start_done = true;
                 // Start+follow request completed (quiescence reached on daemon side).
-                // If the response is an error, handle it and exit.
-                if let Ok(Response::Error { message } | Response::PermissionDenied { message }) = &result {
-                    eprintln!("Error: {}", message);
-                    std::process::exit(1);
-                }
+                check_launch_response(result)?;
                 // Drain remaining buffered events
             }
         }
