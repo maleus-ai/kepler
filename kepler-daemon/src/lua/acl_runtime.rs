@@ -468,6 +468,7 @@ fn request_config_path(request: &Request) -> Option<String> {
         | CheckQuiescence { config_path, .. }
         | CheckReadiness { config_path, .. }
         | UserRights { config_path, .. }
+        | ConfigOwner { config_path }
         | MonitorMetrics { config_path, .. } => config_path,
         Status {
             config_path: Some(path),
@@ -609,7 +610,8 @@ pub fn build_authorizer_context(
         | Request::Shutdown
         | Request::Prune { .. }
         | Request::Status { config_path: None }
-        | Request::UserRights { .. } => return None,
+        | Request::UserRights { .. }
+        | Request::ConfigOwner { .. } => return None,
     };
 
     Some(AuthorizerContext {

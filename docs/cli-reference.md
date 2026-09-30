@@ -283,6 +283,23 @@ This is equivalent to running `kepler stop --clean` followed by `kepler start`, 
 
 See [Configuration](configuration.md#config-immutability) for details on the baking process.
 
+### Root Owner Takeover
+
+Loading a config records its caller as the config's owner. The owner is what grants access to the config once the daemon no longer holds it (after a daemon restart, for instance), and the user its services without `user:` run as. When root loads a config another user owns, root becomes the owner: that user loses access to the config unless an ACL grants it — and only finds out the next time they need it.
+
+`kepler start` (on a config the daemon does not hold), `kepler run` and `kepler recreate` all load the config. Run as root on a config owned by another user, they:
+
+1. Always print a warning naming the displaced owner.
+2. On a terminal (stdin and stderr are TTYs), ask `Take ownership as root? [y/N]`. Anything but `y` / `yes` aborts with exit code 1.
+3. Without a terminal, proceed after the warning.
+
+```bash
+$ sudo kepler -f apps/backend/test.kepler.yaml run -d --wait
+Warning: /repo/apps/backend/test.kepler.yaml is owned by UID 1001 (snivel). Launching it as root makes root its owner: UID 1001 (snivel) loses access to it unless an ACL grants it, and its services without `user:` run as root.
+Take ownership as root? [y/N] n
+Aborted.
+```
+
 ### Per-Config Hardening
 
 The `--hardening` flag on `kepler start`, `kepler run`, and `kepler recreate` sets a per-config hardening level that is baked into the config snapshot (for `start`/`recreate`) or applied ephemerally (for `run`). This allows untrusted configs to be loaded with stricter hardening while others remain unrestricted.

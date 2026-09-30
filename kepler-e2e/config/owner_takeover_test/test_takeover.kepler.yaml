@@ -1,0 +1,3 @@
+services:
+  takeover-svc:
+    command: ["sh", "-c", "echo TAKEOVER_SVC_RUNNING; sleep 300"]
