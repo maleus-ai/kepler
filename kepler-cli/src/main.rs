@@ -158,12 +158,12 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Commands::Start { args } => {
-            confirm_owner_takeover(&client, &canonical_path, OwnerTakeover::IfUnloaded, args.force).await?;
+            confirm_owner_takeover(&client, &canonical_path, OwnerTakeover::IfUnloaded).await?;
             handle_launch(&client, canonical_path, sys_env, args, LaunchMode::Start, cli.quiet).await?;
         }
 
         Commands::Run { args, start_clean, clean } => {
-            confirm_owner_takeover(&client, &canonical_path, OwnerTakeover::Always, args.force).await?;
+            confirm_owner_takeover(&client, &canonical_path, OwnerTakeover::Always).await?;
             handle_launch(&client, canonical_path, sys_env, args, LaunchMode::Run { start_clean, clean }, cli.quiet).await?;
         }
 
@@ -256,8 +256,8 @@ async fn run() -> Result<()> {
             }
         }
 
-        Commands::Recreate { hardening, define, force } => {
-            confirm_owner_takeover(&client, &canonical_path, OwnerTakeover::Always, force).await?;
+        Commands::Recreate { hardening, define } => {
+            confirm_owner_takeover(&client, &canonical_path, OwnerTakeover::Always).await?;
             let define_flags = build_define_flags(define);
             let (progress_rx, response_future) = client.recreate(canonical_path.clone(), Some(sys_env), hardening, define_flags)?;
             let response = run_with_progress(progress_rx, response_future).await?;
@@ -591,13 +591,12 @@ fn describe_uid(uid: u32) -> String {
 }
 
 /// Before a root launch reloads a config owned by another user, warns — always —
-/// then asks for confirmation on a terminal unless `--force` is given. Without a
-/// terminal the launch proceeds after the warning. Exits 1 when the operator declines.
+/// then asks for confirmation on a terminal. Without a terminal the launch proceeds
+/// after the warning. Exits 1 when the operator declines.
 async fn confirm_owner_takeover(
     client: &Client,
     config_path: &Path,
     takeover: OwnerTakeover,
-    force: bool,
 ) -> Result<()> {
     // SAFETY: geteuid has no preconditions and cannot fail.
     if unsafe { libc::geteuid() } != 0 {
@@ -624,10 +623,6 @@ async fn confirm_owner_takeover(
         owner,
     );
 
-    if force {
-        eprintln!("Taking ownership as root (--force).");
-        return Ok(());
-    }
     if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
         return Ok(());
     }

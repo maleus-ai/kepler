@@ -2,7 +2,7 @@
 //!
 //! Loading a config records its caller as owner. A root reload of another user's
 //! config therefore locks that user out of it, so the CLI warns — always — and asks
-//! for confirmation on a terminal unless `--force` is given.
+//! for confirmation on a terminal.
 
 use kepler_e2e::{E2eHarness, E2eResult};
 use std::path::Path;
@@ -112,24 +112,6 @@ async fn test_root_run_on_terminal_confirmed_proceeds() -> E2eResult<()> {
     assert_eq!(output.exit_code, 0, "Confirmed takeover should proceed. output: {}", output.output);
     assert!(output.output.contains(WARNING), "output: {}", output.output);
     assert!(output.output.contains("Taking ownership as root (confirmed)."), "output: {}", output.output);
-
-    harness.stop_daemon().await?;
-    Ok(())
-}
-
-/// `--force` skips the prompt on a terminal but never the warning.
-#[tokio::test]
-async fn test_root_run_with_force_skips_prompt_but_warns() -> E2eResult<()> {
-    let mut harness = E2eHarness::new().await?;
-    let config_path = harness.load_config(TEST_MODULE, "test_takeover")?;
-    let config = config_path.to_str().unwrap();
-    start_as_testuser1(&mut harness, &config_path).await?;
-
-    let output = run_root_cli_in_pty(&harness, &["-f", config, "run", "-d", "--wait", "--force"], "").await?;
-    assert_eq!(output.exit_code, 0, "--force should not prompt. output: {}", output.output);
-    assert!(output.output.contains(WARNING), "output: {}", output.output);
-    assert!(output.output.contains("Taking ownership as root (--force)."), "output: {}", output.output);
-    assert!(!output.output.contains("[y/N]"), "--force should not prompt. output: {}", output.output);
 
     harness.stop_daemon().await?;
     Ok(())
