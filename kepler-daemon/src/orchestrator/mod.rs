@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 /// Allows OS resources (ports, file handles) to be fully released.
 const RESTART_DELAY: Duration = Duration::from_millis(500);
 
+use futures::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -729,6 +730,14 @@ impl ServiceOrchestrator {
         // Mark service initialized after first start
         if !service_initialized {
             handle.mark_service_initialized(service_name).await?;
+        }
+
+        // Manual restart hooks must finish before file watching is enabled.
+        // Otherwise changes made by post_restart can trigger another restart.
+        if startup_status == ServiceStatus::Restarting {
+            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart, progress, Some(handle)).await {
+                warn!("Hook post_restart failed for {}: {}", service_name, e);
+            }
         }
 
         // Spawn auxiliary tasks
@@ -1627,31 +1636,38 @@ impl ServiceOrchestrator {
         let mut restarted = Vec::new();
         let mut startup_error = None;
 
-        // Dependencies selected for this cycle are already Restarting, so stale
-        // terminal results cannot satisfy conditions before their new execution.
-        for service_name in &start_order {
-            if let Err(e) = handle.increment_restart_count(service_name).await {
-                warn!("Failed to increment restart count for {}: {}", service_name, e);
+        // Poll each startup independently so a deferred dependency cannot keep
+        // unrelated services stopped. Dependency checks coordinate spawning;
+        // --no-deps retains sequential startup in the user's specified order.
+        let concurrency = if no_deps { 1 } else { start_order.len() };
+        let mut startups = futures::stream::iter(start_order.into_iter().map(|service_name| {
+            let handle = handle.clone();
+            let orchestrator = self.clone();
+            let shared_evaluator = shared_evaluator.clone();
+            async move {
+                if let Err(e) = handle.increment_restart_count(&service_name).await {
+                    warn!("Failed to increment restart count for {}: {}", service_name, e);
+                }
+                let result = orchestrator.run_service_startup(
+                    &handle, &service_name, &None, Some(shared_evaluator),
+                    !is_full_restart, no_deps,
+                ).await;
+                (service_name, result)
             }
-            match self.run_service_startup(
-                &handle, service_name, &None, Some(shared_evaluator.clone()),
-                !is_full_restart, no_deps,
-            ).await {
+        })).buffer_unordered(concurrency);
+
+        while let Some((service_name, result)) = startups.next().await {
+            match result {
                 Ok(()) => {
-                    if handle.get_service_state(service_name).await
+                    if handle.get_service_state(&service_name).await
                         .is_some_and(|state| !matches!(state.status, ServiceStatus::Skipped | ServiceStatus::Failed | ServiceStatus::Stopped | ServiceStatus::Restarting))
                     {
                         restarted.push(service_name.clone());
-                        if let Some(ctx) = handle.get_service_context(service_name).await
-                            && let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart, &None, Some(&handle)).await
-                        {
-                            warn!("Hook post_restart failed for {}: {}", service_name, e);
-                        }
                     }
                 }
                 Err(e) => {
                     error!("Failed to restart service {}: {}", service_name, e);
-                    self.containment.cleanup_service(handle.config_hash(), service_name).await;
+                    self.containment.cleanup_service(handle.config_hash(), &service_name).await;
                     startup_error.get_or_insert(e);
                 }
             }

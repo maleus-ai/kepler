@@ -252,7 +252,7 @@ kepler restart backend --states stopped
 
 `all` includes `stopped`, `exited` (any exit code), `failed`, and `killed`. Skipped services and services already transitioning are excluded. Explicit names restrict selection; dependencies are not added automatically.
 
-Selected running processes stop in reverse dependency order. All selected services then use the normal startup path in dependency order, waiting for their configured dependency conditions. When a dependency is also selected, conditions must be satisfied by its new execution. Whole-config restart evaluates `if:` conditions; explicitly named services bypass them. `--no-deps` bypasses dependency checks and ordering.
+Selected running processes stop in reverse dependency order. All selected services then use the normal startup path independently, waiting for their configured dependency conditions. Deferred dependency waits do not block unrelated services. When a dependency is also selected, conditions must be satisfied by its new execution. Whole-config restart evaluates `if:` conditions; explicitly named services bypass them. `--no-deps` bypasses dependency checks and ordering.
 
 ### Restart Policies
 
