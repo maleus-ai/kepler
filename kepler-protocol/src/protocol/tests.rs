@@ -113,6 +113,7 @@ fn roundtrip_envelope_restart() {
         id: 5,
         token: None,
         request: Request::Restart {
+            states: vec![RestartState::Exited, RestartState::Failed, RestartState::All],
             config_path: PathBuf::from("/app/kepler.yaml"),
             services: vec!["api".into(), "web".into()],
             sys_env: None,
@@ -124,9 +125,10 @@ fn roundtrip_envelope_restart() {
     let bytes = encode_envelope(&envelope).unwrap();
     let decoded = decode_envelope(&bytes[4..]).unwrap();
     match decoded.request {
-        Request::Restart { services, no_deps, .. } => {
+        Request::Restart { services, no_deps, states, .. } => {
             assert_eq!(services, vec!["api".to_string(), "web".to_string()]);
             assert!(no_deps);
+            assert_eq!(states, vec![RestartState::Exited, RestartState::Failed, RestartState::All]);
         }
         _ => panic!("Expected Restart request"),
     }
@@ -813,6 +815,7 @@ fn roundtrip_restart_with_define_flags() {
         id: 402,
         token: None,
         request: Request::Restart {
+            states: vec![],
             config_path: PathBuf::from("/test.yaml"),
             services: vec![],
             sys_env: None,

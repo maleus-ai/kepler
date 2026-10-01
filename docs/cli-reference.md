@@ -239,6 +239,9 @@ kepler restart --wait                    # Block until restart complete (with pr
 kepler restart --wait --timeout 30s      # Block with timeout
 kepler restart --follow                  # Restart, then follow logs (Ctrl+C just exits)
 kepler restart backend worker            # Restart specific services
+kepler restart --states all              # Also start stopped, exited, failed, and killed services
+kepler restart --states exited,failed    # Also start exited and failed services
+kepler restart backend --states stopped  # Also start backend if manually stopped
 kepler restart -e MY_VAR=new_value       # Restart with overridden env var
 kepler restart -D MODE=production        # Restart with defined flags
 kepler restart --refresh-env             # Restart with refreshed shell env
@@ -253,7 +256,14 @@ kepler restart --refresh-env             # Restart with refreshed shell env
 | `-e, --override-envs <KEY=VALUE>` | Override specific `kepler.env` variables (repeatable). Can be combined with `--refresh-env`. Applies to the entire config, not just targeted services      |
 | `-r, --refresh-env`               | Re-capture the entire `kepler.env` from the current shell environment. Can be combined with `-e`. Applies to the entire config, not just targeted services |
 | `-D, --define <KEY=VALUE>`        | Define a flag accessible via `kepler.flags` in expressions (repeatable). See [Define Flags](#define-flags)                                                 |
-| `--no-deps`                       | Skip dependency ordering (requires specifying service names)                                                                                               |
+| `--states <STATE,...>`           | Include additional terminal states: `stopped`, `exited`, `failed`, `killed`, or `all`. Comma-separated and repeatable; running services are always eligible |
+| `--no-deps`                       | Skip dependency checks and ordering (requires specifying service names)                                                                                               |
+
+By default, only running services (including healthy and unhealthy services) are restarted. `--states` adds eligible terminal states; it does not filter out running services. `all` includes the four listed terminal states, excluding `skipped` and services already waiting, starting, stopping, or restarting.
+
+Explicit service names constrain selection and do not automatically start dependencies. Without names, selection covers the loaded config. Running services are stopped in reverse dependency order, then selected services start in dependency order. Each service waits for its configured dependency conditions, including health and successful completion, using the same startup checks as `start`. Dependencies selected for the restart must satisfy conditions in the new execution; their previous results are not reused. Unsatisfied dependencies can skip startup or cause a dependency timeout, as with `start`.
+
+Whole-config restart evaluates service `if:` conditions. Explicitly named services bypass their `if:` conditions, as with `start`. `--no-deps` also bypasses dependency checks. Terminal services run the startup path without process stop operations or stop hooks. Restart hooks and restart counters are preserved.
 
 **Behavior by mode:**
 

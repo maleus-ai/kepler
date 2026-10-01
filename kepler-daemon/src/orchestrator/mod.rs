@@ -371,6 +371,19 @@ impl ServiceOrchestrator {
             return Ok(());
         }
 
+        self.run_service_startup(handle, service_name, progress, shared_evaluator, skip_condition, no_deps).await
+    }
+
+    /// Shared startup and error handling for starts and manual restarts.
+    async fn run_service_startup(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        progress: &Option<ProgressSender>,
+        shared_evaluator: Option<SharedLuaEvaluator>,
+        skip_condition: bool,
+        no_deps: bool,
+    ) -> Result<(), OrchestratorError> {
         // Run the actual startup. If anything fails, mark as Skipped or Failed.
         match self.execute_service_startup(handle, service_name, progress, shared_evaluator, skip_condition, no_deps).await {
             Ok(()) => Ok(()),
@@ -452,6 +465,15 @@ impl ServiceOrchestrator {
         // Extract depends_on from raw config for dependency wait
         let depends_on = ctx.service_config.depends_on.clone();
 
+        // Keep manual restarts active through dependency waiting and startup.
+        let startup_status = if handle.get_service_state(service_name).await
+            .is_some_and(|state| state.status == ServiceStatus::Restarting)
+        {
+            ServiceStatus::Restarting
+        } else {
+            ServiceStatus::Starting
+        };
+
         // Wait for dependencies to satisfy their conditions (blocks while in Waiting state)
         // Skip when --no-deps is set (user explicitly chose to bypass dependency waiting)
         if !no_deps {
@@ -460,7 +482,7 @@ impl ServiceOrchestrator {
         }
 
         // Transition: Waiting → Starting (dependencies satisfied)
-        handle.set_service_status(service_name, ServiceStatus::Starting).await?;
+        handle.set_service_status(service_name, startup_status).await?;
 
         // Build evaluation context (kepler_env + kepler_flags + deps).
         // env_file vars are loaded inside resolve_service (step 0) so that
@@ -685,7 +707,7 @@ impl ServiceOrchestrator {
 
         // Check if startup was cancelled (e.g., concurrent stop)
         let state = handle.get_service_state(service_name).await;
-        if state.as_ref().map(|s| s.status) != Some(ServiceStatus::Starting) {
+        if state.as_ref().map(|s| s.status) != Some(startup_status) {
             debug!(
                 "Service {} startup cancelled (status: {:?})",
                 service_name,
@@ -1054,7 +1076,7 @@ impl ServiceOrchestrator {
                 let state = handle.get_service_state(service_name).await;
                 if !matches!(
                     state.as_ref().map(|s| s.status),
-                    Some(ServiceStatus::Starting) | Some(ServiceStatus::Waiting)
+                    Some(ServiceStatus::Starting) | Some(ServiceStatus::Waiting) | Some(ServiceStatus::Restarting)
                 ) {
                     return Err(OrchestratorError::StartupCancelled(
                         service_name.to_string(),
@@ -1436,6 +1458,19 @@ impl ServiceOrchestrator {
         override_envs: Option<HashMap<String, String>>,
         define_flags: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
+        self.restart_services_with_states(config_path, services, no_deps, override_envs, define_flags, &[]).await
+    }
+
+    /// Restart running services and selected terminal states using normal startup checks.
+    pub async fn restart_services_with_states(
+        &self,
+        config_path: &Path,
+        services: &[String],
+        no_deps: bool,
+        override_envs: Option<HashMap<String, String>>,
+        define_flags: Option<HashMap<String, String>>,
+        states: &[kepler_protocol::protocol::RestartState],
+    ) -> Result<String, OrchestratorError> {
         info!("Restarting services for {:?} (preserving state)", config_path);
 
         let is_full_restart = services.is_empty();
@@ -1458,21 +1493,35 @@ impl ServiceOrchestrator {
             .await
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
-        // Get list of running services to restart
-        let services_to_restart: Vec<String> = if is_full_restart {
-            handle.get_running_services().await
+        // Explicit names constrain the scope; dependencies are never added implicitly.
+        let candidates: Vec<String> = if is_full_restart {
+            config.services.keys().cloned().collect()
         } else {
-            let mut running = Vec::new();
-            for s in services {
-                if handle.is_service_running(s).await {
-                    running.push(s.clone());
+            for name in services {
+                if !config.services.contains_key(name) {
+                    return Err(OrchestratorError::ServiceNotFound(name.clone()));
                 }
             }
-            running
+            services.to_vec()
         };
-
+        let mut services_to_restart = Vec::new();
+        let mut running_services = HashSet::new();
+        let mut seen = HashSet::new();
+        for name in candidates {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(state) = handle.get_service_state(&name).await {
+                if state.status.is_running() {
+                    running_services.insert(name.clone());
+                    services_to_restart.push(name);
+                } else if states.iter().any(|selected| selected.includes(state.status.as_str())) {
+                    services_to_restart.push(name);
+                }
+            }
+        }
         if services_to_restart.is_empty() {
-            return Ok("No running services to restart".to_string());
+            return Ok("No eligible services to restart".to_string());
         }
 
         // Sort services by dependency graph (unless --no-deps, which uses user-specified order)
@@ -1484,16 +1533,19 @@ impl ServiceOrchestrator {
         } else {
             // Start order: forward topological sort (dependencies first, then dependents)
             // Stop order: reverse of start order (dependents first, then dependencies)
-            let filtered: HashMap<_, _> = config.services
-                .iter()
-                .filter(|(k, _)| services_to_restart.contains(k))
-                .map(|(k, v)| (k.clone(), v.clone()))
+            let start: Vec<String> = get_start_order(&config.services)?
+                .into_iter()
+                .filter(|name| services_to_restart.contains(name))
                 .collect();
-            let start = get_start_order(&filtered).unwrap_or_else(|_| services_to_restart.clone());
             let mut stop = start.clone();
             stop.reverse();
             (start, stop)
         };
+
+        let shared_evaluator: SharedLuaEvaluator = Arc::new(tokio::sync::Mutex::new(
+            config.create_lua_evaluator()
+                .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?,
+        ));
 
         // Mark all restarting services before the stop phase.
         // Restarting is active and non-terminal, so quiescence/ready signals
@@ -1532,6 +1584,13 @@ impl ServiceOrchestrator {
                 warn!("Hook pre_restart failed for {}: {}", service_name, e);
             }
 
+            // Terminal services have no process to stop. Keep restart hooks, but
+            // do not run stop hooks or overwrite their previous exit information.
+            if !running_services.contains(service_name) {
+                self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart).await;
+                continue;
+            }
+
             // Run pre_stop hook
             if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStop, &None, Some(&handle)).await {
                 warn!("Hook pre_stop failed for {}: {}", service_name, e);
@@ -1566,70 +1625,44 @@ impl ServiceOrchestrator {
         tokio::time::sleep(RESTART_DELAY).await;
 
         let mut restarted = Vec::new();
+        let mut startup_error = None;
 
-        // Phase 2: Start services (forward dependency order)
+        // Dependencies selected for this cycle are already Restarting, so stale
+        // terminal results cannot satisfy conditions before their new execution.
         for service_name in &start_order {
-            // Increment restart count before hooks so pre_start sees the updated value
             if let Err(e) = handle.increment_restart_count(service_name).await {
                 warn!("Failed to increment restart count for {}: {}", service_name, e);
             }
-
-            // Re-resolve service config with updated restart_count
-            let ctx = match self.re_resolve_service(&handle, service_name, None).await {
-                Ok(ctx) => ctx,
-                Err(e) => {
-                    warn!("Failed to re-resolve service {}: {}", service_name, e);
-                    continue;
-                }
-            };
-
-            // Emit Start event (restart includes a start)
-            handle.emit_event(service_name, ServiceEvent::Start).await;
-
-            // Create token guard before pre_start hooks
-            if let Some(resolved) = ctx.resolved_config.as_ref()
-                && let Err(e) = self.create_service_token_guard(&handle, service_name, resolved).await
-            {
-                error!("Failed to create token guard for {}, skipping restart: {}", service_name, e);
-                continue;
-            }
-
-            // Run pre_start hook
-            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, &None, Some(&handle)).await {
-                warn!("Hook pre_start failed for {}: {}", service_name, e);
-                self.revoke_service_token_guard(&handle, service_name).await;
-                continue;
-            }
-
-            // Apply on_start log retention
-            self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Start).await;
-
-            // Spawn process
-            match self.spawn_service(&handle, service_name, &ctx).await {
+            match self.run_service_startup(
+                &handle, service_name, &None, Some(shared_evaluator.clone()),
+                !is_full_restart, no_deps,
+            ).await {
                 Ok(()) => {
-                    restarted.push(service_name.clone());
-
-                    // Run post_start hook
-                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart, &None, Some(&handle)).await {
-                        warn!("Hook post_start failed for {}: {}", service_name, e);
+                    if handle.get_service_state(service_name).await
+                        .is_some_and(|state| !matches!(state.status, ServiceStatus::Skipped | ServiceStatus::Failed | ServiceStatus::Stopped | ServiceStatus::Restarting))
+                    {
+                        restarted.push(service_name.clone());
+                        if let Some(ctx) = handle.get_service_context(service_name).await
+                            && let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart, &None, Some(&handle)).await
+                        {
+                            warn!("Hook post_restart failed for {}: {}", service_name, e);
+                        }
                     }
-
-                    // Run post_restart hook
-                    if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart, &None, Some(&handle)).await {
-                        warn!("Hook post_restart failed for {}: {}", service_name, e);
-                    }
-
-                    // Spawn auxiliary tasks
-                    self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
                 }
                 Err(e) => {
-                    error!("Failed to spawn service {}: {}", service_name, e);
+                    error!("Failed to restart service {}: {}", service_name, e);
                     self.containment.cleanup_service(handle.config_hash(), service_name).await;
-                    if let Err(err) = handle.set_service_status(service_name, ServiceStatus::Failed).await {
-                        warn!("Failed to set {} to Failed: {}", service_name, err);
-                    }
+                    startup_error.get_or_insert(e);
                 }
             }
+        }
+
+        self.post_startup_work(StartupContext {
+            config_path, config: &config, handle: &handle, started: &restarted,
+            initialized: handle.is_config_initialized().await,
+        }).await?;
+        if let Some(error) = startup_error {
+            return Err(error);
         }
 
         if restarted.is_empty() {

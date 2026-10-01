@@ -1065,6 +1065,7 @@ async fn handle_request(
         Request::Restart {
             config_path,
             services,
+            states,
             sys_env: _,
             no_deps,
             override_envs,
@@ -1092,19 +1093,19 @@ async fn handle_request(
                                     .cloned()
                                     .collect()
                             };
-                            // Filter to only active services (those that will be restarted)
-                            let mut active = Vec::new();
+                            // Track running services and the additional selected terminal states.
+                            let mut eligible = Vec::new();
                             for svc in &all_services {
-                                let is_active = handle
+                                let is_eligible = handle
                                     .get_service_state(svc)
                                     .await
-                                    .map(|s| s.status.is_active())
+                                    .map(|s| s.status.is_running() || states.iter().any(|state| state.includes(s.status.as_str())))
                                     .unwrap_or(false);
-                                if is_active {
-                                    active.push(svc.clone());
+                                if is_eligible {
+                                    eligible.push(svc.clone());
                                 }
                             }
-                            (active, Some(rx))
+                            (eligible, Some(rx))
                         }
                         None => (Vec::new(), Some(rx)),
                     }
@@ -1112,18 +1113,23 @@ async fn handle_request(
                 None => (Vec::new(), None),
             };
 
-            // Send initial Stopping phase for each active service
+            // Terminal services have no stop phase.
             for svc in &tracked_services {
-                progress.send(ProgressEvent {
-                    service: svc.clone(),
-                    phase: ServicePhase::Stopping,
-                }).await;
+                let phase = if let Some(handle) = &progress_handle
+                    && handle.is_service_running(svc).await
+                {
+                    ServicePhase::Stopping
+                } else {
+                    ServicePhase::Restarting
+                };
+                progress.send(ProgressEvent { service: svc.clone(), phase }).await;
             }
 
             // Spawn forwarding task to relay state changes as ProgressEvents
             let fwd_task = if let Some(mut state_rx) = state_rx {
                 let fwd_progress = progress.clone();
                 let fwd_services = tracked_services.clone();
+                let fwd_handle = progress_handle.clone();
                 Some(tokio::spawn(async move {
                     while let Some(event) = state_rx.recv().await {
                         let change = match event {
@@ -1137,10 +1143,26 @@ async fn handle_request(
                             ServiceStatus::Restarting => ServicePhase::Restarting,
                             ServiceStatus::Stopping => ServicePhase::Stopping,
                             ServiceStatus::Stopped => ServicePhase::Stopped,
+                            ServiceStatus::Skipped => {
+                                let reason = if let Some(handle) = &fwd_handle {
+                                    handle.get_service_state(&change.service).await.and_then(|state| state.skip_reason)
+                                } else {
+                                    None
+                                };
+                                ServicePhase::Skipped { reason: reason.unwrap_or_else(|| "skipped".to_string()) }
+                            },
+                            ServiceStatus::Exited | ServiceStatus::Killed => ServicePhase::Stopped,
                             ServiceStatus::Starting => ServicePhase::Starting,
                             ServiceStatus::Running => ServicePhase::Started,
                             ServiceStatus::Healthy => ServicePhase::Healthy,
-                            ServiceStatus::Failed => ServicePhase::Failed { message: "failed".to_string() },
+                            ServiceStatus::Failed => {
+                                let message = if let Some(handle) = &fwd_handle {
+                                    handle.get_service_state(&change.service).await.and_then(|state| state.fail_reason)
+                                } else {
+                                    None
+                                };
+                                ServicePhase::Failed { message: message.unwrap_or_else(|| "failed".to_string()) }
+                            },
                             _ => continue,
                         };
                         fwd_progress.send(ProgressEvent {
@@ -1155,7 +1177,7 @@ async fn handle_request(
 
             // Run restart_services (blocks until done)
             let result = orchestrator
-                .restart_services(&config_path, &services, no_deps, override_envs, define_flags)
+                .restart_services_with_states(&config_path, &services, no_deps, override_envs, define_flags, &states)
                 .await;
 
             // Brief sleep to drain remaining events, then abort forwarding task

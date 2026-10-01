@@ -118,6 +118,7 @@ fn required_rights_restart_with_flags() {
     let mut envs = HashMap::new();
     envs.insert("K".to_string(), "V".to_string());
     let req = Request::Restart {
+        states: vec![],
         config_path: "/test".into(),
         services: vec![],
         sys_env: None,
