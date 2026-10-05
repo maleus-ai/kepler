@@ -196,7 +196,7 @@ Kepler detects **unhandled service failures** and exits with code 1 when they oc
 A failure is "unhandled" when **all** of these are true:
 
 1. A service reached a terminal failure state (**Failed**, **Killed**, or **Exited** with non-zero code)
-2. The service's restart policy will **not** restart it
+2. The service's restart policy will **not** restart it. The policy only applies when a process exits: a service that fails to start (**Failed**, e.g. a failing `pre_start` hook) is never restarted by it, whatever the policy
 3. No other service has a `depends_on` with `service_failed` or `service_stopped` condition targeting this service
 
 This mirrors GitHub Actions semantics: a `service_failed` dependency acts like `if: failure()` — it's a failure handler. Without one, the failure propagates as an error exit.

@@ -434,6 +434,15 @@ pub fn is_transient_satisfaction(dep_state: &ServiceState, restart_config: &Rest
         && restart_config.should_restart_on_exit(dep_state.exit_code)
 }
 
+/// Check if the restart policy brings a service back from a terminal status.
+///
+/// The policy only applies when a process exits (`handle_exit`). `Failed` marks a
+/// startup that failed before or while spawning (hook, spawn, config resolution):
+/// nothing restarts it until the service is started again.
+pub fn restart_follows(status: ServiceStatus, exit_code: Option<i32>, restart_config: &RestartConfig) -> bool {
+    status != ServiceStatus::Failed && restart_config.should_restart_on_exit(exit_code)
+}
+
 /// Check if any service has a `service_failed` or `service_stopped` dependency on the given service.
 ///
 /// A failure is "handled" when another service declares a `depends_on` with
