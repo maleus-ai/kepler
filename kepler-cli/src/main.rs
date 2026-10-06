@@ -806,6 +806,30 @@ fn check_launch_response(result: std::result::Result<Response, ClientError>) -> 
     }
 }
 
+/// Keep the reason of each service's latest `Failed` phase, so an unhandled failure
+/// can name it. Hook phases leave it as is; any other phase means the service moved on.
+fn track_fail_reason(fail_reasons: &mut HashMap<String, String>, service: &str, phase: &ServicePhase) {
+    match phase {
+        ServicePhase::Failed { message } => {
+            fail_reasons.insert(service.to_string(), message.clone());
+        }
+        ServicePhase::HookStarted { .. } | ServicePhase::HookCompleted { .. } | ServicePhase::HookFailed { .. } => {}
+        _ => {
+            fail_reasons.remove(service);
+        }
+    }
+}
+
+fn report_unhandled_failure(service: &str, exit_code: Option<i32>, fail_reasons: &HashMap<String, String>) {
+    match fail_reasons.get(service) {
+        Some(reason) => eprintln!("Error: service '{}' failed: {}", service, reason),
+        None => {
+            let code_str = exit_code.map(|c| format!(" (exit code {})", c)).unwrap_or_default();
+            eprintln!("Error: service '{}' failed{}", service, code_str);
+        }
+    }
+}
+
 /// Wait for all services to reach their target state (Started or Healthy) using
 /// inline progress events from `Start { follow: true }`.
 ///
@@ -834,6 +858,7 @@ async fn wait_until_ready(
     let mut bars: HashMap<String, ProgressBar> = HashMap::new();
     let mut targets: HashMap<String, ServiceTarget> = HashMap::new();
     let mut finished: HashMap<String, bool> = HashMap::new();
+    let mut fail_reasons: HashMap<String, String> = HashMap::new();
     let mut has_unhandled_failure = false;
 
     tokio::pin!(start_future);
@@ -845,6 +870,7 @@ async fn wait_until_ready(
             server_event = progress_rx.recv() => {
                 match server_event {
                     Some(ServerEvent::Progress { event, .. }) => {
+                        track_fail_reason(&mut fail_reasons, &event.service, &event.phase);
                         let pb = bars.entry(event.service.clone()).or_insert_with(|| {
                             let pb = mp.add(ProgressBar::new_spinner());
                             pb.set_style(style_active.clone());
@@ -938,9 +964,11 @@ async fn wait_until_ready(
                                 break;
                             }
                             match tokio::time::timeout(remaining, progress_rx.recv()).await {
+                                Ok(Some(ServerEvent::Progress { event, .. })) => {
+                                    track_fail_reason(&mut fail_reasons, &event.service, &event.phase);
+                                }
                                 Ok(Some(ServerEvent::UnhandledFailure { service, exit_code, .. })) => {
-                                    let code_str = exit_code.map(|c| format!(" (exit code {})", c)).unwrap_or_default();
-                                    eprintln!("Unhandled failure: service '{}' failed{}", service, code_str);
+                                    report_unhandled_failure(&service, exit_code, &fail_reasons);
                                     has_unhandled_failure = true;
                                     if abort_on_failure {
                                         break;
@@ -960,8 +988,7 @@ async fn wait_until_ready(
                         // Ignored in --wait mode
                     }
                     Some(ServerEvent::UnhandledFailure { service, exit_code, .. }) => {
-                        let code_str = exit_code.map(|c| format!(" (exit code {})", c)).unwrap_or_default();
-                        eprintln!("Unhandled failure: service '{}' failed{}", service, code_str);
+                        report_unhandled_failure(&service, exit_code, &fail_reasons);
                         has_unhandled_failure = true;
                         if abort_on_failure {
                             break;

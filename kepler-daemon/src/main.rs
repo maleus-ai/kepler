@@ -1837,10 +1837,11 @@ async fn forward_state_events(
                     _ => false,
                 };
                 if is_failure {
-                    let would_restart = svc_config.restart.as_static()
-                        .cloned()
-                        .unwrap_or_default()
-                        .should_restart_on_exit(exit_code);
+                    let would_restart = kepler_daemon::deps::restart_follows(
+                        state.status,
+                        exit_code,
+                        &svc_config.restart.as_static().cloned().unwrap_or_default(),
+                    );
                     if !would_restart && !kepler_daemon::deps::is_failure_handled(name, &config.services) {
                         progress.send_unhandled_failure(name.clone(), exit_code).await;
                     }

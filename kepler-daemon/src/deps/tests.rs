@@ -375,6 +375,17 @@ fn test_restart_on_failure_only_on_nonzero() {
     assert!(restart.should_restart_on_exit(None), "Signal kill (None) should restart");
 }
 
+#[test]
+fn test_restart_follows_process_exits_only() {
+    let restart = RestartConfig::Simple(RestartPolicy::always());
+    assert!(restart_follows(ServiceStatus::Exited, Some(1), &restart));
+    assert!(restart_follows(ServiceStatus::Killed, None, &restart));
+    assert!(!restart_follows(ServiceStatus::Failed, None, &restart), "A startup failure is never restarted by the policy");
+
+    let restart = RestartConfig::Simple(RestartPolicy::no());
+    assert!(!restart_follows(ServiceStatus::Exited, Some(1), &restart));
+}
+
 // --- Transient exit satisfaction tests ---
 
 fn make_state_with_status(status: ServiceStatus, exit_code: Option<i32>) -> ServiceState {
