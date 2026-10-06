@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 use crate::config::{
     ConfigValue, DependencyConfig, EnvironmentEntries, KeplerConfig, ServiceConfig,
 };
-use crate::deps::{get_start_order, is_condition_met, is_failure_handled};
+use crate::deps::{get_start_order, is_condition_met, is_failure_handled, restart_follows};
 use crate::errors::{DaemonError, Result};
 use crate::events::{ServiceEventMessage, ServiceEventSender, service_event_channel};
 use crate::hardening::HardeningLevel;
@@ -1469,20 +1469,7 @@ impl ConfigActor {
         };
 
         if is_failure {
-            let would_restart = self
-                .resolved_configs
-                .get(service_name)
-                .map(|rc| rc.restart.should_restart_on_exit(exit_code))
-                .or_else(|| {
-                    self.config.services.get(service_name).map(|raw| {
-                        raw.restart
-                            .as_static()
-                            .cloned()
-                            .unwrap_or_default()
-                            .should_restart_on_exit(exit_code)
-                    })
-                })
-                .unwrap_or(false);
+            let would_restart = self.restart_follows(service_name, status, exit_code);
 
             if !would_restart && !is_failure_handled(service_name, &self.config.services) {
                 self.notify_subscribers(ConfigEvent::UnhandledFailure {
@@ -1651,6 +1638,17 @@ impl ConfigActor {
         }
     }
 
+    /// Whether the restart policy brings the service back from this terminal status
+    /// (resolved config when available, raw static config otherwise).
+    fn restart_follows(&self, service_name: &str, status: ServiceStatus, exit_code: Option<i32>) -> bool {
+        match self.resolved_configs.get(service_name) {
+            Some(rc) => restart_follows(status, exit_code, &rc.restart),
+            None => self.config.services.get(service_name).is_some_and(|raw| {
+                restart_follows(status, exit_code, &raw.restart.as_static().cloned().unwrap_or_default())
+            }),
+        }
+    }
+
     /// Returns true when all services have reached their target state or are permanently blocked.
     /// This implements the `--wait` semantic (like `docker compose up -d --wait`).
     fn compute_ready(&self) -> bool {
@@ -1721,18 +1719,9 @@ impl ConfigActor {
                             ds.status,
                             ServiceStatus::Exited | ServiceStatus::Killed | ServiceStatus::Failed
                         )
-                        && let Some(dep_raw) = self.config.services.get(dep_name)
+                        && self.restart_follows(dep_name, ds.status, ds.exit_code)
                     {
-                        let dep_restart = self
-                            .resolved_configs
-                            .get(dep_name)
-                            .map(|rc| rc.restart.clone())
-                            .unwrap_or_else(|| {
-                                dep_raw.restart.as_static().cloned().unwrap_or_default()
-                            });
-                        if dep_restart.should_restart_on_exit(ds.exit_code) {
-                            return false; // dep will restart → still settling
-                        }
+                        return false; // dep will restart → still settling
                     }
                     // dep is in a stable state (Running/Healthy/Unhealthy/terminal-no-restart)
                     has_unsatisfied_stable_dep = true;
@@ -1815,20 +1804,7 @@ impl ConfigActor {
         }
 
         // Terminal (Stopped, Failed, Exited, Killed)
-        let would_restart = self
-            .resolved_configs
-            .get(service_name)
-            .map(|rc| rc.restart.should_restart_on_exit(state.exit_code))
-            .or_else(|| {
-                self.config.services.get(service_name).map(|raw| {
-                    raw.restart
-                        .as_static()
-                        .cloned()
-                        .unwrap_or_default()
-                        .should_restart_on_exit(state.exit_code)
-                })
-            })
-            .unwrap_or(false);
+        let would_restart = self.restart_follows(service_name, status, state.exit_code);
 
         if !would_restart {
             return true;
