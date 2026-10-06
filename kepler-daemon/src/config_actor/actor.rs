@@ -29,7 +29,7 @@ use kepler_protocol::protocol::ServiceInfo;
 
 use super::command::ConfigCommand;
 use super::context::{
-    ConfigEvent, DiagnosticCounts, HealthCheckUpdate, ServiceContext, ServiceStatusChange,
+    ConfigEvent, DiagnosticCounts, HealthCheckSession, HealthCheckUpdate, ServiceContext, ServiceInstance, ServiceStartup, ServiceStatusChange,
     TaskHandleType,
 };
 use super::handle::ConfigActorHandle;
@@ -50,6 +50,8 @@ pub struct ConfigActor {
     config: KeplerConfig,
     config_dir: PathBuf,
     services: HashMap<String, ServiceState>,
+    /// In-memory generations prevent a cancelled startup from resuming a later one.
+    startup_generations: HashMap<String, u64>,
     log_store: LogStoreHandle,
     initialized: bool,
 
@@ -64,6 +66,10 @@ pub struct ConfigActor {
     token_guards: HashMap<String, crate::token_store::ServiceTokenGuard>,
     watchers: HashMap<String, FileWatcherHandle>,
     health_checks: HashMap<String, JoinHandle<()>>,
+    service_instances: HashMap<String, ServiceInstance>,
+    next_service_instance: u64,
+    health_check_sessions: HashMap<String, HealthCheckSession>,
+    next_health_check: u64,
 
     // Event channels per service (service_name -> sender)
     event_senders: HashMap<String, ServiceEventSender>,
@@ -521,6 +527,7 @@ impl ConfigActor {
             config,
             config_dir,
             services,
+            startup_generations: HashMap::new(),
             log_store,
             initialized,
             resolved_configs: HashMap::new(),
@@ -528,6 +535,10 @@ impl ConfigActor {
             token_guards: HashMap::new(),
             watchers: HashMap::new(),
             health_checks: HashMap::new(),
+            service_instances: HashMap::new(),
+            next_service_instance: 0,
+            health_check_sessions: HashMap::new(),
+            next_health_check: 0,
             event_senders: HashMap::new(),
             persistence,
             snapshot_taken,
@@ -829,7 +840,41 @@ impl ConfigActor {
                 } else {
                     false
                 };
-                let _ = reply.send(claimed);
+                let _ = reply.send(if claimed { self.service_startup(&service_name) } else { None });
+            }
+            ConfigCommand::ClaimServiceRestart { service_name, reply } => {
+                let running = self.services.get(&service_name)
+                    .is_some_and(|state| state.status.is_running());
+                let startup = if running {
+                    let _ = self.set_service_status(&service_name, ServiceStatus::Restarting);
+                    let _ = self.save_state();
+                    self.service_startup(&service_name)
+                } else {
+                    None
+                };
+                let _ = reply.send(startup);
+            }
+            ConfigCommand::GetServiceStartup { service_name, reply } => {
+                let _ = reply.send(self.service_startup(&service_name));
+            }
+            ConfigCommand::TransitionServiceStartup {
+                service_name, startup, status, skip_reason, fail_reason, reply,
+            } => {
+                let current = self.service_startup(&service_name) == Some(startup);
+                let transitioned = if current {
+                    if let Some(state) = self.services.get_mut(&service_name) {
+                        state.skip_reason = skip_reason;
+                        state.fail_reason = fail_reason;
+                    }
+                    let result = self.set_service_status(&service_name, status);
+                    if result.is_ok() {
+                        let _ = self.save_state();
+                    }
+                    result.is_ok()
+                } else {
+                    false
+                };
+                let _ = reply.send(transitioned);
             }
             ConfigCommand::SetServiceStatusWithReason {
                 service_name,
@@ -904,14 +949,59 @@ impl ConfigActor {
                 }
                 let _ = reply.send(result);
             }
+            ConfigCommand::RegisterServiceInstance { service_name, pid, started_at, reply } => {
+                let result = self.set_service_pid(&service_name, pid, Some(started_at)).map(|()| {
+                    self.cancel_health_check(&service_name);
+                    self.next_service_instance = self.next_service_instance.wrapping_add(1);
+                    let instance = ServiceInstance { generation: self.next_service_instance };
+                    self.service_instances.insert(service_name.clone(), instance);
+                    instance
+                });
+                if result.is_ok() { let _ = self.save_state(); }
+                let _ = reply.send(result);
+            }
+            ConfigCommand::GetServiceInstance { service_name, reply } => {
+                let _ = reply.send(self.service_instances.get(&service_name).copied());
+            }
+            ConfigCommand::BeginHealthCheck { service_name, instance, reply } => {
+                let current = self.service_instances.get(&service_name) == Some(&instance)
+                    && self.services.get(&service_name).is_some_and(|state| state.status.is_running());
+                let session = if current {
+                    self.cancel_health_check(&service_name);
+                    self.next_health_check = self.next_health_check.wrapping_add(1);
+                    let session = HealthCheckSession { generation: self.next_health_check };
+                    self.health_check_sessions.insert(service_name, session);
+                    Some(session)
+                } else { None };
+                let _ = reply.send(session);
+            }
+            ConfigCommand::IsHealthCheckCurrent { service_name, session, reply } => {
+                let _ = reply.send(self.is_health_check_current(&service_name, session));
+            }
+            ConfigCommand::StoreHealthCheckTask { service_name, session, handle } => {
+                if self.is_health_check_current(&service_name, session) {
+                    if let Some(old) = self.health_checks.insert(service_name, handle) { old.abort(); }
+                } else { handle.abort(); }
+            }
+            ConfigCommand::EmitHealthCheckEvent { service_name, session, event } => {
+                if self.is_health_check_current(&service_name, session)
+                    && let Some(sender) = self.event_senders.get(&service_name) {
+                        if let Err(e) = sender.try_send(ServiceEventMessage::health_check(event, session)) {
+                            warn!("Could not emit health event for '{}': {}", service_name, e);
+                        }
+                    }
+            }
             ConfigCommand::UpdateHealthCheck {
                 service_name,
+                session,
                 passed,
                 retries,
                 reply,
             } => {
-                let result = self.update_health_check(&service_name, passed, retries);
-                if let Ok(ref update) = result
+                let result = if self.is_health_check_current(&service_name, session) {
+                    self.update_health_check(&service_name, passed, retries).map(Some)
+                } else { Ok(None) };
+                if let Ok(Some(ref update)) = result
                     && update.previous_status != update.new_status
                 {
                     let _ = self.save_state();
@@ -1026,11 +1116,25 @@ impl ConfigActor {
             } => {
                 self.token_guards.insert(service_name, guard);
             }
+            ConfigCommand::StoreStartupTokenGuard { service_name, startup, guard, reply } => {
+                if self.service_startup(&service_name) == Some(startup) {
+                    self.token_guards.insert(service_name, guard);
+                    let _ = reply.send(None);
+                } else {
+                    let _ = reply.send(Some(guard));
+                }
+            }
             ConfigCommand::TakeTokenGuard {
                 service_name,
                 reply,
             } => {
                 let guard = self.token_guards.remove(&service_name);
+                let _ = reply.send(guard);
+            }
+            ConfigCommand::TakeMatchingTokenGuard { service_name, token, reply } => {
+                let matches = self.token_guards.get(&service_name)
+                    .is_some_and(|guard| guard.token().ok() == Some(token));
+                let guard = if matches { self.token_guards.remove(&service_name) } else { None };
                 let _ = reply.send(guard);
             }
             ConfigCommand::GetServiceTokenHex {
@@ -1066,9 +1170,7 @@ impl ConfigActor {
                 handle_type,
             } => match handle_type {
                 TaskHandleType::HealthCheck => {
-                    if let Some(handle) = self.health_checks.remove(&service_name) {
-                        handle.abort();
-                    }
+                    self.cancel_health_check(&service_name);
                 }
                 TaskHandleType::FileWatcher => {
                     if let Some(handle) = self.watchers.remove(&service_name) {
@@ -1412,11 +1514,47 @@ impl ConfigActor {
         }
     }
 
+    fn service_startup(&self, service_name: &str) -> Option<ServiceStartup> {
+        let state = self.services.get(service_name)?;
+        if !matches!(state.status, ServiceStatus::Waiting | ServiceStatus::Starting | ServiceStatus::Restarting) {
+            return None;
+        }
+        Some(ServiceStartup {
+            generation: self.startup_generations.get(service_name).copied().unwrap_or(0),
+        })
+    }
+
+    fn cancel_health_check(&mut self, service_name: &str) {
+        self.health_check_sessions.remove(service_name);
+        if let Some(handle) = self.health_checks.remove(service_name) {
+            handle.abort();
+        }
+    }
+
+    fn is_health_check_current(&self, service_name: &str, session: HealthCheckSession) -> bool {
+        self.health_check_sessions.get(service_name) == Some(&session)
+            && self.services.get(service_name).is_some_and(|state| state.status.is_running())
+    }
+
     fn set_service_status(&mut self, service_name: &str, status: ServiceStatus) -> Result<()> {
+        if !status.is_running() {
+            // Invalidate queued results and stop checks before any restart/stop hooks.
+            self.cancel_health_check(service_name);
+        }
         let service_state = self
             .services
             .get_mut(service_name)
             .ok_or_else(|| DaemonError::ServiceNotFound(service_name.to_string()))?;
+
+        // Stop invalidates the current operation immediately. Claiming a new
+        // start/restart advances the generation even if an old task is still waiting.
+        if status == ServiceStatus::Stopping
+            || (matches!(status, ServiceStatus::Waiting | ServiceStatus::Restarting)
+                && status != service_state.status)
+        {
+            let generation = self.startup_generations.entry(service_name.to_string()).or_default();
+            *generation = generation.wrapping_add(1);
+        }
 
         if status == ServiceStatus::Waiting
             || status == ServiceStatus::Starting
@@ -1534,6 +1672,7 @@ impl ConfigActor {
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> Result<()> {
+        self.cancel_health_check(service_name);
         // Remove process handle
         self.processes.remove(service_name);
 

@@ -27,7 +27,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{resolve_log_retention, resolve_inherit_env, DependsOn, KeplerConfig, LogRetention, RawServiceConfig, ServiceHooks};
 use crate::hardening::HardeningLevel;
-use crate::config_actor::{ConfigActorHandle, ServiceContext, TaskHandleType};
+use crate::config_actor::{ConfigActorHandle, ServiceContext, ServiceInstance, ServiceStartup, TaskHandleType};
 use crate::config_registry::SharedConfigRegistry;
 use crate::deps::{check_dependency_satisfied, get_start_order, get_stop_order, is_condition_unreachable_by_policy, is_dependency_permanently_unsatisfied, is_transient_satisfaction};
 use crate::lua::templating_runtime::{EvalContext, LuaEvaluator, OwnerEvalContext, ServiceEvalContext};
@@ -49,7 +49,7 @@ use crate::watcher::{spawn_file_watcher, FileChangeEvent};
 use kepler_protocol::protocol::PrunedConfigInfo;
 use kepler_protocol::server::ProgressSender;
 use crate::containment::ContainmentManager;
-use crate::token_store::{SharedTokenStore, TokenContext};
+use crate::token_store::{SharedTokenStore, Token, TokenContext};
 
 /// Context for post-startup work, bundling all parameters into a single struct.
 struct StartupContext<'a> {
@@ -58,6 +58,13 @@ struct StartupContext<'a> {
     handle: &'a ConfigActorHandle,
     started: &'a [String],
     initialized: bool,
+}
+
+/// Chosen when claiming the service, before changing its lifecycle status.
+#[derive(Clone, Copy)]
+enum SelectedServiceLifecycle {
+    Start(ServiceStartup),
+    Restart(ServiceStartup),
 }
 
 
@@ -367,43 +374,88 @@ impl ServiceOrchestrator {
         no_deps: bool,
     ) -> Result<(), OrchestratorError> {
         // Atomically claim the service for startup
-        if !handle.claim_service_start(service_name).await {
+        let Some(startup) = handle.claim_service_start(service_name).await else {
             debug!("Service {} already active, skipping", service_name);
             return Ok(());
-        }
+        };
 
-        self.run_service_startup(handle, service_name, progress, shared_evaluator, skip_condition, no_deps).await
+        self.run_service_startup(handle, service_name, startup, progress, shared_evaluator, skip_condition, no_deps).await
     }
 
-    /// Shared startup and error handling for starts and manual restarts.
+    /// Start a terminal service, including one selected by `restart --states`.
     async fn run_service_startup(
         &self,
         handle: &ConfigActorHandle,
         service_name: &str,
+        startup: ServiceStartup,
         progress: &Option<ProgressSender>,
         shared_evaluator: Option<SharedLuaEvaluator>,
         skip_condition: bool,
         no_deps: bool,
     ) -> Result<(), OrchestratorError> {
-        // Run the actual startup. If anything fails, mark as Skipped or Failed.
-        match self.execute_service_startup(handle, service_name, progress, shared_evaluator, skip_condition, no_deps).await {
+        let result = self.execute_service_startup(
+            handle, service_name, startup, progress, shared_evaluator, skip_condition, no_deps,
+        ).await;
+        self.handle_service_launch_result(handle, service_name, startup, result).await
+    }
+
+    /// Finish a running service's manual restart after the stop phase.
+    async fn run_manual_restart_startup(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        startup: ServiceStartup,
+        shared_evaluator: SharedLuaEvaluator,
+        skip_condition: bool,
+        no_deps: bool,
+    ) -> Result<(), OrchestratorError> {
+        let result = async {
+            self.ensure_service_startup(handle, service_name, startup).await?;
+            handle.increment_restart_count(service_name).await?;
+            let Some(ctx) = self.prepare_service_launch(
+                handle, service_name, startup, ServiceStatus::Restarting,
+                Some(shared_evaluator), skip_condition, no_deps,
+            ).await? else {
+                return Ok(());
+            };
+
+            // Stop/restart hooks already ran. Preserve their outputs for the
+            // start and post_restart hooks, but discard the old process result.
+            crate::outputs::clear_service_process_outputs(&ctx.state_dir, service_name)?;
+            let instance = self.start_service_process(handle, service_name, startup, &ctx, &None).await?;
+            if let Err(e) = self.run_service_hook(
+                &ctx, service_name, ServiceHookType::PostRestart, &None, Some(handle),
+            ).await {
+                warn!("Hook post_restart failed for {}: {}", service_name, e);
+            }
+            self.spawn_auxiliary_tasks(handle, service_name, &ctx, instance).await;
+            Ok(())
+        }.await;
+        self.handle_service_launch_result(handle, service_name, startup, result).await
+    }
+
+    /// Shared outcome handling; cancelled operations cannot overwrite a later lifecycle.
+    async fn handle_service_launch_result(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        startup: ServiceStartup,
+        result: Result<(), OrchestratorError>,
+    ) -> Result<(), OrchestratorError> {
+        match result {
             Ok(()) => Ok(()),
             Err(ref e @ OrchestratorError::DependencySkipped { ref dependency, .. }) => {
                 let reason = format!("dependency `{}` was skipped", dependency);
-                if let Err(err) = handle.set_service_status_with_reason(
-                    service_name, ServiceStatus::Skipped, Some(reason.clone()), None,
-                ).await {
-                    warn!("Failed to set {} to Skipped: {}", service_name, err);
-                }
+                handle.transition_service_startup(
+                    service_name, startup, ServiceStatus::Skipped, Some(reason.clone()), None,
+                ).await;
                 info!("Service {} skipped: {}", service_name, e);
                 Ok(())
             }
             Err(ref e @ OrchestratorError::DependencyUnsatisfied { ref reason, .. }) => {
-                if let Err(err) = handle.set_service_status_with_reason(
-                    service_name, ServiceStatus::Skipped, Some(reason.clone()), None,
-                ).await {
-                    warn!("Failed to set {} to Skipped: {}", service_name, err);
-                }
+                handle.transition_service_startup(
+                    service_name, startup, ServiceStatus::Skipped, Some(reason.clone()), None,
+                ).await;
                 info!("Service {} skipped: {}", service_name, e);
                 Ok(())
             }
@@ -414,6 +466,9 @@ impl ServiceOrchestrator {
                 Ok(())
             }
             Err(e) => {
+                if handle.get_service_startup(service_name).await != Some(startup) {
+                    return Ok(());
+                }
                 // Write error to service stderr log so it's visible via `kepler logs`.
                 // Skip for hook errors — they already wrote to stderr in run_service_hook.
                 if !matches!(e, OrchestratorError::HookFailed(_))
@@ -421,10 +476,10 @@ impl ServiceOrchestrator {
                         let writer = LogWriter::new(log_store, service_name, "error");
                         writer.write(&e.to_string());
                     }
-                if let Err(err) = handle.set_service_status_with_reason(
-                    service_name, ServiceStatus::Failed, None, Some(e.to_string()),
+                if !handle.transition_service_startup(
+                    service_name, startup, ServiceStatus::Failed, None, Some(e.to_string()),
                 ).await {
-                    warn!("Failed to set {} to Failed: {}", service_name, err);
+                    return Ok(());
                 }
                 Err(e)
             }
@@ -443,20 +498,57 @@ impl ServiceOrchestrator {
         self.start_single_service_with_evaluator(handle, service_name, &None, None, false, false).await
     }
 
-    /// Execute the actual service startup sequence (after claiming).
-    ///
-    /// This is the lazy resolution point: after dependencies are satisfied,
-    /// the raw service config is expanded (${{}}$ + !lua) and deserialized
-    /// into a typed ServiceConfig.
+    /// A start owns output reset and start hooks, without restart hooks or counters.
     async fn execute_service_startup(
         &self,
         handle: &ConfigActorHandle,
         service_name: &str,
+        startup: ServiceStartup,
         progress: &Option<ProgressSender>,
         shared_evaluator: Option<SharedLuaEvaluator>,
         skip_condition: bool,
         no_deps: bool,
     ) -> Result<(), OrchestratorError> {
+        let Some(ctx) = self.prepare_service_launch(
+            handle, service_name, startup, ServiceStatus::Starting,
+            shared_evaluator, skip_condition, no_deps,
+        ).await? else {
+            return Ok(());
+        };
+
+        if let Err(e) = crate::outputs::clear_service_outputs(&ctx.state_dir, service_name) {
+            warn!("Failed to clear outputs for {}: {}", service_name, e);
+        }
+        let instance = self.start_service_process(handle, service_name, startup, &ctx, progress).await?;
+        self.spawn_auxiliary_tasks(handle, service_name, &ctx, instance).await;
+        Ok(())
+    }
+
+    async fn ensure_service_startup(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        startup: ServiceStartup,
+    ) -> Result<(), OrchestratorError> {
+        if handle.get_service_startup(service_name).await == Some(startup) {
+            Ok(())
+        } else {
+            Err(OrchestratorError::StartupCancelled(service_name.to_string()))
+        }
+    }
+
+    /// Wait, resolve configuration and evaluate `if`, without lifecycle hooks or output cleanup.
+    async fn prepare_service_launch(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        startup: ServiceStartup,
+        startup_status: ServiceStatus,
+        shared_evaluator: Option<SharedLuaEvaluator>,
+        skip_condition: bool,
+        no_deps: bool,
+    ) -> Result<Option<ServiceContext>, OrchestratorError> {
+        self.ensure_service_startup(handle, service_name, startup).await?;
         // Get service context (single round-trip — raw config + state)
         let ctx = handle
             .get_service_context(service_name)
@@ -466,24 +558,17 @@ impl ServiceOrchestrator {
         // Extract depends_on from raw config for dependency wait
         let depends_on = ctx.service_config.depends_on.clone();
 
-        // Keep manual restarts active through dependency waiting and startup.
-        let startup_status = if handle.get_service_state(service_name).await
-            .is_some_and(|state| state.status == ServiceStatus::Restarting)
-        {
-            ServiceStatus::Restarting
-        } else {
-            ServiceStatus::Starting
-        };
-
         // Wait for dependencies to satisfy their conditions (blocks while in Waiting state)
         // Skip when --no-deps is set (user explicitly chose to bypass dependency waiting)
         if !no_deps {
-            self.wait_for_dependencies(handle, service_name, &depends_on)
+            self.wait_for_dependencies(handle, service_name, startup, &depends_on)
                 .await?;
         }
 
-        // Transition: Waiting → Starting (dependencies satisfied)
-        handle.set_service_status(service_name, startup_status).await?;
+        // Advance a claimed start while keeping a restart non-terminal.
+        if !handle.transition_service_startup(service_name, startup, startup_status, None, None).await {
+            return Err(OrchestratorError::StartupCancelled(service_name.to_string()));
+        }
 
         // Build evaluation context (kepler_env + kepler_flags + deps).
         // env_file vars are loaded inside resolve_service (step 0) so that
@@ -664,66 +749,73 @@ impl ServiceOrchestrator {
             .await
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
+        self.ensure_service_startup(handle, service_name, startup).await?;
+
         // Service-level `if` condition — already resolved to bool by resolve_service
         // Skip when the user explicitly named this service (skip_condition=true)
         if !skip_condition && resolved.condition == Some(false) {
             let reason = "`if` condition evaluated to false".to_string();
             tracing::info!("Service {} skipped: {}", service_name, reason);
-            if let Err(err) = handle.set_service_status_with_reason(
-                service_name, ServiceStatus::Skipped, Some(reason), None,
+            if !handle.transition_service_startup(
+                service_name, startup, ServiceStatus::Skipped, Some(reason), None,
             ).await {
-                warn!("Failed to set {} to Skipped: {}", service_name, err);
+                return Err(OrchestratorError::StartupCancelled(service_name.to_string()));
             }
             // Apply on_skipped log retention
             self.apply_retention(handle, service_name, &ctx, LifecycleEvent::Skipped)
                 .await;
-            return Ok(());
+            return Ok(None);
         }
 
+        Ok(Some(ctx))
+    }
+
+    /// Process launch shared by start and restart; each caller owns its outer lifecycle.
+    async fn start_service_process(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        startup: ServiceStartup,
+        ctx: &ServiceContext,
+        progress: &Option<ProgressSender>,
+    ) -> Result<ServiceInstance, OrchestratorError> {
+        self.ensure_service_startup(handle, service_name, startup).await?;
+        let resolved = ctx.resolved_config.as_ref()
+            .ok_or(OrchestratorError::ServiceContextNotFound)?;
         let service_initialized = handle.is_service_initialized(service_name).await;
-
-        // Clear previous outputs for a fresh start
-        if let Err(e) = crate::outputs::clear_service_outputs(&state_dir, service_name) {
-            warn!("Failed to clear outputs for {}: {}", service_name, e);
-        }
 
         // Emit Start event
         handle.emit_event(service_name, ServiceEvent::Start).await;
 
         // Create token guard before pre_start hooks so hooks can use the token.
         // The guard is stored in the config actor and revoked after post_exit/post_stop.
-        self.create_service_token_guard(handle, service_name, &resolved).await?;
+        let token = self.create_service_token_guard_for_operation(
+            handle, service_name, resolved, Some(startup),
+        ).await?;
 
         // Run pre_start hook
-        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, progress, Some(handle))
+        if let Err(e) = self.run_service_hook(ctx, service_name, ServiceHookType::PreStart, progress, Some(handle))
             .await
         {
-            self.revoke_service_token_guard(handle, service_name).await;
+            self.revoke_matching_service_token_guard(handle, service_name, token).await;
             return Err(e);
         }
 
         // Apply on_start log retention
-        self.apply_retention(handle, service_name, &ctx, LifecycleEvent::Start)
+        self.apply_retention(handle, service_name, ctx, LifecycleEvent::Start)
             .await;
 
         // Check if startup was cancelled (e.g., concurrent stop)
-        let state = handle.get_service_state(service_name).await;
-        if state.as_ref().map(|s| s.status) != Some(startup_status) {
-            debug!(
-                "Service {} startup cancelled (status: {:?})",
-                service_name,
-                state.map(|s| s.status)
-            );
-            // Startup cancelled — revoke the token guard
-            self.revoke_service_token_guard(handle, service_name).await;
-            return Ok(());
+        if let Err(e) = self.ensure_service_startup(handle, service_name, startup).await {
+            self.revoke_matching_service_token_guard(handle, service_name, token).await;
+            return Err(e);
         }
 
         // Spawn process
-        self.spawn_service(handle, service_name, &ctx).await?;
+        let instance = self.spawn_service_with_token_guard(handle, service_name, ctx, token).await?;
 
         // Run post_start hook (after process spawned)
-        if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart, progress, Some(handle)).await {
+        if let Err(e) = self.run_service_hook(ctx, service_name, ServiceHookType::PostStart, progress, Some(handle)).await {
             warn!("Hook post_start failed for {}: {}", service_name, e);
         }
 
@@ -732,18 +824,7 @@ impl ServiceOrchestrator {
             handle.mark_service_initialized(service_name).await?;
         }
 
-        // Manual restart hooks must finish before file watching is enabled.
-        // Otherwise changes made by post_restart can trigger another restart.
-        if startup_status == ServiceStatus::Restarting {
-            if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostRestart, progress, Some(handle)).await {
-                warn!("Hook post_restart failed for {}: {}", service_name, e);
-            }
-        }
-
-        // Spawn auxiliary tasks
-        self.spawn_auxiliary_tasks(handle, service_name, &ctx).await;
-
-        Ok(())
+        Ok(instance)
     }
 
     /// Load env_file variables for a service from the state directory copy.
@@ -965,10 +1046,13 @@ impl ServiceOrchestrator {
         &self,
         handle: &ConfigActorHandle,
         service_name: &str,
+        startup: ServiceStartup,
         depends_on: &DependsOn,
     ) -> Result<(), OrchestratorError> {
         // Get the full config for looking up dependency service configs (raw values)
         let config = handle.get_config().await;
+        // Dependency changes and stop/start changes must both wake this task.
+        let mut service_rx = handle.watch_dep(service_name);
 
         for (dep_name, dep_config) in depends_on.iter() {
             let start = Instant::now();
@@ -985,6 +1069,7 @@ impl ServiceOrchestrator {
             let mut status_rx = handle.watch_dep(dep_name);
 
             loop {
+                self.ensure_service_startup(handle, service_name, startup).await?;
                 let dep_satisfied = check_dependency_satisfied(dep_name, &dep_config, handle).await;
                 if dep_satisfied {
                     // Check if this is a transient satisfaction (dep exited but will restart).
@@ -1082,15 +1167,7 @@ impl ServiceOrchestrator {
                 }
 
                 // Check if startup was cancelled during dependency wait
-                let state = handle.get_service_state(service_name).await;
-                if !matches!(
-                    state.as_ref().map(|s| s.status),
-                    Some(ServiceStatus::Starting) | Some(ServiceStatus::Waiting) | Some(ServiceStatus::Restarting)
-                ) {
-                    return Err(OrchestratorError::StartupCancelled(
-                        service_name.to_string(),
-                    ));
-                }
+                self.ensure_service_startup(handle, service_name, startup).await?;
 
                 // Wait for next status change, with optional deadline
                 let recv_result = if let Some(dl) = deadline {
@@ -1102,7 +1179,12 @@ impl ServiceOrchestrator {
                             condition: dep_config.condition.clone(),
                         });
                     }
-                    match tokio::time::timeout(remaining, status_rx.recv()).await {
+                    match tokio::time::timeout(remaining, async {
+                        tokio::select! {
+                            event = status_rx.recv() => event,
+                            event = service_rx.recv() => event,
+                        }
+                    }).await {
                         Ok(result) => result,
                         Err(_) => {
                             return Err(OrchestratorError::DependencyTimeout {
@@ -1114,7 +1196,10 @@ impl ServiceOrchestrator {
                     }
                 } else {
                     // No timeout — wait indefinitely for next status change
-                    status_rx.recv().await
+                    tokio::select! {
+                        event = status_rx.recv() => event,
+                        event = service_rx.recv() => event,
+                    }
                 };
 
                 match recv_result {
@@ -1534,7 +1619,7 @@ impl ServiceOrchestrator {
         }
 
         // Sort services by dependency graph (unless --no-deps, which uses user-specified order)
-        let (start_order, stop_order) = if no_deps {
+        let (mut start_order, mut stop_order) = if no_deps {
             // --no-deps: use user-specified order for start, reverse for stop
             let mut stop = services_to_restart.clone();
             stop.reverse();
@@ -1556,15 +1641,35 @@ impl ServiceOrchestrator {
                 .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?,
         ));
 
-        // Mark all restarting services before the stop phase.
-        // Restarting is active and non-terminal, so quiescence/ready signals
-        // won't fire while any service is in this state.
+        // Claim all selected lifecycles before stopping any dependency. Terminal
+        // services wait for a start; running services retain the restart contract.
+        let mut lifecycles = HashMap::new();
+        handle.set_startup_in_progress(true).await;
         for service_name in &stop_order {
-            let _ = handle.set_service_status(service_name, ServiceStatus::Restarting).await;
+            let lifecycle = if running_services.contains(service_name) {
+                handle.claim_service_restart(service_name).await.map(SelectedServiceLifecycle::Restart)
+            } else {
+                handle.claim_service_start(service_name).await.map(SelectedServiceLifecycle::Start)
+            };
+            if let Some(lifecycle) = lifecycle {
+                lifecycles.insert(service_name.clone(), lifecycle);
+            }
+        }
+        handle.set_startup_in_progress(false).await;
+        start_order.retain(|name| lifecycles.contains_key(name));
+        stop_order.retain(|name| matches!(lifecycles.get(name), Some(SelectedServiceLifecycle::Restart(_))));
+        if start_order.is_empty() {
+            return Ok("No eligible services to restart".to_string());
         }
 
         // Phase 1: Run pre_restart hooks and stop (reverse dependency order)
         for service_name in &stop_order {
+            let SelectedServiceLifecycle::Restart(startup) = lifecycles[service_name] else {
+                unreachable!("stop order only contains running services");
+            };
+            if self.ensure_service_startup(&handle, service_name, startup).await.is_err() {
+                continue;
+            }
             // Suppress file watcher early so hooks that modify watched files
             // don't queue spurious restart events.
             handle.suppress_file_watcher(service_name).await;
@@ -1593,16 +1698,17 @@ impl ServiceOrchestrator {
                 warn!("Hook pre_restart failed for {}: {}", service_name, e);
             }
 
-            // Terminal services have no process to stop. Keep restart hooks, but
-            // do not run stop hooks or overwrite their previous exit information.
-            if !running_services.contains(service_name) {
-                self.apply_retention(&handle, service_name, &ctx, LifecycleEvent::Restart).await;
+            if self.ensure_service_startup(&handle, service_name, startup).await.is_err() {
                 continue;
             }
 
             // Run pre_stop hook
             if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStop, &None, Some(&handle)).await {
                 warn!("Hook pre_stop failed for {}: {}", service_name, e);
+            }
+
+            if self.ensure_service_startup(&handle, service_name, startup).await.is_err() {
+                continue;
             }
 
             // Apply on_restart log retention
@@ -1631,7 +1737,9 @@ impl ServiceOrchestrator {
         }
 
         // Small delay between stop and start phases
-        tokio::time::sleep(RESTART_DELAY).await;
+        if !stop_order.is_empty() {
+            tokio::time::sleep(RESTART_DELAY).await;
+        }
 
         let mut restarted = Vec::new();
         let mut startup_error = None;
@@ -1641,17 +1749,21 @@ impl ServiceOrchestrator {
         // --no-deps retains sequential startup in the user's specified order.
         let concurrency = if no_deps { 1 } else { start_order.len() };
         let mut startups = futures::stream::iter(start_order.into_iter().map(|service_name| {
+            let lifecycle = lifecycles[&service_name];
             let handle = handle.clone();
             let orchestrator = self.clone();
             let shared_evaluator = shared_evaluator.clone();
             async move {
-                if let Err(e) = handle.increment_restart_count(&service_name).await {
-                    warn!("Failed to increment restart count for {}: {}", service_name, e);
-                }
-                let result = orchestrator.run_service_startup(
-                    &handle, &service_name, &None, Some(shared_evaluator),
-                    !is_full_restart, no_deps,
-                ).await;
+                let result = match lifecycle {
+                    SelectedServiceLifecycle::Start(startup) => orchestrator.run_service_startup(
+                        &handle, &service_name, startup, &None, Some(shared_evaluator),
+                        !is_full_restart, no_deps,
+                    ).await,
+                    SelectedServiceLifecycle::Restart(startup) => orchestrator.run_manual_restart_startup(
+                        &handle, &service_name, startup, shared_evaluator,
+                        !is_full_restart, no_deps,
+                    ).await,
+                };
                 (service_name, result)
             }
         })).buffer_unordered(concurrency);
@@ -1876,6 +1988,9 @@ impl ServiceOrchestrator {
             .get(&config_path.to_path_buf())
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
+        // Stop the old checker before restart hooks and invalidate queued results.
+        handle.cancel_task_handle(service_name, TaskHandleType::HealthCheck).await;
+
         // Emit Restart event
         handle
             .emit_event(
@@ -2018,7 +2133,7 @@ impl ServiceOrchestrator {
             .await;
 
         // Spawn the service
-        self.spawn_service(handle, service_name, &ctx).await?;
+        let instance = self.spawn_service(handle, service_name, &ctx).await?;
 
         // Run post_start hook (after process spawned)
         if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart, &None, Some(handle)).await {
@@ -2031,7 +2146,7 @@ impl ServiceOrchestrator {
         }
 
         // Spawn auxiliary tasks (health checker, file watcher)
-        self.spawn_auxiliary_tasks(handle, service_name, &ctx).await;
+        self.spawn_auxiliary_tasks(handle, service_name, &ctx, instance).await;
 
         Ok(())
     }
@@ -2231,7 +2346,7 @@ impl ServiceOrchestrator {
 
             // Spawn new process
             match self.spawn_service(&handle, service_name, &ctx).await {
-                Ok(()) => {
+                Ok(instance) => {
                     // Run post_start hook (after process spawned)
                     if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart, &None, Some(&handle)).await {
                         warn!("Hook post_start failed for {}: {}", service_name, e);
@@ -2243,7 +2358,7 @@ impl ServiceOrchestrator {
                     }
 
                     // Spawn auxiliary tasks (health checker, file watcher)
-                    self.spawn_auxiliary_tasks(&handle, service_name, &ctx).await;
+                    self.spawn_auxiliary_tasks(&handle, service_name, &ctx, instance).await;
 
                     let _ = handle
                         .set_service_status(service_name, ServiceStatus::Running)
@@ -2689,6 +2804,18 @@ impl ServiceOrchestrator {
         service_name: &str,
         resolved: &crate::config::ServiceConfig,
     ) -> Result<(), OrchestratorError> {
+        self.create_service_token_guard_for_operation(handle, service_name, resolved, None)
+            .await.map(|_| ())
+    }
+
+    /// Return the created guard's identity so cleanup cannot revoke another operation's guard.
+    async fn create_service_token_guard_for_operation(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        resolved: &crate::config::ServiceConfig,
+        startup: Option<ServiceStartup>,
+    ) -> Result<Option<Token>, OrchestratorError> {
         if let Some(permissions) = &resolved.permissions {
             let expanded = crate::permissions::expand_allow(&permissions.allow, &std::collections::HashMap::new())
                 .map_err(|e| OrchestratorError::SpawnFailed(
@@ -2742,9 +2869,29 @@ impl ServiceOrchestrator {
                 format!("failed to generate auth token: {}", e),
             ))?;
 
-            handle.store_token_guard(service_name, guard).await;
+            let token = guard.token().expect("a newly created guard owns its token");
+            if let Some(startup) = startup {
+                if !handle.store_startup_token_guard(service_name, startup, guard).await {
+                    return Err(OrchestratorError::StartupCancelled(service_name.to_string()));
+                }
+            } else {
+                handle.store_token_guard(service_name, guard).await;
+            }
+            return Ok(Some(token));
         }
-        Ok(())
+        Ok(None)
+    }
+
+    async fn revoke_matching_service_token_guard(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        token: Option<Token>,
+    ) {
+        if let Some(token) = token
+            && let Some(guard) = handle.take_matching_token_guard(service_name, token).await {
+                guard.revoke().await;
+            }
     }
 
     /// Revoke and remove the token guard for a service (if any).
@@ -2766,7 +2913,19 @@ impl ServiceOrchestrator {
         handle: &ConfigActorHandle,
         service_name: &str,
         ctx: &ServiceContext,
-    ) -> Result<(), OrchestratorError> {
+    ) -> Result<ServiceInstance, OrchestratorError> {
+        let token = handle.get_service_token_hex(service_name).await
+            .and_then(|hex| Token::from_hex(&hex));
+        self.spawn_service_with_token_guard(handle, service_name, ctx, token).await
+    }
+
+    async fn spawn_service_with_token_guard(
+        &self,
+        handle: &ConfigActorHandle,
+        service_name: &str,
+        ctx: &ServiceContext,
+        token: Option<Token>,
+    ) -> Result<ServiceInstance, OrchestratorError> {
         let resolved = ctx.resolved_config.as_ref()
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
@@ -2826,8 +2985,8 @@ impl ServiceOrchestrator {
 
         // Inject the token from the stored guard (created by create_service_token_guard
         // before pre_start hooks). The guard handles registration and RAII revocation.
-        if let Some(token_hex) = handle.get_service_token_hex(service_name).await {
-            spec.environment.insert("KEPLER_TOKEN".to_string(), token_hex);
+        if let Some(token) = token {
+            spec.environment.insert("KEPLER_TOKEN".to_string(), token.to_hex());
             // Ensure the process knows where to connect back to the daemon socket,
             // especially when KEPLER_SOCKET_PATH or KEPLER_DAEMON_PATH override the default.
             if let Ok(socket_path) = crate::Daemon::get_socket_path() {
@@ -2866,7 +3025,7 @@ impl ServiceOrchestrator {
                 self.containment.cleanup_service(handle.config_hash(), service_name).await;
                 // Revoke the token guard (RAII Drop would also handle
                 // this, but explicit revocation is cleaner and avoids the warning).
-                self.revoke_service_token_guard(handle, service_name).await;
+                self.revoke_matching_service_token_guard(handle, service_name, token).await;
                 return Err(OrchestratorError::SpawnFailed(e.to_string()));
             }
         };
@@ -2884,9 +3043,10 @@ impl ServiceOrchestrator {
         // handle (for output capture tasks) and a status it can transition
         // from. See `SpawnGate`.
         info!("GATEDBG registration for {} took {:?}", service_name, gate_t0.elapsed());
+        let instance = spawn_gate.instance();
         spawn_gate.release();
 
-        Ok(())
+        Ok(instance)
     }
 
     /// Spawn auxiliary tasks (health checker, file watcher)
@@ -2895,6 +3055,7 @@ impl ServiceOrchestrator {
         handle: &ConfigActorHandle,
         service_name: &str,
         ctx: &ServiceContext,
+        instance: ServiceInstance,
     ) {
         let resolved = match ctx.resolved_config.as_ref() {
             Some(c) => c,
@@ -2903,16 +3064,14 @@ impl ServiceOrchestrator {
 
         // Start health check if configured
         if let Some(health_config) = &resolved.healthcheck {
-            let task_handle = spawn_health_checker(
+            spawn_health_checker(
                 service_name.to_string(),
                 health_config.clone(),
                 handle.clone(),
                 self.effective_hardening(handle),
                 self.kepler_gid,
-            );
-            handle
-                .store_task_handle(service_name, TaskHandleType::HealthCheck, task_handle)
-                .await;
+                instance,
+            ).await;
         }
 
         // Start monitor if configured and not already running

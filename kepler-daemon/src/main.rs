@@ -1120,7 +1120,7 @@ async fn handle_request(
                 {
                     ServicePhase::Stopping
                 } else {
-                    ServicePhase::Restarting
+                    ServicePhase::Waiting
                 };
                 progress.send(ProgressEvent { service: svc.clone(), phase }).await;
             }
@@ -1140,6 +1140,7 @@ async fn handle_request(
                             continue;
                         }
                         let phase = match change.status {
+                            ServiceStatus::Waiting => ServicePhase::Waiting,
                             ServiceStatus::Restarting => ServicePhase::Restarting,
                             ServiceStatus::Stopping => ServicePhase::Stopping,
                             ServiceStatus::Stopped => ServicePhase::Stopped,

@@ -75,6 +75,8 @@ pub struct ServiceEventMessage {
     pub event: ServiceEvent,
     /// Timestamp when the event occurred
     pub timestamp: DateTime<Utc>,
+    /// Health events remain tied to their checker even while queued for handling.
+    pub health_check_session: Option<crate::config_actor::HealthCheckSession>,
 }
 
 impl ServiceEventMessage {
@@ -83,7 +85,12 @@ impl ServiceEventMessage {
         Self {
             event,
             timestamp: Utc::now(),
+            health_check_session: None,
         }
+    }
+
+    pub fn health_check(event: ServiceEvent, session: crate::config_actor::HealthCheckSession) -> Self {
+        Self { health_check_session: Some(session), ..Self::new(event) }
     }
 }
 

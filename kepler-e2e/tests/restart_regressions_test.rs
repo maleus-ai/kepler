@@ -3,6 +3,460 @@ use kepler_e2e::{E2eHarness, E2eResult};
 use serde_json::Value;
 use std::time::Duration;
 
+async fn service_states(harness: &E2eHarness, config: &std::path::Path) -> E2eResult<Value> {
+    let output = harness
+        .run_cli(&["-f", config.to_str().unwrap(), "ps", "--json"])
+        .await?;
+    output.assert_success();
+    Ok(serde_json::from_str(&output.stdout).unwrap())
+}
+
+fn persisted_states(harness: &E2eHarness, config: &std::path::Path) -> Value {
+    let state_dir = harness.get_config_state_dir(config).unwrap();
+    let state = std::fs::read_to_string(state_dir.join("state.json")).unwrap();
+    serde_json::from_str::<Value>(&state).unwrap()["services"].clone()
+}
+
+#[tokio::test]
+async fn running_restart_and_terminal_start_have_distinct_hooks_and_counters() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let root = harness.temp_dir().path().to_path_buf();
+    let names = ["running", "stopped", "exited", "killed", "failed", "fresh"];
+    let mut yaml = String::from("services:\n");
+    for name in names {
+        let command = match name {
+            "exited" => "[sh, -c, 'exit 0']",
+            "killed" => "[sh, -c, 'kill -KILL $$']",
+            _ => "[sleep, '300']",
+        };
+        yaml.push_str(&format!("  {name}:\n    command: {command}\n    hooks:\n"));
+        for hook in [
+            "pre_restart",
+            "pre_stop",
+            "post_stop",
+            "pre_start",
+            "post_start",
+            "post_restart",
+        ] {
+            let guard = if name == "failed" && hook == "pre_start" {
+                format!("test -f {}/repaired && ", root.display())
+            } else {
+                String::new()
+            };
+            yaml.push_str(&format!(
+                "      {hook}:\n        run: '{guard}echo {hook} >> {}/{name}.hooks'\n",
+                root.display(),
+            ));
+        }
+    }
+    let config = harness.create_test_config(&yaml)?;
+    harness.start_daemon().await?;
+    for name in ["running", "stopped", "exited", "killed", "failed"] {
+        let output = harness
+            .run_cli(&["-f", config.to_str().unwrap(), "start", name, "-d"])
+            .await?;
+        if name == "failed" {
+            assert!(!output.success());
+        } else {
+            output.assert_success();
+        }
+    }
+    for (name, expected) in [
+        ("running", "running"),
+        ("stopped", "running"),
+        ("exited", "exited"),
+        ("killed", "killed"),
+        ("failed", "failed"),
+    ] {
+        harness
+            .wait_for_service_status(&config, name, expected, Duration::from_secs(5))
+            .await?;
+    }
+    harness
+        .stop_service(&config, "stopped")
+        .await?
+        .assert_success();
+    std::fs::write(root.join("repaired"), "ready").unwrap();
+    let before = persisted_states(&harness, &config);
+    for name in names {
+        let path = root.join(format!("{name}.hooks"));
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    harness
+        .run_cli(&["-f", config.to_str().unwrap(), "restart", "--states", "all"])
+        .await?
+        .assert_success();
+    let after = persisted_states(&harness, &config);
+    assert_eq!(
+        std::fs::read_to_string(root.join("running.hooks")).unwrap(),
+        "pre_restart\npre_stop\npost_stop\npre_start\npost_start\npost_restart\n",
+    );
+    assert_eq!(
+        after["running"]["restart_count"].as_u64().unwrap(),
+        before["running"]["restart_count"].as_u64().unwrap() + 1
+    );
+    for name in ["stopped", "exited", "killed", "failed", "fresh"] {
+        assert_eq!(
+            std::fs::read_to_string(root.join(format!("{name}.hooks"))).unwrap(),
+            "pre_start\npost_start\n",
+            "incorrect lifecycle for {name}"
+        );
+        assert_eq!(
+            after[name]["restart_count"], before[name]["restart_count"],
+            "start incremented restart count for {name}"
+        );
+    }
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_hook_outputs_survive_until_start_and_post_restart_hooks() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let root = harness.temp_dir().path().display().to_string();
+    let config = harness.create_test_config(&format!(
+        r#"
+services:
+  worker:
+    command: [sleep, '300']
+    hooks:
+      pre_restart:
+        run: "echo '::output::token=from-restart'"
+        output: setup
+      post_stop:
+        run: "echo '::output::token=from-stop'"
+        output: cleanup
+      pre_start:
+        if: ${{{{ service.restart_count > 0 }}}}$
+        run: "echo '${{{{ service.hooks.pre_restart.outputs.setup.token }}}}$' >> {root}/observed"
+      post_restart:
+        run: "echo '${{{{ service.hooks.post_stop.outputs.cleanup.token }}}}$' >> {root}/observed"
+"#
+    ))?;
+    harness.start_daemon().await?;
+    harness.start_services_wait(&config).await?.assert_success();
+    harness.restart_services(&config).await?.assert_success();
+    assert_eq!(
+        std::fs::read_to_string(harness.temp_dir().path().join("observed")).unwrap(),
+        "from-restart\nfrom-stop\n"
+    );
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn stop_cancels_dependency_waits_for_both_restart_and_terminal_start() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let root = harness.temp_dir().path().display().to_string();
+    let config = harness.create_test_config(&format!(
+        r#"
+services:
+  source:
+    command: [sleep, '300']
+    healthcheck:
+      command: [test, -f, '{root}/healthy']
+      interval: 100ms
+      retries: 1
+  worker:
+    command: [sleep, '300']
+    depends_on:
+      source:
+        condition: service_healthy
+"#
+    ))?;
+    harness.start_daemon().await?;
+    harness
+        .run_cli(&[
+            "-f",
+            config.to_str().unwrap(),
+            "start",
+            "source",
+            "worker",
+            "-d",
+            "--no-deps",
+        ])
+        .await?
+        .assert_success();
+    harness
+        .wait_for_service_status(&config, "worker", "running", Duration::from_secs(5))
+        .await?;
+
+    for expected in ["restarting", "waiting"] {
+        let marker = harness.temp_dir().path().join("healthy");
+        if marker.exists() {
+            std::fs::remove_file(&marker).unwrap();
+        }
+        harness
+            .wait_for_service_status(&config, "source", "unhealthy", Duration::from_secs(5))
+            .await?;
+        let mut child = tokio::process::Command::new(harness.kepler_bin())
+            .args([
+                "-f",
+                config.to_str().unwrap(),
+                "restart",
+                "worker",
+                "--states",
+                "stopped",
+            ])
+            .env("KEPLER_DAEMON_PATH", harness.state_dir())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if service_states(&harness, &config).await.unwrap()["worker"]["status"] == expected
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("worker did not enter the selected lifecycle");
+        if expected == "restarting" {
+            // Count advances after the stop phase and restart delay, just before dependency waiting.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if persisted_states(&harness, &config)["worker"]["restart_count"] == 1 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("restart never reached dependency waiting");
+        }
+        harness
+            .stop_service(&config, "worker")
+            .await?
+            .assert_success();
+        let result = tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("stopping worker did not cancel its dependency wait")?;
+        assert!(result.success());
+        std::fs::write(&marker, "healthy").unwrap();
+        harness
+            .wait_for_service_status(&config, "source", "healthy", Duration::from_secs(5))
+            .await?;
+        assert_eq!(
+            service_states(&harness, &config).await?["worker"]["status"],
+            "stopped"
+        );
+    }
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_startup_cleanup_preserves_a_new_process_token() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let root = harness.temp_dir().path().to_path_buf();
+    let config = harness.create_test_config(&format!(
+        r#"
+services:
+  worker:
+    command: [sh, -c, 'echo "$KEPLER_TOKEN" > {root}/token; sleep 300']
+    permissions:
+      allow: [status]
+    hooks:
+      pre_start:
+        run: |
+          if [ "$MODE" = old ]; then
+            touch {root}/old-hook
+            while [ ! -f {root}/release-old ]; do sleep 0.02; done
+            test ! -f {root}/fail-old
+          fi
+"#,
+        root = root.display()
+    ))?;
+    harness.start_daemon().await?;
+
+    for fail_old_hook in [false, true] {
+        for marker in ["old-hook", "release-old", "token"] {
+            let path = root.join(marker);
+            if path.exists() {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        if fail_old_hook {
+            std::fs::write(root.join("fail-old"), "fail").unwrap();
+        }
+        let mut old_start = tokio::process::Command::new(harness.kepler_bin())
+            .args([
+                "-f",
+                config.to_str().unwrap(),
+                "start",
+                "worker",
+                "-d",
+                "-e",
+                "MODE=old",
+            ])
+            .env("KEPLER_DAEMON_PATH", harness.state_dir())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        harness
+            .wait_for_file_content(&root.join("old-hook"), "", Duration::from_secs(5))
+            .await?;
+        harness
+            .stop_service(&config, "worker")
+            .await?
+            .assert_success();
+        harness
+            .run_cli(&[
+                "-f",
+                config.to_str().unwrap(),
+                "start",
+                "worker",
+                "-d",
+                "-e",
+                "MODE=new",
+            ])
+            .await?
+            .assert_success();
+        let token = harness
+            .wait_for_file_content(&root.join("token"), "\n", Duration::from_secs(5))
+            .await?;
+        assert_eq!(token.trim().len(), 64);
+        let commands = ["-f", config.to_str().unwrap(), "logs"];
+        let env = [("KEPLER_TOKEN", token.trim())];
+        // A valid status-only token must deny logs. If revoked, this root test
+        // client falls back to root authentication and logs would succeed.
+        assert!(!harness.run_cli_with_env(&commands, &env).await?.success());
+        std::fs::write(root.join("release-old"), "release").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), old_start.wait())
+            .await
+            .expect("old startup did not finish")?;
+        assert!(
+            !harness.run_cli_with_env(&commands, &env).await?.success(),
+            "old hook cleanup revoked the newer process's token"
+        );
+        assert_eq!(
+            service_states(&harness, &config).await?["worker"]["status"],
+            "running"
+        );
+        harness
+            .stop_service(&config, "worker")
+            .await?
+            .assert_success();
+    }
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_cancels_old_health_checks_and_new_instance_controls_health() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let root = harness.temp_dir().path().to_path_buf();
+    let config = harness.create_test_config(&format!(
+        r#"
+services:
+  worker:
+    command: [sleep, '300']
+    healthcheck:
+      run: |
+        if [ -f {root}/armed ] && [ ! -f {root}/new-instance ]; then
+          echo $$ > {root}/old-health-pid
+          while [ ! -f {root}/release-health ]; do sleep 0.02; done
+          touch {root}/old-result
+          exit 1
+        fi
+        test ! -f {root}/fail-new
+      interval: 100ms
+      timeout: 10s
+      retries: 1
+    hooks:
+      pre_restart:
+        run: |
+          touch {root}/restart-hook
+          while [ ! -f {root}/release-restart ]; do sleep 0.02; done
+"#,
+        root = root.display()
+    ))?;
+    harness.start_daemon().await?;
+    harness.start_services_wait(&config).await?.assert_success();
+    harness
+        .wait_for_service_status(&config, "worker", "healthy", Duration::from_secs(5))
+        .await?;
+    let before = service_states(&harness, &config).await?;
+    std::fs::write(root.join("armed"), "armed").unwrap();
+    let old_health_pid = harness
+        .wait_for_file_content(&root.join("old-health-pid"), "\n", Duration::from_secs(5))
+        .await?;
+    let mut restart = tokio::process::Command::new(harness.kepler_bin())
+        .args(["-f", config.to_str().unwrap(), "restart", "worker"])
+        .env("KEPLER_DAEMON_PATH", harness.state_dir())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    harness
+        .wait_for_file_content(&root.join("restart-hook"), "", Duration::from_secs(5))
+        .await?;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if !std::process::Command::new("sh")
+                .args(["-c", "kill -0 \"$1\"", "check", old_health_pid.trim()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("old health-check process was not cancelled before restart hooks");
+    assert_eq!(
+        service_states(&harness, &config).await?["worker"]["status"],
+        "restarting"
+    );
+    std::fs::write(root.join("new-instance"), "new").unwrap();
+    std::fs::write(root.join("release-health"), "release").unwrap();
+    std::fs::write(root.join("release-restart"), "release").unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), restart.wait())
+            .await
+            .expect("restart did not complete")?
+            .success()
+    );
+    assert!(!root.join("old-result").exists());
+    harness
+        .wait_for_service_status(&config, "worker", "healthy", Duration::from_secs(5))
+        .await?;
+    let after = service_states(&harness, &config).await?;
+    assert_ne!(before["worker"]["pid"], after["worker"]["pid"]);
+
+    // Only the new checker can mark this process unhealthy; no automatic policy is configured.
+    std::fs::write(root.join("fail-new"), "fail").unwrap();
+    harness
+        .wait_for_service_status(&config, "worker", "unhealthy", Duration::from_secs(5))
+        .await?;
+    let unhealthy = service_states(&harness, &config).await?;
+    assert_eq!(unhealthy["worker"]["pid"], after["worker"]["pid"]);
+    harness
+        .restart_service(&config, "worker")
+        .await?
+        .assert_success();
+    harness
+        .wait_for_service_status(&config, "worker", "unhealthy", Duration::from_secs(5))
+        .await?;
+    assert_ne!(
+        service_states(&harness, &config).await?["worker"]["pid"],
+        unhealthy["worker"]["pid"]
+    );
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn unrelated_service_must_not_wait_for_deferred_service() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
@@ -54,7 +508,7 @@ services:
         states["a_parent"]["status"], "running",
         "independent service is held down: {states}"
     );
-    assert_eq!(states["a_blocker"]["status"], "restarting");
+    assert_eq!(states["a_blocker"]["status"], "waiting");
     harness
         .stop_service(&config, "z_source")
         .await?

@@ -7,6 +7,24 @@ use crate::config::{LogConfig, RawServiceConfig, ServiceConfig};
 use crate::logs::LogStoreHandle;
 use crate::state::ServiceStatus;
 
+/// Identifies a claimed startup. Invalidated by a stop or a later lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceStartup {
+    pub(super) generation: u64,
+}
+
+/// Identity of one spawned process, independent of its current lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceInstance {
+    pub(super) generation: u64,
+}
+
+/// Identity of a checker attached to one service instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HealthCheckSession {
+    pub(super) generation: u64,
+}
+
 /// Type of task handle stored in state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskHandleType {

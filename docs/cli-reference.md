@@ -263,7 +263,7 @@ By default, only running services (including healthy and unhealthy services) are
 
 Explicit service names constrain selection and do not automatically start dependencies. Without names, selection covers the loaded config. Running services are stopped in reverse dependency order, then startup tasks run independently. Each service waits for its configured dependency conditions, including health and successful completion, using the same startup checks as `start`. A deferred dependency wait does not prevent unrelated services from starting. Dependencies selected for the restart must satisfy conditions in the new execution; their previous results are not reused. Unsatisfied dependencies can skip startup or cause a dependency timeout, as with `start`.
 
-Whole-config restart evaluates service `if:` conditions. Explicitly named services bypass their `if:` conditions, as with `start`. `--no-deps` also bypasses dependency checks. Terminal services run the startup path without process stop operations or stop hooks. Restart hooks and restart counters are preserved.
+Whole-config restart evaluates service `if:` conditions. Explicitly named services bypass their `if:` conditions, as with `start`. `--no-deps` also bypasses dependency checks. Running services keep the full restart lifecycle: `pre_restart`, `pre_stop`, stop, `post_stop`, `pre_start`, spawn, `post_start`, `post_restart`, with an incremented restart counter. Selected terminal services use the normal start lifecycle: `pre_start`, spawn, `post_start`, without stop/restart hooks, restart retention, or an incremented restart counter.
 
 **Behavior by mode:**
 
