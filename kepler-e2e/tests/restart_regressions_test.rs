@@ -18,6 +18,252 @@ fn persisted_states(harness: &E2eHarness, config: &std::path::Path) -> Value {
 }
 
 #[tokio::test]
+async fn failed_restart_dependency_reports_error_and_unblocks_dependents() -> E2eResult<()> {
+    for policy in ["on-failure", "always"] {
+        let mut harness = E2eHarness::new().await?;
+        let root = harness.temp_dir().path().to_path_buf();
+        let config = harness.create_test_config(&format!(
+            r#"
+services:
+  dependency:
+    command: [sleep, '300']
+    restart: {policy}
+    hooks:
+      pre_start:
+        run: 'test ! -f {root}/fail'
+  worker:
+    command: [sleep, '300']
+    depends_on:
+      dependency:
+        condition: service_started
+  fallback:
+    command: [sleep, '300']
+    depends_on:
+      dependency:
+        condition: service_failed
+"#,
+            root = root.display()
+        ))?;
+        harness.start_daemon().await?;
+        // Leave the failure handler stopped until the restart selects it.
+        harness
+            .run_cli(&[
+                "-f",
+                config.to_str().unwrap(),
+                "start",
+                "dependency",
+                "worker",
+                "-d",
+            ])
+            .await?
+            .assert_success();
+        harness
+            .wait_for_service_status(&config, "worker", "running", Duration::from_secs(5))
+            .await?;
+        std::fs::write(root.join("fail"), "fail").unwrap();
+        // No dependency timeout: the terminal startup failure itself must finish this request.
+        let output = harness
+            .run_cli_with_timeout(
+                &[
+                    "-f",
+                    config.to_str().unwrap(),
+                    "restart",
+                    "--states",
+                    "stopped",
+                ],
+                Duration::from_secs(5),
+            )
+            .await?;
+        assert!(!output.success());
+        assert!(
+            output.stderr.contains("pre_start"),
+            "missing hook failure: {}",
+            output.stderr
+        );
+        let states = service_states(&harness, &config).await?;
+        assert_eq!(states["dependency"]["status"], "failed");
+        assert_eq!(states["worker"]["status"], "skipped");
+        assert!(states["worker"]["pid"].is_null());
+        harness
+            .wait_for_service_status(&config, "fallback", "running", Duration::from_secs(5))
+            .await?;
+        harness.stop_daemon().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_post_stop_cleanup_preserves_the_replacement_token() -> E2eResult<()> {
+    for operation in ["restart", "stop"] {
+        let mut harness = E2eHarness::new().await?;
+        let root = harness.temp_dir().path().to_path_buf();
+        let config = harness.create_test_config(&format!(
+            r#"
+services:
+  worker:
+    command: [sh, -c, 'echo "$KEPLER_TOKEN" > {root}/token; sleep 300']
+    permissions:
+      allow: [status]
+    hooks:
+      post_stop:
+        run: |
+          if mkdir {root}/hook-once 2>/dev/null; then
+            touch {root}/old-post-stop
+            while [ ! -f {root}/release-old ]; do sleep 0.02; done
+          fi
+"#,
+            root = root.display()
+        ))?;
+        harness.start_daemon().await?;
+        harness.start_services_wait(&config).await?.assert_success();
+        let mut old_stop = tokio::process::Command::new(harness.kepler_bin())
+            .args(["-f", config.to_str().unwrap(), operation, "worker"])
+            .env("KEPLER_DAEMON_PATH", harness.state_dir())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        harness
+            .wait_for_file_content(&root.join("old-post-stop"), "", Duration::from_secs(5))
+            .await?;
+        harness
+            .stop_service(&config, "worker")
+            .await?
+            .assert_success();
+        std::fs::remove_file(root.join("token")).unwrap();
+        harness
+            .start_service(&config, "worker")
+            .await?
+            .assert_success();
+        let token = harness
+            .wait_for_file_content(&root.join("token"), "\n", Duration::from_secs(5))
+            .await?;
+        assert_eq!(token.trim().len(), 64);
+        let commands = ["-f", config.to_str().unwrap(), "logs"];
+        let env = [("KEPLER_TOKEN", token.trim())];
+        // Revocation would make this root client fall back to unrestricted root rights.
+        assert!(!harness.run_cli_with_env(&commands, &env).await?.success());
+        let replacement = service_states(&harness, &config).await?;
+        std::fs::write(root.join("release-old"), "release").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), old_stop.wait())
+                .await
+                .expect("cancelled stop did not finish")?
+                .success()
+        );
+        assert!(
+            !harness.run_cli_with_env(&commands, &env).await?.success(),
+            "{operation} cleanup revoked the replacement token"
+        );
+        let after = service_states(&harness, &config).await?;
+        assert_eq!(after["worker"]["status"], "running");
+        assert_eq!(after["worker"]["pid"], replacement["worker"]["pid"]);
+        harness.stop_daemon().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn overlapping_restart_requests_launch_each_terminal_service_once() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let root = harness.temp_dir().path().to_path_buf();
+    let mut yaml = format!(
+        r#"
+services:
+  active:
+    command: [sleep, '300']
+    hooks:
+      pre_restart:
+        run: |
+          touch {root}/active-restart
+          while [ ! -f {root}/release-active ]; do sleep 0.02; done
+  fresh:
+    command: [sh, -c, 'echo $$ >> {root}/pids; sleep 300']
+    hooks:
+      pre_start:
+        run: |
+          echo entering >> {root}/pre-starts
+          while [ ! -f {root}/release-starts ]; do sleep 0.02; done
+"#,
+        root = root.display()
+    );
+    // Widen the selection window so the two real requests can both observe
+    // terminal services before claims. These services never spawn processes.
+    for i in 0..64 {
+        yaml.push_str(&format!(
+            "  extra_{i}:\n    if: false\n    command: [sleep, '300']\n"
+        ));
+    }
+    let config = harness.create_test_config(&yaml)?;
+    harness.start_daemon().await?;
+    harness
+        .start_service(&config, "active")
+        .await?
+        .assert_success();
+    let spawn_restart = || {
+        tokio::process::Command::new(harness.kepler_bin())
+            .args(["-f", config.to_str().unwrap(), "restart", "--states", "all"])
+            .env("KEPLER_DAEMON_PATH", harness.state_dir())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+    };
+    let mut first = spawn_restart()?;
+    let mut second = spawn_restart()?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while harness
+            .daemon_logs()
+            .matches("Restarting services for")
+            .count()
+            < 2
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both restart requests must reach the daemon");
+    harness
+        .wait_for_file_content(&root.join("active-restart"), "", Duration::from_secs(5))
+        .await?;
+    std::fs::write(root.join("release-active"), "release").unwrap();
+    harness
+        .wait_for_file_content(&root.join("pre-starts"), "entering", Duration::from_secs(5))
+        .await?;
+    harness
+        .wait_for_service_status(&config, "active", "running", Duration::from_secs(5))
+        .await?;
+    // Keep pre_start blocked while both requests finish their claim/stop phases.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    std::fs::write(root.join("release-starts"), "release").unwrap();
+    let (first, second) = tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::join!(first.wait(), second.wait())
+    })
+    .await
+    .expect("overlapping restart requests did not finish");
+    assert!(first?.success());
+    assert!(second?.success());
+    assert_eq!(
+        std::fs::read_to_string(root.join("pre-starts")).unwrap(),
+        "entering\n",
+        "pre_start ran more than once for one terminal service"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("pids"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert_eq!(
+        service_states(&harness, &config).await?["fresh"]["status"],
+        "running"
+    );
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn running_restart_and_terminal_start_have_distinct_hooks_and_counters() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let root = harness.temp_dir().path().to_path_buf();

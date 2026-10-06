@@ -45,6 +45,8 @@ pub struct ServiceContext {
     /// Resolved (expanded + deserialized) service config, cached after first start.
     /// None before a service has been started for the first time.
     pub resolved_config: Option<ServiceConfig>,
+    /// Guard identity captured with this context, for cleanup of this lifecycle only.
+    pub token: Option<crate::token_store::Token>,
     pub config_dir: PathBuf,
     /// State directory for daemon-managed data (outputs, logs, etc.)
     pub state_dir: PathBuf,

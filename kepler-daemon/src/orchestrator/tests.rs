@@ -111,6 +111,59 @@ async fn test_cancelled_startup_cannot_transition_a_later_start_or_restart() {
 }
 
 #[tokio::test]
+async fn test_startup_claims_have_only_one_owner() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _) = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        setup_handle(temp_dir.path()).await
+    };
+    for reserve_waiting in [false, true] {
+        handle.set_service_status("svc1", ServiceStatus::Stopped).await.unwrap();
+        if reserve_waiting {
+            // Daemon recovery reserves Waiting before dispatching tasks.
+            handle.set_service_status("svc1", ServiceStatus::Waiting).await.unwrap();
+        }
+        let (first, second) = tokio::join!(
+            handle.claim_service_start("svc1"),
+            handle.claim_service_start("svc1"),
+        );
+        assert_eq!(usize::from(first.is_some()) + usize::from(second.is_some()), 1);
+        let owner = first.or(second).unwrap();
+        assert_eq!(handle.get_service_startup("svc1").await, Some(owner));
+        assert!(handle.claim_service_start("svc1").await.is_none());
+        assert!(handle.transition_service_startup("svc1", owner, ServiceStatus::Starting, None, None).await);
+        assert!(handle.claim_service_start("svc1").await.is_none());
+        handle.set_service_status("svc1", ServiceStatus::Stopping).await.unwrap();
+        handle.set_service_status("svc1", ServiceStatus::Stopped).await.unwrap();
+        assert!(handle.get_service_startup("svc1").await.is_none());
+        let later = handle.claim_service_start("svc1").await.unwrap();
+        assert_ne!(owner, later);
+        assert!(!handle.transition_service_startup("svc1", owner, ServiceStatus::Failed, None, Some("stale failure".into())).await);
+        assert_eq!(handle.get_service_startup("svc1").await, Some(later));
+    }
+}
+
+#[tokio::test]
+async fn test_failed_dependency_will_not_retry_its_startup_under_an_exit_policy() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _) = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        setup_handle(temp_dir.path()).await
+    };
+    for restart in [crate::config::RestartPolicy::on_failure(), crate::config::RestartPolicy::always()] {
+        let restart = crate::config::RestartConfig::Simple(restart);
+        for status in [ServiceStatus::Failed, ServiceStatus::Stopped] {
+            handle.set_service_status("svc1", status).await.unwrap();
+            assert!(is_dependency_permanently_unsatisfied("svc1", &crate::config::DependencyConfig::default(), &handle, &restart).await);
+        }
+        // Actual exits still defer while their policy schedules a retry.
+        handle.record_process_exit("svc1", Some(1), None).await.unwrap();
+        handle.set_service_status("svc1", ServiceStatus::Exited).await.unwrap();
+        assert!(!is_dependency_permanently_unsatisfied("svc1", &crate::config::DependencyConfig::default(), &handle, &restart).await);
+    }
+}
+
+#[tokio::test]
 async fn test_cancelled_startup_cannot_replace_or_revoke_a_newer_token_guard() {
     let temp_dir = TempDir::new().unwrap();
     let (handle, _) = {

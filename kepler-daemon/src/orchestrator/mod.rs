@@ -280,18 +280,13 @@ impl ServiceOrchestrator {
             // Raise startup fence to suppress premature Ready/Quiescent signals
             handle.set_startup_in_progress(true).await;
 
-            // Mark services that need starting as Waiting.
-            // Skip: already-active services only.
+            // Atomically reserve each startup before dispatching tasks. A
+            // separate read + Waiting transition could overwrite another claim.
             let mut newly_waiting = Vec::new();
             for service_name in &services_to_start {
-                if !self.service_needs_starting(service_name, &config, &handle).await {
-                    debug!("Service {} does not need starting, skipping", service_name);
-                    continue;
+                if let Some(startup) = handle.claim_service_start(service_name).await {
+                    newly_waiting.push((service_name.clone(), startup));
                 }
-                if let Err(e) = handle.set_service_status(service_name, ServiceStatus::Waiting).await {
-                    warn!("Failed to set {} to Waiting: {}", service_name, e);
-                }
-                newly_waiting.push(service_name.clone());
             }
 
             // Lower startup fence — all services are now in Waiting state
@@ -299,15 +294,16 @@ impl ServiceOrchestrator {
 
             // Spawn only newly-waiting services (not already-active ones or
             // services with an existing blocked task from a previous start call).
-            for service_name in &newly_waiting {
+            for (service_name, startup) in &newly_waiting {
                 let self_clone = self.clone();
                 let handle_clone = handle.clone();
                 let progress_clone = progress.clone();
                 let service_name_clone = service_name.clone();
                 let evaluator_clone = shared_evaluator.clone();
+                let startup = *startup;
                 tokio::spawn(async move {
-                    if let Err(e) = self_clone.start_single_service_with_evaluator(
-                        &handle_clone, &service_name_clone, &progress_clone, Some(evaluator_clone), false, no_deps,
+                    if let Err(e) = self_clone.run_service_startup(
+                        &handle_clone, &service_name_clone, startup, &progress_clone, Some(evaluator_clone), false, no_deps,
                     ).await {
                         warn!("Failed to start service {}: {}", service_name_clone, e);
                     }
@@ -1358,7 +1354,7 @@ impl ServiceOrchestrator {
                 }
 
                 // Revoke token guard after post_stop hook
-                self.revoke_service_token_guard(&handle, service_name).await;
+                self.revoke_matching_service_token_guard(&handle, service_name, ctx.as_ref().and_then(|ctx| ctx.token)).await;
 
                 stopped.push(service_name.clone());
                 pass_stopped = true;
@@ -1733,7 +1729,7 @@ impl ServiceOrchestrator {
             }
 
             // Revoke old token guard after post_stop hook
-            self.revoke_service_token_guard(&handle, service_name).await;
+            self.revoke_matching_service_token_guard(&handle, service_name, ctx.token).await;
         }
 
         // Small delay between stop and start phases
@@ -2053,7 +2049,7 @@ impl ServiceOrchestrator {
         }
 
         // Revoke old token guard after post_stop hook
-        self.revoke_service_token_guard(&handle, service_name).await;
+        self.revoke_matching_service_token_guard(&handle, service_name, ctx.token).await;
 
         // Compute backoff delay from restart config
         {
@@ -2116,15 +2112,15 @@ impl ServiceOrchestrator {
         handle.emit_event(service_name, ServiceEvent::Start).await;
 
         // Create new token guard before pre_start hooks
-        if let Some(resolved) = ctx.resolved_config.as_ref() {
-            self.create_service_token_guard(handle, service_name, resolved).await?;
-        }
+        let token = if let Some(resolved) = ctx.resolved_config.as_ref() {
+            self.create_service_token_guard_for_operation(handle, service_name, resolved, None).await?
+        } else { None };
 
         // Run pre_start hook (runs on every start, including restarts)
         if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PreStart, &None, Some(handle))
             .await
         {
-            self.revoke_service_token_guard(handle, service_name).await;
+            self.revoke_matching_service_token_guard(handle, service_name, token).await;
             return Err(e);
         }
 
@@ -2133,7 +2129,7 @@ impl ServiceOrchestrator {
             .await;
 
         // Spawn the service
-        let instance = self.spawn_service(handle, service_name, &ctx).await?;
+        let instance = self.spawn_service_with_token_guard(handle, service_name, &ctx, token).await?;
 
         // Run post_start hook (after process spawned)
         if let Err(e) = self.run_service_hook(&ctx, service_name, ServiceHookType::PostStart, &None, Some(handle)).await {
@@ -2204,7 +2200,7 @@ impl ServiceOrchestrator {
         }
 
         // Revoke token guard AFTER post_exit hook so hooks can use the token
-        self.revoke_service_token_guard(&handle, service_name).await;
+        self.revoke_matching_service_token_guard(&handle, service_name, ctx.token).await;
 
         // Apply on_success/on_failure log retention
         // (on_exit is sugar: get_on_success/get_on_failure fall back to on_exit)
@@ -2894,19 +2890,6 @@ impl ServiceOrchestrator {
             }
     }
 
-    /// Revoke and remove the token guard for a service (if any).
-    ///
-    /// Call this AFTER post_exit/post_stop hooks so hooks can still use the token.
-    async fn revoke_service_token_guard(
-        &self,
-        handle: &ConfigActorHandle,
-        service_name: &str,
-    ) {
-        if let Some(guard) = handle.take_token_guard(service_name).await {
-            guard.revoke().await;
-        }
-    }
-
     /// Spawn a service process
     async fn spawn_service(
         &self,
@@ -2914,9 +2897,7 @@ impl ServiceOrchestrator {
         service_name: &str,
         ctx: &ServiceContext,
     ) -> Result<ServiceInstance, OrchestratorError> {
-        let token = handle.get_service_token_hex(service_name).await
-            .and_then(|hex| Token::from_hex(&hex));
-        self.spawn_service_with_token_guard(handle, service_name, ctx, token).await
+        self.spawn_service_with_token_guard(handle, service_name, ctx, ctx.token).await
     }
 
     async fn spawn_service_with_token_guard(

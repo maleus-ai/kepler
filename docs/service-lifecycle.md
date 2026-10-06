@@ -256,6 +256,8 @@ Selected running processes stop in reverse dependency order. All selected servic
 
 Running services enter `Restarting` and run the full restart hook sequence, including stop and start hooks. Selected terminal services enter `Waiting` and run only `pre_start` and `post_start`; they do not run stop/restart hooks or increment the restart counter. A stop cancels the pending lifecycle, including dependency waits.
 
+A pending startup cannot be claimed by overlapping start or restart requests more than once. A dependency whose startup fails is not retried by an exit restart policy: dependents waiting for it to start are skipped, while dependents waiting for `service_failed` can run. Restart reports the startup error instead of waiting for a retry that will never occur.
+
 ### Restart Policies
 
 Restart policies are flags that can be combined with the pipe (`|`) operator:

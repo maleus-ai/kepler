@@ -52,6 +52,8 @@ pub struct ConfigActor {
     services: HashMap<String, ServiceState>,
     /// In-memory generations prevent a cancelled startup from resuming a later one.
     startup_generations: HashMap<String, u64>,
+    /// A Waiting reservation has at most one task that owns its startup token.
+    startup_claims: HashMap<String, ServiceStartup>,
     log_store: LogStoreHandle,
     initialized: bool,
 
@@ -528,6 +530,7 @@ impl ConfigActor {
             config_dir,
             services,
             startup_generations: HashMap::new(),
+            startup_claims: HashMap::new(),
             log_store,
             initialized,
             resolved_configs: HashMap::new(),
@@ -829,7 +832,9 @@ impl ConfigActor {
             } => {
                 let claimed = if let Some(state) = self.services.get(&service_name) {
                     match state.status {
-                        ServiceStatus::Waiting => true, // Already Waiting (set by spawn-all)
+                        // Recovery can reserve Waiting before dispatch, but an
+                        // already-owned reservation cannot be claimed twice.
+                        ServiceStatus::Waiting => !self.startup_claims.contains_key(&service_name),
                         s if !s.is_active() => {
                             // Terminal state — set to Waiting atomically
                             let _ = self.set_service_status(&service_name, ServiceStatus::Waiting);
@@ -840,7 +845,9 @@ impl ConfigActor {
                 } else {
                     false
                 };
-                let _ = reply.send(if claimed { self.service_startup(&service_name) } else { None });
+                let startup = if claimed { Some(self.claim_startup(&service_name)) } else { None };
+                if claimed { let _ = self.save_state(); }
+                let _ = reply.send(startup);
             }
             ConfigCommand::ClaimServiceRestart { service_name, reply } => {
                 let running = self.services.get(&service_name)
@@ -848,7 +855,7 @@ impl ConfigActor {
                 let startup = if running {
                     let _ = self.set_service_status(&service_name, ServiceStatus::Restarting);
                     let _ = self.save_state();
-                    self.service_startup(&service_name)
+                    Some(self.claim_startup(&service_name))
                 } else {
                     None
                 };
@@ -1485,6 +1492,7 @@ impl ConfigActor {
         Some(ServiceContext {
             service_config,
             resolved_config,
+            token: self.token_guards.get(service_name).and_then(|guard| guard.token().ok()),
             config_dir: self.config_dir.clone(),
             state_dir: self.persistence.state_dir().to_path_buf(),
             log_store: self.log_store.clone(),
@@ -1519,9 +1527,15 @@ impl ConfigActor {
         if !matches!(state.status, ServiceStatus::Waiting | ServiceStatus::Starting | ServiceStatus::Restarting) {
             return None;
         }
-        Some(ServiceStartup {
+        self.startup_claims.get(service_name).copied()
+    }
+
+    fn claim_startup(&mut self, service_name: &str) -> ServiceStartup {
+        let startup = ServiceStartup {
             generation: self.startup_generations.get(service_name).copied().unwrap_or(0),
-        })
+        };
+        self.startup_claims.insert(service_name.to_string(), startup);
+        startup
     }
 
     fn cancel_health_check(&mut self, service_name: &str) {
@@ -1554,6 +1568,10 @@ impl ConfigActor {
         {
             let generation = self.startup_generations.entry(service_name.to_string()).or_default();
             *generation = generation.wrapping_add(1);
+            self.startup_claims.remove(service_name);
+        }
+        if !matches!(status, ServiceStatus::Waiting | ServiceStatus::Starting | ServiceStatus::Restarting) {
+            self.startup_claims.remove(service_name);
         }
 
         if status == ServiceStatus::Waiting

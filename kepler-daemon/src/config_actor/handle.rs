@@ -444,7 +444,7 @@ impl ConfigActorHandle {
     // === Mutation Methods ===
 
     /// Atomically claim a service for startup.
-    /// Returns its operation token if claimed (was Waiting or terminal).
+    /// Returns its operation token only if terminal or Waiting without an owner.
     pub async fn claim_service_start(&self, service_name: &str) -> Option<ServiceStartup> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self

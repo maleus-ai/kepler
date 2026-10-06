@@ -113,8 +113,8 @@ pub enum ConfigCommand {
         service_name: String,
         reason: String,
     },
-    /// Atomically claim a service for startup: checks if Waiting or terminal, and if so,
-    /// sets it to Waiting. Returns a startup token if claimed.
+    /// Atomically claim a terminal service or an unowned Waiting reservation.
+    /// Sets it to Waiting and returns a token to exactly one startup task.
     ClaimServiceStart {
         service_name: String,
         reply: oneshot::Sender<Option<ServiceStartup>>,
