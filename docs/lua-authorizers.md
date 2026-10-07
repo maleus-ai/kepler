@@ -114,8 +114,9 @@ Restart service(s).
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `services` | `string[]` | Services to restart (empty table = all running) |
-| `no_deps` | `boolean` | Skip dependency ordering |
+| `services` | `string[]` | Services to consider (empty table = whole loaded config) |
+| `states` | `string[]` | Additional eligible terminal states: `stopped`, `exited`, `failed`, `killed`, or `all`. Requires `restart:inactive`; only previously initialized services are eligible |
+| `no_deps` | `boolean` | Skip dependency checks and ordering |
 | `override_envs` | `table<string, string>?` | Environment variable overrides |
 
 ### `recreate`

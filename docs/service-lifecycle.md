@@ -240,6 +240,24 @@ See [CLI Reference](cli-reference.md#kepler-start) for flag details.
 
 ## Restart Behavior
 
+### Manual Restart Selection
+
+`kepler restart` restarts running, healthy, and unhealthy services. `--states` adds terminal states to that selection:
+
+```bash
+kepler restart --states all
+kepler restart --states exited,failed
+kepler restart backend --states stopped
+```
+
+Restart requires a service to have completed at least one startup (`initialized: true`). Never-initialized services are excluded from whole-config selection; explicitly naming one returns an error directing the caller to `kepler start`. `all` includes `stopped`, `exited` (any exit code), `failed`, and `killed`, and using `--states` requires the additional `restart:inactive` right. Skipped services and services already transitioning are excluded. Explicit names restrict selection; dependencies are not added automatically.
+
+Selected running processes stop in reverse dependency order. All selected services then launch independently, waiting for their configured dependency conditions. Deferred dependency waits do not block unrelated services. When a dependency is also selected, conditions must be satisfied by its new execution. Whole-config restart evaluates `if:` conditions; explicitly named services bypass them. `--no-deps` bypasses dependency checks and ordering.
+
+Running services enter `Restarting` and run the full restart hook sequence, including stop and start hooks. Selected terminal services enter `Waiting` and run only `pre_start` and `post_start`; they do not run stop/restart hooks or increment the restart counter. A stop cancels the pending lifecycle, including dependency waits.
+
+A pending startup cannot be claimed by overlapping start or restart requests more than once. A dependency whose startup fails is not retried by an exit restart policy: dependents waiting for it to start are skipped, while dependents waiting for `service_failed` can run. Restart reports the startup error instead of waiting for a retry that will never occur.
+
 ### Restart Policies
 
 Restart policies are flags that can be combined with the pipe (`|`) operator:

@@ -1,4 +1,4 @@
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, builder::TypedValueParser};
 
 /// Arguments shared between `start` and `run` commands
 #[derive(Args, Debug)]
@@ -82,9 +82,19 @@ pub enum Commands {
     },
     /// Restart services (preserves config, runs restart hooks)
     Restart {
-        /// Services to restart (restarts all running services if none specified)
+        /// Previously initialized services to restart (all running services if none specified)
         #[arg(value_name = "SERVICE")]
         services: Vec<String>,
+        /// Also recover initialized terminal services: stopped, exited, failed, killed, all (requires restart:inactive)
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "STATE,...",
+            value_parser = clap::builder::PossibleValuesParser::new([
+                "stopped", "exited", "failed", "killed", "all",
+            ]).map(|value| value.parse::<kepler_protocol::protocol::RestartState>().unwrap()),
+        )]
+        states: Vec<kepler_protocol::protocol::RestartState>,
         /// Wait until all restarted services are ready, then return
         #[arg(long, conflicts_with = "follow")]
         wait: bool,
@@ -97,7 +107,7 @@ pub enum Commands {
         /// Follow logs after restart (Ctrl+C exits log following, services keep running)
         #[arg(long, conflicts_with = "wait")]
         follow: bool,
-        /// Skip dependency ordering (use specified order instead; requires service names)
+        /// Skip dependency checks and ordering (use specified order; requires service names)
         #[arg(long)]
         no_deps: bool,
         /// Override system environment variables (KEY=VALUE, repeatable)

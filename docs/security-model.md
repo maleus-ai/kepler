@@ -184,7 +184,7 @@ Rights are flat, explicit identifiers — there are no categories, no implicit c
 | `start`      | Start services                                                    |
 | `run`        | Run services in ephemeral mode (fresh config reload, no snapshot) |
 | `stop`       | Stop services                                                     |
-| `restart`    | Restart services                                                  |
+| `restart`    | Restart services that have completed at least one startup         |
 | `recreate`   | Recreate config                                                   |
 | `status`     | View config/service status; filters `kepler ps --all` results     |
 | `inspect`    | Inspect config (base info only; sub-rights unlock sections)       |
@@ -207,6 +207,7 @@ Rights are flat, explicit identifiers — there are no categories, no implicit c
 | `stop:clean`           | `stop`     | Allow `--clean` flag on stop                                                                            |
 | `stop:signal`          | `stop`     | Allow custom signal on stop                                                                             |
 | `restart:env-override` | `restart`  | Allow environment variable overrides on restart                                                         |
+| `restart:inactive`     | `restart`  | Allow `--states` to recover terminal services that have completed at least one startup                  |
 | `restart:no-deps`      | `restart`  | Allow `--no-deps` flag on restart                                                                       |
 | `recreate:hardening`   | `recreate` | Allow `--hardening` flag on recreate                                                                    |
 | `inspect:services`     | `inspect`  | Include services section in inspect output                                                              |

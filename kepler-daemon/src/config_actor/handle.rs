@@ -22,7 +22,7 @@ use crate::watcher::FileWatcherHandle;
 use kepler_protocol::protocol::ServiceInfo;
 
 use super::command::{ConfigCommand, OutputTasks};
-use super::context::{ConfigEvent, DiagnosticCounts, HealthCheckUpdate, ServiceContext, ServiceStatusChange, TaskHandleType};
+use super::context::{ConfigEvent, DiagnosticCounts, HealthCheckSession, HealthCheckUpdate, ServiceContext, ServiceInstance, ServiceStartup, ServiceStatusChange, TaskHandleType};
 
 /// Handle for sending commands to a config actor.
 /// This is cheap to clone (just clones the channel sender and path).
@@ -444,8 +444,8 @@ impl ConfigActorHandle {
     // === Mutation Methods ===
 
     /// Atomically claim a service for startup.
-    /// Returns true if claimed (was Waiting or terminal), false if already active.
-    pub async fn claim_service_start(&self, service_name: &str) -> bool {
+    /// Returns its operation token only if terminal or Waiting without an owner.
+    pub async fn claim_service_start(&self, service_name: &str) -> Option<ServiceStartup> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .tx
@@ -457,6 +457,52 @@ impl ConfigActorHandle {
             .is_err()
         {
             warn!("Config actor closed, cannot send ClaimServiceStart");
+        }
+        reply_rx.await.ok().flatten()
+    }
+
+    pub async fn claim_service_restart(&self, service_name: &str) -> Option<ServiceStartup> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.send(ConfigCommand::ClaimServiceRestart {
+            service_name: service_name.to_string(), reply: reply_tx,
+        }).await.ok()?;
+        reply_rx.await.ok().flatten()
+    }
+
+    pub async fn get_service_startup(&self, service_name: &str) -> Option<ServiceStartup> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.send(ConfigCommand::GetServiceStartup {
+            service_name: service_name.to_string(), reply: reply_tx,
+        }).await.ok()?;
+        reply_rx.await.ok().flatten()
+    }
+
+    pub async fn claim_inactive_service_restart(
+        &self,
+        service_name: &str,
+        states: &[kepler_protocol::protocol::RestartState],
+    ) -> Option<ServiceStartup> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.send(ConfigCommand::ClaimInactiveServiceRestart {
+            service_name: service_name.to_string(), states: states.to_vec(), reply: reply_tx,
+        }).await.ok()?;
+        reply_rx.await.ok().flatten()
+    }
+
+    pub async fn transition_service_startup(
+        &self,
+        service_name: &str,
+        startup: ServiceStartup,
+        status: ServiceStatus,
+        skip_reason: Option<String>,
+        fail_reason: Option<String>,
+    ) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.tx.send(ConfigCommand::TransitionServiceStartup {
+            service_name: service_name.to_string(), startup, status,
+            skip_reason, fail_reason, reply: reply_tx,
+        }).await.is_err() {
+            return false;
         }
         reply_rx.await.unwrap_or(false)
     }
@@ -583,13 +629,15 @@ impl ConfigActorHandle {
     pub async fn update_health_check(
         &self,
         service_name: &str,
+        session: HealthCheckSession,
         passed: bool,
         retries: u32,
-    ) -> Result<HealthCheckUpdate> {
+    ) -> Result<Option<HealthCheckUpdate>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ConfigCommand::UpdateHealthCheck {
                 service_name: service_name.to_string(),
+                session,
                 passed,
                 retries,
                 reply: reply_tx,
@@ -599,6 +647,58 @@ impl ConfigActorHandle {
         reply_rx
             .await
             .map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
+    }
+
+    /// Register a new process instance and invalidate its predecessor's health checker.
+    pub async fn register_service_instance(
+        &self,
+        service_name: &str,
+        pid: Option<u32>,
+        started_at: DateTime<Utc>,
+    ) -> Result<ServiceInstance> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.send(ConfigCommand::RegisterServiceInstance {
+            service_name: service_name.to_string(), pid, started_at, reply: reply_tx,
+        }).await.map_err(|_| DaemonError::Internal("Config actor closed".into()))?;
+        reply_rx.await.map_err(|_| DaemonError::Internal("Config actor dropped response".into()))?
+    }
+
+    pub async fn get_service_instance(&self, service_name: &str) -> Option<ServiceInstance> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.send(ConfigCommand::GetServiceInstance {
+            service_name: service_name.to_string(), reply: reply_tx,
+        }).await.ok()?;
+        reply_rx.await.ok().flatten()
+    }
+
+    pub async fn begin_health_check(&self, service_name: &str, instance: ServiceInstance) -> Option<HealthCheckSession> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.send(ConfigCommand::BeginHealthCheck {
+            service_name: service_name.to_string(), instance, reply: reply_tx,
+        }).await.ok()?;
+        reply_rx.await.ok().flatten()
+    }
+
+    pub async fn is_health_check_current(&self, service_name: &str, session: HealthCheckSession) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.tx.send(ConfigCommand::IsHealthCheckCurrent {
+            service_name: service_name.to_string(), session, reply: reply_tx,
+        }).await.is_err() { return false; }
+        reply_rx.await.unwrap_or(false)
+    }
+
+    pub async fn store_health_check_task(&self, service_name: &str, session: HealthCheckSession, handle: JoinHandle<()>) {
+        if let Err(error) = self.tx.send(ConfigCommand::StoreHealthCheckTask {
+            service_name: service_name.to_string(), session, handle,
+        }).await {
+            if let ConfigCommand::StoreHealthCheckTask { handle, .. } = error.0 { handle.abort(); }
+        }
+    }
+
+    pub async fn emit_health_check_event(&self, service_name: &str, session: HealthCheckSession, event: ServiceEvent) {
+        let _ = self.tx.send(ConfigCommand::EmitHealthCheckEvent {
+            service_name: service_name.to_string(), session, event,
+        }).await;
     }
 
     /// Mark config as initialized
@@ -783,6 +883,46 @@ impl ConfigActorHandle {
         {
             warn!("Config actor closed, cannot send StoreTokenGuard");
         }
+    }
+
+    /// Store a guard only while its startup still owns the service.
+    /// Rejected guards are explicitly revoked without replacing a newer guard.
+    pub async fn store_startup_token_guard(
+        &self,
+        service_name: &str,
+        startup: ServiceStartup,
+        guard: crate::token_store::ServiceTokenGuard,
+    ) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if let Err(error) = self.tx.send(ConfigCommand::StoreStartupTokenGuard {
+            service_name: service_name.to_string(), startup, guard, reply: reply_tx,
+        }).await {
+            if let ConfigCommand::StoreStartupTokenGuard { guard, .. } = error.0 {
+                guard.revoke().await;
+            }
+            return false;
+        }
+        match reply_rx.await {
+            Ok(None) => true,
+            Ok(Some(guard)) => {
+                guard.revoke().await;
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Take only the guard with the specified identity, even after a later start.
+    pub async fn take_matching_token_guard(
+        &self,
+        service_name: &str,
+        token: crate::token_store::Token,
+    ) -> Option<crate::token_store::ServiceTokenGuard> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.send(ConfigCommand::TakeMatchingTokenGuard {
+            service_name: service_name.to_string(), token, reply: reply_tx,
+        }).await.ok()?;
+        reply_rx.await.ok().flatten()
     }
 
     /// Take the token guard for a service (for explicit revocation after hooks complete).

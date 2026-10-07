@@ -5,7 +5,7 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
 use crate::config::HealthCheck;
-use crate::config_actor::ConfigActorHandle;
+use crate::config_actor::{ConfigActorHandle, HealthCheckSession, ServiceInstance};
 use crate::events::{HealthStatus, ServiceEvent};
 use crate::hardening::HardeningLevel;
 use crate::hooks::{run_service_hook, ServiceHookParams, ServiceHookType};
@@ -13,16 +13,23 @@ use crate::process::{spawn_blocking, BlockingMode, CommandSpec};
 use crate::state::ServiceStatus;
 
 /// Spawn a health check monitoring task for a service
-pub fn spawn_health_checker(
+pub async fn spawn_health_checker(
     service_name: String,
     health_config: HealthCheck,
     handle: ConfigActorHandle,
     hardening: HardeningLevel,
     kepler_gid: Option<u32>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        health_check_loop(service_name, health_config, handle, hardening, kepler_gid).await;
-    })
+    instance: ServiceInstance,
+) {
+    let Some(session) = handle.begin_health_check(&service_name, instance).await else { return; };
+    let task_handle = {
+        let handle = handle.clone();
+        let service_name = service_name.clone();
+        tokio::spawn(async move {
+            health_check_loop(service_name, health_config, handle, hardening, kepler_gid, session).await;
+        })
+    };
+    handle.store_health_check_task(&service_name, session, task_handle).await;
 }
 
 async fn health_check_loop(
@@ -31,6 +38,7 @@ async fn health_check_loop(
     handle: ConfigActorHandle,
     hardening: HardeningLevel,
     kepler_gid: Option<u32>,
+    session: HealthCheckSession,
 ) {
     // Wait for start_period before beginning checks
     if !config.start_period.is_zero() {
@@ -43,7 +51,7 @@ async fn health_check_loop(
 
     loop {
         // Check if service is still running
-        if !handle.is_service_running(&service_name).await {
+        if !handle.is_health_check_current(&service_name, session).await {
             debug!(
                 "Health check for {} stopping - service not running",
                 service_name
@@ -162,11 +170,11 @@ async fn health_check_loop(
 
         // Update state based on result
         let update_result = handle
-            .update_health_check(&service_name, passed, config.retries)
+            .update_health_check(&service_name, session, passed, config.retries)
             .await;
 
         match update_result {
-            Ok(update) => {
+            Ok(Some(update)) => {
                 // Emit Healthcheck event
                 let health_status = if passed {
                     HealthStatus::Success
@@ -176,8 +184,9 @@ async fn health_check_loop(
                     }
                 };
                 handle
-                    .emit_event(
+                    .emit_health_check_event(
                         &service_name,
+                        session,
                         ServiceEvent::Healthcheck {
                             status: health_status,
                         },
@@ -223,23 +232,25 @@ async fn health_check_loop(
                         &handle,
                         hardening,
                         kepler_gid,
+                        session,
                     )
                     .await;
 
                     // Emit Healthy or Unhealthy event after hook completes
                     match update.new_status {
                         ServiceStatus::Healthy => {
-                            handle.emit_event(&service_name, ServiceEvent::Healthy).await;
+                            handle.emit_health_check_event(&service_name, session, ServiceEvent::Healthy).await;
                         }
                         ServiceStatus::Unhealthy => {
                             handle
-                                .emit_event(&service_name, ServiceEvent::Unhealthy)
+                                .emit_health_check_event(&service_name, session, ServiceEvent::Unhealthy)
                                 .await;
                         }
                         _ => {}
                     }
                 }
             }
+            Ok(None) => return, // Cancelled checker or superseded process instance.
             Err(e) => {
                 error!(
                     "Failed to update health check for {}: {}",
@@ -261,7 +272,9 @@ async fn run_status_change_hook(
     handle: &ConfigActorHandle,
     hardening: HardeningLevel,
     kepler_gid: Option<u32>,
+    session: HealthCheckSession,
 ) {
+    if !handle.is_health_check_current(service_name, session).await { return; }
     let hook_type = match new_status {
         ServiceStatus::Healthy
             if previous_status == ServiceStatus::Running
@@ -339,6 +352,7 @@ async fn run_status_change_hook(
         // be ConfigValue::Dynamic, resolved per-step in run_hook_step).
         let hooks = resolved.hooks.clone();
 
+        if !handle.is_health_check_current(service_name, session).await { return; }
         if let Err(e) = run_service_hook(
             &hooks,
             hook_type,
