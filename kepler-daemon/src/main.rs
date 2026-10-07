@@ -1099,7 +1099,7 @@ async fn handle_request(
                                 let is_eligible = handle
                                     .get_service_state(svc)
                                     .await
-                                    .map(|s| s.status.is_running() || states.iter().any(|state| state.includes(s.status.as_str())))
+                                    .map(|s| s.initialized && (s.status.is_running() || states.iter().any(|state| state.includes(s.status.as_str()))))
                                     .unwrap_or(false);
                                 if is_eligible {
                                     eligible.push(svc.clone());

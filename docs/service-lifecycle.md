@@ -250,7 +250,7 @@ kepler restart --states exited,failed
 kepler restart backend --states stopped
 ```
 
-`all` includes `stopped`, `exited` (any exit code), `failed`, and `killed`. Skipped services and services already transitioning are excluded. Explicit names restrict selection; dependencies are not added automatically.
+Restart requires a service to have completed at least one startup (`initialized: true`). Never-initialized services are excluded from whole-config selection; explicitly naming one returns an error directing the caller to `kepler start`. `all` includes `stopped`, `exited` (any exit code), `failed`, and `killed`, and using `--states` requires the additional `restart:inactive` right. Skipped services and services already transitioning are excluded. Explicit names restrict selection; dependencies are not added automatically.
 
 Selected running processes stop in reverse dependency order. All selected services then launch independently, waiting for their configured dependency conditions. Deferred dependency waits do not block unrelated services. When a dependency is also selected, conditions must be satisfied by its new execution. Whole-config restart evaluates `if:` conditions; explicitly named services bypass them. `--no-deps` bypasses dependency checks and ordering.
 

@@ -1602,6 +1602,12 @@ impl ServiceOrchestrator {
                 continue;
             }
             if let Some(state) = handle.get_service_state(&name).await {
+                if !state.initialized {
+                    if !is_full_restart {
+                        return Err(OrchestratorError::ServiceNotInitialized(name));
+                    }
+                    continue;
+                }
                 if state.status.is_running() {
                     running_services.insert(name.clone());
                     services_to_restart.push(name);
@@ -1645,7 +1651,7 @@ impl ServiceOrchestrator {
             let lifecycle = if running_services.contains(service_name) {
                 handle.claim_service_restart(service_name).await.map(SelectedServiceLifecycle::Restart)
             } else {
-                handle.claim_service_start(service_name).await.map(SelectedServiceLifecycle::Start)
+                handle.claim_inactive_service_restart(service_name, states).await.map(SelectedServiceLifecycle::Start)
             };
             if let Some(lifecycle) = lifecycle {
                 lifecycles.insert(service_name.clone(), lifecycle);

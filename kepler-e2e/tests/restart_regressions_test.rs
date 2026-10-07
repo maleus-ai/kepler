@@ -60,6 +60,21 @@ services:
         harness
             .wait_for_service_status(&config, "worker", "running", Duration::from_secs(5))
             .await?;
+        harness
+            .run_cli(&[
+                "-f",
+                config.to_str().unwrap(),
+                "start",
+                "fallback",
+                "-d",
+                "--no-deps",
+            ])
+            .await?
+            .assert_success();
+        harness
+            .stop_service(&config, "fallback")
+            .await?
+            .assert_success();
         std::fs::write(root.join("fail"), "fail").unwrap();
         // No dependency timeout: the terminal startup failure itself must finish this request.
         let output = harness
@@ -182,8 +197,10 @@ services:
     hooks:
       pre_start:
         run: |
-          echo entering >> {root}/pre-starts
-          while [ ! -f {root}/release-starts ]; do sleep 0.02; done
+          if [ -f {root}/armed ]; then
+            echo entering >> {root}/pre-starts
+            while [ ! -f {root}/release-starts ]; do sleep 0.02; done
+          fi
 "#,
         root = root.display()
     );
@@ -200,6 +217,16 @@ services:
         .start_service(&config, "active")
         .await?
         .assert_success();
+    harness
+        .start_service(&config, "fresh")
+        .await?
+        .assert_success();
+    harness
+        .stop_service(&config, "fresh")
+        .await?
+        .assert_success();
+    std::fs::remove_file(root.join("pids")).unwrap();
+    std::fs::write(root.join("armed"), "armed").unwrap();
     let spawn_restart = || {
         tokio::process::Command::new(harness.kepler_bin())
             .args(["-f", config.to_str().unwrap(), "restart", "--states", "all"])
@@ -297,16 +324,19 @@ async fn running_restart_and_terminal_start_have_distinct_hooks_and_counters() -
     }
     let config = harness.create_test_config(&yaml)?;
     harness.start_daemon().await?;
+    std::fs::write(root.join("repaired"), "ready").unwrap();
     for name in ["running", "stopped", "exited", "killed", "failed"] {
         let output = harness
             .run_cli(&["-f", config.to_str().unwrap(), "start", name, "-d"])
             .await?;
-        if name == "failed" {
-            assert!(!output.success());
-        } else {
-            output.assert_success();
-        }
+        output.assert_success();
     }
+    harness
+        .stop_service(&config, "failed")
+        .await?
+        .assert_success();
+    std::fs::remove_file(root.join("repaired")).unwrap();
+    assert!(!harness.start_service(&config, "failed").await?.success());
     for (name, expected) in [
         ("running", "running"),
         ("stopped", "running"),
@@ -344,7 +374,7 @@ async fn running_restart_and_terminal_start_have_distinct_hooks_and_counters() -
         after["running"]["restart_count"].as_u64().unwrap(),
         before["running"]["restart_count"].as_u64().unwrap() + 1
     );
-    for name in ["stopped", "exited", "killed", "failed", "fresh"] {
+    for name in ["stopped", "exited", "killed", "failed"] {
         assert_eq!(
             std::fs::read_to_string(root.join(format!("{name}.hooks"))).unwrap(),
             "pre_start\npost_start\n",
@@ -355,6 +385,9 @@ async fn running_restart_and_terminal_start_have_distinct_hooks_and_counters() -
             "start incremented restart count for {name}"
         );
     }
+    assert_eq!(after["fresh"]["status"], "stopped");
+    assert_eq!(after["fresh"]["initialized"], false);
+    assert!(!root.join("fresh.hooks").exists());
     harness.stop_daemon().await?;
     Ok(())
 }
@@ -723,7 +756,16 @@ services:
     harness.start_daemon().await?;
     let path = config.to_str().unwrap();
     harness
-        .run_cli(&["-f", path, "start", "z_source", "a_parent", "-d"])
+        .run_cli(&[
+            "-f",
+            path,
+            "start",
+            "z_source",
+            "a_parent",
+            "a_blocker",
+            "-d",
+            "--no-deps",
+        ])
         .await?
         .assert_success();
     harness
@@ -732,6 +774,10 @@ services:
     harness
         .wait_for_service_status(&config, "a_parent", "running", Duration::from_secs(5))
         .await?;
+    harness
+        .stop_service(&config, "a_blocker")
+        .await?
+        .assert_success();
     let output = harness
         .run_cli(&[
             "-f",

@@ -133,6 +133,21 @@ fn required_rights_restart_with_flags() {
 }
 
 #[test]
+fn restart_inactive_requires_both_rights_only_when_states_are_requested() {
+    let mut request = Request::Restart {
+        states: vec![kepler_protocol::protocol::RestartState::All],
+        config_path: "/test".into(), services: vec![], sys_env: None,
+        no_deps: false, override_envs: None, define_flags: None,
+    };
+    assert!(check_rights(&HashSet::from(["restart"]), &request).unwrap_err().contains("restart:inactive"));
+    assert!(check_rights(&HashSet::from(["restart:inactive"]), &request).is_err());
+    assert!(check_rights(&HashSet::from(["restart", "restart:inactive"]), &request).is_ok());
+    assert!(check_rights(&ALL_RIGHTS, &request).is_ok());
+    if let Request::Restart { states, .. } = &mut request { states.clear(); }
+    assert!(check_rights(&HashSet::from(["restart"]), &request).is_ok());
+}
+
+#[test]
 fn required_rights_recreate_with_hardening() {
     let req = Request::Recreate {
         config_path: "/test".into(),

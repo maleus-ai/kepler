@@ -851,7 +851,7 @@ impl ConfigActor {
             }
             ConfigCommand::ClaimServiceRestart { service_name, reply } => {
                 let running = self.services.get(&service_name)
-                    .is_some_and(|state| state.status.is_running());
+                    .is_some_and(|state| state.initialized && state.status.is_running());
                 let startup = if running {
                     let _ = self.set_service_status(&service_name, ServiceStatus::Restarting);
                     let _ = self.save_state();
@@ -859,6 +859,18 @@ impl ConfigActor {
                 } else {
                     None
                 };
+                let _ = reply.send(startup);
+            }
+            ConfigCommand::ClaimInactiveServiceRestart { service_name, states, reply } => {
+                let eligible = self.services.get(&service_name).is_some_and(|state| {
+                    state.initialized && states.iter().any(|selected| selected.includes(state.status.as_str()))
+                });
+                let startup = if eligible {
+                    let _ = self.set_service_status(&service_name, ServiceStatus::Waiting);
+                    let startup = self.claim_startup(&service_name);
+                    let _ = self.save_state();
+                    Some(startup)
+                } else { None };
                 let _ = reply.send(startup);
             }
             ConfigCommand::GetServiceStartup { service_name, reply } => {

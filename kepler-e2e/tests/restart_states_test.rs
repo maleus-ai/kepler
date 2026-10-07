@@ -49,7 +49,18 @@ services:
         recovery_marker.display()
     ))?;
     harness.start_daemon().await?;
+    // Establish a successful startup before testing recovery of a later failure.
+    std::fs::write(&recovery_marker, "ready").unwrap();
     harness.start_services(&config).await?.assert_success();
+    harness
+        .wait_for_service_status(&config, "broken", "running", Duration::from_secs(10))
+        .await?;
+    harness
+        .stop_service(&config, "broken")
+        .await?
+        .assert_success();
+    std::fs::remove_file(&recovery_marker).unwrap();
+    assert!(!harness.start_service(&config, "broken").await?.success());
     for (name, expected) in [
         ("active", "running"),
         ("manual", "running"),

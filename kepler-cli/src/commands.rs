@@ -82,10 +82,10 @@ pub enum Commands {
     },
     /// Restart services (preserves config, runs restart hooks)
     Restart {
-        /// Services to restart (restarts all running services if none specified)
+        /// Previously initialized services to restart (all running services if none specified)
         #[arg(value_name = "SERVICE")]
         services: Vec<String>,
-        /// Also restart these terminal states: stopped, exited, failed, killed, all (running services always included)
+        /// Also recover initialized terminal services: stopped, exited, failed, killed, all (requires restart:inactive)
         #[arg(
             long,
             value_delimiter = ',',

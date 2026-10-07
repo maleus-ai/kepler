@@ -124,6 +124,12 @@ pub enum ConfigCommand {
         service_name: String,
         reply: oneshot::Sender<Option<ServiceStartup>>,
     },
+    /// Claim an initialized terminal service selected by a manual restart.
+    ClaimInactiveServiceRestart {
+        service_name: String,
+        states: Vec<kepler_protocol::protocol::RestartState>,
+        reply: oneshot::Sender<Option<ServiceStartup>>,
+    },
     GetServiceStartup {
         service_name: String,
         reply: oneshot::Sender<Option<ServiceStartup>>,

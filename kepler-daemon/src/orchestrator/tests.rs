@@ -104,10 +104,32 @@ async fn test_cancelled_startup_cannot_transition_a_later_start_or_restart() {
     assert!(handle.transition_service_startup("svc1", second, ServiceStatus::Starting, None, None).await);
 
     handle.set_service_status("svc1", ServiceStatus::Running).await.unwrap();
+    handle.mark_service_initialized("svc1").await.unwrap();
     let restart = handle.claim_service_restart("svc1").await.unwrap();
     assert!(!handle.transition_service_startup("svc1", second, ServiceStatus::Starting, None, None).await);
     assert!(handle.transition_service_startup("svc1", restart, ServiceStatus::Restarting, None, None).await);
     assert!(handle.get_service_state("svc1").await.unwrap().fail_reason.is_none());
+}
+
+#[tokio::test]
+async fn test_restart_claims_require_initialization_and_recheck_terminal_selection() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _) = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        setup_handle(temp_dir.path()).await
+    };
+    use kepler_protocol::protocol::RestartState;
+    assert!(handle.claim_inactive_service_restart("svc1", &[RestartState::All]).await.is_none());
+    handle.set_service_status("svc1", ServiceStatus::Running).await.unwrap();
+    assert!(handle.claim_service_restart("svc1").await.is_none());
+    handle.mark_service_initialized("svc1").await.unwrap();
+    assert!(handle.claim_service_restart("svc1").await.is_some());
+    handle.set_service_status("svc1", ServiceStatus::Stopped).await.unwrap();
+    assert!(handle.claim_inactive_service_restart("svc1", &[RestartState::Failed]).await.is_none());
+    assert!(handle.claim_inactive_service_restart("svc1", &[RestartState::Stopped]).await.is_some());
+    assert!(handle.claim_inactive_service_restart("svc1", &[RestartState::All]).await.is_none());
+    handle.set_service_status("svc1", ServiceStatus::Skipped).await.unwrap();
+    assert!(handle.claim_inactive_service_restart("svc1", &[RestartState::All]).await.is_none());
 }
 
 #[tokio::test]
@@ -220,6 +242,7 @@ async fn test_old_health_results_and_events_cannot_affect_a_new_instance() {
     let queued = events.try_recv().unwrap();
     assert_eq!(queued.health_check_session, Some(old_session));
 
+    handle.mark_service_initialized("svc1").await.unwrap();
     handle.claim_service_restart("svc1").await.unwrap();
     for passed in [false, true] {
         assert!(handle.update_health_check("svc1", old_session, passed, 1).await.unwrap().is_none());

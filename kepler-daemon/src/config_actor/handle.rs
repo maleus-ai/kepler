@@ -477,6 +477,18 @@ impl ConfigActorHandle {
         reply_rx.await.ok().flatten()
     }
 
+    pub async fn claim_inactive_service_restart(
+        &self,
+        service_name: &str,
+        states: &[kepler_protocol::protocol::RestartState],
+    ) -> Option<ServiceStartup> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.send(ConfigCommand::ClaimInactiveServiceRestart {
+            service_name: service_name.to_string(), states: states.to_vec(), reply: reply_tx,
+        }).await.ok()?;
+        reply_rx.await.ok().flatten()
+    }
+
     pub async fn transition_service_startup(
         &self,
         service_name: &str,
