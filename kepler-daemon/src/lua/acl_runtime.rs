@@ -525,12 +525,14 @@ pub fn build_authorizer_context(
         }
         Request::Restart {
             services,
+            states,
             no_deps,
             override_envs,
             ..
         } => {
             let mut params = HashMap::new();
             params.insert("services".into(), ParamValue::StringList(services.clone()));
+            params.insert("states".into(), ParamValue::StringList(states.iter().map(|state| state.as_str().to_string()).collect()));
             params.insert("no_deps".into(), ParamValue::Bool(*no_deps));
             if let Some(envs) = override_envs {
                 params.insert("override_envs".into(), ParamValue::StringMap(envs.clone()));

@@ -43,6 +43,7 @@ pub const SUB_RIGHTS: &[&str] = &[
     "stop:clean",
     "stop:signal",
     "restart:env-override",
+    "restart:inactive",
     "restart:no-deps",
     "recreate:hardening",
     "inspect:services",
@@ -175,11 +176,15 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
         Request::Restart {
             override_envs,
             no_deps,
+            states,
             ..
         } => Some(RequiredRights {
             base: "restart",
             sub_rights: {
                 let mut s = vec![];
+                if !states.is_empty() {
+                    s.push("restart:inactive");
+                }
                 if override_envs.is_some() {
                     s.push("restart:env-override");
                 }

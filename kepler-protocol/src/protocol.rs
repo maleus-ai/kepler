@@ -24,6 +24,54 @@ pub const STREAM_CHUNK_SIZE: usize = 5_000;
 
 fn default_stream_limit() -> usize { MAX_STREAM_BATCH_SIZE }
 
+/// Additional terminal states eligible for a manual restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RestartState {
+    Stopped,
+    Exited,
+    Failed,
+    Killed,
+    All,
+}
+
+impl RestartState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::Exited => "exited",
+            Self::Failed => "failed",
+            Self::Killed => "killed",
+            Self::All => "all",
+        }
+    }
+
+    pub fn includes(self, status: &str) -> bool {
+        match self {
+            Self::Stopped => status == "stopped",
+            Self::Exited => status == "exited",
+            Self::Failed => status == "failed",
+            Self::Killed => status == "killed",
+            Self::All => matches!(status, "stopped" | "exited" | "failed" | "killed"),
+        }
+    }
+}
+
+impl std::str::FromStr for RestartState {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "stopped" => Ok(Self::Stopped),
+            "exited" => Ok(Self::Exited),
+            "failed" => Ok(Self::Failed),
+            "killed" => Ok(Self::Killed),
+            "all" => Ok(Self::All),
+            _ => Err(format!("invalid restart state `{value}`; expected stopped, exited, failed, killed, or all")),
+        }
+    }
+}
+
 /// Request sent from CLI to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
@@ -101,13 +149,13 @@ pub enum Request {
     Restart {
         /// Path to the config file
         config_path: PathBuf,
-        /// Services to restart (empty = all running services)
+        /// Services to consider (empty = all services in the loaded config)
         #[serde(default)]
         services: Vec<String>,
         /// System environment variables (unused, kept for API compatibility)
         #[serde(default)]
         sys_env: Option<HashMap<String, String>>,
-        /// Skip dependency ordering (use user-specified order instead)
+        /// Skip dependency checks and ordering (use user-specified order instead)
         #[serde(default)]
         no_deps: bool,
         /// Override specific system environment variables (merged into stored sys_env)
@@ -116,6 +164,9 @@ pub enum Request {
         /// User-defined flags accessible via `kepler.flags` in expressions
         #[serde(default)]
         define_flags: Option<HashMap<String, String>>,
+        /// Additional eligible terminal states; running services are always eligible
+        #[serde(default)]
+        states: Vec<RestartState>,
     },
     /// Recreate config - stop, re-bake config snapshot, start
     Recreate {

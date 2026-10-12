@@ -7,6 +7,24 @@ use crate::config::{LogConfig, RawServiceConfig, ServiceConfig};
 use crate::logs::LogStoreHandle;
 use crate::state::ServiceStatus;
 
+/// Identifies a claimed startup. Invalidated by a stop or a later lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceStartup {
+    pub(super) generation: u64,
+}
+
+/// Identity of one spawned process, independent of its current lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceInstance {
+    pub(super) generation: u64,
+}
+
+/// Identity of a checker attached to one service instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HealthCheckSession {
+    pub(super) generation: u64,
+}
+
 /// Type of task handle stored in state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskHandleType {
@@ -27,6 +45,8 @@ pub struct ServiceContext {
     /// Resolved (expanded + deserialized) service config, cached after first start.
     /// None before a service has been started for the first time.
     pub resolved_config: Option<ServiceConfig>,
+    /// Guard identity captured with this context, for cleanup of this lifecycle only.
+    pub token: Option<crate::token_store::Token>,
     pub config_dir: PathBuf,
     /// State directory for daemon-managed data (outputs, logs, etc.)
     pub state_dir: PathBuf,

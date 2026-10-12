@@ -14,6 +14,9 @@ pub enum OrchestratorError {
     #[error("Service not found: {0}")]
     ServiceNotFound(String),
 
+    #[error("Service '{0}' has not completed its first startup; use 'kepler start {0}' before restarting")]
+    ServiceNotInitialized(String),
+
     #[error("Failed to stop service: {0}")]
     StopFailed(String),
 

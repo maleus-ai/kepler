@@ -22,7 +22,7 @@ use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::config_actor::{ConfigActorHandle, TaskHandleType};
+use crate::config_actor::{ConfigActorHandle, ServiceInstance, TaskHandleType};
 use crate::containment::ContainmentManager;
 use crate::errors::{DaemonError, Result};
 use crate::logs::LogStoreHandle;
@@ -78,15 +78,20 @@ const SPAWN_GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 ///
 /// Dropping the gate releases the exit event — the start path always releases
 /// it, on success or failure, and a dropped gate never blocks the monitor.
-pub struct SpawnGate(oneshot::Sender<()>);
+pub struct SpawnGate {
+    sender: oneshot::Sender<()>,
+    instance: ServiceInstance,
+}
 
 impl SpawnGate {
+    pub fn instance(&self) -> ServiceInstance { self.instance }
+
     /// Release the exit event. Dropping the gate does the same thing; calling
     /// this makes the ordering requirement visible at the call site.
     pub fn release(self) {
         // Err just means the monitor is already gone (process reaped and task
         // finished, or the service was stopped) — nothing to release.
-        let _ = self.0.send(());
+        let _ = self.sender.send(());
     }
 }
 
@@ -134,7 +139,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<(ProcessHan
     spec.cgroup_path = containment.service_cgroup_path(&config_hash, service_name);
 
     // Spawn the command detached for monitoring
-    let result = spawn_detached(
+    let mut result = spawn_detached(
         spec,
         log_store,
         service_name.to_string(),
@@ -156,9 +161,18 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<(ProcessHan
     }
 
     // Store the PID in state immediately after spawning
-    let _ = handle
-        .set_service_pid(service_name, pid, Some(Utc::now()))
-        .await;
+    let instance = match handle.register_service_instance(service_name, pid, Utc::now()).await {
+        Ok(instance) => instance,
+        Err(e) => {
+            if let Some(pid) = pid {
+                containment.force_kill_service(&config_hash, service_name, pid).await;
+            }
+            let _ = result.child.kill().await;
+            if let Some(task) = result.stdout_task { task.abort(); }
+            if let Some(task) = result.stderr_task { task.abort(); }
+            return Err(e);
+        }
+    };
 
     // Create shutdown channel for graceful stop (round-trip: request → reply)
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<ShutdownRequest>();
@@ -197,7 +211,7 @@ pub async fn spawn_service(params: SpawnServiceParams<'_>) -> Result<(ProcessHan
         debug!("FD count after spawning service {}: {}", service_name, fd_count);
     }
 
-    Ok((process_handle, SpawnGate(gate_tx)))
+    Ok((process_handle, SpawnGate { sender: gate_tx, instance }))
 }
 
 /// Monitor a process using signal-based waiting (child.wait())

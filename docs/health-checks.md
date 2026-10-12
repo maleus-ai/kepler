@@ -16,6 +16,8 @@ Docker-compatible health check configuration for monitoring service readiness.
 
 ## Configuration
 
+When a service restarts, its old health checker is cancelled before restart hooks run. Results and queued health events from that checker are discarded. After the replacement process starts, a new checker determines its health using a fresh retry counter and start period.
+
 Health checks are configured under the `healthcheck` key in a service definition:
 
 ```yaml

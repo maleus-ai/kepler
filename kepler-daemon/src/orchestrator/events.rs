@@ -63,6 +63,11 @@ impl ServiceEventHandler {
             let service_name = &tagged_msg.service_name;
             let event = &tagged_msg.message.event;
 
+            if let Some(session) = tagged_msg.message.health_check_session
+                && !self.handle.is_health_check_current(service_name, session).await {
+                    continue;
+                }
+
             debug!(
                 "Event received for {}: {:?}",
                 service_name, event

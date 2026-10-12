@@ -3,7 +3,7 @@
 use kepler_daemon::config::{
     KeplerConfig, LogRetention, RawServiceConfig, ServiceConfig, ServiceHooks, resolve_log_store,
 };
-use kepler_daemon::config_actor::{ConfigActor, ConfigActorHandle, TaskHandleType};
+use kepler_daemon::config_actor::{ConfigActor, ConfigActorHandle};
 use kepler_daemon::containment::ContainmentManager;
 use kepler_daemon::env::{insert_env_entries, load_env_file};
 use kepler_daemon::hardening::HardeningLevel;
@@ -616,18 +616,16 @@ impl TestDaemonHarness {
         let resolved = ctx.resolved_config.as_ref().ok_or("Service not resolved")?;
 
         if let Some(health_config) = resolved.healthcheck.clone() {
-            let task_handle = spawn_health_checker(
+            let instance = self.handle.get_service_instance(service_name).await
+                .ok_or("Service instance not found")?;
+            spawn_health_checker(
                 service_name.to_string(),
                 health_config,
                 self.handle.clone(),
                 self.effective_hardening(),
                 None,
-            );
-
-            // Store the health check handle
-            self.handle
-                .store_task_handle(service_name, TaskHandleType::HealthCheck, task_handle)
-                .await;
+                instance,
+            ).await;
         }
 
         Ok(())

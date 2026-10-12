@@ -369,8 +369,10 @@ pub async fn is_dependency_permanently_unsatisfied(
         return false;
     }
 
-    // Check if the restart policy would restart the service
-    !dep_restart_config.should_restart_on_exit(state.exit_code)
+    // Stopped is explicit cancellation; Failed is a startup failure. Neither
+    // schedules an exit-policy retry, even with on-failure/always configured.
+    state.status == ServiceStatus::Stopped
+        || !restart_follows(state.status, state.exit_code, dep_restart_config)
 }
 
 /// Check if a dependency condition is structurally unreachable given the dep's restart policy.
@@ -430,8 +432,8 @@ pub fn is_condition_unreachable_by_policy(
 ///
 /// Returns true if the condition satisfaction is transient and should be ignored.
 pub fn is_transient_satisfaction(dep_state: &ServiceState, restart_config: &RestartConfig) -> bool {
-    matches!(dep_state.status, ServiceStatus::Exited | ServiceStatus::Killed | ServiceStatus::Failed)
-        && restart_config.should_restart_on_exit(dep_state.exit_code)
+    matches!(dep_state.status, ServiceStatus::Exited | ServiceStatus::Killed)
+        && restart_follows(dep_state.status, dep_state.exit_code, restart_config)
 }
 
 /// Check if the restart policy brings a service back from a terminal status.

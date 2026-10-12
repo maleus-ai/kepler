@@ -180,7 +180,7 @@ async fn run() -> Result<()> {
             }
         }
 
-        Commands::Restart { services, wait, timeout, raw: raw_output, follow, no_deps, override_envs, refresh_env, define } => {
+        Commands::Restart { services, states, wait, timeout, raw: raw_output, follow, no_deps, override_envs, refresh_env, define } => {
             let override_envs = build_override_envs(override_envs, refresh_env, &sys_env);
             let define_flags = build_define_flags(define);
             if no_deps && services.is_empty() {
@@ -189,13 +189,14 @@ async fn run() -> Result<()> {
             }
             if wait {
                 // --wait: Progress bars for full stop+start lifecycle, exit when restart completes
-                let (progress_rx, response_future) = client.restart(
+                let (progress_rx, response_future) = client.restart_with_states(
                     canonical_path.clone(),
                     services,
                     Some(sys_env),
                     no_deps,
                     override_envs,
                     define_flags.clone(),
+                    states.clone(),
                 )?;
                 if let Some(timeout_str) = &timeout {
                     let timeout_duration = kepler_daemon::config::parse_duration(timeout_str)
@@ -222,13 +223,14 @@ async fn run() -> Result<()> {
                 // Anchor before restarting: the restart is awaited below, so by the
                 // time streaming starts the new services have already logged.
                 let log_start = current_log_end(&client, &canonical_path).await;
-                let (progress_rx, restart_future) = client.restart(
+                let (progress_rx, restart_future) = client.restart_with_states(
                     canonical_path.clone(),
                     services,
                     Some(sys_env),
                     no_deps,
                     override_envs,
                     define_flags.clone(),
+                    states.clone(),
                 )?;
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);
@@ -243,13 +245,14 @@ async fn run() -> Result<()> {
                 }
             } else {
                 // Default: Progress bars, exit when done
-                let (progress_rx, restart_future) = client.restart(
+                let (progress_rx, restart_future) = client.restart_with_states(
                     canonical_path.clone(),
                     services,
                     Some(sys_env),
                     no_deps,
                     override_envs,
                     define_flags,
+                    states,
                 )?;
                 let response = run_with_progress(progress_rx, restart_future).await?;
                 handle_response(response);

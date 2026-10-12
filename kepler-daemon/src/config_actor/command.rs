@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use super::context::{DiagnosticCounts, HealthCheckUpdate, ServiceContext, TaskHandleType};
+use super::context::{DiagnosticCounts, HealthCheckSession, HealthCheckUpdate, ServiceContext, ServiceInstance, ServiceStartup, TaskHandleType};
 use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig};
 use crate::watcher::FileWatcherHandle;
 
@@ -113,10 +113,34 @@ pub enum ConfigCommand {
         service_name: String,
         reason: String,
     },
-    /// Atomically claim a service for startup: checks if Waiting or terminal, and if so,
-    /// sets it to Waiting. Returns true if claimed, false if already active.
+    /// Atomically claim a terminal service or an unowned Waiting reservation.
+    /// Sets it to Waiting and returns a token to exactly one startup task.
     ClaimServiceStart {
         service_name: String,
+        reply: oneshot::Sender<Option<ServiceStartup>>,
+    },
+    /// Atomically claim a running service for a manual restart.
+    ClaimServiceRestart {
+        service_name: String,
+        reply: oneshot::Sender<Option<ServiceStartup>>,
+    },
+    /// Claim an initialized terminal service selected by a manual restart.
+    ClaimInactiveServiceRestart {
+        service_name: String,
+        states: Vec<kepler_protocol::protocol::RestartState>,
+        reply: oneshot::Sender<Option<ServiceStartup>>,
+    },
+    GetServiceStartup {
+        service_name: String,
+        reply: oneshot::Sender<Option<ServiceStartup>>,
+    },
+    /// Change startup status only if its operation has not been cancelled.
+    TransitionServiceStartup {
+        service_name: String,
+        startup: ServiceStartup,
+        status: ServiceStatus,
+        skip_reason: Option<String>,
+        fail_reason: Option<String>,
         reply: oneshot::Sender<bool>,
     },
     /// Atomically set a reason (skip/fail) and status in one command.
@@ -139,11 +163,42 @@ pub enum ConfigCommand {
         signal: Option<i32>,
         reply: oneshot::Sender<Result<()>>,
     },
+    RegisterServiceInstance {
+        service_name: String,
+        pid: Option<u32>,
+        started_at: DateTime<Utc>,
+        reply: oneshot::Sender<Result<ServiceInstance>>,
+    },
+    GetServiceInstance {
+        service_name: String,
+        reply: oneshot::Sender<Option<ServiceInstance>>,
+    },
+    BeginHealthCheck {
+        service_name: String,
+        instance: ServiceInstance,
+        reply: oneshot::Sender<Option<HealthCheckSession>>,
+    },
+    IsHealthCheckCurrent {
+        service_name: String,
+        session: HealthCheckSession,
+        reply: oneshot::Sender<bool>,
+    },
+    StoreHealthCheckTask {
+        service_name: String,
+        session: HealthCheckSession,
+        handle: JoinHandle<()>,
+    },
+    EmitHealthCheckEvent {
+        service_name: String,
+        session: HealthCheckSession,
+        event: ServiceEvent,
+    },
     UpdateHealthCheck {
         service_name: String,
+        session: HealthCheckSession,
         passed: bool,
         retries: u32,
-        reply: oneshot::Sender<Result<HealthCheckUpdate>>,
+        reply: oneshot::Sender<Result<Option<HealthCheckUpdate>>>,
     },
     MarkConfigInitialized {
         reply: oneshot::Sender<Result<()>>,
@@ -197,8 +252,21 @@ pub enum ConfigCommand {
         service_name: String,
         guard: crate::token_store::ServiceTokenGuard,
     },
+    /// Reject a guard created by a startup that was cancelled in the meantime.
+    StoreStartupTokenGuard {
+        service_name: String,
+        startup: ServiceStartup,
+        guard: crate::token_store::ServiceTokenGuard,
+        reply: oneshot::Sender<Option<crate::token_store::ServiceTokenGuard>>,
+    },
     TakeTokenGuard {
         service_name: String,
+        reply: oneshot::Sender<Option<crate::token_store::ServiceTokenGuard>>,
+    },
+    /// Remove only the guard owned by the caller's token.
+    TakeMatchingTokenGuard {
+        service_name: String,
+        token: crate::token_store::Token,
         reply: oneshot::Sender<Option<crate::token_store::ServiceTokenGuard>>,
     },
     GetServiceTokenHex {

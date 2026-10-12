@@ -212,6 +212,21 @@ pub fn clear_service_outputs(base_dir: &Path, service: &str) -> Result<()> {
     Ok(())
 }
 
+/// Discard an old process result while preserving hook outputs across a restart.
+pub fn clear_service_process_outputs(base_dir: &Path, service: &str) -> Result<()> {
+    let dir = service_outputs_dir(base_dir, service);
+    for name in ["process.json", "outputs.json"] {
+        match std::fs::remove_file(dir.join(name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(crate::errors::DaemonError::Internal(format!(
+                "Failed to clear process outputs for {}: {}", service, e,
+            ))),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,5 +411,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = clear_service_outputs(dir.path(), "nonexistent");
         assert!(result.is_ok(), "Clearing outputs for nonexistent service should not error");
+    }
+
+    #[test]
+    fn test_clear_process_outputs_preserves_restart_hook_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let outputs = HashMap::from([("token".to_string(), "value".to_string())]);
+        write_process_outputs(dir.path(), "svc", &outputs).unwrap();
+        write_resolved_outputs(dir.path(), "svc", &outputs).unwrap();
+        write_hook_step_outputs(dir.path(), "svc", "pre_restart", "setup", &outputs).unwrap();
+
+        clear_service_process_outputs(dir.path(), "svc").unwrap();
+        assert!(read_service_outputs(dir.path(), "svc").is_empty());
+        assert_eq!(read_all_hook_outputs(dir.path(), "svc")["pre_restart"]["setup"]["token"], "value");
+        clear_service_process_outputs(dir.path(), "svc").unwrap();
+        clear_service_process_outputs(dir.path(), "never-started").unwrap();
     }
 }

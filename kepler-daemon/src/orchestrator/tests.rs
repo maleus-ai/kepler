@@ -88,6 +88,211 @@ fn create_orchestrator() -> ServiceOrchestrator {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn test_cancelled_startup_cannot_transition_a_later_start_or_restart() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _) = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        setup_handle(temp_dir.path()).await
+    };
+    let first = handle.claim_service_start("svc1").await.unwrap();
+    handle.set_service_status("svc1", ServiceStatus::Stopping).await.unwrap();
+    handle.set_service_status("svc1", ServiceStatus::Stopped).await.unwrap();
+    let second = handle.claim_service_start("svc1").await.unwrap();
+    assert_ne!(first, second);
+    assert!(!handle.transition_service_startup("svc1", first, ServiceStatus::Failed, None, Some("old failure".into())).await);
+    assert_eq!(handle.get_service_state("svc1").await.unwrap().status, ServiceStatus::Waiting);
+    assert!(handle.transition_service_startup("svc1", second, ServiceStatus::Starting, None, None).await);
+
+    handle.set_service_status("svc1", ServiceStatus::Running).await.unwrap();
+    handle.mark_service_initialized("svc1").await.unwrap();
+    let restart = handle.claim_service_restart("svc1").await.unwrap();
+    assert!(!handle.transition_service_startup("svc1", second, ServiceStatus::Starting, None, None).await);
+    assert!(handle.transition_service_startup("svc1", restart, ServiceStatus::Restarting, None, None).await);
+    assert!(handle.get_service_state("svc1").await.unwrap().fail_reason.is_none());
+}
+
+#[tokio::test]
+async fn test_restart_claims_require_initialization_and_recheck_terminal_selection() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _) = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        setup_handle(temp_dir.path()).await
+    };
+    use kepler_protocol::protocol::RestartState;
+    assert!(handle.claim_inactive_service_restart("svc1", &[RestartState::All]).await.is_none());
+    handle.set_service_status("svc1", ServiceStatus::Running).await.unwrap();
+    assert!(handle.claim_service_restart("svc1").await.is_none());
+    handle.mark_service_initialized("svc1").await.unwrap();
+    assert!(handle.claim_service_restart("svc1").await.is_some());
+    handle.set_service_status("svc1", ServiceStatus::Stopped).await.unwrap();
+    assert!(handle.claim_inactive_service_restart("svc1", &[RestartState::Failed]).await.is_none());
+    assert!(handle.claim_inactive_service_restart("svc1", &[RestartState::Stopped]).await.is_some());
+    assert!(handle.claim_inactive_service_restart("svc1", &[RestartState::All]).await.is_none());
+    handle.set_service_status("svc1", ServiceStatus::Skipped).await.unwrap();
+    assert!(handle.claim_inactive_service_restart("svc1", &[RestartState::All]).await.is_none());
+}
+
+#[tokio::test]
+async fn test_startup_claims_have_only_one_owner() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _) = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        setup_handle(temp_dir.path()).await
+    };
+    for reserve_waiting in [false, true] {
+        handle.set_service_status("svc1", ServiceStatus::Stopped).await.unwrap();
+        if reserve_waiting {
+            // Daemon recovery reserves Waiting before dispatching tasks.
+            handle.set_service_status("svc1", ServiceStatus::Waiting).await.unwrap();
+        }
+        let (first, second) = tokio::join!(
+            handle.claim_service_start("svc1"),
+            handle.claim_service_start("svc1"),
+        );
+        assert_eq!(usize::from(first.is_some()) + usize::from(second.is_some()), 1);
+        let owner = first.or(second).unwrap();
+        assert_eq!(handle.get_service_startup("svc1").await, Some(owner));
+        assert!(handle.claim_service_start("svc1").await.is_none());
+        assert!(handle.transition_service_startup("svc1", owner, ServiceStatus::Starting, None, None).await);
+        assert!(handle.claim_service_start("svc1").await.is_none());
+        handle.set_service_status("svc1", ServiceStatus::Stopping).await.unwrap();
+        handle.set_service_status("svc1", ServiceStatus::Stopped).await.unwrap();
+        assert!(handle.get_service_startup("svc1").await.is_none());
+        let later = handle.claim_service_start("svc1").await.unwrap();
+        assert_ne!(owner, later);
+        assert!(!handle.transition_service_startup("svc1", owner, ServiceStatus::Failed, None, Some("stale failure".into())).await);
+        assert_eq!(handle.get_service_startup("svc1").await, Some(later));
+    }
+}
+
+#[tokio::test]
+async fn test_failed_dependency_will_not_retry_its_startup_under_an_exit_policy() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _) = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        setup_handle(temp_dir.path()).await
+    };
+    for restart in [crate::config::RestartPolicy::on_failure(), crate::config::RestartPolicy::always()] {
+        let restart = crate::config::RestartConfig::Simple(restart);
+        for status in [ServiceStatus::Failed, ServiceStatus::Stopped] {
+            handle.set_service_status("svc1", status).await.unwrap();
+            assert!(is_dependency_permanently_unsatisfied("svc1", &crate::config::DependencyConfig::default(), &handle, &restart).await);
+        }
+        // Actual exits still defer while their policy schedules a retry.
+        handle.record_process_exit("svc1", Some(1), None).await.unwrap();
+        handle.set_service_status("svc1", ServiceStatus::Exited).await.unwrap();
+        assert!(!is_dependency_permanently_unsatisfied("svc1", &crate::config::DependencyConfig::default(), &handle, &restart).await);
+    }
+}
+
+#[tokio::test]
+async fn test_cancelled_startup_cannot_replace_or_revoke_a_newer_token_guard() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _) = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        setup_handle(temp_dir.path()).await
+    };
+    let orch = create_orchestrator();
+    let context = TokenContext {
+        allow: HashSet::from(["status"]),
+        max_hardening: HardeningLevel::None,
+        service: "svc1".into(),
+        config_path: handle.config_path().to_path_buf(),
+        authorizer: None,
+    };
+    let old_startup = handle.claim_service_start("svc1").await.unwrap();
+    let old_guard = crate::token_store::ServiceTokenGuard::new(orch.token_store.clone(), context.clone()).await.unwrap();
+    let old_token = old_guard.token().unwrap();
+    assert!(handle.store_startup_token_guard("svc1", old_startup, old_guard).await);
+
+    handle.set_service_status("svc1", ServiceStatus::Stopping).await.unwrap();
+    handle.set_service_status("svc1", ServiceStatus::Stopped).await.unwrap();
+    handle.take_token_guard("svc1").await.unwrap().revoke().await;
+    let new_startup = handle.claim_service_start("svc1").await.unwrap();
+    let new_guard = crate::token_store::ServiceTokenGuard::new(orch.token_store.clone(), context.clone()).await.unwrap();
+    let new_token = new_guard.token().unwrap();
+    assert!(handle.store_startup_token_guard("svc1", new_startup, new_guard).await);
+
+    let late_guard = crate::token_store::ServiceTokenGuard::new(orch.token_store.clone(), context).await.unwrap();
+    let late_token = late_guard.token().unwrap();
+    assert!(!handle.store_startup_token_guard("svc1", old_startup, late_guard).await);
+    assert!(orch.token_store.get(&late_token).await.is_none());
+    handle.set_service_status("svc1", ServiceStatus::Running).await.unwrap();
+    orch.revoke_matching_service_token_guard(&handle, "svc1", Some(old_token)).await;
+    orch.revoke_matching_service_token_guard(&handle, "svc1", None).await;
+    assert!(orch.token_store.get(&new_token).await.is_some());
+    let guard = handle.take_matching_token_guard("svc1", new_token).await.unwrap();
+    guard.revoke().await;
+    assert!(orch.token_store.get(&new_token).await.is_none());
+}
+
+#[tokio::test]
+async fn test_old_health_results_and_events_cannot_affect_a_new_instance() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _) = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        setup_handle(temp_dir.path()).await
+    };
+    let old_instance = handle.register_service_instance("svc1", Some(123), chrono::Utc::now()).await.unwrap();
+    handle.set_service_status("svc1", ServiceStatus::Running).await.unwrap();
+    let old_session = handle.begin_health_check("svc1", old_instance).await.unwrap();
+    let mut events = handle.create_event_channel("svc1").await.unwrap();
+    handle.emit_health_check_event("svc1", old_session, ServiceEvent::Unhealthy).await;
+    handle.get_service_state("svc1").await; // Drain preceding actor commands.
+    let queued = events.try_recv().unwrap();
+    assert_eq!(queued.health_check_session, Some(old_session));
+
+    handle.mark_service_initialized("svc1").await.unwrap();
+    handle.claim_service_restart("svc1").await.unwrap();
+    for passed in [false, true] {
+        assert!(handle.update_health_check("svc1", old_session, passed, 1).await.unwrap().is_none());
+    }
+    let during_restart = handle.get_service_state("svc1").await.unwrap();
+    assert_eq!(during_restart.status, ServiceStatus::Restarting);
+    assert_eq!(during_restart.health_check_failures, 0);
+
+    // Even PID reuse must not allow an old checker to attach to the replacement.
+    let new_instance = handle.register_service_instance("svc1", Some(123), chrono::Utc::now()).await.unwrap();
+    handle.set_service_status("svc1", ServiceStatus::Running).await.unwrap();
+    assert_ne!(old_instance, new_instance);
+    assert!(handle.begin_health_check("svc1", old_instance).await.is_none());
+    let new_session = handle.begin_health_check("svc1", new_instance).await.unwrap();
+    assert!(!handle.is_health_check_current("svc1", queued.health_check_session.unwrap()).await);
+    handle.emit_health_check_event("svc1", old_session, ServiceEvent::Unhealthy).await;
+    for passed in [false, true] {
+        assert!(handle.update_health_check("svc1", old_session, passed, 1).await.unwrap().is_none());
+    }
+    assert!(events.try_recv().is_err());
+    let state = handle.get_service_state("svc1").await.unwrap();
+    assert_eq!(state.status, ServiceStatus::Running);
+    assert_eq!(state.health_check_failures, 0);
+    assert!(!state.was_healthy);
+
+    let failed = handle.update_health_check("svc1", new_session, false, 1).await.unwrap().unwrap();
+    assert_eq!(failed.new_status, ServiceStatus::Unhealthy);
+    let recovered = handle.update_health_check("svc1", new_session, true, 1).await.unwrap().unwrap();
+    assert_eq!(recovered.new_status, ServiceStatus::Healthy);
+
+    // A task delivered late cannot abort a newer checker's task on the same instance.
+    let newer_session = handle.begin_health_check("svc1", new_instance).await.unwrap();
+    let current_task = tokio::spawn(std::future::pending::<()>());
+    let current_abort = current_task.abort_handle();
+    handle.store_health_check_task("svc1", newer_session, current_task).await;
+    let stale_task = tokio::spawn(std::future::pending::<()>());
+    let stale_abort = stale_task.abort_handle();
+    handle.store_health_check_task("svc1", new_session, stale_task).await;
+    handle.get_service_state("svc1").await;
+    tokio::task::yield_now().await;
+    assert!(stale_abort.is_finished());
+    assert!(!current_abort.is_finished());
+    handle.cancel_task_handle("svc1", TaskHandleType::HealthCheck).await;
+    handle.get_service_state("svc1").await;
+    tokio::task::yield_now().await;
+    assert!(current_abort.is_finished());
+    assert!(handle.update_health_check("svc1", newer_session, false, 1).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn test_service_needs_starting_when_exited() {
     let temp_dir = TempDir::new().unwrap();
     let (handle, config) = {

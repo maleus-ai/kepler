@@ -284,7 +284,22 @@ impl Client {
         override_envs: Option<HashMap<String, String>>,
         define_flags: Option<HashMap<String, String>>,
     ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
+        self.restart_with_states(config_path, services, sys_env, no_deps, override_envs, define_flags, Vec::new())
+    }
+
+    /// Restart running services plus services in the specified terminal states.
+    pub fn restart_with_states(
+        &self,
+        config_path: PathBuf,
+        services: Vec<String>,
+        sys_env: Option<HashMap<String, String>>,
+        no_deps: bool,
+        override_envs: Option<HashMap<String, String>>,
+        define_flags: Option<HashMap<String, String>>,
+        states: Vec<crate::protocol::RestartState>,
+    ) -> Result<(mpsc::UnboundedReceiver<ServerEvent>, impl Future<Output = Result<Response>> + use<'_>)> {
         self.send_request(Request::Restart {
+            states,
             config_path,
             services,
             sys_env,

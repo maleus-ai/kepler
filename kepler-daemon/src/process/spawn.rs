@@ -17,6 +17,24 @@ use crate::logs::{LogStoreHandle, LogWriter};
 /// A read error does not close the pipe fd, so we retry rather than permanently
 /// ending capture; the cap stops a persistent error from hot-spinning.
 const MAX_CAPTURE_READ_RETRIES: u32 = 5;
+
+/// Abort capture tasks and terminate a health-check process group on cancellation.
+struct CaptureCleanup {
+    pid: Option<u32>,
+    stdout: tokio::task::AbortHandle,
+    stderr: tokio::task::AbortHandle,
+}
+
+impl Drop for CaptureCleanup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            let _ = kepler_unix::process_tree::force_kill_process_tree(pid);
+        }
+        self.stdout.abort();
+        self.stderr.abort();
+    }
+}
 /// Backoff between capture read retries (keeps a persistent error from spinning).
 const CAPTURE_READ_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 
@@ -499,6 +517,9 @@ fn spawn_capture_task(
 /// - `WithLogging`: Wait with logging to tracing and LogWriter
 pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<BlockingResult> {
     let (mut cmd, program) = build_command(&spec)?;
+    if matches!(&mode, BlockingMode::CaptureOutput) {
+        cmd.kill_on_drop(true);
+    }
 
     let mut child = cmd.spawn().map_err(|e| DaemonError::ProcessSpawn {
         service: program.clone(),
@@ -530,6 +551,11 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
         BlockingMode::CaptureOutput => {
             let stdout_handle = spawn_collect_task(child.stdout.take());
             let stderr_handle = spawn_collect_task(child.stderr.take());
+            let mut cleanup = CaptureCleanup {
+                pid,
+                stdout: stdout_handle.abort_handle(),
+                stderr: stderr_handle.abort_handle(),
+            };
 
             let status = child.wait().await.map_err(|e| DaemonError::ProcessSpawn {
                 service: program.clone(),
@@ -538,6 +564,7 @@ pub async fn spawn_blocking(spec: CommandSpec, mode: BlockingMode) -> Result<Blo
 
             let stdout_text = stdout_handle.await.unwrap_or_default();
             let stderr_text = stderr_handle.await.unwrap_or_default();
+            cleanup.pid = None; // Completed normally; no cancellation cleanup needed.
 
             let mut combined = String::new();
             if !stdout_text.is_empty() {

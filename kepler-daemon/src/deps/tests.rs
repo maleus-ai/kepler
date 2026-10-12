@@ -440,7 +440,7 @@ fn test_transient_killed_restart_always() {
 fn test_transient_failed_restart_always() {
     let restart = RestartConfig::Simple(RestartPolicy::always());
     let state = make_state_with_status(ServiceStatus::Failed, None);
-    assert!(is_transient_satisfaction(&state, &restart), "Failed + restart:always should be transient");
+    assert!(!is_transient_satisfaction(&state, &restart), "A startup failure does not schedule an exit-policy retry");
 }
 
 #[test]
