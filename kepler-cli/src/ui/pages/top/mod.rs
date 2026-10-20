@@ -369,6 +369,7 @@ fn handle_subscribe_event(app: &mut TopApp, event: ServerEvent) {
                 started_at: None,
                 stopped_at: None,
                 health_check_failures: 0,
+                restart_count: 0,
                 exit_code: None,
                 signal: None,
                 initialized: false,

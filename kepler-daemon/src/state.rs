@@ -134,6 +134,7 @@ impl From<&ServiceState> for ServiceInfo {
             started_at: state.started_at.map(|dt| dt.timestamp()),
             stopped_at: state.stopped_at.map(|dt| dt.timestamp()),
             health_check_failures: state.health_check_failures,
+            restart_count: state.restart_count,
             exit_code: state.exit_code,
             signal: state.signal,
             initialized: state.initialized,

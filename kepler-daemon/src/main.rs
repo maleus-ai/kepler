@@ -2026,6 +2026,7 @@ fn read_persisted_status(state_dir: &Path) -> HashMap<String, ServiceInfo> {
                 started_at: ps.started_at,
                 stopped_at: ps.stopped_at,
                 health_check_failures: ps.health_check_failures,
+                restart_count: ps.restart_count,
                 exit_code: ps.exit_code,
                 signal: ps.signal,
                 initialized: ps.initialized,
@@ -2363,6 +2364,7 @@ mod tests {
             let mut s = make_persisted_service(PersistedServiceStatus::Running);
             s.pid = Some(12345);
             s.started_at = Some(999);
+            s.restart_count = 3;
             s
         });
         services.insert("healthy_svc".to_string(), {
@@ -2386,6 +2388,8 @@ mod tests {
         persistence.save_state(&make_state(services)).unwrap();
 
         let result = read_persisted_status(tmp.path());
+
+        assert_eq!(result["running_svc"].restart_count, 3);
 
         // All active statuses should be mapped to "stopped" with pid: None
         for name in ["running_svc", "healthy_svc", "starting_svc", "waiting_svc", "stopping_svc", "unhealthy_svc"] {
@@ -2550,6 +2554,7 @@ mod tests {
             started_at: Some(1700000000),
             stopped_at: None,
             health_check_failures: 0,
+            restart_count: 3,
             exit_code: None,
             signal: None,
             initialized: true,
@@ -2568,6 +2573,7 @@ mod tests {
         let state = result.get("state").unwrap();
         assert_eq!(state["status"], "running");
         assert_eq!(state["pid"], 1234);
+        assert_eq!(state["restart_count"], 3);
 
         // Outputs should have path, process, hooks
         let outputs = result.get("outputs").unwrap();
@@ -2634,6 +2640,7 @@ mod tests {
             started_at: None,
             stopped_at: Some(1700000100),
             health_check_failures: 0,
+            restart_count: 0,
             exit_code: Some(0),
             signal: None,
             initialized: false,

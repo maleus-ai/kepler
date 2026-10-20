@@ -1464,6 +1464,8 @@ struct ServiceRow {
     status: String,
     #[tabled(rename = "PID")]
     pid: String,
+    #[tabled(rename = "RESTARTS")]
+    restarts: u32,
 }
 
 fn format_service_row(name: &str, info: &ServiceInfo) -> ServiceRow {
@@ -1471,6 +1473,7 @@ fn format_service_row(name: &str, info: &ServiceInfo) -> ServiceRow {
         name: name.to_string(),
         status: format_status(info),
         pid: info.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+        restarts: info.restart_count,
     }
 }
 
@@ -1484,6 +1487,8 @@ struct MultiConfigRow {
     status: String,
     #[tabled(rename = "PID")]
     pid: String,
+    #[tabled(rename = "RESTARTS")]
+    restarts: u32,
 }
 
 fn print_service_table(services: &std::collections::HashMap<String, ServiceInfo>) {
@@ -1527,6 +1532,7 @@ fn print_multi_config_table(configs: &[ConfigStatus]) {
                 name: service.name,
                 status: service.status,
                 pid: service.pid,
+                restarts: service.restarts,
             }
         })
         .collect();
