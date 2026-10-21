@@ -966,17 +966,16 @@ impl E2eHarness {
         rss_str.trim().parse().ok()
     }
 
-    /// Extract PID from ps output for a service.
-    /// PID is always the last column: "NAME  STATUS  PID"
-    /// STATUS can be multi-word (e.g., "Up 5s", "Exited (0) 14s ago")
+    /// Extract the PID for an exact service name using the table's PID header.
     pub fn extract_pid_from_ps(&self, ps_output: &str, service: &str) -> Option<u32> {
-        for line in ps_output.lines() {
-            if line.contains(service) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                // PID is the last token
-                if let Some(last) = parts.last() {
-                    return last.parse().ok();
-                }
+        let mut lines = ps_output.lines().filter(|line| !line.trim().is_empty());
+        // Count columns from the right because STATUS can contain spaces.
+        let pid_from_right = lines.next()?.split_whitespace().rev()
+            .position(|column| column == "PID")?;
+        for line in lines {
+            let mut cells = line.split_whitespace();
+            if cells.next() == Some(service) {
+                return cells.rev().nth(pid_from_right)?.parse().ok();
             }
         }
         None

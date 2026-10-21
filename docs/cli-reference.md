@@ -383,7 +383,11 @@ kepler ps --json   # Output as JSON
 | `--all`, `-a` | Show status for all loaded configs |
 | `--json`      | Output as JSON instead of a table  |
 
-Output columns: **NAME**, **STATUS**, **PID**
+Output columns: **NAME**, **STATUS**, **PID**, **RESTARTS** (`--all` also includes **CONFIG**).
+
+JSON output includes `restart_count` for each service. It counts restarts in the current service runtime and does not reset when the service becomes healthy. Reinitializing the service runtime, including restoring a config after a daemon restart, resets the counter. Status read from an unloaded config retains its persisted count.
+
+The CLI and daemon must be upgraded together: the status response uses a binary protocol, and a daemon from a version without `restart_count` cannot supply this field.
 
 Status display examples:
 - `Up 5m` -- Running for 5 minutes

@@ -146,6 +146,7 @@ Response::PermissionDenied {
 | `started_at`            | `Option<i64>`    | Start timestamp                                       |
 | `stopped_at`            | `Option<i64>`    | Stop/exit/fail timestamp                              |
 | `health_check_failures` | `u32`            | Health check failure count                            |
+| `restart_count`        | `u32`            | Restart count; healthcheck success does not reset it. JSON deserialization defaults to 0 when absent. |
 | `exit_code`             | `Option<i32>`    | Exit code (for exited services)                       |
 | `signal`                | `Option<i32>`    | Signal that killed the process (e.g., 9 for SIGKILL)  |
 | `initialized`           | `bool`           | Whether the service has completed its first start     |

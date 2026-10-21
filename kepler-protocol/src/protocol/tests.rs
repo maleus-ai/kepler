@@ -258,6 +258,7 @@ fn roundtrip_server_message_service_status() {
         started_at: Some(1700000000),
         stopped_at: None,
         health_check_failures: 0,
+        restart_count: 3,
         exit_code: None,
         signal: None,
         initialized: false,
@@ -271,6 +272,7 @@ fn roundtrip_server_message_service_status() {
         started_at: Some(1700000000),
         stopped_at: Some(1700001000),
         health_check_failures: 0,
+        restart_count: 0,
         exit_code: Some(0),
         signal: None,
         initialized: false,
@@ -284,6 +286,7 @@ fn roundtrip_server_message_service_status() {
         started_at: Some(1700000000),
         stopped_at: Some(1700001000),
         health_check_failures: 0,
+        restart_count: 0,
         exit_code: None,
         signal: Some(9),
         initialized: false,
@@ -303,11 +306,24 @@ fn roundtrip_server_message_service_status() {
             assert_eq!(id, 10);
             assert_eq!(s.len(), 3);
             assert_eq!(s["web"].pid, Some(1234));
+            assert_eq!(s["web"].restart_count, 3);
             assert_eq!(s["api"].exit_code, Some(0));
             assert_eq!(s["worker"].signal, Some(9));
         }
         _ => panic!("Expected ServiceStatus response"),
     }
+}
+
+#[test]
+fn service_info_deserializes_without_restart_count() {
+    let info: ServiceInfo = serde_json::from_value(serde_json::json!({
+        "status": "healthy",
+        "pid": 1234,
+        "started_at": 1700000000,
+        "health_check_failures": 0
+    })).unwrap();
+    assert_eq!(info.restart_count, 0);
+    assert_eq!(serde_json::to_value(&info).unwrap()["restart_count"], 0);
 }
 
 #[test]

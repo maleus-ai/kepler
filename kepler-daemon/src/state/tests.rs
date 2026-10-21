@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn service_info_preserves_total_restart_count() {
+    for status in [ServiceStatus::Starting, ServiceStatus::Healthy, ServiceStatus::Exited] {
+        let state = ServiceState {
+            status,
+            restart_count: 3,
+            restart_count_since_healthy: 0,
+            ..Default::default()
+        };
+        assert_eq!(state.to_service_info().restart_count, 3);
+    }
+    assert_eq!(ServiceState::default().to_service_info().restart_count, 0);
+}
+
+#[test]
 fn test_exited_status_as_str() {
     assert_eq!(ServiceStatus::Exited.as_str(), "exited");
 }

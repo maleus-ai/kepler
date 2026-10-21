@@ -537,6 +537,7 @@ fn make_info(status: &str) -> ServiceInfo {
         started_at: None,
         stopped_at: None,
         health_check_failures: 0,
+        restart_count: 0,
         exit_code: None,
         signal: None,
         initialized: false,

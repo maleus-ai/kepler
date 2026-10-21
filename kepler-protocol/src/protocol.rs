@@ -558,6 +558,9 @@ pub struct ServiceInfo {
     /// Reason for failure (when status is "failed")
     #[serde(default)]
     pub fail_reason: Option<String>,
+    /// Number of restarts; passing a healthcheck does not reset this counter.
+    #[serde(default)]
+    pub restart_count: u32,
 }
 
 /// Information about the daemon
