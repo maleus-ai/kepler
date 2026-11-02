@@ -134,8 +134,10 @@ async fn test_non_root_config_umask() -> E2eResult<()> {
     Ok(())
 }
 
-/// An unquoted `027` is refused with a hint to quote it, instead of running
-/// with the decimal 27 (`0o033`).
+/// An unquoted YAML number (here `777`) is refused with a hint to quote it,
+/// rather than being applied as a possibly decimal value. (An unquoted `027`
+/// is a different case: serde_yaml reads it as the string "027", so it is
+/// accepted as 0o027 — see `yaml_unquoted_leading_zero_is_never_misread`.)
 #[tokio::test]
 async fn test_unquoted_umask_rejected() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
