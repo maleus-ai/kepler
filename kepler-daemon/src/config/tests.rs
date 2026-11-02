@@ -1533,3 +1533,98 @@ services:
         "old field name 'retention' should be rejected"
     );
 }
+
+// ============================================================================
+// umask tests
+// ============================================================================
+
+fn load_yaml(yaml: &str) -> Result<KeplerConfig> {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("kepler.yaml");
+    std::fs::write(&config_path, yaml).unwrap();
+    KeplerConfig::load(&config_path, &HashMap::new())
+}
+
+fn resolve_umask(config: &KeplerConfig, service: &str) -> Option<u32> {
+    use crate::lua::templating_runtime::EvalContext;
+    let evaluator = config.create_lua_evaluator().unwrap();
+    let mut ctx = EvalContext::default();
+    config
+        .resolve_service(service, &mut ctx, &evaluator, std::path::Path::new("/tmp/test.yaml"), None)
+        .unwrap()
+        .umask
+        .map(|u| u.bits())
+}
+
+#[test]
+fn test_umask_quoted_string_accepted() {
+    let config = load_yaml(
+        r#"
+kepler:
+  services:
+    default_umask: '027'
+services:
+  svc:
+    command: ["./svc"]
+    umask: '0077'
+"#,
+    )
+    .unwrap();
+    assert_eq!(config.global_default_umask().map(|u| u.bits()), Some(0o027));
+    assert_eq!(config.services["svc"].umask.map(|u| u.bits()), Some(0o077));
+}
+
+#[test]
+fn test_umask_integer_rejected_with_quote_hint() {
+    for (field, yaml) in [
+        ("default_umask", "kepler:\n  services:\n    default_umask: 777\nservices:\n  svc:\n    command: [\"./svc\"]\n"),
+        ("at umask", "services:\n  svc:\n    command: [\"./svc\"]\n    umask: 27\n"),
+        ("at umask", "services:\n  svc:\n    command: [\"./svc\"]\n    umask: 0o027\n"),
+    ] {
+        let msg = load_yaml(yaml).unwrap_err().to_string();
+        assert!(msg.contains(field), "error should name {field}, got: {msg}");
+        assert!(msg.contains("quoted octal string"), "error should ask for quotes, got: {msg}");
+    }
+}
+
+#[test]
+fn test_umask_non_octal_rejected() {
+    for bad in ["'028'", "'27'", "'00027'", "'abc'", "'1027'", "''"] {
+        let yaml = format!("services:\n  svc:\n    command: [\"./svc\"]\n    umask: {bad}\n");
+        let msg = load_yaml(&yaml).unwrap_err().to_string();
+        assert!(msg.contains("invalid umask"), "{bad} should be rejected, got: {msg}");
+    }
+}
+
+#[test]
+fn test_umask_unknown_key_under_kepler_services_rejected() {
+    let yaml = "kepler:\n  services:\n    umask: '027'\nservices:\n  svc:\n    command: [\"./svc\"]\n";
+    assert!(load_yaml(yaml).is_err());
+}
+
+#[test]
+fn test_umask_precedence() {
+    let config = load_yaml(
+        r#"
+kepler:
+  services:
+    default_umask: '027'
+services:
+  defaulted:
+    command: ["./a"]
+  overridden:
+    command: ["./b"]
+    umask: '077'
+"#,
+    )
+    .unwrap();
+    assert_eq!(resolve_umask(&config, "defaulted"), Some(0o027));
+    assert_eq!(resolve_umask(&config, "overridden"), Some(0o077));
+    assert_eq!(config.effective_umask("defaulted").map(|u| u.bits()), Some(0o027));
+    assert_eq!(config.effective_umask("overridden").map(|u| u.bits()), Some(0o077));
+
+    // Neither key: None, i.e. the process inherits the daemon's 007.
+    let config = load_yaml("services:\n  svc:\n    command: [\"./svc\"]\n").unwrap();
+    assert_eq!(resolve_umask(&config, "svc"), None);
+    assert_eq!(config.effective_umask("svc"), None);
+}

@@ -1,0 +1,19 @@
+kepler:
+  services:
+    default_umask: '027'
+
+services:
+  svc:
+    user: testuser1
+    run: touch __DIR__/run_file && exec sleep 300
+    hooks:
+      pre_start:
+        # Different user from the service: the umask must still apply.
+        user: testuser2
+        run: touch __DIR__/hook_file
+    healthcheck:
+      run: touch __DIR__/healthcheck_file
+      interval: 1s
+      timeout: 5s
+      retries: 3
+      start_period: 0s

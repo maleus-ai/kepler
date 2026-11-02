@@ -87,6 +87,12 @@ The daemon state directory is secured:
 - **Ownership**: `root:kepler`
 - **Daemon umask**: `0o007` on startup
 
+### umask of Spawned Processes
+
+Services, hooks and healthchecks inherit the daemon's `0o007` unless the config sets one. With `0o007`, anything a service writes is writable by every member of its group. When several users share a group (e.g. an agent and the application it runs), that lets one rewrite the other's files: set `kepler.services.default_umask: '027'` (or a per-service `umask`) to remove group write access.
+
+The configured umask is applied by `kepler-exec` right before exec, for the service command, every hook whatever its `user:`, and the healthcheck. It works the same for configs loaded by non-root users, and never changes the daemon's own umask. See [Configuration](configuration.md#file-creation-mask-umask).
+
 ### Startup Hardening
 
 The daemon validates and secures the state directory at every startup. Symlink attacks are rejected, permissions are enforced to `0o771`, and world-readable/writable bits are verified absent.
