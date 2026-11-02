@@ -75,6 +75,7 @@ impl TestConfigBuilder {
             autostart: self.autostart.clone(),
             acl: None,
             monitor: None,
+            services: None,
         })
     }
 
@@ -377,6 +378,7 @@ impl TestServiceBuilder {
             outputs: self.outputs,
             user_identity: None,
             no_new_privileges: None,
+            umask: None,
             permissions: self.permissions,
         }
     }

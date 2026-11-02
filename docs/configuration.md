@@ -14,6 +14,7 @@ Complete reference for Kepler's YAML configuration format.
   - [Service Options](#service-options)
     - [User Format](#user-format)
     - [Resource Limits](#resource-limits)
+    - [File Creation Mask (umask)](#file-creation-mask-umask)
     - [Restart Configuration](#restart-configuration)
       - [Restart Backoff](#restart-backoff)
       - [Grace Period](#grace-period)
@@ -45,6 +46,8 @@ kepler:
       - HOME
       - NODE_ENV=production
   timeout: 30s           # Global default timeout for dependency waits
+  services:
+    default_umask: '027'   # umask of every service, hook and healthcheck (default: daemon's 007)
   output_max_size: "1mb"   # Max output capture per step/process (default: 1mb)
   logs:
     flush_interval: "100ms"   # How often batched writes are flushed to SQLite
@@ -175,6 +178,7 @@ Settings under the `kepler:` namespace apply to all services unless overridden.
 | `autostart`           | `bool\|object` | `false` | Enable automatic service restart on daemon restart. Accepts `true` (no declared env), `false`, or `{ environment: [...] }`. See [Environment Variables](environment-variables.md#kepler-environment-declaration)                                                       |
 | `output_max_size`     | `string`       | `1mb`   | Max output capture size per step/process (e.g., `"2mb"`, `"512kb"`). See [Outputs](outputs.md)                                                                                                                                                                         |
 | `acl`                 | `object`       | -       | Per-config ACL restricting non-owner `kepler` group members. Supports `users`, `groups`, `aliases`, `lua`, and per-rule `authorize` Lua authorizers. See [Security Model](security-model.md#per-config-acl)                                                            |
+| `services.default_umask` | `string`    | -       | Default umask (quoted octal string, e.g. `'027'`) of every service of the config, its hooks and healthcheck. Without it, processes inherit the daemon's `007`. See [File Creation Mask](#file-creation-mask-umask) |
 | `monitor`             | `object`       | -       | Resource monitoring configuration. See [Resource Monitoring](#resource-monitoring)                                                                                                                                                                                     |
 
 ### Global Log Settings
@@ -207,6 +211,7 @@ See [Log Management](log-management.md) for full details.
 | `groups`            | `string[]`         | `[]`       | Supplementary groups lockdown (Unix). Supports `${{ }}$`. See [Privilege Dropping](privilege-dropping.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `logs`              | `object`           | -          | Log configuration. Supports `${{ }}$` and `!lua`. See [Log Management](log-management.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `limits`            | `object`           | -          | Resource limits. See [Privilege Dropping](privilege-dropping.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `umask`             | `string`           | global     | umask (quoted octal string, e.g. `'027'`) of the service, its hooks and healthcheck. Overrides `kepler.services.default_umask`. See [File Creation Mask](#file-creation-mask-umask) |
 | `no_new_privileges` | `bool`             | `true`     | When `true`, sets `PR_SET_NO_NEW_PRIVS` on the spawned process to prevent privilege escalation via setuid/setgid binaries (e.g. `sudo`, `su`). Inherited by hooks and healthchecks. See [Privilege Dropping](privilege-dropping.md#no-new-privileges)                                                                                                                                                                                                                                                                                                                                       |
 | `output`            | `bool`             | `false`    | Enable `::output::KEY=VALUE` capture from process stdout. Requires `restart: no`. See [Outputs](outputs.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `outputs`           | `object`           | -          | Named output declarations (expressions referencing hook/dep outputs). Requires `restart: no`. See [Outputs](outputs.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -229,6 +234,32 @@ User format (Unix only):
 | `limits.max_fds`  | `int`    | Maximum number of open file descriptors          |
 
 See [Privilege Dropping](privilege-dropping.md) for details.
+
+### File Creation Mask (umask)
+
+By default, every process kepler spawns inherits the daemon's umask, `007`: files are created group-writable (`0660`) and directories `0770`.
+
+`kepler.services.default_umask` sets the umask of every service of the config; `services.<name>.umask` overrides it for one service:
+
+```yaml
+kepler:
+  services:
+    default_umask: '027'   # files 0640, directories 0750
+
+services:
+  app:
+    run: ./server
+  agent:
+    umask: '077'           # files 0600, directories 0700
+    run: ./agent
+```
+
+- **Scope**: the umask of a service applies to everything kepler spawns for it: the `command`/`run` process, every hook (`pre_start`, `post_exit`, ...) whatever its `user:`, and the healthcheck. Hooks and healthchecks cannot override it.
+- **Precedence**: `services.<name>.umask` > `kepler.services.default_umask` > the daemon's `007`.
+- **Daemon unchanged**: the daemon keeps its own `007` for the files it creates (state directory, logs, sockets).
+- **Format**: a quoted string of 3 or 4 octal digits, at most `'0777'`. YAML numbers (`umask: 27`, `umask: 0o27`, `umask: 777`) are refused at load time: write `umask: '027'`, never an unquoted value.
+- **Mechanism**: `kepler-exec` calls `umask(2)` right before exec'ing the command, after dropping privileges. See [Privilege Dropping](privilege-dropping.md#how-privilege-dropping-works).
+- **Compatibility**: requires kepler 0.18.0. Older daemons refuse configs using these keys (unknown fields); pin it with `version: '^0.18.0'`.
 
 ### Restart Configuration
 

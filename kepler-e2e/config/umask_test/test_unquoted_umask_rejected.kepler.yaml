@@ -1,0 +1,7 @@
+kepler:
+  services:
+    default_umask: 777
+
+services:
+  svc:
+    run: exec sleep 300

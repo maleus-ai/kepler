@@ -54,6 +54,7 @@ async fn capture_script_lines(script: &str) -> Vec<LogLine> {
         clear_env: false,
         no_new_privileges: false,
         cgroup_path: None,
+        umask: None,
     };
 
     let result = spawn_blocking(

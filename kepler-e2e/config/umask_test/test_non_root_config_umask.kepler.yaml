@@ -1,0 +1,10 @@
+kepler:
+  services:
+    default_umask: '027'
+
+services:
+  svc:
+    run: touch __DIR__/run_file && exec sleep 300
+    hooks:
+      pre_start:
+        run: touch __DIR__/hook_file

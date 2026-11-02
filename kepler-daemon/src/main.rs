@@ -2862,6 +2862,7 @@ mod tests {
             storage: Default::default(),
             acl,
             monitor: None,
+            services: None,
         });
         let config = KeplerConfig {
             version: None,
