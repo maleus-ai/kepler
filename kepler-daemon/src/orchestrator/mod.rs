@@ -128,6 +128,34 @@ impl ServiceOrchestrator {
         std::cmp::max(self.hardening, handle.hardening().unwrap_or_default())
     }
 
+    /// Config owner identity to record from the CLI peer credentials, with a
+    /// privileged effective gid (kepler via `newgrp`/`sg`, or 0) replaced by
+    /// the owner's own primary gid. See [`crate::user::owner_primary_gid`].
+    fn owner_identity(&self, owner: Option<(u32, u32)>) -> Option<(u32, u32)> {
+        #[cfg(unix)]
+        {
+            owner.map(|(uid, gid)| (uid, crate::user::owner_primary_gid(uid, gid, self.kepler_gid)))
+        }
+        #[cfg(not(unix))]
+        {
+            owner
+        }
+    }
+
+    /// Default `user:` for services that do not set one: the non-root config
+    /// owner, as `uid:gid`. The gid goes through the same sanitizing as at load
+    /// time, for snapshots recorded before it existed.
+    fn default_user(&self, handle: &ConfigActorHandle) -> Option<String> {
+        match (handle.owner_uid(), handle.owner_gid()) {
+            (Some(uid), Some(gid)) if uid != 0 => {
+                let gid = self.owner_identity(Some((uid, gid))).map_or(gid, |(_, g)| g);
+                Some(format!("{}:{}", uid, gid))
+            }
+            (Some(uid), None) if uid != 0 => Some(format!("{}", uid)),
+            _ => None,
+        }
+    }
+
     /// Build an OwnerEvalContext from a ConfigActorHandle.
     fn build_owner_ctx(handle: &ConfigActorHandle) -> Option<OwnerEvalContext> {
         let uid = handle.owner_uid()?;
@@ -170,7 +198,7 @@ impl ServiceOrchestrator {
         // Get or create the config actor
         let handle = self
             .registry
-            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening, permission_ceiling)
+            .get_or_create(config_path.to_path_buf(), sys_env.clone(), self.owner_identity(config_owner), hardening, permission_ceiling)
             .await?;
 
         // Wire up log notification: when the log store flushes a batch,
@@ -650,11 +678,7 @@ impl ServiceOrchestrator {
         // across service starts within the same config.
         //
         // Build default_user from CLI owner uid:gid (skip if root)
-        let default_user = match (handle.owner_uid(), handle.owner_gid()) {
-            (Some(uid), Some(gid)) if uid != 0 => Some(format!("{}:{}", uid, gid)),
-            (Some(uid), None) if uid != 0 => Some(format!("{}", uid)),
-            _ => None,
-        };
+        let default_user = self.default_user(handle);
         let resolve_start = std::time::Instant::now();
         let resolved = if let Some(ref shared_eval) = shared_evaluator {
             let evaluator = shared_eval.lock().await;
@@ -966,11 +990,7 @@ impl ServiceOrchestrator {
         let lua_evaluator = config.create_lua_evaluator()
             .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?;
 
-        let default_user = match (handle.owner_uid(), handle.owner_gid()) {
-            (Some(uid), Some(gid)) if uid != 0 => Some(format!("{}:{}", uid, gid)),
-            (Some(uid), None) if uid != 0 => Some(format!("{}", uid)),
-            _ => None,
-        };
+        let default_user = self.default_user(handle);
 
         let resolved = config.resolve_service(
             service_name,
@@ -1860,7 +1880,7 @@ impl ServiceOrchestrator {
         // Re-load config with new sys_env (re-reads source, re-expands env vars)
         let handle = self
             .registry
-            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening, permission_ceiling)
+            .get_or_create(config_path.to_path_buf(), sys_env.clone(), self.owner_identity(config_owner), hardening, permission_ceiling)
             .await?;
 
         // Persist the rebaked config snapshot
@@ -1961,7 +1981,7 @@ impl ServiceOrchestrator {
         // Step 5: Load config fresh
         let handle = self
             .registry
-            .get_or_create(config_path.to_path_buf(), sys_env.clone(), config_owner, hardening, permission_ceiling)
+            .get_or_create(config_path.to_path_buf(), sys_env.clone(), self.owner_identity(config_owner), hardening, permission_ceiling)
             .await?;
 
         // Suppress snapshot even if autostart: true
