@@ -1574,6 +1574,28 @@ async fn test_no_root_blocks_supplementary_group_zero() {
     assert!(err.contains("supplementary group '0'"), "got: {}", err);
 }
 
+/// Any group the user is not a member of (disk, docker, shadow...) is denied,
+/// not only gid 0 and kepler: kepler-exec applies whatever gid it is given.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_no_root_blocks_groups_user_is_not_member_of() {
+    // 4243: a gid `nobody` is not a member of
+    let err = no_root_start_error(
+        TestServiceBuilder::long_running().with_user("65534:4243").build(),
+    )
+    .await;
+    assert!(err.contains("not a member"), "got: {}", err);
+
+    let err = no_root_start_error(
+        TestServiceBuilder::long_running()
+            .with_user("65534")
+            .with_groups(vec!["4243".to_string()])
+            .build(),
+    )
+    .await;
+    assert!(err.contains("not a group user"), "got: {}", err);
+}
+
 /// `no_new_privileges: false` would make setgid binaries (`sg kepler`) usable again.
 #[tokio::test]
 #[cfg(unix)]

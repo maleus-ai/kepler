@@ -784,13 +784,13 @@ The `--hardening` flag controls how strictly the daemon enforces privilege bound
 | `no-root` (CLI default) | Non-root config owners cannot run as root (uid 0, see below)    | Kepler group stripped from spawned processes |
 | `strict`                | Non-root config owners can only run as themselves (own uid:gid) | Kepler group stripped from spawned processes |
 
-At `no-root` and `strict`, non-root config owners are also denied, for services, hooks and healthchecks alike:
+At `no-root` and `strict`, non-root config owners are also held to the groups the target user already has, for services, hooks and healthchecks alike. `kepler-exec` runs as root and applies whatever gid it is given, so without this check any group (`disk`, `docker`, `shadow`...) would be a path to root:
 
-- a privileged primary gid: gid 0 or the `kepler` group (`user: "me:0"`, `user: "me:kepler"`);
-- a privileged supplementary group: gid 0 or the `kepler` group (`groups: ["0"]`, `groups: ["kepler"]`);
-- `no_new_privileges: false`, which would make setgid binaries such as `sg kepler` usable again.
+- the primary gid (`user: "me:group"`) and every explicit supplementary group (`groups: [...]`) must be groups the target user is a member of, according to passwd and the group database. A user with no passwd entry may only use its own uid as gid, and only if no group has that gid;
+- gid 0 and the `kepler` group are denied even to their members. When `groups:` is empty, the process receives the user's own supplementary groups minus `kepler`, so a target user that is a member of gid 0 is denied;
+- `no_new_privileges: false` is denied, as it would make setgid binaries such as `sg kepler` usable again.
 
-Gid 0 grants write access to everything `root:root` and group-writable, including the daemon's per-config state; the `kepler` group grants daemon socket access. Either one is a path to root, so the uid check alone is not enough. Group specs that cannot be resolved are denied.
+At `no-root`, running as another non-root user still grants that user's groups: choose the users your config owners may impersonate accordingly, or use `strict`. Group specs that cannot be resolved are denied.
 
 **Privilege escalation checks** are skipped for root-owned configs (owner uid 0 or legacy configs with no owner) -- root can use any `user:` field regardless of hardening level. **Kepler group stripping** still applies to all configs when hardening is `no-root` or `strict`, including root-owned configs. This means spawned processes lose the ability to connect to the daemon socket even when the config was loaded by root.
 

@@ -89,8 +89,8 @@ mod escalation {
     fn no_root_allows_same_user_as_owner() {
         assert!(check_privilege_escalation(
             HardeningLevel::NoRoot,
-            &user_only(Some("1000")),
-            Some(1000),
+            &user_only(Some("65534")),
+            Some(65534),
             None,
             "service 'test'",
         ).is_ok());
@@ -100,7 +100,7 @@ mod escalation {
     fn no_root_allows_different_non_root_user() {
         assert!(check_privilege_escalation(
             HardeningLevel::NoRoot,
-            &user_only(Some("1001")),
+            &user_only(Some("65534:65534")),
             Some(1000),
             None,
             "service 'test'",
@@ -112,7 +112,7 @@ mod escalation {
         assert!(check_privilege_escalation(
             HardeningLevel::NoRoot,
             &user_only(None),
-            Some(1000),
+            Some(65534),
             None,
             "service 'test'",
         ).is_ok());
@@ -173,8 +173,8 @@ mod escalation {
     fn strict_allows_same_user_as_owner() {
         assert!(check_privilege_escalation(
             HardeningLevel::Strict,
-            &user_only(Some("1000")),
-            Some(1000),
+            &user_only(Some("65534")),
+            Some(65534),
             None,
             "service 'test'",
         ).is_ok());
@@ -182,11 +182,11 @@ mod escalation {
 
     #[test]
     fn strict_allows_same_user_with_gid() {
-        // "1000:1000" resolves uid to 1000, which matches owner
+        // "65534:65534" resolves uid to 65534, which matches owner
         assert!(check_privilege_escalation(
             HardeningLevel::Strict,
-            &user_only(Some("1000:1000")),
-            Some(1000),
+            &user_only(Some("65534:65534")),
+            Some(65534),
             None,
             "service 'test'",
         ).is_ok());
@@ -210,7 +210,7 @@ mod escalation {
         assert!(check_privilege_escalation(
             HardeningLevel::Strict,
             &user_only(None),
-            Some(1000),
+            Some(65534),
             None,
             "service 'test'",
         ).is_ok());
@@ -352,10 +352,10 @@ mod escalation {
 
     #[test]
     fn no_root_allows_unprivileged_groups() {
-        let groups = ["1000".to_string(), "65534".to_string()];
+        let groups = ["65534".to_string()];
         assert!(check_privilege_escalation(
             HardeningLevel::NoRoot,
-            &SpawnIdentity { user: Some("1000:1000"), groups: &groups, no_new_privileges: true },
+            &SpawnIdentity { user: Some("65534:65534"), groups: &groups, no_new_privileges: true },
             Some(1000),
             Some(KEPLER_GID),
             "service 'test'",
@@ -384,6 +384,133 @@ mod escalation {
             Some(KEPLER_GID),
             "service 'test'",
         ).is_ok());
+    }
+
+    // --- Groups must already belong to the target user ---
+    //
+    // `nobody` (65534, member of 65534 only) is the one non-root user found on
+    // every test host; 4243 stands for any group it is not a member of
+    // (disk, docker, shadow...).
+
+    const NOT_A_MEMBER_GID: &str = "4243";
+
+    #[test]
+    fn no_root_blocks_primary_gid_user_is_not_member_of() {
+        let spec = format!("65534:{}", NOT_A_MEMBER_GID);
+        let err = deny(HardeningLevel::NoRoot, user_only(Some(&spec)));
+        assert!(err.contains("not a member"), "got: {}", err);
+    }
+
+    #[test]
+    fn strict_blocks_primary_gid_owner_is_not_member_of() {
+        // uid matches the owner: strict used to stop at the uid
+        let spec = format!("65534:{}", NOT_A_MEMBER_GID);
+        let err = check_privilege_escalation(
+            HardeningLevel::Strict,
+            &user_only(Some(&spec)),
+            Some(65534),
+            Some(KEPLER_GID),
+            "service 'test'",
+        ).unwrap_err();
+        assert!(err.contains("not a member"), "got: {}", err);
+    }
+
+    #[test]
+    fn no_root_blocks_supplementary_group_user_is_not_member_of() {
+        let groups = [NOT_A_MEMBER_GID.to_string()];
+        let err = deny(HardeningLevel::NoRoot, SpawnIdentity {
+            user: Some("65534"),
+            groups: &groups,
+            no_new_privileges: true,
+        });
+        assert!(err.contains("is not a group user '65534' is a member of"), "got: {}", err);
+    }
+
+    #[test]
+    fn strict_blocks_supplementary_group_owner_is_not_member_of() {
+        let groups = [NOT_A_MEMBER_GID.to_string()];
+        let err = check_privilege_escalation(
+            HardeningLevel::Strict,
+            &SpawnIdentity { user: None, groups: &groups, no_new_privileges: true },
+            Some(65534),
+            Some(KEPLER_GID),
+            "service 'test'",
+        ).unwrap_err();
+        assert!(err.contains("not a group user"), "got: {}", err);
+    }
+
+    // --- Group grant policy, independent of the host's databases ---
+
+    const UID: u32 = 1500;
+    const DISK: u32 = 6;
+
+    fn grants(
+        primary_gid: u32,
+        explicit: &[(&str, u32)],
+        memberships: Option<&[u32]>,
+        existing_groups: &[u32],
+    ) -> Result<(), String> {
+        let existing = existing_groups.to_vec();
+        check_group_grants(
+            &GroupRequest {
+                user: "alice",
+                uid: UID,
+                primary_gid,
+                explicit,
+                memberships,
+                kepler_gid: Some(KEPLER_GID),
+            },
+            move |gid| existing.contains(&gid),
+        )
+    }
+
+    #[test]
+    fn grants_allow_groups_user_is_member_of() {
+        let m = [UID, 2000];
+        assert!(grants(UID, &[], Some(&m), &[]).is_ok());
+        assert!(grants(2000, &[("2000", 2000), ("alice", UID)], Some(&m), &[]).is_ok());
+    }
+
+    #[test]
+    fn grants_deny_primary_gid_not_member_of() {
+        let err = grants(DISK, &[], Some(&[UID]), &[]).unwrap_err();
+        assert!(err.contains("primary gid 6, which it is not a member of"), "got: {}", err);
+    }
+
+    #[test]
+    fn grants_deny_supplementary_group_not_member_of() {
+        let err = grants(UID, &[("docker", 999)], Some(&[UID]), &[]).unwrap_err();
+        assert!(err.contains("'docker' (gid 999) is not a group"), "got: {}", err);
+    }
+
+    #[test]
+    fn grants_deny_privileged_groups_even_to_members() {
+        let m = [UID, 0, KEPLER_GID];
+        assert!(grants(0, &[], Some(&m), &[]).unwrap_err().contains("privileged primary gid 0"));
+        assert!(grants(KEPLER_GID, &[], Some(&m), &[]).unwrap_err().contains("privileged primary gid"));
+        assert!(grants(UID, &[("0", 0)], Some(&m), &[]).unwrap_err().contains("privileged gid 0"));
+        assert!(grants(UID, &[("kepler", KEPLER_GID)], Some(&m), &[]).unwrap_err().contains("privileged gid"));
+    }
+
+    #[test]
+    fn grants_deny_gid_zero_in_computed_supplementary_groups() {
+        // No explicit groups: the user's own groups would be applied, gid 0 included
+        let err = grants(UID, &[], Some(&[UID, 0]), &[]).unwrap_err();
+        assert!(err.contains("member of gid 0"), "got: {}", err);
+        // The kepler group is stripped from those, so membership alone is fine
+        assert!(grants(UID, &[], Some(&[UID, KEPLER_GID]), &[]).is_ok());
+        // Explicit groups replace the computed ones
+        assert!(grants(UID, &[("alice", UID)], Some(&[UID, 0]), &[]).is_ok());
+    }
+
+    #[test]
+    fn grants_user_without_passwd_entry() {
+        // Only its own uid as gid, and only if no group has that gid
+        assert!(grants(UID, &[], None, &[]).is_ok());
+        assert!(grants(UID, &[("1500", UID)], None, &[]).is_ok());
+        assert!(grants(UID, &[], None, &[UID]).unwrap_err().contains("not a member"));
+        assert!(grants(DISK, &[], None, &[]).unwrap_err().contains("not a member"));
+        assert!(grants(UID, &[("6", DISK)], None, &[]).unwrap_err().contains("not a group"));
     }
 
     // --- Error message quality ---
