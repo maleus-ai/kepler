@@ -1,0 +1,8 @@
+services:
+  egid-svc:
+    command:
+      - "sh"
+      - "-c"
+      - |
+        echo "SVC_GID=$(id -g) SVC_GROUPS=$(id -G | tr ' ' ',') PASSWD_GID=$(id -g testuser1) KEPLER_GID=$(getent group kepler | cut -d: -f3) END"
+        sleep 300

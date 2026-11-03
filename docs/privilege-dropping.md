@@ -52,7 +52,7 @@ When `user` is set, the daemon drops privileges for that service's process.
 
 When `user` is **not** set, the default depends on who loaded the config:
 
-- **Non-root CLI user**: Services default to the CLI user's UID:GID. This is baked into the config at load time, so it persists across daemon restarts.
+- **Non-root CLI user**: Services default to the CLI user's UID:GID. This is baked into the config at load time, so it persists across daemon restarts. The GID is the CLI process's effective GID, except when it is the `kepler` group (CLI run through `newgrp kepler` or `sg kepler`) or GID 0: the user's passwd primary GID is used instead (its UID if it has no passwd entry).
 - **Root CLI user**: Services run as root (the daemon's user), same as before.
 
 This means a non-root member of the `kepler` group cannot accidentally run services as root. To explicitly run a service as root, set `user: root` or `user: "0"`.

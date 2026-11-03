@@ -122,6 +122,22 @@ pub fn group_memberships(uid: u32) -> Result<Option<Vec<u32>>> {
     Ok(Some(gids))
 }
 
+/// Primary gid to record for a non-root config owner, from the gid of its CLI
+/// process (`SO_PEERCRED`, i.e. its effective gid).
+///
+/// A CLI run through `newgrp kepler` or `sg kepler` has the kepler group as
+/// effective gid, and the daemon accepts that as group membership. That gid
+/// must not become the owner's default primary gid (`user: "<uid>:<gid>"` for
+/// services without `user:`): the kepler group (and gid 0) are privileged and
+/// are denied under hardening. Fall back to the owner's passwd primary gid, or
+/// to its uid if it has no passwd entry. Root keeps its gid.
+pub fn owner_primary_gid(uid: u32, peer_gid: u32, kepler_gid: Option<u32>) -> u32 {
+    if uid == 0 || (peer_gid != 0 && Some(peer_gid) != kepler_gid) {
+        return peer_gid;
+    }
+    lookup_user_by_uid(uid).map(|u| u.gid.as_raw()).unwrap_or(uid)
+}
+
 /// Whether the group database has an entry for this gid.
 pub fn group_exists(gid: u32) -> bool {
     !matches!(Group::from_gid(nix::unistd::Gid::from_raw(gid)), Ok(None))
