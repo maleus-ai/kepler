@@ -235,7 +235,12 @@ impl ConfigActor {
             resolved_hardening,
             evaluator,
             permission_ceiling,
-        ) = if let Ok(Some(snapshot)) = persistence.load_expanded_config() {
+        ) = if let Some(snapshot) = persistence.load_expanded_config().unwrap_or_else(|e| {
+            // Untrusted (wrong owner or mode) or unreadable: never restore it,
+            // reload from source instead. The next snapshot replaces it.
+            warn!("Ignoring config snapshot: {}", e);
+            None
+        }) {
             info!(
                 "Restoring config from snapshot (taken at {})",
                 snapshot.snapshot_time

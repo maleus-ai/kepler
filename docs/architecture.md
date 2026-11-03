@@ -67,7 +67,7 @@ The daemon stores all state in `/var/lib/kepler/` (or `$KEPLER_DAEMON_PATH` if s
 
 ### Security
 
-- **State directory**: `0o771` (root + kepler group access, world-traverse for token auth)
+- **State directory**: `0o751` (root write, kepler group read/traverse, world-traverse for token auth)
 - **Socket**: `0o666 root:kepler` (world-accessible, auth handled at protocol level)
 - **PID file**: `0o660` (root + kepler group access)
 - **Daemon umask**: `0o007` ensures all created files/dirs are group-accessible
@@ -80,7 +80,7 @@ See [Security Model](security-model.md) for the full access control design.
 | File                               | Description                                                          |
 | ---------------------------------- | -------------------------------------------------------------------- |
 | `kepler-daemon/src/lib.rs`         | Directory structure constants and path helpers                       |
-| `kepler-daemon/src/main.rs`        | Root enforcement, umask, secure directory creation with `0o771` mode |
+| `kepler-daemon/src/main.rs`        | Root enforcement, umask, secure directory creation with `0o751` mode |
 | `kepler-daemon/src/persistence.rs` | Secure file writing                                                  |
 
 ---
@@ -879,7 +879,7 @@ The server enforces a maximum of 1,024 concurrent connections. When the limit is
 At every daemon startup, the state directory undergoes validation:
 
 1. **Symlink rejection** -- The daemon refuses to start if the state directory is a symlink. This prevents an attacker from redirecting state to an arbitrary location.
-2. **Permission enforcement** -- Permissions are unconditionally set to `0o771`, correcting any pre-existing weak permissions (e.g., a directory previously set to `0o777`). The world-execute bit allows processes with `KEPLER_TOKEN` to traverse the directory and reach the socket.
+2. **Permission enforcement** -- Permissions are unconditionally set to `0o751`, correcting any pre-existing weak permissions (e.g., a directory previously set to `0o777`). The world-execute bit allows processes with `KEPLER_TOKEN` to traverse the directory and reach the socket.
 3. **World-access validation** -- After permission enforcement, the daemon verifies no world-readable/writable bits remain (`mode & 0o006 == 0`).
 
 #### Symlink Protection

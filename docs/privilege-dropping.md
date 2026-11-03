@@ -131,7 +131,7 @@ The daemon supports a `--hardening` flag that restricts which users non-root con
 | `no-root` | Any user except root (uid 0) |
 | `strict` | Only their own uid |
 
-When hardening is `no-root` or `strict`, the `kepler` group is also stripped from spawned processes' supplementary groups to prevent socket access.
+When hardening is `no-root` or `strict`, the `kepler` group is also stripped from spawned processes' supplementary groups to prevent socket access. Non-root config owners are moreover denied gid 0 and the `kepler` group, as primary gid (`user: "me:0"`) or supplementary group (`groups: ["0"]`), and cannot set `no_new_privileges: false`.
 
 ### Per-Config Hardening
 
@@ -245,6 +245,8 @@ services:
     user: appuser
     no_new_privileges: false     # Allow setuid binaries (e.g. needs sudo internally)
 ```
+
+`no_new_privileges: false` is only accepted for root-owned configs, or when hardening is `none`: at `no-root` and `strict`, a non-root config owner that sets it is denied.
 
 ### Inheritance
 

@@ -83,13 +83,19 @@ See [Architecture](architecture.md#peer-credential-verification) for implementat
 The daemon state directory is secured:
 
 - **Path**: `/var/lib/kepler/` (or `$KEPLER_DAEMON_PATH`)
-- **Permissions**: `0o771` (`rwxrwx--x`) -- **enforced at every startup**
+- **Permissions**: `0o751` (`rwxr-x--x`) -- **enforced at every startup**
 - **Ownership**: `root:kepler`
 - **Daemon umask**: `0o007` on startup
 
 ### Startup Hardening
 
-The daemon validates and secures the state directory at every startup. Symlink attacks are rejected, permissions are enforced to `0o771`, and world-readable/writable bits are verified absent.
+The daemon validates and secures the state directory at every startup. Symlink attacks are rejected, permissions are enforced to `0o751`, and world-readable/writable bits are verified absent.
+
+The kepler group has no write access to the state directory, so it cannot rename or recreate `configs/` to plant forged state.
+
+### Persisted State Trust
+
+On restart, the daemon restores configs from the files it persisted under `configs/<hash>/` (`expanded_config.yaml`, `state.json`, `source_path.txt`). They carry the config owner, the services' users and the PIDs the daemon kills, so each one is refused unless it is a regular file (not a symlink) owned by the daemon's uid and not writable by group or others. A refused snapshot is ignored and the config is reloaded from source.
 
 See [Architecture](architecture.md#state-directory-hardening) for implementation details.
 
@@ -775,8 +781,16 @@ The `--hardening` flag controls how strictly the daemon enforces privilege bound
 | Level                   | Privilege restriction                                           | Kepler group stripping                       |
 | ----------------------- | --------------------------------------------------------------- | -------------------------------------------- |
 | `none`                  | No restrictions                                                 | No stripping                                 |
-| `no-root` (CLI default) | Non-root config owners cannot run as root (uid 0)               | Kepler group stripped from spawned processes |
+| `no-root` (CLI default) | Non-root config owners cannot run as root (uid 0, see below)    | Kepler group stripped from spawned processes |
 | `strict`                | Non-root config owners can only run as themselves (own uid:gid) | Kepler group stripped from spawned processes |
+
+At `no-root` and `strict`, non-root config owners are also denied, for services, hooks and healthchecks alike:
+
+- a privileged primary gid: gid 0 or the `kepler` group (`user: "me:0"`, `user: "me:kepler"`);
+- a privileged supplementary group: gid 0 or the `kepler` group (`groups: ["0"]`, `groups: ["kepler"]`);
+- `no_new_privileges: false`, which would make setgid binaries such as `sg kepler` usable again.
+
+Gid 0 grants write access to everything `root:root` and group-writable, including the daemon's per-config state; the `kepler` group grants daemon socket access. Either one is a path to root, so the uid check alone is not enough. Group specs that cannot be resolved are denied.
 
 **Privilege escalation checks** are skipped for root-owned configs (owner uid 0 or legacy configs with no owner) -- root can use any `user:` field regardless of hardening level. **Kepler group stripping** still applies to all configs when hardening is `no-root` or `strict`, including root-owned configs. This means spawned processes lose the ability to connect to the daemon socket even when the config was loaded by root.
 

@@ -684,8 +684,13 @@ impl ServiceOrchestrator {
             let context = format!("service '{}'", service_name);
             crate::auth::check_privilege_escalation(
                 self.effective_hardening(handle),
-                resolved.user.as_deref(),
+                &crate::auth::SpawnIdentity {
+                    user: resolved.user.as_deref(),
+                    groups: &resolved.groups,
+                    no_new_privileges: resolved.no_new_privileges.unwrap_or(true),
+                },
                 handle.owner_uid(),
+                self.kepler_gid,
                 &context,
             ).map_err(OrchestratorError::ConfigError)?;
         }
@@ -981,8 +986,13 @@ impl ServiceOrchestrator {
             let context = format!("service '{}'", service_name);
             crate::auth::check_privilege_escalation(
                 self.effective_hardening(handle),
-                resolved.user.as_deref(),
+                &crate::auth::SpawnIdentity {
+                    user: resolved.user.as_deref(),
+                    groups: &resolved.groups,
+                    no_new_privileges: resolved.no_new_privileges.unwrap_or(true),
+                },
                 handle.owner_uid(),
+                self.kepler_gid,
                 &context,
             ).map_err(OrchestratorError::ConfigError)?;
         }
