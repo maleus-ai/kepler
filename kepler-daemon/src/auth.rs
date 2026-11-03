@@ -125,23 +125,46 @@ pub fn check_hardening_floor(
     }
 }
 
-/// Check if a resolved user spec constitutes a privilege escalation.
+/// Identity a spawned process (service, hook, healthcheck) will run with,
+/// as handed to `kepler-exec`.
+#[cfg(unix)]
+pub struct SpawnIdentity<'a> {
+    /// Resolved user spec (after `${{ }}$` / `!lua` evaluation).
+    pub user: Option<&'a str>,
+    /// Explicitly requested supplementary groups, before kepler GID stripping.
+    pub groups: &'a [String],
+    /// Effective `no_new_privileges` setting.
+    pub no_new_privileges: bool,
+}
+
+/// Check if a spawned process identity constitutes a privilege escalation.
 ///
 /// Rules by hardening level:
 /// - `None`: always Ok (no restrictions)
 /// - `NoRoot`: non-root config owners cannot run as uid 0
 /// - `Strict`: non-root config owners can only run as their own uid
 ///
+/// At `NoRoot` and `Strict`, non-root config owners also cannot:
+/// - take gid 0 or the kepler group as primary gid (`user: "me:0"`, `user: "me:kepler"`);
+/// - request gid 0 or the kepler group as a supplementary group;
+/// - disable `no_new_privileges` (which would make setgid binaries such as
+///   `sg kepler` usable again).
+///
+/// Gid 0 gives write access to everything `root:root 0770` (including the
+/// daemon's own per-config state), and the kepler group gives daemon socket
+/// access plus read access to the state directory: either one is a path to root.
+///
 /// Root-owned configs (owner_uid == 0 or None) are unrestricted at all levels.
 ///
-/// The `user_spec` should be the resolved user string (after `${{ }}$` / `!lua` evaluation).
-/// All user specs are resolved through the system user database to obtain the effective uid.
+/// All user and group specs are resolved through the system databases to
+/// obtain effective ids; unresolvable specs are denied.
 /// The `context` string is included in error messages for debugging (e.g. "service 'web'").
 #[cfg(unix)]
 pub fn check_privilege_escalation(
     hardening: HardeningLevel,
-    user_spec: Option<&str>,
+    identity: &SpawnIdentity<'_>,
     owner_uid: Option<u32>,
+    kepler_gid: Option<u32>,
     context: &str,
 ) -> Result<(), String> {
     // No restrictions at HardeningLevel::None
@@ -150,20 +173,45 @@ pub fn check_privilege_escalation(
     }
 
     // Root-owned configs are unrestricted
-    match owner_uid {
+    let owner = match owner_uid {
         Some(0) | None => return Ok(()),
-        _ => {}
+        Some(uid) => uid,
+    };
+
+    if !identity.no_new_privileges {
+        return Err(format!(
+            "Privilege escalation denied for {}: no_new_privileges cannot be disabled \
+             when the config owner is uid {} (hardening level: {})",
+            context, owner, hardening,
+        ));
     }
 
-    let owner = owner_uid.unwrap(); // safe: we handled None above
+    let privileged_gid = |gid: u32| gid == 0 || Some(gid) == kepler_gid;
 
-    // No user spec means the process runs as the config owner (always allowed)
-    let spec = match user_spec {
+    for group in identity.groups {
+        let gid = crate::user::resolve_group(group).map_err(|e| {
+            format!(
+                "Privilege escalation check failed for {}: cannot resolve group '{}': {}",
+                context, group, e,
+            )
+        })?;
+        if privileged_gid(gid) {
+            return Err(format!(
+                "Privilege escalation denied for {}: supplementary group '{}' resolves to \
+                 privileged gid {}, but config owner is uid {} (hardening level: {})",
+                context, group, gid, owner, hardening,
+            ));
+        }
+    }
+
+    // No user spec means the process runs as the daemon would run it for the
+    // config owner (the orchestrator always fills in the owner as default user)
+    let spec = match identity.user {
         Some(s) => s,
         None => return Ok(()),
     };
 
-    // Resolve the user spec to an effective uid via the system user database
+    // Resolve the user spec to effective ids via the system user database
     let resolved = crate::user::resolve_user(spec).map_err(|e| {
         format!(
             "Privilege escalation check failed for {}: cannot resolve user '{}': {}",
@@ -180,7 +228,6 @@ pub fn check_privilege_escalation(
                     context, spec, owner,
                 ));
             }
-            Ok(())
         }
         HardeningLevel::Strict => {
             if resolved.uid != owner {
@@ -190,10 +237,19 @@ pub fn check_privilege_escalation(
                     context, spec, resolved.uid, owner,
                 ));
             }
-            Ok(())
         }
         HardeningLevel::None => unreachable!(),
     }
+
+    if privileged_gid(resolved.gid) {
+        return Err(format!(
+            "Privilege escalation denied for {}: user '{}' resolves to privileged primary \
+             gid {}, but config owner is uid {} (hardening level: {})",
+            context, spec, resolved.gid, owner, hardening,
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

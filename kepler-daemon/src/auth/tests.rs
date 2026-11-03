@@ -6,14 +6,20 @@ use super::*;
 mod escalation {
     use super::*;
 
+    /// Identity with only a user spec: no explicit groups, `no_new_privileges` on.
+    fn user_only(user: Option<&str>) -> SpawnIdentity<'_> {
+        SpawnIdentity { user, groups: &[], no_new_privileges: true }
+    }
+
     // --- HardeningLevel::None (no restrictions) ---
 
     #[test]
     fn none_allows_root_user() {
         assert!(check_privilege_escalation(
             HardeningLevel::None,
-            Some("0"),
+            &user_only(Some("0")),
             Some(1000),
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -22,8 +28,9 @@ mod escalation {
     fn none_allows_any_user() {
         assert!(check_privilege_escalation(
             HardeningLevel::None,
-            Some("65534"),
+            &user_only(Some("65534")),
             Some(1000),
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -32,8 +39,9 @@ mod escalation {
     fn none_allows_no_user_spec() {
         assert!(check_privilege_escalation(
             HardeningLevel::None,
-            None,
+            &user_only(None),
             Some(1000),
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -44,8 +52,9 @@ mod escalation {
     fn no_root_blocks_uid_zero() {
         let err = check_privilege_escalation(
             HardeningLevel::NoRoot,
-            Some("0"),
+            &user_only(Some("0")),
             Some(1000),
+            None,
             "service 'test'",
         ).unwrap_err();
         assert!(err.contains("Privilege escalation denied"), "got: {}", err);
@@ -57,8 +66,9 @@ mod escalation {
     fn no_root_blocks_uid_zero_colon_gid() {
         let err = check_privilege_escalation(
             HardeningLevel::NoRoot,
-            Some("0:0"),
+            &user_only(Some("0:0")),
             Some(1000),
+            None,
             "service 'test'",
         ).unwrap_err();
         assert!(err.contains("Privilege escalation denied"), "got: {}", err);
@@ -68,8 +78,9 @@ mod escalation {
     fn no_root_allows_non_root_user() {
         assert!(check_privilege_escalation(
             HardeningLevel::NoRoot,
-            Some("65534"),
+            &user_only(Some("65534")),
             Some(1000),
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -78,8 +89,9 @@ mod escalation {
     fn no_root_allows_same_user_as_owner() {
         assert!(check_privilege_escalation(
             HardeningLevel::NoRoot,
-            Some("1000"),
+            &user_only(Some("1000")),
             Some(1000),
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -88,8 +100,9 @@ mod escalation {
     fn no_root_allows_different_non_root_user() {
         assert!(check_privilege_escalation(
             HardeningLevel::NoRoot,
-            Some("1001"),
+            &user_only(Some("1001")),
             Some(1000),
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -98,8 +111,9 @@ mod escalation {
     fn no_root_allows_no_user_spec() {
         assert!(check_privilege_escalation(
             HardeningLevel::NoRoot,
-            None,
+            &user_only(None),
             Some(1000),
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -108,8 +122,9 @@ mod escalation {
     fn no_root_unrestricted_for_root_owned_config() {
         assert!(check_privilege_escalation(
             HardeningLevel::NoRoot,
-            Some("0"),
+            &user_only(Some("0")),
             Some(0),
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -118,8 +133,9 @@ mod escalation {
     fn no_root_unrestricted_for_legacy_config() {
         assert!(check_privilege_escalation(
             HardeningLevel::NoRoot,
-            Some("0"),
+            &user_only(Some("0")),
             None, // legacy config has no owner
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -130,8 +146,9 @@ mod escalation {
     fn strict_blocks_uid_zero() {
         let err = check_privilege_escalation(
             HardeningLevel::Strict,
-            Some("0"),
+            &user_only(Some("0")),
             Some(1000),
+            None,
             "service 'test'",
         ).unwrap_err();
         assert!(err.contains("Privilege escalation denied"), "got: {}", err);
@@ -142,8 +159,9 @@ mod escalation {
     fn strict_blocks_different_non_root_user() {
         let err = check_privilege_escalation(
             HardeningLevel::Strict,
-            Some("65534"),
+            &user_only(Some("65534")),
             Some(1000),
+            None,
             "service 'test'",
         ).unwrap_err();
         assert!(err.contains("Privilege escalation denied"), "got: {}", err);
@@ -155,8 +173,9 @@ mod escalation {
     fn strict_allows_same_user_as_owner() {
         assert!(check_privilege_escalation(
             HardeningLevel::Strict,
-            Some("1000"),
+            &user_only(Some("1000")),
             Some(1000),
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -166,29 +185,33 @@ mod escalation {
         // "1000:1000" resolves uid to 1000, which matches owner
         assert!(check_privilege_escalation(
             HardeningLevel::Strict,
-            Some("1000:1000"),
+            &user_only(Some("1000:1000")),
             Some(1000),
+            None,
             "service 'test'",
         ).is_ok());
     }
 
     #[test]
-    fn strict_blocks_same_uid_different_gid_format() {
-        // "1000:0" still resolves uid to 1000 (matches), gid doesn't affect the check
-        assert!(check_privilege_escalation(
+    fn strict_blocks_same_uid_with_gid_zero() {
+        // "1000:0" matches the owner uid, but gid 0 is a privileged primary gid
+        let err = check_privilege_escalation(
             HardeningLevel::Strict,
-            Some("1000:0"),
+            &user_only(Some("1000:0")),
             Some(1000),
+            None,
             "service 'test'",
-        ).is_ok());
+        ).unwrap_err();
+        assert!(err.contains("primary gid 0"), "got: {}", err);
     }
 
     #[test]
     fn strict_allows_no_user_spec() {
         assert!(check_privilege_escalation(
             HardeningLevel::Strict,
-            None,
+            &user_only(None),
             Some(1000),
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -197,8 +220,9 @@ mod escalation {
     fn strict_unrestricted_for_root_owned_config() {
         assert!(check_privilege_escalation(
             HardeningLevel::Strict,
-            Some("65534"),
+            &user_only(Some("65534")),
             Some(0),
+            None,
             "service 'test'",
         ).is_ok());
     }
@@ -207,8 +231,157 @@ mod escalation {
     fn strict_unrestricted_for_legacy_config() {
         assert!(check_privilege_escalation(
             HardeningLevel::Strict,
-            Some("65534"),
+            &user_only(Some("65534")),
             None,
+            None,
+            "service 'test'",
+        ).is_ok());
+    }
+
+    // --- Privileged groups and no_new_privileges (no-root / strict floors) ---
+
+    /// Arbitrary non-zero gid standing in for the kepler group in tests.
+    const KEPLER_GID: u32 = 4242;
+
+    fn deny(hardening: HardeningLevel, identity: SpawnIdentity<'_>) -> String {
+        check_privilege_escalation(hardening, &identity, Some(1000), Some(KEPLER_GID), "service 'test'")
+            .unwrap_err()
+    }
+
+    #[test]
+    fn no_root_blocks_primary_gid_zero() {
+        let err = deny(HardeningLevel::NoRoot, user_only(Some("1000:0")));
+        assert!(err.contains("primary gid 0"), "got: {}", err);
+        assert!(err.contains("no-root"), "got: {}", err);
+    }
+
+    #[test]
+    fn no_root_blocks_primary_gid_kepler() {
+        let spec = format!("1000:{}", KEPLER_GID);
+        let err = deny(HardeningLevel::NoRoot, user_only(Some(&spec)));
+        assert!(err.contains(&format!("primary gid {}", KEPLER_GID)), "got: {}", err);
+    }
+
+    #[test]
+    fn no_root_blocks_primary_gid_zero_by_name() {
+        // "user:group" with a group *name*: the check goes by resolved gid, not
+        // by spelling. Uses gid 0's name, the one group guaranteed to exist.
+        let root_group = nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(0))
+            .unwrap()
+            .expect("gid 0 must have a name")
+            .name;
+        let spec = format!("1000:{}", root_group);
+        let err = deny(HardeningLevel::NoRoot, user_only(Some(&spec)));
+        assert!(err.contains("primary gid 0"), "got: {}", err);
+    }
+
+    #[test]
+    fn no_root_blocks_supplementary_group_zero() {
+        let groups = ["0".to_string()];
+        let err = deny(HardeningLevel::NoRoot, SpawnIdentity {
+            user: Some("1000"),
+            groups: &groups,
+            no_new_privileges: true,
+        });
+        assert!(err.contains("supplementary group '0'"), "got: {}", err);
+    }
+
+    #[test]
+    fn no_root_blocks_supplementary_group_zero_without_user() {
+        let groups = ["0".to_string()];
+        let err = deny(HardeningLevel::NoRoot, SpawnIdentity {
+            user: None,
+            groups: &groups,
+            no_new_privileges: true,
+        });
+        assert!(err.contains("supplementary group '0'"), "got: {}", err);
+    }
+
+    #[test]
+    fn no_root_blocks_supplementary_group_kepler() {
+        let groups = ["1000".to_string(), KEPLER_GID.to_string()];
+        let err = deny(HardeningLevel::NoRoot, SpawnIdentity {
+            user: Some("1000"),
+            groups: &groups,
+            no_new_privileges: true,
+        });
+        assert!(err.contains(&format!("privileged gid {}", KEPLER_GID)), "got: {}", err);
+    }
+
+    #[test]
+    fn no_root_blocks_unresolvable_supplementary_group() {
+        let groups = ["kepler-test-no-such-group".to_string()];
+        let err = deny(HardeningLevel::NoRoot, SpawnIdentity {
+            user: Some("1000"),
+            groups: &groups,
+            no_new_privileges: true,
+        });
+        assert!(err.contains("cannot resolve group"), "got: {}", err);
+    }
+
+    #[test]
+    fn no_root_blocks_disabled_no_new_privileges() {
+        let err = deny(HardeningLevel::NoRoot, SpawnIdentity {
+            user: Some("1000"),
+            groups: &[],
+            no_new_privileges: false,
+        });
+        assert!(err.contains("no_new_privileges"), "got: {}", err);
+    }
+
+    #[test]
+    fn strict_blocks_disabled_no_new_privileges() {
+        let err = deny(HardeningLevel::Strict, SpawnIdentity {
+            user: None,
+            groups: &[],
+            no_new_privileges: false,
+        });
+        assert!(err.contains("no_new_privileges"), "got: {}", err);
+    }
+
+    #[test]
+    fn strict_blocks_supplementary_group_kepler() {
+        let groups = [KEPLER_GID.to_string()];
+        let err = deny(HardeningLevel::Strict, SpawnIdentity {
+            user: Some("1000"),
+            groups: &groups,
+            no_new_privileges: true,
+        });
+        assert!(err.contains("supplementary group"), "got: {}", err);
+    }
+
+    #[test]
+    fn no_root_allows_unprivileged_groups() {
+        let groups = ["1000".to_string(), "65534".to_string()];
+        assert!(check_privilege_escalation(
+            HardeningLevel::NoRoot,
+            &SpawnIdentity { user: Some("1000:1000"), groups: &groups, no_new_privileges: true },
+            Some(1000),
+            Some(KEPLER_GID),
+            "service 'test'",
+        ).is_ok());
+    }
+
+    #[test]
+    fn root_owned_config_may_use_privileged_groups() {
+        let groups = ["0".to_string(), KEPLER_GID.to_string()];
+        assert!(check_privilege_escalation(
+            HardeningLevel::NoRoot,
+            &SpawnIdentity { user: Some("0:0"), groups: &groups, no_new_privileges: false },
+            Some(0),
+            Some(KEPLER_GID),
+            "service 'test'",
+        ).is_ok());
+    }
+
+    #[test]
+    fn none_allows_privileged_groups() {
+        let groups = ["0".to_string()];
+        assert!(check_privilege_escalation(
+            HardeningLevel::None,
+            &SpawnIdentity { user: Some("1000:0"), groups: &groups, no_new_privileges: false },
+            Some(1000),
+            Some(KEPLER_GID),
             "service 'test'",
         ).is_ok());
     }
@@ -219,8 +392,9 @@ mod escalation {
     fn error_includes_context() {
         let err = check_privilege_escalation(
             HardeningLevel::NoRoot,
-            Some("0"),
+            &user_only(Some("0")),
             Some(1000),
+            None,
             "hook 'pre_start'",
         ).unwrap_err();
         assert!(err.contains("hook 'pre_start'"), "got: {}", err);
@@ -230,8 +404,9 @@ mod escalation {
     fn error_includes_owner_uid() {
         let err = check_privilege_escalation(
             HardeningLevel::Strict,
-            Some("65534"),
+            &user_only(Some("65534")),
             Some(42),
+            None,
             "service 'web'",
         ).unwrap_err();
         assert!(err.contains("42"), "error should include owner uid, got: {}", err);
@@ -241,8 +416,9 @@ mod escalation {
     fn invalid_user_spec_returns_error() {
         let err = check_privilege_escalation(
             HardeningLevel::NoRoot,
-            Some("nonexistent_user_xyzzy_12345"),
+            &user_only(Some("nonexistent_user_xyzzy_12345")),
             Some(1000),
+            None,
             "service 'test'",
         ).unwrap_err();
         assert!(err.contains("cannot resolve user"), "got: {}", err);

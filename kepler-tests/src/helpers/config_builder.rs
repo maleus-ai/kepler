@@ -146,6 +146,7 @@ pub struct TestServiceBuilder {
     output: Option<bool>,
     outputs: Option<HashMap<String, String>>,
     permissions: Option<ServicePermissions>,
+    no_new_privileges: Option<bool>,
 }
 
 impl TestServiceBuilder {
@@ -168,6 +169,7 @@ impl TestServiceBuilder {
             output: None,
             outputs: None,
             permissions: None,
+            no_new_privileges: None,
         }
     }
 
@@ -331,6 +333,12 @@ impl TestServiceBuilder {
         self
     }
 
+    /// Set `no_new_privileges`
+    pub fn with_no_new_privileges(mut self, no_new_privileges: bool) -> Self {
+        self.no_new_privileges = Some(no_new_privileges);
+        self
+    }
+
     /// Enable output capture from process stdout (`output: true`)
     pub fn with_output(mut self, output: bool) -> Self {
         self.output = Some(output);
@@ -377,7 +385,7 @@ impl TestServiceBuilder {
             output: self.output,
             outputs: self.outputs,
             user_identity: None,
-            no_new_privileges: None,
+            no_new_privileges: self.no_new_privileges,
             umask: None,
             permissions: self.permissions,
         }

@@ -110,13 +110,15 @@ impl ConfigPersistence {
     }
 
     /// Load the expanded config snapshot from disk.
+    ///
+    /// The snapshot is refused (error) unless it is a regular file owned by the
+    /// daemon and not writable by group or others: it carries the config owner
+    /// and the services' users, so a forged one would run anything as root.
     pub fn load_expanded_config(&self) -> Result<Option<ExpandedConfigSnapshot>> {
         let path = self.expanded_config_path();
-        if !path.exists() {
+        let Some(content) = read_trusted_file(&path)? else {
             return Ok(None);
-        }
-
-        let content = std::fs::read_to_string(&path).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", path.display(), e)))?;
+        };
         let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(&content).map_err(|e| {
             DaemonError::Internal(format!("Failed to parse expanded config: {}", e))
         })?;
@@ -142,13 +144,14 @@ impl ConfigPersistence {
     }
 
     /// Load the service state from disk.
+    ///
+    /// Refused (error) unless trusted, like the snapshot: it carries the config
+    /// owner and PIDs the daemon kills as root.
     pub fn load_state(&self) -> Result<Option<PersistedConfigState>> {
         let path = self.state_path();
-        if !path.exists() {
+        let Some(content) = read_trusted_file(&path)? else {
             return Ok(None);
-        }
-
-        let content = std::fs::read_to_string(&path).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", path.display(), e)))?;
+        };
         match serde_json::from_str(&content) {
             Ok(state) => {
                 debug!("Loaded config state from {:?}", path);
@@ -199,13 +202,14 @@ impl ConfigPersistence {
     }
 
     /// Load the original source config path from disk.
+    ///
+    /// Refused (error) unless trusted, like the snapshot: on daemon restart it
+    /// decides which config the restored snapshot is bound to.
     pub fn load_source_path(&self) -> Result<Option<PathBuf>> {
         let path = self.source_path_path();
-        if !path.exists() {
+        let Some(content) = read_trusted_file(&path)? else {
             return Ok(None);
-        }
-
-        let content = std::fs::read_to_string(&path).map_err(|e| DaemonError::Internal(format!("Failed to read '{}': {}", path.display(), e)))?;
+        };
         let source_path = PathBuf::from(content.trim());
         debug!("Loaded source path from {:?}: {:?}", path, source_path);
         Ok(Some(source_path))
@@ -375,6 +379,85 @@ impl ConfigPersistence {
 
         Ok(())
     }
+}
+
+/// Read a state file the daemon wrote itself, refusing to trust it unless it
+/// is a regular file owned by the daemon's effective uid (root in production)
+/// and not writable by group or others.
+///
+/// Returns `Ok(None)` if the file does not exist. The file is opened without
+/// following symlinks and checked through the open descriptor, so it cannot be
+/// swapped between the check and the read.
+fn read_trusted_file(path: &Path) -> Result<Option<String>> {
+    #[cfg(unix)]
+    {
+        read_trusted_file_owned_by(path, nix::unistd::geteuid().as_raw())
+    }
+    #[cfg(not(unix))]
+    {
+        match std::fs::read_to_string(path) {
+            Ok(content) => Ok(Some(content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(DaemonError::Internal(format!("Failed to read '{}': {}", path.display(), e))),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_trusted_file_owned_by(path: &Path, expected_uid: u32) -> Result<Option<String>> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    // O_NONBLOCK: opening a FIFO planted in place of the file must not hang the daemon
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(DaemonError::Internal(format!(
+                "Refusing to trust '{}': it is a symlink",
+                path.display()
+            )));
+        }
+        Err(e) => {
+            return Err(DaemonError::Internal(format!("Failed to open '{}': {}", path.display(), e)));
+        }
+    };
+
+    let meta = file.metadata().map_err(|e| {
+        DaemonError::Internal(format!("Failed to stat '{}': {}", path.display(), e))
+    })?;
+    if !meta.file_type().is_file() {
+        return Err(DaemonError::Internal(format!(
+            "Refusing to trust '{}': not a regular file",
+            path.display()
+        )));
+    }
+    if meta.uid() != expected_uid {
+        return Err(DaemonError::Internal(format!(
+            "Refusing to trust '{}': owned by uid {}, expected uid {}",
+            path.display(),
+            meta.uid(),
+            expected_uid
+        )));
+    }
+    let mode = meta.mode() & 0o7777;
+    if mode & 0o022 != 0 {
+        return Err(DaemonError::Internal(format!(
+            "Refusing to trust '{}': writable by group or others (mode 0o{:o})",
+            path.display(),
+            mode
+        )));
+    }
+
+    let mut content = String::new();
+    file.read_to_string(&mut content).map_err(|e| {
+        DaemonError::Internal(format!("Failed to read '{}': {}", path.display(), e))
+    })?;
+    Ok(Some(content))
 }
 
 #[cfg(test)]
