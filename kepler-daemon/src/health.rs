@@ -92,14 +92,28 @@ async fn health_check_loop(
             user = service_user.map(|s| s.to_string());
         }
 
+        if groups.is_empty() {
+            groups = service_groups.to_vec();
+        }
+
+        let service_no_new_privileges = resolved.and_then(|r| r.no_new_privileges);
+        let no_new_privileges = config.no_new_privileges
+            .or(service_no_new_privileges)
+            .unwrap_or(true);
+
         // Check privilege escalation before daemon→None conversion
         #[cfg(unix)]
         {
             let context = format!("healthcheck for service '{}'", service_name);
             if let Err(e) = crate::auth::check_privilege_escalation(
                 hardening,
-                user.as_deref(),
+                &crate::auth::SpawnIdentity {
+                    user: user.as_deref(),
+                    groups: &groups,
+                    no_new_privileges,
+                },
                 handle.owner_uid(),
+                kepler_gid,
                 &context,
             ) {
                 debug!("Health check for {} blocked: {}", service_name, e);
@@ -107,10 +121,6 @@ async fn health_check_loop(
                 sleep(config.interval).await;
                 continue;
             }
-        }
-
-        if groups.is_empty() {
-            groups = service_groups.to_vec();
         }
 
         // Compute effective groups, stripping kepler GID
@@ -152,11 +162,6 @@ async fn health_check_loop(
                 );
             }
         }
-
-        let service_no_new_privileges = resolved.and_then(|r| r.no_new_privileges);
-        let no_new_privileges = config.no_new_privileges
-            .or(service_no_new_privileges)
-            .unwrap_or(true);
 
         let passed = run_health_check(
             &cmd,

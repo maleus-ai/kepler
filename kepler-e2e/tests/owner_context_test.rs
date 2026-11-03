@@ -338,3 +338,58 @@ async fn test_os_getgroups_allowed_strict_self() -> E2eResult<()> {
     harness.stop_daemon().await?;
     Ok(())
 }
+
+// =========================================================================
+// default user of a CLI run with the kepler group as effective gid
+// =========================================================================
+
+/// Extract `KEY=value` from a log line.
+fn field<'a>(stdout: &'a str, key: &str) -> &'a str {
+    let start = stdout.find(&format!("{}=", key)).unwrap_or_else(|| panic!("{} missing: {}", key, stdout)) + key.len() + 1;
+    stdout[start..].split_whitespace().next().unwrap()
+}
+
+/// A user just added to the kepler group may run the CLI through `newgrp
+/// kepler` / `sg kepler`: its effective gid, which the daemon records as the
+/// owner gid, is then kepler. Services without `user:` must still start, as
+/// the owner with its own passwd primary gid, and without the kepler group.
+async fn assert_default_user_ignores_kepler_effective_gid(hardening: &[&str]) -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_owner_kepler_effective_gid")?;
+
+    harness.start_daemon().await?;
+
+    let config_str = config_path.to_str().unwrap();
+    let mut args = vec!["-f", config_str, "start", "-d"];
+    args.extend(hardening);
+    let output = harness.run_cli_as_user_and_group("testuser1", "kepler", &args).await?;
+    output.assert_success();
+
+    harness
+        .wait_for_service_status(&config_path, "egid-svc", "running", Duration::from_secs(10))
+        .await?;
+
+    let logs = harness.wait_for_log_content(&config_path, " END", Duration::from_secs(5)).await?;
+    let stdout = &logs.stdout;
+    let kepler_gid = field(stdout, "KEPLER_GID");
+    assert_eq!(field(stdout, "SVC_GID"), field(stdout, "PASSWD_GID"), "stdout: {}", stdout);
+    assert!(
+        !field(stdout, "SVC_GROUPS").split(',').any(|g| g == kepler_gid),
+        "service must not hold the kepler group. stdout: {}", stdout
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Under no-root, a kepler default primary gid would be denied: nothing would start.
+#[tokio::test]
+async fn test_default_user_ignores_kepler_effective_gid_no_root() -> E2eResult<()> {
+    assert_default_user_ignores_kepler_effective_gid(&["--hardening", "no-root"]).await
+}
+
+/// Without hardening, it would hand the services the kepler group (socket access).
+#[tokio::test]
+async fn test_default_user_ignores_kepler_effective_gid_no_hardening() -> E2eResult<()> {
+    assert_default_user_ignores_kepler_effective_gid(&[]).await
+}

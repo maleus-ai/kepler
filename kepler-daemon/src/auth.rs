@@ -125,23 +125,49 @@ pub fn check_hardening_floor(
     }
 }
 
-/// Check if a resolved user spec constitutes a privilege escalation.
+/// Identity a spawned process (service, hook, healthcheck) will run with,
+/// as handed to `kepler-exec`.
+#[cfg(unix)]
+pub struct SpawnIdentity<'a> {
+    /// Resolved user spec (after `${{ }}$` / `!lua` evaluation).
+    pub user: Option<&'a str>,
+    /// Explicitly requested supplementary groups, before kepler GID stripping.
+    pub groups: &'a [String],
+    /// Effective `no_new_privileges` setting.
+    pub no_new_privileges: bool,
+}
+
+/// Check if a spawned process identity constitutes a privilege escalation.
 ///
 /// Rules by hardening level:
 /// - `None`: always Ok (no restrictions)
 /// - `NoRoot`: non-root config owners cannot run as uid 0
 /// - `Strict`: non-root config owners can only run as their own uid
 ///
+/// At `NoRoot` and `Strict`, non-root config owners are also held to the
+/// groups the target user already has. `kepler-exec` runs as root and applies
+/// any gid it is given, member or not, so every group must be checked:
+/// - the primary gid and every explicit supplementary group must be groups the
+///   target user is a member of (passwd primary gid + group database). A user
+///   with no passwd entry may only use its own uid as gid, and only if no group
+///   has that gid;
+/// - gid 0 and the kepler group are denied even to members, including in the
+///   supplementary groups computed from the group database when `groups:` is
+///   empty (the kepler group is stripped from those, gid 0 is denied);
+/// - `no_new_privileges` cannot be disabled (setgid binaries such as
+///   `sg kepler` would grant groups the user is not given).
+///
 /// Root-owned configs (owner_uid == 0 or None) are unrestricted at all levels.
 ///
-/// The `user_spec` should be the resolved user string (after `${{ }}$` / `!lua` evaluation).
-/// All user specs are resolved through the system user database to obtain the effective uid.
+/// All user and group specs are resolved through the system databases to
+/// obtain effective ids; unresolvable specs are denied.
 /// The `context` string is included in error messages for debugging (e.g. "service 'web'").
 #[cfg(unix)]
 pub fn check_privilege_escalation(
     hardening: HardeningLevel,
-    user_spec: Option<&str>,
+    identity: &SpawnIdentity<'_>,
     owner_uid: Option<u32>,
+    kepler_gid: Option<u32>,
     context: &str,
 ) -> Result<(), String> {
     // No restrictions at HardeningLevel::None
@@ -150,20 +176,27 @@ pub fn check_privilege_escalation(
     }
 
     // Root-owned configs are unrestricted
-    match owner_uid {
+    let owner = match owner_uid {
         Some(0) | None => return Ok(()),
-        _ => {}
-    }
-
-    let owner = owner_uid.unwrap(); // safe: we handled None above
-
-    // No user spec means the process runs as the config owner (always allowed)
-    let spec = match user_spec {
-        Some(s) => s,
-        None => return Ok(()),
+        Some(uid) => uid,
     };
 
-    // Resolve the user spec to an effective uid via the system user database
+    let deny = |reason: String| {
+        format!(
+            "Privilege escalation denied for {}: {}, but config owner is uid {} (hardening level: {})",
+            context, reason, owner, hardening,
+        )
+    };
+
+    if !identity.no_new_privileges {
+        return Err(deny("no_new_privileges cannot be disabled".to_string()));
+    }
+
+    // No user spec: the process runs as the config owner
+    let owner_spec = owner.to_string();
+    let spec = identity.user.unwrap_or(&owner_spec);
+
+    // Resolve the user spec to effective ids via the system user database
     let resolved = crate::user::resolve_user(spec).map_err(|e| {
         format!(
             "Privilege escalation check failed for {}: cannot resolve user '{}': {}",
@@ -174,26 +207,122 @@ pub fn check_privilege_escalation(
     match hardening {
         HardeningLevel::NoRoot => {
             if resolved.uid == 0 {
-                return Err(format!(
-                    "Privilege escalation denied for {}: user '{}' resolves to uid 0 (root), \
-                     but config owner is uid {} (hardening level: no-root)",
-                    context, spec, owner,
-                ));
+                return Err(deny(format!("user '{}' resolves to uid 0 (root)", spec)));
             }
-            Ok(())
         }
         HardeningLevel::Strict => {
             if resolved.uid != owner {
-                return Err(format!(
-                    "Privilege escalation denied for {}: user '{}' (uid {}) \
-                     is not the config owner uid {} (hardening level: strict)",
-                    context, spec, resolved.uid, owner,
-                ));
+                return Err(deny(format!(
+                    "user '{}' resolves to uid {}",
+                    spec, resolved.uid,
+                )));
             }
-            Ok(())
         }
         HardeningLevel::None => unreachable!(),
     }
+
+    let mut explicit = Vec::with_capacity(identity.groups.len());
+    for group in identity.groups {
+        let gid = crate::user::resolve_group(group).map_err(|e| {
+            format!(
+                "Privilege escalation check failed for {}: cannot resolve group '{}': {}",
+                context, group, e,
+            )
+        })?;
+        explicit.push((group.as_str(), gid));
+    }
+
+    let memberships = crate::user::group_memberships(resolved.uid).map_err(|e| {
+        format!(
+            "Privilege escalation check failed for {}: cannot list groups of user '{}': {}",
+            context, spec, e,
+        )
+    })?;
+
+    check_group_grants(
+        &GroupRequest {
+            user: spec,
+            uid: resolved.uid,
+            primary_gid: resolved.gid,
+            explicit: &explicit,
+            memberships: memberships.as_deref(),
+            kepler_gid,
+        },
+        crate::user::group_exists,
+    )
+    .map_err(deny)
+}
+
+/// Groups a spawned process would receive, with what the target user owns.
+#[cfg(unix)]
+struct GroupRequest<'a> {
+    user: &'a str,
+    uid: u32,
+    primary_gid: u32,
+    /// Explicit supplementary groups: (spec as written, resolved gid)
+    explicit: &'a [(&'a str, u32)],
+    /// The target user's groups, `None` if it has no passwd entry
+    memberships: Option<&'a [u32]>,
+    kepler_gid: Option<u32>,
+}
+
+/// Decide whether the groups of a [`GroupRequest`] are all already owned by
+/// the target user and unprivileged. Returns the denial reason on failure.
+///
+/// `group_exists` is injected so the policy can be tested without depending on
+/// the host's group database.
+#[cfg(unix)]
+fn check_group_grants(req: &GroupRequest<'_>, group_exists: impl Fn(u32) -> bool) -> Result<(), String> {
+    let privileged = |gid: u32| gid == 0 || Some(gid) == req.kepler_gid;
+
+    let owned = |gid: u32| match req.memberships {
+        Some(groups) => groups.contains(&gid),
+        // No passwd entry: kepler-exec falls back to gid = uid. Accept it only
+        // if no group has that gid, so it carries no group privileges.
+        None => gid == req.uid && !group_exists(gid),
+    };
+
+    if privileged(req.primary_gid) {
+        return Err(format!(
+            "user '{}' resolves to privileged primary gid {}",
+            req.user, req.primary_gid,
+        ));
+    }
+    if !owned(req.primary_gid) {
+        return Err(format!(
+            "user '{}' requests primary gid {}, which it is not a member of",
+            req.user, req.primary_gid,
+        ));
+    }
+
+    for &(group, gid) in req.explicit {
+        if privileged(gid) {
+            return Err(format!(
+                "supplementary group '{}' resolves to privileged gid {}",
+                group, gid,
+            ));
+        }
+        if !owned(gid) {
+            return Err(format!(
+                "supplementary group '{}' (gid {}) is not a group user '{}' is a member of",
+                group, gid, req.user,
+            ));
+        }
+    }
+
+    // No explicit groups: the daemon gives the user its own supplementary
+    // groups minus the kepler group, so gid 0 would slip through there.
+    if req.explicit.is_empty()
+        && let Some(groups) = req.memberships
+        && groups.contains(&0)
+    {
+        return Err(format!(
+            "user '{}' is a member of gid 0, which it would receive as supplementary group",
+            req.user,
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

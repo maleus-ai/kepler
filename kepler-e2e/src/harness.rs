@@ -463,6 +463,27 @@ impl E2eHarness {
         args: &[&str],
         timeout_duration: Duration,
     ) -> E2eResult<CommandOutput> {
+        self.run_cli_as(user, None, args, timeout_duration).await
+    }
+
+    /// Run CLI as a specific user with `group` as effective (primary) gid, as
+    /// after `newgrp <group>` or `sg <group>`.
+    pub async fn run_cli_as_user_and_group(
+        &self,
+        user: &str,
+        group: &str,
+        args: &[&str],
+    ) -> E2eResult<CommandOutput> {
+        self.run_cli_as(user, Some(group), args, Duration::from_secs(30)).await
+    }
+
+    async fn run_cli_as(
+        &self,
+        user: &str,
+        group: Option<&str>,
+        args: &[&str],
+        timeout_duration: Duration,
+    ) -> E2eResult<CommandOutput> {
         // TempDir creates directories with 0o700, but non-root users need to
         // traverse the temp dir to reach the daemon socket and config files.
         // Make it world-traversable (auth is handled at the protocol level).
@@ -479,7 +500,11 @@ impl E2eHarness {
         let kepler_bin_str = self.kepler_bin.to_string_lossy().to_string();
 
         // Use `sudo -u <user> env VAR=val kepler args` to ensure env is passed
-        let mut sudo_args = vec!["-u", user, "env", &daemon_path_env, &kepler_bin_str];
+        let mut sudo_args = vec!["-u", user];
+        if let Some(group) = group {
+            sudo_args.extend(["-g", group]);
+        }
+        sudo_args.extend(["env", daemon_path_env.as_str(), kepler_bin_str.as_str()]);
         sudo_args.extend(args);
 
         let mut child = Command::new("sudo")

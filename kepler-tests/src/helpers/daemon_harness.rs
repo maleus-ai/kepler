@@ -339,8 +339,13 @@ impl TestDaemonHarness {
             let context = format!("service '{}'", service_name);
             kepler_daemon::auth::check_privilege_escalation(
                 self.effective_hardening(),
-                resolved.user.as_deref(),
+                &kepler_daemon::auth::SpawnIdentity {
+                    user: resolved.user.as_deref(),
+                    groups: &resolved.groups,
+                    no_new_privileges: resolved.no_new_privileges.unwrap_or(true),
+                },
                 self.handle.owner_uid(),
+                None,
                 &context,
             )
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;

@@ -175,20 +175,30 @@ async fn run_hook_step(
             spec.user = params.service_user.map(|s| s.to_string());
         }
 
+        if spec.groups.is_empty() {
+            spec.groups = params.service_groups.to_vec();
+        }
+
+        // Apply no_new_privileges: hook > service > default (true)
+        spec.no_new_privileges = hook.common().no_new_privileges
+            .or(params.service_no_new_privileges)
+            .unwrap_or(true);
+
         // Check privilege escalation before daemon→None conversion
         #[cfg(unix)]
         {
             let context = format!("hook '{}.{}'", service_name, hook_name);
             crate::auth::check_privilege_escalation(
                 params.hardening,
-                spec.user.as_deref(),
+                &crate::auth::SpawnIdentity {
+                    user: spec.user.as_deref(),
+                    groups: &spec.groups,
+                    no_new_privileges: spec.no_new_privileges,
+                },
                 params.owner_uid,
+                params.kepler_gid,
                 &context,
             ).map_err(DaemonError::Config)?;
-        }
-
-        if spec.groups.is_empty() {
-            spec.groups = params.service_groups.to_vec();
         }
 
         // Compute effective groups, stripping kepler GID
@@ -201,11 +211,6 @@ async fn run_hook_step(
                 &format!("hook '{}.{}'", service_name, hook_name),
             );
         }
-
-        // Apply no_new_privileges: hook > service > default (true)
-        spec.no_new_privileges = hook.common().no_new_privileges
-            .or(params.service_no_new_privileges)
-            .unwrap_or(true);
 
         // Inject user identity env vars (HOME, USER, LOGNAME, SHELL)
         #[cfg(unix)]
