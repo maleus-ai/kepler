@@ -107,6 +107,26 @@ pub fn resolve_group(group: &str) -> Result<u32> {
     Ok(grp.gid.as_raw())
 }
 
+/// Groups a user is a member of: its passwd primary gid plus its supplementary
+/// groups from the group database (`getgrouplist`).
+///
+/// Returns `Ok(None)` if the uid has no passwd entry.
+pub fn group_memberships(uid: u32) -> Result<Option<Vec<u32>>> {
+    let Some(user) = lookup_user_by_uid(uid) else {
+        return Ok(None);
+    };
+    let c_name = std::ffi::CString::new(user.name.as_str())
+        .map_err(|_| DaemonError::Internal("invalid username for group lookup".to_string()))?;
+    let gids = kepler_unix::groups::getgrouplist(&c_name, user.gid.as_raw())
+        .map_err(|e| DaemonError::Internal(format!("getgrouplist failed: {}", e)))?;
+    Ok(Some(gids))
+}
+
+/// Whether the group database has an entry for this gid.
+pub fn group_exists(gid: u32) -> bool {
+    !matches!(Group::from_gid(nix::unistd::Gid::from_raw(gid)), Ok(None))
+}
+
 /// Resolve user-specific environment variables from `/etc/passwd`.
 ///
 /// Returns a map of `{HOME, USER, LOGNAME, SHELL}` for the given user spec.
