@@ -235,12 +235,14 @@ impl ConfigActor {
             resolved_hardening,
             evaluator,
             permission_ceiling,
-        ) = if let Some(snapshot) = persistence.load_expanded_config().unwrap_or_else(|e| {
-            // Untrusted (wrong owner or mode) or unreadable: never restore it,
-            // reload from source instead. The next snapshot replaces it.
-            warn!("Ignoring config snapshot: {}", e);
-            None
-        }) {
+        ) = if let Some(snapshot) = match persistence.load_expanded_config() {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                // Untrusted (wrong owner or mode) or unreadable: never restore it.
+                warn!("Ignoring config snapshot: {}", e);
+                None
+            }
+        } {
             info!(
                 "Restoring config from snapshot (taken at {})",
                 snapshot.snapshot_time
@@ -334,6 +336,19 @@ impl ConfigActor {
                 restored_permission_ceiling,
             )
         } else {
+            // No request context (no caller identity, no CLI environment): this
+            // is daemon-restart discovery, which must only restore a trusted
+            // snapshot. Loading the source here would make the config ownerless,
+            // i.e. treated as root-owned, while the source file may belong to
+            // anyone: refuse, the owner reloads it with `kepler start`.
+            if config_owner.is_none() && sys_env.is_none() {
+                return Err(DaemonError::Internal(format!(
+                    "Refusing to restore '{}' without a trusted snapshot: \
+                     the config owner is unknown, reload it with `kepler start`",
+                    canonical_path.display()
+                )));
+            }
+
             // No snapshot - parse fresh from source
             info!("Loading config fresh from source (no snapshot)");
 
