@@ -95,7 +95,7 @@ The kepler group has no write access to the state directory, so it cannot rename
 
 ### Persisted State Trust
 
-On restart, the daemon restores configs from the files it persisted under `configs/<hash>/` (`expanded_config.yaml`, `state.json`, `source_path.txt`). They carry the config owner, the services' users and the PIDs the daemon kills, so each one is refused unless it is a regular file (not a symlink) owned by the daemon's uid and not writable by group or others. A refused snapshot is ignored and the config is reloaded from source.
+On restart, the daemon restores configs from the files it persisted under `configs/<hash>/` (`expanded_config.yaml`, `state.json`, `source_path.txt`). They carry the config owner, the services' users and the PIDs the daemon kills, so each one is refused unless it is a regular file (not a symlink) owned by the daemon's uid and not writable by group or others. A refused snapshot is never restored. On daemon restart, the config is then left unloaded rather than reloaded from source: discovery knows no caller, and a config loaded without an owner is treated as root-owned. Its owner reloads it with `kepler start`, which loads the source with the caller as owner.
 
 See [Architecture](architecture.md#state-directory-hardening) for implementation details.
 
