@@ -8,6 +8,8 @@
 //! Tests:
 //! - `run -d --wait` on a dependency chain, a dependent service left out
 //! - `start -d --wait` on the same chain, on a fresh config and after `stop --clean`
+//! - `start`/`run -d --wait` on a failing one-shot still exits non-zero: the scoped
+//!   Ready must not overtake its unhandled failure
 
 use kepler_e2e::{E2eHarness, E2eResult};
 use std::path::Path;
@@ -105,5 +107,43 @@ async fn test_start_wait_subset_returns_with_unrequested_service() -> E2eResult<
     assert_returned(&output, "`start -d --wait pg rec mig be` after `stop --clean`");
 
     harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// `job` fails right away; `other` is never requested.
+const FAILING_CONFIG: &str = r#"
+services:
+  job:
+    command: ["sh", "-c", "exit 3"]
+    restart: "no"
+  other:
+    command: ["sleep", "600"]
+"#;
+
+/// `start`/`run -d --wait job` exits non-zero although `job`, being terminal,
+/// counts as ready, and `other` is left out.
+#[tokio::test]
+async fn test_wait_subset_reports_failure_of_requested_service() -> E2eResult<()> {
+    for command in ["start", "run"] {
+        let mut harness = E2eHarness::new().await?;
+        let config_path = harness.create_test_config(FAILING_CONFIG)?;
+        harness.start_daemon().await?;
+
+        let output = harness
+            .run_cli_with_timeout(&["-f", config_path.to_str().unwrap(), command, "-d", "--wait", "job"], WAIT_TIMEOUT)
+            .await?;
+        assert_ne!(
+            output.exit_code, 0,
+            "`{} -d --wait job` should exit non-zero when job fails. stdout: {}\nstderr: {}",
+            command, output.stdout, output.stderr
+        );
+        assert!(
+            output.stderr_contains("job"),
+            "`{} -d --wait job` should name the failed service. stderr: {}",
+            command, output.stderr
+        );
+
+        harness.stop_daemon().await?;
+    }
     Ok(())
 }
