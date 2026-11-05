@@ -85,8 +85,10 @@ pub enum ConfigCommand {
     CheckQuiescence {
         reply: oneshot::Sender<bool>,
     },
-    /// Check if all services are ready (reached target state). Respects startup_in_progress fence.
+    /// Check if services are ready (reached target state). Respects startup_in_progress fence.
+    /// `services: None` covers the whole config; `Some` restricts the check to those services.
     CheckReadiness {
+        services: Option<Vec<String>>,
         reply: oneshot::Sender<bool>,
     },
 

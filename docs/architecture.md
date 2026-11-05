@@ -374,7 +374,7 @@ flowchart TD
 
 The daemon computes two signals for the CLI:
 
-**Ready** (for `start -d --wait`): All services have reached their target state (Healthy if healthcheck, Running if not), are in a terminal state, or are in a deferred wait (Waiting with all unsatisfied deps in a stable state). Unhealthy counts as ready (healthcheck resolved).
+**Ready** (for `start -d --wait`): All services have reached their target state (Healthy if healthcheck, Running if not), are in a terminal state, or are in a deferred wait (Waiting with all unsatisfied deps in a stable state). Unhealthy counts as ready (healthcheck resolved). When services are named (`start -d --wait svc…`), Ready covers only those services, whatever the state of the others (like `docker compose up -d --wait svc…`).
 
 **Quiescent** (for foreground mode): All services are settled — in a permanent terminal state or permanently blocked. Uses topological traversal to determine if any service could still transition.
 
