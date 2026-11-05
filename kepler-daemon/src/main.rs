@@ -1796,6 +1796,11 @@ async fn handle_request(
 /// Shared by `Request::Subscribe` and `Request::Start { follow: true }`.
 /// Sends an initial snapshot, replays unhandled failures, then streams
 /// StatusChange / Ready / Quiescent / UnhandledFailure until done.
+///
+/// With a service filter, Ready covers only the requested services (like
+/// `docker compose up -d --wait svc…`): the config-wide Ready is ignored and
+/// readiness of the subset is re-evaluated on every status change, since a
+/// service left out of the request (e.g. `Stopped`) never becomes ready.
 async fn forward_state_events(
     handle: &kepler_daemon::config_actor::ConfigActorHandle,
     config: &kepler_daemon::config::KeplerConfig,
@@ -1850,28 +1855,58 @@ async fn forward_state_events(
         }
     }
 
+    // Scoped readiness for a service filter: a change on any service (including
+    // an unrequested dependency) can affect it, so it is re-evaluated each time.
+    //
+    // Ready must not overtake an UnhandledFailure: the CLI only grants a short
+    // grace window to failures arriving after Ready. The config-wide path gets
+    // this ordering for free (the actor emits StatusChange, UnhandledFailure,
+    // then Ready). Here, the readiness query is answered by the actor after it
+    // has queued the events of the change being processed, so Ready is held
+    // until `rx` is drained, and the initial check runs after the failure replay.
+    let scoped = services.as_ref().filter(|s| !s.is_empty());
+    let mut scoped_ready = false;
+    let mut scoped_ready_sent = false;
+    if let Some(svcs) = scoped {
+        scoped_ready = handle.check_services_readiness(svcs.clone()).await;
+        if scoped_ready && rx.is_empty() {
+            scoped_ready_sent = true;
+            progress.send_ready().await;
+        }
+    }
+
     // Stream config events until client disconnects or channel closes
     let mut quiescence_handled = false;
     loop {
         tokio::select! {
             event = rx.recv() => {
                 match event {
-                    Some(ConfigEvent::StatusChange(change))
-                        if services.as_ref().is_none_or(|s| s.contains(&change.service)) =>
-                    {
-                        let has_hc = config.services.get(&change.service)
-                            .is_some_and(|s| s.has_healthcheck());
-                        let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
-                        // Fetch full state for skip_reason on Skipped status
-                        let state = handle.get_service_state(&change.service).await;
-                        progress.send(ProgressEvent {
-                            service: change.service,
-                            phase: status_to_phase(state.as_ref(), target),
-                        }).await;
+                    Some(ConfigEvent::StatusChange(change)) => {
+                        if services.as_ref().is_none_or(|s| s.contains(&change.service)) {
+                            let has_hc = config.services.get(&change.service)
+                                .is_some_and(|s| s.has_healthcheck());
+                            let target = if has_hc { ServiceTarget::Healthy } else { ServiceTarget::Started };
+                            // Fetch full state for skip_reason on Skipped status
+                            let state = handle.get_service_state(&change.service).await;
+                            progress.send(ProgressEvent {
+                                service: change.service,
+                                phase: status_to_phase(state.as_ref(), target),
+                            }).await;
+                        }
+                        if let Some(svcs) = scoped {
+                            // Edge-triggered like the config-wide signal: emit on
+                            // the not-ready → ready transition only.
+                            scoped_ready = handle.check_services_readiness(svcs.clone()).await;
+                            if !scoped_ready {
+                                scoped_ready_sent = false;
+                            }
+                        }
                     }
-                    Some(ConfigEvent::StatusChange(_)) => {} // filtered out
                     Some(ConfigEvent::Ready) => {
-                        progress.send_ready().await;
+                        // With a service filter, Ready is computed per subscription above.
+                        if scoped.is_none() {
+                            progress.send_ready().await;
+                        }
                     }
                     Some(ConfigEvent::Quiescent) => {
                         // Guard: Quiescent can arrive more than once
@@ -1885,6 +1920,12 @@ async fn forward_state_events(
                         progress.send_unhandled_failure(service, exit_code).await;
                     }
                     None => break, // Channel closed (config unloaded)
+                }
+                // Send the scoped Ready once the events already queued (such as
+                // the UnhandledFailure of the change that made us ready) are out.
+                if scoped_ready && !scoped_ready_sent && rx.is_empty() {
+                    scoped_ready_sent = true;
+                    progress.send_ready().await;
                 }
             }
             _ = progress.closed() => break, // Client disconnected

@@ -799,11 +799,14 @@ impl ConfigActor {
                 };
                 let _ = reply.send(result);
             }
-            ConfigCommand::CheckReadiness { reply } => {
+            ConfigCommand::CheckReadiness { services, reply } => {
                 let result = if self.startup_in_progress {
                     false
                 } else {
-                    self.compute_ready()
+                    match services {
+                        None => self.compute_ready(),
+                        Some(services) => services.iter().all(|s| self.is_service_ready(s)),
+                    }
                 };
                 let _ = reply.send(result);
             }

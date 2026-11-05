@@ -1194,7 +1194,17 @@ impl ConfigActorHandle {
     /// Check if all services are ready (reached target state). Respects startup_in_progress fence.
     pub async fn check_readiness(&self) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self.tx.send(ConfigCommand::CheckReadiness { reply: reply_tx }).await.is_err() {
+        if self.tx.send(ConfigCommand::CheckReadiness { services: None, reply: reply_tx }).await.is_err() {
+            warn!("Config actor closed, cannot send CheckReadiness");
+        }
+        reply_rx.await.unwrap_or(false)
+    }
+
+    /// Check if the given services are ready (reached target state), ignoring
+    /// the rest of the config. Respects startup_in_progress fence.
+    pub async fn check_services_readiness(&self, services: Vec<String>) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.tx.send(ConfigCommand::CheckReadiness { services: Some(services), reply: reply_tx }).await.is_err() {
             warn!("Config actor closed, cannot send CheckReadiness");
         }
         reply_rx.await.unwrap_or(false)
