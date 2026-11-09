@@ -16,6 +16,7 @@ mod lua;
 pub mod resolvable;
 mod resources;
 mod restart;
+mod umask;
 
 pub use deps::{
     DependencyCondition, DependencyConfig, DependencyEntry, DependsOn, DependsOnFormat,
@@ -32,6 +33,7 @@ pub use logs::{LogConfig, LogRetention, LogRetentionConfig, LogStoreConfig};
 pub use resolvable::ResolvableCommand;
 pub use resources::{ResourceLimits, parse_memory_limit};
 pub use restart::{RestartConfig, RestartPolicy};
+pub use umask::Umask;
 
 use serde::Deserialize;
 
@@ -465,6 +467,11 @@ pub struct RawServiceConfig {
     /// privilege escalation via setuid/setgid binaries. Defaults to true at runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_new_privileges: Option<bool>,
+    /// File-mode creation mask for everything kepler spawns for this service
+    /// (command, hooks, healthcheck). Overrides `kepler.services.default_umask`.
+    /// When neither is set, processes inherit the daemon's umask (`007`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub umask: Option<Umask>,
     /// Permissions configuration for token-based access control.
     /// When present, the daemon generates a CSPRNG bearer token with granted rights.
     /// When absent, the service gets no daemon access.
@@ -593,6 +600,7 @@ impl Default for RawServiceConfig {
             outputs: ConfigValue::default(),
             user_identity: None,
             no_new_privileges: None,
+            umask: None,
             permissions: None,
         }
     }
@@ -985,6 +993,20 @@ pub struct KeplerGlobalConfig {
     /// Resource monitoring configuration (CPU/memory metrics to SQLite).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor: Option<MonitorConfig>,
+
+    /// Defaults applied to every service of this config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<ServiceDefaults>,
+}
+
+/// Defaults applied to every service of a config (under `kepler.services`).
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceDefaults {
+    /// Default umask for every service (command, hooks, healthcheck).
+    /// `services.<name>.umask` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_umask: Option<Umask>,
 }
 
 /// Root configuration structure
@@ -1058,6 +1080,10 @@ pub struct ServiceConfig {
     /// When true, sets PR_SET_NO_NEW_PRIVS on the spawned process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_new_privileges: Option<bool>,
+    /// Effective umask (service `umask` > `kepler.services.default_umask`).
+    /// `None` means the processes inherit the daemon's umask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub umask: Option<Umask>,
     /// Permissions configuration for token-based access control.
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "security")]
     pub permissions: Option<ServicePermissions>,
@@ -1554,6 +1580,7 @@ impl KeplerConfig {
             outputs,
             user_identity: raw.user_identity,
             no_new_privileges: raw.no_new_privileges,
+            umask: raw.umask.or_else(|| self.global_default_umask()),
             permissions: raw.permissions.clone(),
         })
     }
@@ -1763,6 +1790,23 @@ impl KeplerConfig {
         self.global_logs()
             .and_then(|l| l.cleanup_interval())
             .unwrap_or(std::time::Duration::from_secs(60))
+    }
+
+    /// Get the `kepler.services.default_umask` setting
+    pub fn global_default_umask(&self) -> Option<Umask> {
+        self.kepler
+            .as_ref()
+            .and_then(|k| k.services.as_ref())
+            .and_then(|s| s.default_umask)
+    }
+
+    /// Effective umask of a service: `services.<name>.umask`, then
+    /// `kepler.services.default_umask`. `None` means "inherit the daemon's".
+    pub fn effective_umask(&self, service_name: &str) -> Option<Umask> {
+        self.services
+            .get(service_name)
+            .and_then(|s| s.umask)
+            .or_else(|| self.global_default_umask())
     }
 
     /// Get global default_inherit_env setting

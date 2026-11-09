@@ -47,6 +47,8 @@ services:
 
 Either `command` or `run` is required (but not both).
 
+Health checks run with the service's umask (`umask`, else `kepler.services.default_umask`, else the daemon's `007`); there is no healthcheck-level override. See [File Creation Mask](configuration.md#file-creation-mask-umask).
+
 **Duration format:** `100ms`, `10s`, `5m`, `1h`, `1d`
 
 ---

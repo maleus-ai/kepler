@@ -1,0 +1,3 @@
+services:
+  plain:
+    run: touch __DIR__/plain_file && exec sleep 300

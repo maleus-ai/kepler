@@ -1,5 +1,5 @@
-//! kepler-exec: lightweight wrapper that applies uid/gid and resource limits
-//! before exec'ing the real command.
+//! kepler-exec: lightweight wrapper that applies uid/gid, resource limits and
+//! umask before exec'ing the real command.
 //!
 //! This avoids fork() overhead in the daemon by keeping the daemon's Command
 //! free of pre_exec/uid()/gid() calls, which lets Rust use posix_spawnp().
@@ -22,6 +22,7 @@ fn main() {
     let mut rlimit_nofile: Option<u64> = None;
     let mut no_new_privileges = false;
     let mut cgroup_path: Option<String> = None;
+    let mut umask: Option<u32> = None;
 
     let mut i = 0;
     let mut cmd_start = None;
@@ -51,6 +52,10 @@ fn main() {
             "--cgroup" => {
                 i += 1;
                 cgroup_path = Some(parse_string_arg(&args, i, "--cgroup"));
+            }
+            "--umask" => {
+                i += 1;
+                umask = Some(parse_umask_arg(&args, i));
             }
             "--no-new-privileges" => {
                 no_new_privileges = true;
@@ -124,6 +129,12 @@ fn main() {
                 process::exit(127);
             }
         }
+    }
+
+    // Apply the service's umask last, right before exec: it is per-process and
+    // unaffected by setuid, and the daemon keeps its own (007).
+    if let Some(mask) = umask {
+        nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(mask as _));
     }
 
     // Close inherited file descriptors above stderr before exec
@@ -352,6 +363,20 @@ fn parse_u64_arg(args: &[String], i: usize, flag: &str) -> u64 {
         eprintln!("kepler-exec: invalid value for {}: {}", flag, args[i]);
         process::exit(127);
     })
+}
+
+/// Parse `--umask` as 3 or 4 octal digits, at most 0777.
+#[cfg(unix)]
+fn parse_umask_arg(args: &[String], i: usize) -> u32 {
+    let raw = parse_string_arg(args, i, "--umask");
+    let valid = (3..=4).contains(&raw.len()) && raw.bytes().all(|b| (b'0'..=b'7').contains(&b));
+    match u32::from_str_radix(&raw, 8) {
+        Ok(v) if valid && v <= 0o777 => v,
+        _ => {
+            eprintln!("kepler-exec: invalid value for --umask: {}", raw);
+            process::exit(127);
+        }
+    }
 }
 
 #[cfg(unix)]

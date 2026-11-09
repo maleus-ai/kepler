@@ -2675,6 +2675,7 @@ impl ServiceOrchestrator {
             kepler_gid: self.kepler_gid,
             kepler_env_denied,
             service_no_new_privileges: resolved.no_new_privileges,
+            service_umask: resolved.umask,
             service_token,
             socket_path: crate::Daemon::get_socket_path().ok(),
         };
@@ -2964,6 +2965,7 @@ impl ServiceOrchestrator {
             clear_env,
             no_new_privileges,
         );
+        spec.umask = resolved.umask.map(|u| u.bits());
 
         // Defensive: ensure no stale KEPLER_TOKEN or KEPLER_SOCKET_PATH reaches the process.
         // The guard-managed token and socket path (if any) are injected below.

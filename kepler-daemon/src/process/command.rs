@@ -32,6 +32,9 @@ pub struct CommandSpec {
     /// those stay in the daemon's cgroup forever. Handing the path to
     /// `kepler-exec` lets it join while it is still the only process.
     pub cgroup_path: Option<PathBuf>,
+    /// File-mode creation mask applied by `kepler-exec` right before exec.
+    /// `None` keeps the daemon's umask.
+    pub umask: Option<u32>,
 }
 
 impl CommandSpec {
@@ -53,6 +56,7 @@ impl CommandSpec {
             clear_env: true, // Secure default
             no_new_privileges: true, // Secure default
             cgroup_path: None,
+            umask: None,
         }
     }
 
@@ -75,6 +79,7 @@ impl CommandSpec {
             clear_env: true, // Secure default
             no_new_privileges: true, // Secure default
             cgroup_path: None,
+            umask: None,
         }
     }
 
@@ -100,6 +105,7 @@ impl CommandSpec {
             clear_env,
             no_new_privileges,
             cgroup_path: None,
+            umask: None,
         }
     }
 
