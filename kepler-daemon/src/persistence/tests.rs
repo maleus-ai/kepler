@@ -151,3 +151,144 @@ kepler_env: {}
     let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(snapshot.permission_ceiling, None);
 }
+
+// --- Trust checks on state files read back from disk ---
+
+#[cfg(unix)]
+mod trusted_files {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn euid() -> u32 {
+        nix::unistd::geteuid().as_raw()
+    }
+
+    /// A persistence layer with a valid snapshot saved by the daemon.
+    fn saved_snapshot(temp_dir: &TempDir) -> ConfigPersistence {
+        let persistence = ConfigPersistence::new(temp_dir.path().to_path_buf());
+        let snapshot: ExpandedConfigSnapshot = serde_yaml::from_str(
+            "config:\n  services: {}\nconfig_dir: /tmp\nsnapshot_time: 1700000000\nkepler_env: {}\nowner_uid: 1000\n",
+        )
+        .unwrap();
+        persistence.save_expanded_config(&snapshot).unwrap();
+        persistence
+    }
+
+    #[test]
+    fn snapshot_written_by_daemon_is_trusted() {
+        let temp_dir = TempDir::new().unwrap();
+        let persistence = saved_snapshot(&temp_dir);
+        let snapshot = persistence.load_expanded_config().unwrap().unwrap();
+        assert_eq!(snapshot.owner_uid, Some(1000));
+    }
+
+    #[test]
+    fn snapshot_not_owned_by_daemon_is_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let persistence = saved_snapshot(&temp_dir);
+        let path = temp_dir.path().join("expanded_config.yaml");
+
+        // Simulates a daemon whose uid differs from the file owner
+        // (e.g. a snapshot planted by a non-root user, read by a root daemon)
+        let err = read_trusted_file_owned_by(&path, euid() + 1).unwrap_err().to_string();
+        assert!(err.contains("owned by uid"), "got: {}", err);
+
+        // The real thing, when the test can chown (CI runs as root)
+        if euid() == 0 {
+            nix::unistd::chown(&path, Some(nix::unistd::Uid::from_raw(65534)), None).unwrap();
+            let err = persistence.load_expanded_config().unwrap_err().to_string();
+            assert!(err.contains("owned by uid 65534"), "got: {}", err);
+        }
+    }
+
+    #[test]
+    fn group_writable_snapshot_is_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let persistence = saved_snapshot(&temp_dir);
+        let path = temp_dir.path().join("expanded_config.yaml");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o620)).unwrap();
+
+        let err = persistence.load_expanded_config().unwrap_err().to_string();
+        assert!(err.contains("writable by group or others"), "got: {}", err);
+    }
+
+    #[test]
+    fn world_writable_snapshot_is_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let persistence = saved_snapshot(&temp_dir);
+        let path = temp_dir.path().join("expanded_config.yaml");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o602)).unwrap();
+
+        let err = persistence.load_expanded_config().unwrap_err().to_string();
+        assert!(err.contains("writable by group or others"), "got: {}", err);
+    }
+
+    #[test]
+    fn symlinked_snapshot_is_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let persistence = ConfigPersistence::new(temp_dir.path().to_path_buf());
+        let target = temp_dir.path().join("forged.yaml");
+        std::fs::write(&target, "config:\n  services: {}\nconfig_dir: /tmp\nsnapshot_time: 0\nkepler_env: {}\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, temp_dir.path().join("expanded_config.yaml")).unwrap();
+
+        let err = persistence.load_expanded_config().unwrap_err().to_string();
+        assert!(err.contains("symlink"), "got: {}", err);
+    }
+
+    #[test]
+    fn fifo_snapshot_is_rejected_without_blocking() {
+        let temp_dir = TempDir::new().unwrap();
+        let persistence = ConfigPersistence::new(temp_dir.path().to_path_buf());
+        nix::unistd::mkfifo(
+            &temp_dir.path().join("expanded_config.yaml"),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+
+        let err = persistence.load_expanded_config().unwrap_err().to_string();
+        assert!(err.contains("not a regular file"), "got: {}", err);
+    }
+
+    #[test]
+    fn group_writable_state_is_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let persistence = ConfigPersistence::new(temp_dir.path().to_path_buf());
+        persistence
+            .save_state(&PersistedConfigState {
+                services: HashMap::new(),
+                config_initialized: true,
+                snapshot_time: 0,
+                owner_uid: Some(1000),
+            })
+            .unwrap();
+        let path = temp_dir.path().join("state.json");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+
+        let err = persistence.load_state().unwrap_err().to_string();
+        assert!(err.contains("writable by group or others"), "got: {}", err);
+        // Rejected, not quarantined: the file stays for inspection
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn group_writable_source_path_is_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let persistence = ConfigPersistence::new(temp_dir.path().to_path_buf());
+        persistence.save_source_path(Path::new("/etc/kepler.yaml")).unwrap();
+        let path = temp_dir.path().join("source_path.txt");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o620)).unwrap();
+
+        let err = persistence.load_source_path().unwrap_err().to_string();
+        assert!(err.contains("writable by group or others"), "got: {}", err);
+    }
+
+    #[test]
+    fn missing_files_are_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let persistence = ConfigPersistence::new(temp_dir.path().to_path_buf());
+        assert!(persistence.load_expanded_config().unwrap().is_none());
+        assert!(persistence.load_state().unwrap().is_none());
+        assert!(persistence.load_source_path().unwrap().is_none());
+    }
+}

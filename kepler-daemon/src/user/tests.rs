@@ -183,3 +183,40 @@ fn test_resolve_user_env_unknown_numeric_uid() {
     let env = resolve_user_env("99999").unwrap();
     assert!(env.is_empty());
 }
+
+// --- owner_primary_gid: default primary gid of a config owner ---
+
+const KEPLER_GID: u32 = 4242;
+
+#[test]
+fn owner_primary_gid_keeps_unprivileged_peer_gid() {
+    assert_eq!(owner_primary_gid(65534, 65534, Some(KEPLER_GID)), 65534);
+    // Not the passwd gid, but unprivileged: the caller's choice is kept
+    assert_eq!(owner_primary_gid(65534, 4243, Some(KEPLER_GID)), 4243);
+}
+
+#[test]
+fn owner_primary_gid_replaces_kepler_effective_gid_with_passwd_gid() {
+    // CLI run through `newgrp kepler` / `sg kepler`
+    assert_eq!(owner_primary_gid(65534, KEPLER_GID, Some(KEPLER_GID)), 65534);
+}
+
+#[test]
+fn owner_primary_gid_replaces_gid_zero_with_passwd_gid() {
+    assert_eq!(owner_primary_gid(65534, 0, Some(KEPLER_GID)), 65534);
+    assert_eq!(owner_primary_gid(65534, 0, None), 65534);
+}
+
+#[test]
+fn owner_primary_gid_falls_back_to_uid_without_passwd_entry() {
+    // 4244: a uid assumed to have no passwd entry on test hosts
+    if lookup_user_by_uid(4244).is_none() {
+        assert_eq!(owner_primary_gid(4244, KEPLER_GID, Some(KEPLER_GID)), 4244);
+    }
+}
+
+#[test]
+fn owner_primary_gid_leaves_root_alone() {
+    assert_eq!(owner_primary_gid(0, 0, Some(KEPLER_GID)), 0);
+    assert_eq!(owner_primary_gid(0, KEPLER_GID, Some(KEPLER_GID)), KEPLER_GID);
+}

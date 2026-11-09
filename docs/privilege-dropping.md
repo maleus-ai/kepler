@@ -52,7 +52,7 @@ When `user` is set, the daemon drops privileges for that service's process.
 
 When `user` is **not** set, the default depends on who loaded the config:
 
-- **Non-root CLI user**: Services default to the CLI user's UID:GID. This is baked into the config at load time, so it persists across daemon restarts.
+- **Non-root CLI user**: Services default to the CLI user's UID:GID. This is baked into the config at load time, so it persists across daemon restarts. The GID is the CLI process's effective GID, except when it is the `kepler` group (CLI run through `newgrp kepler` or `sg kepler`) or GID 0: the user's passwd primary GID is used instead (its UID if it has no passwd entry).
 - **Root CLI user**: Services run as root (the daemon's user), same as before.
 
 This means a non-root member of the `kepler` group cannot accidentally run services as root. To explicitly run a service as root, set `user: root` or `user: "0"`.
@@ -131,7 +131,7 @@ The daemon supports a `--hardening` flag that restricts which users non-root con
 | `no-root` | Any user except root (uid 0) |
 | `strict` | Only their own uid |
 
-When hardening is `no-root` or `strict`, the `kepler` group is also stripped from spawned processes' supplementary groups to prevent socket access.
+When hardening is `no-root` or `strict`, the `kepler` group is also stripped from spawned processes' supplementary groups to prevent socket access. Non-root config owners moreover may only use groups the target user is already a member of, as primary gid (`user: "me:group"`) or supplementary group (`groups: [...]`); gid 0 and the `kepler` group are denied even to members, and `no_new_privileges: false` is denied. See [Security Model -- Hardening](security-model.md#hardening).
 
 ### Per-Config Hardening
 
@@ -245,6 +245,8 @@ services:
     user: appuser
     no_new_privileges: false     # Allow setuid binaries (e.g. needs sudo internally)
 ```
+
+`no_new_privileges: false` is only accepted for root-owned configs, or when hardening is `none`: at `no-root` and `strict`, a non-root config owner that sets it is denied.
 
 ### Inheritance
 

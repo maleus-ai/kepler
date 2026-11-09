@@ -1504,6 +1504,111 @@ async fn test_per_config_hardening_strict_allows_same_uid() {
     harness.stop_service("allowed").await.unwrap();
 }
 
+/// Start a single service under daemon-level `no-root` hardening, for a
+/// config owned by a non-root user (65534), and return the error.
+#[cfg(unix)]
+async fn no_root_start_error(service: kepler_daemon::config::ServiceConfig) -> String {
+    let _guard = UMASK_LOCK.lock().unwrap();
+    let temp_dir = TempDir::new().unwrap();
+    let config = TestConfigBuilder::new().add_service("blocked", service).build();
+    let harness = TestDaemonHarness::new_with_hardening(
+        config,
+        temp_dir.path(),
+        Some((65534, 65534)),
+        HardeningLevel::NoRoot,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let err = harness
+        .start_service("blocked")
+        .await
+        .expect_err("no-root hardening should refuse this service")
+        .to_string();
+    assert!(err.contains("Privilege escalation denied"), "got: {}", err);
+    err
+}
+
+/// `user: "<non-root>:0"` would run with primary gid 0 (write access to
+/// everything root:root and group-writable, daemon state included).
+#[tokio::test]
+#[cfg(unix)]
+async fn test_no_root_blocks_primary_gid_zero() {
+    let err = no_root_start_error(
+        TestServiceBuilder::long_running().with_user("65534:0").build(),
+    )
+    .await;
+    assert!(err.contains("primary gid 0"), "got: {}", err);
+}
+
+/// `user: "<non-root>:kepler"` would give the service daemon socket access.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_no_root_blocks_primary_gid_kepler() {
+    // The harness has no kepler group: use gid 0's name to prove resolution by
+    // name works the same way; the kepler gid itself is covered by unit tests.
+    let root_group = nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(0))
+        .unwrap()
+        .expect("gid 0 must have a name")
+        .name;
+    let err = no_root_start_error(
+        TestServiceBuilder::long_running()
+            .with_user(&format!("65534:{}", root_group))
+            .build(),
+    )
+    .await;
+    assert!(err.contains("primary gid 0"), "got: {}", err);
+}
+
+/// `groups: ["0"]` would add gid 0 as a supplementary group.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_no_root_blocks_supplementary_group_zero() {
+    let err = no_root_start_error(
+        TestServiceBuilder::long_running()
+            .with_groups(vec!["0".to_string()])
+            .build(),
+    )
+    .await;
+    assert!(err.contains("supplementary group '0'"), "got: {}", err);
+}
+
+/// Any group the user is not a member of (disk, docker, shadow...) is denied,
+/// not only gid 0 and kepler: kepler-exec applies whatever gid it is given.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_no_root_blocks_groups_user_is_not_member_of() {
+    // 4243: a gid `nobody` is not a member of
+    let err = no_root_start_error(
+        TestServiceBuilder::long_running().with_user("65534:4243").build(),
+    )
+    .await;
+    assert!(err.contains("not a member"), "got: {}", err);
+
+    let err = no_root_start_error(
+        TestServiceBuilder::long_running()
+            .with_user("65534")
+            .with_groups(vec!["4243".to_string()])
+            .build(),
+    )
+    .await;
+    assert!(err.contains("not a group user"), "got: {}", err);
+}
+
+/// `no_new_privileges: false` would make setgid binaries (`sg kepler`) usable again.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_no_root_blocks_disabled_no_new_privileges() {
+    let err = no_root_start_error(
+        TestServiceBuilder::long_running()
+            .with_no_new_privileges(false)
+            .build(),
+    )
+    .await;
+    assert!(err.contains("no_new_privileges"), "got: {}", err);
+}
+
 /// Verify that effective hardening cannot be lowered below daemon level.
 /// daemon_hardening=NoRoot, config_hardening=None → effective=NoRoot
 #[tokio::test]
