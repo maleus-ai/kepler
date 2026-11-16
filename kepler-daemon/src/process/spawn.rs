@@ -194,7 +194,8 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
     let needs_wrapper = spec.user.is_some()
         || spec.limits.is_some()
         || spec.no_new_privileges
-        || spec.cgroup_path.is_some();
+        || spec.cgroup_path.is_some()
+        || spec.umask.is_some();
 
     let mut cmd;
     #[cfg(unix)]
@@ -267,6 +268,13 @@ fn build_command(spec: &CommandSpec) -> Result<(Command, String)> {
         if let Some(ref cgroup) = spec.cgroup_path {
             wrapper_args.push("--cgroup".to_string());
             wrapper_args.push(cgroup.to_string_lossy().to_string());
+        }
+
+        // umask is set by kepler-exec right before exec, so it applies to the
+        // command whatever user it runs as, without touching the daemon's own.
+        if let Some(mask) = spec.umask {
+            wrapper_args.push("--umask".to_string());
+            wrapper_args.push(format!("{:03o}", mask));
         }
 
         wrapper_args.push("--".to_string());

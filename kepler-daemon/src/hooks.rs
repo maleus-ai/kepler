@@ -67,6 +67,9 @@ pub struct ServiceHookParams<'a> {
     pub kepler_env_denied: bool,
     /// Service-level no_new_privileges setting (inherited by hooks if not overridden)
     pub service_no_new_privileges: Option<bool>,
+    /// Service umask (service `umask` > `kepler.services.default_umask`).
+    /// Applies to every hook, whatever its `user:`; hooks cannot override it.
+    pub service_umask: Option<crate::config::Umask>,
     /// Bearer token for the service (if permissions are configured).
     /// Injected into the hook environment as KEPLER_TOKEN so hooks can
     /// authenticate to the daemon with the service's scoped permissions.
@@ -206,6 +209,8 @@ async fn run_hook_step(
         spec.no_new_privileges = hook.common().no_new_privileges
             .or(params.service_no_new_privileges)
             .unwrap_or(true);
+
+        spec.umask = params.service_umask.map(|u| u.bits());
 
         // Inject user identity env vars (HOME, USER, LOGNAME, SHELL)
         #[cfg(unix)]

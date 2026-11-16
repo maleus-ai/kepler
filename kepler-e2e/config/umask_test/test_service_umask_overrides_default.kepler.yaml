@@ -1,0 +1,10 @@
+kepler:
+  services:
+    default_umask: '027'
+
+services:
+  overridden:
+    umask: '077'
+    run: touch __DIR__/overridden_file && exec sleep 300
+  defaulted:
+    run: touch __DIR__/defaulted_file && exec sleep 300

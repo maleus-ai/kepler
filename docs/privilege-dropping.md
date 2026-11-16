@@ -115,7 +115,8 @@ Kepler uses the `kepler-exec` helper binary to drop privileges:
 4. `kepler-exec` calls `setuid()` to set the target user
 5. `kepler-exec` sets `PR_SET_NO_NEW_PRIVS` (if `no_new_privileges` is enabled)
 6. `kepler-exec` applies resource limits (if configured)
-7. `kepler-exec` executes the service command
+7. `kepler-exec` sets the umask (if `umask` or `kepler.services.default_umask` is configured; otherwise the daemon's `007` is inherited)
+8. `kepler-exec` executes the service command
 
 This ensures the service process never runs as root, even momentarily after spawn.
 
@@ -166,6 +167,8 @@ services:
 ```
 
 Each hook can override `user` and `groups` to run with different privileges. Use `user: root` to explicitly run as root, bypassing the service's user and the config owner default.
+
+The service's umask, on the other hand, cannot be overridden: every hook and the healthcheck run with it, whatever their `user`. See [File Creation Mask](configuration.md#file-creation-mask-umask).
 
 ---
 

@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
-use crate::config::HealthCheck;
+use crate::config::{HealthCheck, Umask};
 use crate::config_actor::{ConfigActorHandle, HealthCheckSession, ServiceInstance};
 use crate::events::{HealthStatus, ServiceEvent};
 use crate::hardening::HardeningLevel;
@@ -158,6 +158,17 @@ async fn health_check_loop(
             .or(service_no_new_privileges)
             .unwrap_or(true);
 
+        // Service umask (already folded with kepler.services.default_umask).
+        // Without a resolved config, read it from the config itself so the
+        // healthcheck never silently falls back to the daemon's umask.
+        let umask = match resolved {
+            Some(r) => r.umask,
+            None => handle
+                .get_config()
+                .await
+                .and_then(|c| c.effective_umask(&service_name)),
+        };
+
         let passed = run_health_check(
             &cmd,
             config.timeout,
@@ -166,6 +177,7 @@ async fn health_check_loop(
             user.as_deref(),
             &groups,
             no_new_privileges,
+            umask,
         ).await;
 
         // Update state based on result
@@ -344,6 +356,7 @@ async fn run_status_change_hook(
             kepler_gid,
             kepler_env_denied,
             service_no_new_privileges: resolved.no_new_privileges,
+            service_umask: resolved.umask,
             service_token,
             socket_path: crate::Daemon::get_socket_path().ok(),
         };
@@ -377,6 +390,7 @@ async fn run_status_change_hook(
 ///
 /// Runs as the resolved user/groups. Inheritance chain:
 /// healthcheck user > service user > config owner.
+#[allow(clippy::too_many_arguments)]
 async fn run_health_check(
     test: &[String],
     check_timeout: Duration,
@@ -385,6 +399,7 @@ async fn run_health_check(
     user: Option<&str>,
     groups: &[String],
     no_new_privileges: bool,
+    umask: Option<Umask>,
 ) -> bool {
     if test.is_empty() {
         return true;
@@ -398,6 +413,7 @@ async fn run_health_check(
         groups.to_vec(),
     );
     spec.no_new_privileges = no_new_privileges;
+    spec.umask = umask.map(|u| u.bits());
 
     let result = timeout(check_timeout, async {
         match spawn_blocking(spec, BlockingMode::CaptureOutput).await {

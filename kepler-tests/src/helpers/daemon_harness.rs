@@ -432,6 +432,7 @@ impl TestDaemonHarness {
             kepler_gid: None,
             kepler_env_denied: false,
             service_no_new_privileges: None,
+            service_umask: resolved.umask,
             service_token: service_token.clone(),
             socket_path: Some(self.config_dir.join(".kepler").join("kepler.sock")),
         };
@@ -465,6 +466,7 @@ impl TestDaemonHarness {
             true,
             resolved.no_new_privileges.unwrap_or(false),
         );
+        spec.umask = resolved.umask.map(|u| u.bits());
 
         // Inject KEPLER_TOKEN and KEPLER_SOCKET_PATH into the process environment
         spec.environment.remove("KEPLER_TOKEN");
@@ -694,6 +696,7 @@ impl TestDaemonHarness {
             kepler_gid: None,
             kepler_env_denied: false,
             service_no_new_privileges: None,
+            service_umask: resolved.umask,
             service_token: service_token.clone(),
             socket_path: Some(self.config_dir.join(".kepler").join("kepler.sock")),
         };
@@ -799,6 +802,7 @@ impl TestDaemonHarness {
             kepler_gid: None,
             kepler_env_denied: false,
             service_no_new_privileges: None,
+            service_umask: resolved.umask,
             service_token: service_token.clone(),
             socket_path: Some(self.config_dir.join(".kepler").join("kepler.sock")),
         };
@@ -952,6 +956,7 @@ impl TestDaemonHarness {
                     kepler_gid: None,
                     kepler_env_denied: false,
                     service_no_new_privileges: None,
+                    service_umask: resolved.umask,
                     service_token: None,
                     socket_path: None,
                 };
@@ -1003,7 +1008,7 @@ impl TestDaemonHarness {
                 // Restart the service
                 let (store_stdout, store_stderr) =
                     resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
-                let spec = CommandSpec::with_all_options(
+                let mut spec = CommandSpec::with_all_options(
                     resolved.command.clone(),
                     working_dir,
                     ctx.env.clone(),
@@ -1013,6 +1018,7 @@ impl TestDaemonHarness {
                     true,
                     resolved.no_new_privileges.unwrap_or(false),
                 );
+                spec.umask = resolved.umask.map(|u| u.bits());
                 let spawn_params = SpawnServiceParams {
                     service_name: &event.service_name,
                     spec,
@@ -1126,6 +1132,7 @@ impl TestDaemonHarness {
                     kepler_gid: None,
                     kepler_env_denied: false,
                     service_no_new_privileges: None,
+                    service_umask: resolved.umask,
                     service_token: None,
                     socket_path: None,
                 };
@@ -1225,7 +1232,7 @@ impl TestDaemonHarness {
                     // Restart the service
                     let (store_stdout, store_stderr) =
                         resolve_log_store(resolved.logs.as_ref(), ctx.global_log_config.as_ref());
-                    let spec = CommandSpec::with_all_options(
+                    let mut spec = CommandSpec::with_all_options(
                         resolved.command.clone(),
                         working_dir.clone(),
                         ctx.env.clone(),
@@ -1235,6 +1242,7 @@ impl TestDaemonHarness {
                         true,
                         resolved.no_new_privileges.unwrap_or(false),
                     );
+                    spec.umask = resolved.umask.map(|u| u.bits());
                     let spawn_params = SpawnServiceParams {
                         service_name: &event.service_name,
                         spec,

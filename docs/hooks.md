@@ -110,6 +110,9 @@ hooks:
 | `no_new_privileges` | `bool` | Prevents privilege escalation via setuid/setgid binaries. Inherits from the service's `no_new_privileges` (default: `true`). See [Privilege Dropping](privilege-dropping.md#no-new-privileges) |
 | `output` | `string` | Output step name. Enables `::output::KEY=VALUE` capture on this step's stdout. See [Outputs](outputs.md) |
 
+
+Hooks always run with the service's umask (`umask`, else `kepler.services.default_umask`, else the daemon's `007`), whatever their `user`; there is no per-hook override. See [File Creation Mask](configuration.md#file-creation-mask-umask).
+
 ---
 
 ## Hook Inheritance
