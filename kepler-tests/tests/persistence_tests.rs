@@ -860,3 +860,132 @@ services:
     handle.shutdown(false).await;
     let _ = actor_task.await;
 }
+
+// ============================================================================
+// Daemon-restart discovery (no caller identity, no CLI env)
+// ============================================================================
+
+/// Create an actor the way daemon-restart discovery does, or the way a CLI
+/// request does when `owner` is given.
+fn create_actor_raw(
+    config_path: PathBuf,
+    state_dir: &std::path::Path,
+    sys_env: Option<HashMap<String, String>>,
+    owner: Option<(u32, u32)>,
+) -> kepler_daemon::errors::Result<(
+    kepler_daemon::config_actor::ConfigActorHandle,
+    tokio::task::JoinHandle<()>,
+)> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var("KEPLER_DAEMON_PATH", state_dir);
+    }
+    let (handle, actor) = ConfigActor::create(config_path, sys_env, owner, None, None)?;
+    Ok((handle, tokio::spawn(actor.run())))
+}
+
+/// Load a config as a non-root owner and snapshot it; return the snapshot path.
+async fn snapshot_as_non_root_owner(config_path: &std::path::Path, state_dir: &std::path::Path) -> PathBuf {
+    std::fs::write(
+        config_path,
+        "kepler:\n  autostart: true\nservices:\n  test:\n    command: [\"sleep\", \"infinity\"]\n",
+    )
+    .unwrap();
+    let (handle, task) = create_actor_raw(
+        config_path.to_path_buf(),
+        state_dir,
+        Some(std::env::vars().collect()),
+        Some((1000, 1000)),
+    )
+    .unwrap();
+    handle.take_snapshot_if_needed().await.unwrap();
+    handle.shutdown(false).await;
+    let _ = task.await;
+
+    let snapshot = std::fs::read_dir(state_dir.join("configs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("expanded_config.yaml");
+    assert!(snapshot.exists(), "snapshot should have been written");
+    snapshot
+}
+
+#[tokio::test]
+async fn test_discovery_restores_trusted_snapshot_with_its_owner() {
+    let temp_dir = TempDir::new().unwrap();
+    let state_dir = temp_dir.path().join(".kepler");
+    let config_path = temp_dir.path().join("kepler.yaml");
+    snapshot_as_non_root_owner(&config_path, &state_dir).await;
+
+    let (handle, task) = create_actor_raw(config_path, &state_dir, None, None).unwrap();
+    assert!(handle.is_restored_from_snapshot().await);
+    assert_eq!(handle.owner_uid(), Some(1000), "owner must come from the snapshot");
+    handle.shutdown(false).await;
+    let _ = task.await;
+}
+
+/// A refused snapshot must not fall back to loading the source without an
+/// owner: an ownerless config is treated as root-owned.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_discovery_refuses_config_with_untrusted_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().unwrap();
+    let state_dir = temp_dir.path().join(".kepler");
+    let config_path = temp_dir.path().join("kepler.yaml");
+    let snapshot = snapshot_as_non_root_owner(&config_path, &state_dir).await;
+    std::fs::set_permissions(&snapshot, std::fs::Permissions::from_mode(0o660)).unwrap();
+
+    let err = create_actor_raw(config_path, &state_dir, None, None)
+        .err()
+        .expect("discovery must refuse a config whose snapshot is untrusted")
+        .to_string();
+    assert!(err.contains("without a trusted snapshot"), "got: {}", err);
+}
+
+/// Same when the snapshot disappears between discovery's existence check and
+/// the actor's load.
+#[tokio::test]
+async fn test_discovery_refuses_config_without_snapshot() {
+    let temp_dir = TempDir::new().unwrap();
+    let state_dir = temp_dir.path().join(".kepler");
+    let config_path = temp_dir.path().join("kepler.yaml");
+    let snapshot = snapshot_as_non_root_owner(&config_path, &state_dir).await;
+    std::fs::remove_file(&snapshot).unwrap();
+
+    let err = create_actor_raw(config_path, &state_dir, None, None)
+        .err()
+        .expect("discovery must refuse a config without snapshot")
+        .to_string();
+    assert!(err.contains("without a trusted snapshot"), "got: {}", err);
+}
+
+/// A CLI request still reloads from source over an untrusted snapshot, with
+/// the caller as owner.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_request_reloads_source_over_untrusted_snapshot_with_caller_as_owner() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().unwrap();
+    let state_dir = temp_dir.path().join(".kepler");
+    let config_path = temp_dir.path().join("kepler.yaml");
+    let snapshot = snapshot_as_non_root_owner(&config_path, &state_dir).await;
+    std::fs::set_permissions(&snapshot, std::fs::Permissions::from_mode(0o660)).unwrap();
+
+    let (handle, task) = create_actor_raw(
+        config_path,
+        &state_dir,
+        Some(std::env::vars().collect()),
+        Some((1001, 1001)),
+    )
+    .unwrap();
+    assert!(!handle.is_restored_from_snapshot().await);
+    assert_eq!(handle.owner_uid(), Some(1001));
+    handle.shutdown(false).await;
+    let _ = task.await;
+}

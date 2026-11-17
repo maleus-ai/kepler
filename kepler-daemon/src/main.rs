@@ -413,7 +413,7 @@ async fn main() -> anyhow::Result<()> {
         nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o007));
     }
 
-    // Ensure state directory exists with group-accessible permissions (0o771)
+    // Ensure state directory exists with permissions 0o751 (root:kepler)
     let state_dir = match Daemon::global_state_dir() {
         Ok(dir) => dir,
         Err(e) => {
@@ -439,20 +439,22 @@ async fn main() -> anyhow::Result<()> {
 
         std::fs::DirBuilder::new()
             .recursive(true)
-            .mode(0o771)
+            .mode(0o751)
             .create(&state_dir)?;
 
         // Enforce permissions on both new and pre-existing directories
-        // 0o771: owner/group full access, world-traverse only (allows socket access via KEPLER_TOKEN)
+        // 0o751: root full access, kepler group read+traverse, world-traverse only
+        // (allows socket access via KEPLER_TOKEN). No group write: the kepler group
+        // must not be able to rename or recreate `configs/` and forge daemon state.
         let meta = std::fs::metadata(&state_dir)?;
         let current_mode = meta.permissions().mode() & 0o777;
-        if current_mode != 0o771 {
+        if current_mode != 0o751 {
             warn!(
-                "State directory '{}' had permissions 0o{:o}, correcting to 0o771",
+                "State directory '{}' had permissions 0o{:o}, correcting to 0o751",
                 state_dir.display(),
                 current_mode
             );
-            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o771))?;
+            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o751))?;
         }
 
         // chown state dir to root:kepler

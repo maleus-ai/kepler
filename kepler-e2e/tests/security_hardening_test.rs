@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 // State directory and socket permission tests
 // ============================================================================
 
-/// Verify that the real daemon binary enforces 0o771 on the state directory
+/// Verify that the real daemon binary enforces 0o751 on the state directory
 /// and creates the socket with 0o666 permissions.
 #[tokio::test]
 #[cfg(unix)]
@@ -20,7 +20,7 @@ async fn test_daemon_enforces_state_dir_and_socket_permissions() -> E2eResult<()
 
     harness.start_daemon().await?;
 
-    // Check state directory permissions (the daemon enforces 0o771)
+    // Check state directory permissions (the daemon enforces 0o751)
     let state_dir = harness.state_dir();
     let dir_mode = std::fs::metadata(state_dir)
         .expect("state dir should exist")
@@ -28,8 +28,8 @@ async fn test_daemon_enforces_state_dir_and_socket_permissions() -> E2eResult<()
         .mode()
         & 0o777;
     assert_eq!(
-        dir_mode, 0o771,
-        "Real daemon should enforce state directory to 0o771, got 0o{:o}",
+        dir_mode, 0o751,
+        "Real daemon should enforce state directory to 0o751, got 0o{:o}",
         dir_mode
     );
 
@@ -88,7 +88,7 @@ async fn test_daemon_pid_file_permissions() -> E2eResult<()> {
 // ============================================================================
 
 /// Verify that the daemon corrects a pre-existing state directory with
-/// overly permissive (0o777) permissions back to 0o771 on startup.
+/// overly permissive (0o777) permissions back to 0o751 on startup.
 #[tokio::test]
 #[cfg(unix)]
 async fn test_daemon_corrects_weak_state_dir_permissions() -> E2eResult<()> {
@@ -115,8 +115,8 @@ async fn test_daemon_corrects_weak_state_dir_permissions() -> E2eResult<()> {
         .mode()
         & 0o777;
     assert_eq!(
-        corrected_mode, 0o771,
-        "Daemon should correct weak state dir permissions to 0o771, got 0o{:o}",
+        corrected_mode, 0o751,
+        "Daemon should correct weak state dir permissions to 0o751, got 0o{:o}",
         corrected_mode
     );
 
@@ -173,7 +173,7 @@ async fn test_daemon_rejects_symlinked_pid_file() -> E2eResult<()> {
     // The daemon expects the state dir to exist (it creates it if missing,
     // but the PID check happens after).
     std::fs::create_dir_all(state_dir).unwrap();
-    std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(0o771)).unwrap();
+    std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(0o751)).unwrap();
 
     // Create a target file and a symlink at the PID file path
     let target_file = state_dir.join("target.pid");
