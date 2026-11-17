@@ -40,3 +40,43 @@ async fn progress_sender_ignores_closed_channel() {
         phase: ServicePhase::Starting,
     }).await;
 }
+
+/// A handler that requests shutdown must still deliver its response, even though
+/// the daemon drops its runtime — aborting every connection task — as soon as
+/// `run` returns.
+#[test]
+fn shutdown_response_reaches_client_before_run_returns() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("kepler.sock");
+
+    let server_socket = socket.clone();
+    let server_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let server = Server::new(server_socket, |_request, shutdown_tx: ShutdownTx, _progress, _peer| async move {
+                let _ = shutdown_tx.send(()).await;
+                // Work done between the shutdown request and the response widens
+                // the window in which an early shutdown loses the response.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Response::ok_with_message("Daemon shutting down")
+            })
+            .unwrap();
+            server.run().await.unwrap();
+        });
+    });
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let response = runtime.block_on(async {
+        let client = loop {
+            if let Ok(client) = crate::client::Client::connect(&socket).await {
+                break client;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        let (_events, response) = client.shutdown().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), response).await.unwrap()
+    });
+    server_thread.join().unwrap();
+
+    assert!(matches!(response, Ok(Response::Ok { .. })), "shutdown response lost: {:?}", response);
+}

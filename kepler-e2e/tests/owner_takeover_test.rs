@@ -221,14 +221,18 @@ async fn test_no_warning_without_takeover() -> E2eResult<()> {
 
     let output = harness.run_cli(&["-f", root_config.to_str().unwrap(), "start", "-d"]).await?;
     output.assert_success();
+    // `run` right after a detached `start` races the service's spawn — wait for it to settle.
+    harness.wait_for_service_status(&root_config, "takeover-svc", "running", Duration::from_secs(10)).await?;
     let output = harness.run_cli(&["-f", root_config.to_str().unwrap(), "run", "-d", "--wait"]).await?;
     output.assert_success();
     assert!(!output.stderr_contains(WARNING), "Root reloading its own config. stderr: {}", output.stderr);
 
     let user_config = harness.create_named_config("user_takeover.kepler.yaml", &std::fs::read_to_string(&root_config)?)?;
-    let user_config = user_config.to_str().unwrap();
+    let user_config_path = user_config;
+    let user_config = user_config_path.to_str().unwrap();
     let output = harness.run_cli_as_user("testuser1", &["-f", user_config, "start", "-d"]).await?;
     output.assert_success();
+    harness.wait_for_service_status(&user_config_path, "takeover-svc", "running", Duration::from_secs(10)).await?;
     let output = harness.run_cli_as_user("testuser1", &["-f", user_config, "run", "-d", "--wait"]).await?;
     output.assert_success();
     assert!(!output.stderr_contains(WARNING), "User reloading their own config. stderr: {}", output.stderr);

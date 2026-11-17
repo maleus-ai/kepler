@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 use tracing::{debug, error, info, warn};
 
@@ -29,6 +29,12 @@ const WRITER_CHANNEL_CAPACITY: usize = 16384;
 
 /// Default maximum number of concurrent connections.
 const DEFAULT_MAX_CONNECTIONS: usize = 1024;
+
+/// How long a shutdown waits for its own response to reach the client.
+///
+/// Bounds a client that stops reading: the response is a courtesy, the
+/// shutdown is not optional.
+const SHUTDOWN_RESPONSE_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Sender for progress events from a request handler back to the client.
 ///
@@ -285,12 +291,28 @@ where
     // Create bounded channel for outgoing messages
     let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(WRITER_CHANNEL_CAPACITY);
 
+    // Flush barriers: acknowledged once every message queued before the
+    // barrier was sent has been written to the stream.
+    let (flush_tx, mut flush_rx) = mpsc::channel::<oneshot::Sender<()>>(1);
+
     // Spawn writer task: receives encoded bytes and writes to stream
     let writer_task = tokio::spawn(async move {
-        while let Some(bytes) = write_rx.recv().await {
-            if let Err(e) = write_half.write_all(&bytes).await {
-                warn!("Failed to write to client: {}", e);
-                break;
+        loop {
+            tokio::select! {
+                // Biased towards messages: a barrier is only acknowledged once
+                // the messages queued before it are drained.
+                biased;
+                bytes = write_rx.recv() => {
+                    let Some(bytes) = bytes else { break };
+                    if let Err(e) = write_half.write_all(&bytes).await {
+                        warn!("Failed to write to client: {}", e);
+                        break;
+                    }
+                }
+                Some(ack) = flush_rx.recv() => {
+                    let _ = write_half.flush().await;
+                    let _ = ack.send(());
+                }
             }
         }
         // Flush before exiting
@@ -367,12 +389,17 @@ where
         let handler = Arc::clone(&handler);
         let shutdown_tx = shutdown_tx.clone();
         let write_tx = write_tx.clone();
+        let flush_tx = flush_tx.clone();
         let request_token = envelope.token;
         tokio::spawn(async move {
             let mut peer = peer_credentials;
             peer.token = request_token;
             let progress_sender = ProgressSender::new(write_tx.clone(), request_id);
-            let response = handler(request, shutdown_tx, progress_sender, peer).await;
+            // The handler's shutdown request is held back until its response is
+            // written: the server stops as soon as it is signalled, and the
+            // daemon exits right after, dropping this task with the response.
+            let (request_shutdown_tx, mut request_shutdown_rx) = mpsc::channel(1);
+            let response = handler(request, request_shutdown_tx, progress_sender, peer).await;
             let msg = ServerMessage::Response {
                 id: request_id,
                 response,
@@ -386,6 +413,14 @@ where
                 Err(e) => {
                     error!("Failed to encode response for request {}: {}", request_id, e);
                 }
+            }
+            if request_shutdown_rx.try_recv().is_ok() {
+                let (ack_tx, ack_rx) = oneshot::channel();
+                // Err: the client is gone, so there is nothing left to wait for.
+                if flush_tx.send(ack_tx).await.is_ok() {
+                    let _ = tokio::time::timeout(SHUTDOWN_RESPONSE_FLUSH_TIMEOUT, ack_rx).await;
+                }
+                let _ = shutdown_tx.send(()).await;
             }
         });
     }
