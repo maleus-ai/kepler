@@ -8,7 +8,7 @@ use tracing::warn;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedRwLockReadGuard, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::config::{DynamicExpr, KeplerConfig, LogConfig, RawServiceConfig, ServiceConfig};
@@ -53,7 +53,13 @@ pub struct ConfigActorHandle {
     /// Pre-created shutdown token for the monitor — allows shutdown_discard()
     /// before the monitor is even spawned. Passed to `MonitorHandle::spawn()`.
     monitor_shutdown_token: Arc<crate::monitor::MonitorShutdownToken>,
+    /// Gate over spawn windows — from creating a service process to the actor
+    /// holding its handle. `true` once closed for unload. See [`Self::enter_spawn`].
+    spawn_gate: Arc<RwLock<bool>>,
 }
+
+/// Held for the duration of a spawn window; see [`ConfigActorHandle::enter_spawn`].
+pub type SpawnWindow = OwnedRwLockReadGuard<bool>;
 
 impl ConfigActorHandle {
     /// Create a new handle (called by ConfigActor::create)
@@ -87,7 +93,28 @@ impl ConfigActorHandle {
             permission_ceiling,
             log_store,
             monitor_shutdown_token,
+            spawn_gate: Arc::new(RwLock::new(false)),
         }
+    }
+
+    /// Enter a spawn window, or `None` once the config is being unloaded.
+    ///
+    /// A process spawned but not yet held by the actor is out of reach of a
+    /// stop. Unloading under it would drop its handle on the floor, and the
+    /// resulting force-kill of the service cgroup — shared with the next load's
+    /// instances — would land on those. Holding the window across the spawn
+    /// lets [`Self::close_spawns`] wait it out.
+    pub async fn enter_spawn(&self) -> Option<SpawnWindow> {
+        let window = Arc::clone(&self.spawn_gate).read_owned().await;
+        (!*window).then_some(window)
+    }
+
+    /// Refuse new spawn windows and wait for those in flight to finish.
+    ///
+    /// Once this returns, every process this config spawned is held by the
+    /// actor (or already reaped), so a stop can reach it.
+    pub async fn close_spawns(&self) {
+        *self.spawn_gate.write().await = true;
     }
 
     /// Immediately set the discard flag on the log store and interrupt any
@@ -427,7 +454,7 @@ impl ConfigActorHandle {
         reply_rx.await.ok().flatten()
     }
 
-    /// Check if all services are stopped
+    /// Check if all services are in a terminal state (none waiting, starting or running)
     pub async fn all_services_stopped(&self) -> bool {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
@@ -813,6 +840,20 @@ impl ConfigActorHandle {
     }
 
     // === Process Handle Methods ===
+
+    /// Store a process handle, handing it back if the actor is gone.
+    pub async fn try_store_process_handle(&self, service_name: &str, handle: ProcessHandle) -> std::result::Result<(), ProcessHandle> {
+        self.tx
+            .send(ConfigCommand::StoreProcessHandle {
+                service_name: service_name.to_string(),
+                handle,
+            })
+            .await
+            .map_err(|error| match error.0 {
+                ConfigCommand::StoreProcessHandle { handle, .. } => handle,
+                _ => unreachable!("the rejected command is the one sent"),
+            })
+    }
 
     /// Store a process handle
     pub async fn store_process_handle(&self, service_name: &str, handle: ProcessHandle) {

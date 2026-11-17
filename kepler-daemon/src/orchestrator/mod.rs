@@ -1518,7 +1518,7 @@ impl ServiceOrchestrator {
             // Unload config from registry — clean=true skips save_state since
             // the state directory is about to be removed
             info!("stop_services: unloading config (clean=true), waiting for cleanup + log store exit");
-            self.registry.unload(&config_path.to_path_buf(), true).await;
+            self.unload_config(config_path, true).await;
             info!("stop_services: config unloaded");
 
             // Clean up config-level cgroup
@@ -1874,7 +1874,7 @@ impl ServiceOrchestrator {
             self.token_store.revoke_for_config(config_path).await;
 
             // Unload the config actor completely
-            self.registry.unload(&config_path.to_path_buf(), false).await;
+            self.unload_config(config_path, false).await;
         }
 
         // Re-load config with new sys_env (re-reads source, re-expands env vars)
@@ -1894,6 +1894,28 @@ impl ServiceOrchestrator {
         Ok(String::new())
     }
 
+
+    /// Unload a config, leaving none of its processes to the actor's teardown.
+    ///
+    /// A start racing the caller's stop can spawn a process after that stop has
+    /// passed it by. Dropped with the actor, its handle would make its monitor
+    /// force-kill the service cgroup asynchronously — by then possibly shared
+    /// with the instances of the config's next load. So: wait out in-flight
+    /// spawns (refusing new ones), stop what they registered, then unload.
+    async fn unload_config(&self, config_path: &Path, clean: bool) {
+        if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
+            handle.close_spawns().await;
+            if let Some(config) = handle.get_config().await {
+                for service_name in config.services.keys() {
+                    if let Some(process_handle) = handle.remove_process_handle(service_name).await {
+                        info!("Stopping {} before unload: it was spawned after the stop", service_name);
+                        crate::process::shut_down_process(service_name, process_handle, None, Duration::ZERO).await;
+                    }
+                }
+            }
+        }
+        self.registry.unload(&config_path.to_path_buf(), clean).await;
+    }
 
     /// Run services in ephemeral mode: always reload config fresh, no snapshot.
     ///
@@ -1940,7 +1962,7 @@ impl ServiceOrchestrator {
             // shutdown/cleanup since run_services deletes state files anyway,
             // and avoids a race where the old actor's cleanup() could recreate
             // state.json after we delete it).
-            self.registry.unload(&config_path.to_path_buf(), true).await;
+            self.unload_config(config_path, true).await;
         }
 
         // Compute state dir path
@@ -2395,6 +2417,11 @@ impl ServiceOrchestrator {
                     let _ = handle
                         .set_service_status(service_name, ServiceStatus::Running)
                         .await;
+                }
+                Err(OrchestratorError::StartupCancelled(_)) => {
+                    // The config is being unloaded: nothing was spawned, and its
+                    // cgroup may already host the next load's instance.
+                    debug!("Restart of {} cancelled: config is being unloaded", service_name);
                 }
                 Err(e) => {
                     error!("Failed to restart service {}: {}", service_name, e);
@@ -2944,6 +2971,12 @@ impl ServiceOrchestrator {
         ctx: &ServiceContext,
         token: Option<Token>,
     ) -> Result<ServiceInstance, OrchestratorError> {
+        // Held until the actor holds the process handle — see `enter_spawn`.
+        let Some(_spawn_window) = handle.enter_spawn().await else {
+            self.revoke_matching_service_token_guard(handle, service_name, token).await;
+            return Err(OrchestratorError::StartupCancelled(service_name.to_string()));
+        };
+
         let resolved = ctx.resolved_config.as_ref()
             .ok_or(OrchestratorError::ServiceContextNotFound)?;
 
@@ -3036,7 +3069,6 @@ impl ServiceOrchestrator {
             config_hash: handle.config_hash().to_string(),
         };
 
-        let gate_t0 = std::time::Instant::now(); // TEMP measurement
         let (process_handle, spawn_gate) = match spawn_service(spawn_params).await {
             Ok(ph) => ph,
             Err(e) => {
@@ -3049,8 +3081,13 @@ impl ServiceOrchestrator {
             }
         };
 
-        // Store process handle
-        handle.store_process_handle(service_name, process_handle).await;
+        // Store process handle. Without an actor nothing could ever stop the
+        // process, so stop it here, while the spawn window is still held.
+        if let Err(process_handle) = handle.try_store_process_handle(service_name, process_handle).await {
+            crate::process::shut_down_process(service_name, process_handle, None, Duration::ZERO).await;
+            self.revoke_matching_service_token_guard(handle, service_name, token).await;
+            return Err(OrchestratorError::StartupCancelled(service_name.to_string()));
+        }
 
         // Update status to running
         let _ = handle
@@ -3061,7 +3098,6 @@ impl ServiceOrchestrator {
         // reported. Released last so `handle_exit` always sees the stored
         // handle (for output capture tasks) and a status it can transition
         // from. See `SpawnGate`.
-        info!("GATEDBG registration for {} took {:?}", service_name, gate_t0.elapsed());
         let instance = spawn_gate.instance();
         spawn_gate.release();
 
@@ -3233,7 +3269,7 @@ impl ServiceOrchestrator {
             if !is_orphaned
                 && let Ok(canonical) = PathBuf::from(&original_path).canonicalize() {
                     self.token_store.revoke_for_config(&canonical).await;
-                    self.registry.unload(&canonical, true).await;
+                    self.unload_config(&canonical, true).await;
                 }
 
             // Delete entire state directory

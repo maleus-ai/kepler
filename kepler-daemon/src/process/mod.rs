@@ -389,6 +389,62 @@ pub fn parse_signal_name(name: &str) -> Option<i32> {
     }
 }
 
+/// Stop a service's process and drain its output, returning once it is dead.
+///
+/// Process-level only: no status update, hooks or task cancellation — see
+/// [`stop_service`] for the full stop.
+pub async fn shut_down_process(
+    service_name: &str,
+    process_handle: ProcessHandle,
+    signal: Option<i32>,
+    grace_period: std::time::Duration,
+) {
+    // Send shutdown request to monitor task and wait for it to confirm the process is dead.
+    // This ensures the process has exited before we drain output tasks.
+    if let Some(shutdown_tx) = process_handle.shutdown_tx {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let request = ShutdownRequest {
+            signal: signal.unwrap_or(15),
+            grace_period,
+            reply: reply_tx,
+        };
+        let _ = shutdown_tx.send(request);
+        // Wait for monitor_process to confirm process death (grace_period + 15s safety margin)
+        let safety_timeout = grace_period + std::time::Duration::from_secs(15);
+        let _ = tokio::time::timeout(
+            safety_timeout,
+            reply_rx,
+        ).await;
+    }
+
+    // Drain output tasks — process is already dead so pipes are closed.
+    // Use a short timeout (2s) since data should flush quickly.
+    let drain_timeout = std::time::Duration::from_secs(2);
+    let stdout_fut = async {
+        if let Some(mut task) = process_handle.stdout_task {
+            tokio::select! {
+                _ = &mut task => {}
+                _ = tokio::time::sleep(drain_timeout) => {
+                    warn!("stdout capture task for {} did not finish in time, aborting", service_name);
+                    task.abort();
+                }
+            }
+        }
+    };
+    let stderr_fut = async {
+        if let Some(mut task) = process_handle.stderr_task {
+            tokio::select! {
+                _ = &mut task => {}
+                _ = tokio::time::sleep(drain_timeout) => {
+                    warn!("stderr capture task for {} did not finish in time, aborting", service_name);
+                    task.abort();
+                }
+            }
+        }
+    };
+    tokio::join!(stdout_fut, stderr_fut);
+}
+
 /// Stop a service process
 pub async fn stop_service(
     service_name: &str,
@@ -410,50 +466,7 @@ pub async fn stop_service(
     let process_handle = handle.remove_process_handle(service_name).await;
 
     if let Some(process_handle) = process_handle {
-        // Send shutdown request to monitor task and wait for it to confirm the process is dead.
-        // This ensures the process has exited before we drain output tasks.
-        if let Some(shutdown_tx) = process_handle.shutdown_tx {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            let request = ShutdownRequest {
-                signal: signal.unwrap_or(15),
-                grace_period,
-                reply: reply_tx,
-            };
-            let _ = shutdown_tx.send(request);
-            // Wait for monitor_process to confirm process death (grace_period + 15s safety margin)
-            let safety_timeout = grace_period + std::time::Duration::from_secs(15);
-            let _ = tokio::time::timeout(
-                safety_timeout,
-                reply_rx,
-            ).await;
-        }
-
-        // Drain output tasks — process is already dead so pipes are closed.
-        // Use a short timeout (2s) since data should flush quickly.
-        let drain_timeout = std::time::Duration::from_secs(2);
-        let stdout_fut = async {
-            if let Some(mut task) = process_handle.stdout_task {
-                tokio::select! {
-                    _ = &mut task => {}
-                    _ = tokio::time::sleep(drain_timeout) => {
-                        warn!("stdout capture task for {} did not finish in time, aborting", service_name);
-                        task.abort();
-                    }
-                }
-            }
-        };
-        let stderr_fut = async {
-            if let Some(mut task) = process_handle.stderr_task {
-                tokio::select! {
-                    _ = &mut task => {}
-                    _ = tokio::time::sleep(drain_timeout) => {
-                        warn!("stderr capture task for {} did not finish in time, aborting", service_name);
-                        task.abort();
-                    }
-                }
-            }
-        };
-        tokio::join!(stdout_fut, stderr_fut);
+        shut_down_process(service_name, process_handle, signal, grace_period).await;
     }
 
     // Cancel health check
