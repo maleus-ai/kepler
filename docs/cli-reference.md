@@ -363,6 +363,7 @@ services:
 - **Repeatable**: Use multiple `-D` flags to define multiple values
 - **String values**: All values are strings (use `tonumber(kepler.flags.PORT)` in Lua if needed)
 - **Merge semantics**: Re-invocation with the same key overwrites the previous value (same as `-e`)
+- **Applied only when the command acts**: A rejected command (unknown service, `restart` of a service that has not completed its first startup) leaves flags and `-e` overrides untouched. `restart` also leaves them untouched when no service is eligible for restart
 - **Persisted in snapshot**: Flags are saved in the config snapshot for `start`/`recreate`, so they survive daemon restarts. For `run` mode, flags are ephemeral
 - **Not inherited**: Flags do not appear in service process environments — use them to control config generation logic without polluting the runtime environment
 
