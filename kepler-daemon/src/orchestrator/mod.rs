@@ -1864,6 +1864,11 @@ impl ServiceOrchestrator {
 
         // Stop all running services with cleanup if config is loaded
         if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {
+            // The config is reloaded from source below: validate it before
+            // tearing down the loaded one, so that a refused recreate leaves
+            // the running services and the recorded flags untouched.
+            self.validate_reload(config_path, &sys_env, &[])?;
+
             if !handle.all_services_stopped().await {
                 info!("Stopping all services before recreate for {:?}", config_path);
                 self.stop_services(config_path, &[], true, None).await?;
@@ -1921,9 +1926,32 @@ impl ServiceOrchestrator {
         self.registry.unload(&config_path.to_path_buf(), clean).await;
     }
 
+    /// Validate a request against the config as a fresh reload from source
+    /// will see it, without touching the loaded config or its state.
+    ///
+    /// Mirrors the checks that would otherwise fail only after the loaded
+    /// config is torn down: the fresh load itself (parsing, `lua:` block,
+    /// `kepler.environment`, ACL), the requested service names, and, when no
+    /// service is named, the dependency order of all services.
+    fn validate_reload(
+        &self,
+        config_path: &Path,
+        sys_env: &Option<HashMap<String, String>>,
+        services: &[String],
+    ) -> Result<(), OrchestratorError> {
+        let config = crate::config_actor::ConfigActor::validate_source(config_path, sys_env.clone())?;
+        if services.is_empty() {
+            get_start_order(&config.services)?;
+        } else if let Some(name) = services.iter().find(|name| !config.services.contains_key(*name)) {
+            return Err(OrchestratorError::ServiceNotFound(name.clone()));
+        }
+        Ok(())
+    }
+
     /// Run services in ephemeral mode: always reload config fresh, no snapshot.
     ///
     /// Flow:
+    /// 0. Validate the request against the config reloaded from source
     /// 1. Stop all prior services (if any)
     /// 2. Unload config actor
     /// 3. Clear state dir contents (keep logs/ and monitor.db)
@@ -1946,6 +1974,11 @@ impl ServiceOrchestrator {
         define_flags: Option<HashMap<String, String>>,
     ) -> Result<String, OrchestratorError> {
         info!("Running config in ephemeral mode for {:?}", config_path);
+
+        // Step 0: validate the request against the config as it will be
+        // reloaded from source, before stopping anything or clearing state:
+        // a refused run (unknown service, broken config) has no side effect.
+        self.validate_reload(config_path, &sys_env, services)?;
 
         // Step 1 & 2: Stop all running services and unload config if loaded
         if let Some(handle) = self.registry.get(&config_path.to_path_buf()) {

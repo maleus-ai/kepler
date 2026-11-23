@@ -352,20 +352,7 @@ impl ConfigActor {
             // No snapshot - parse fresh from source
             info!("Loading config fresh from source (no snapshot)");
 
-            let mut cli_env = match sys_env {
-                Some(env) => env,
-                None => {
-                    warn!("No sys_env provided and no snapshot exists; using empty environment");
-                    HashMap::new()
-                }
-            };
-            // Defense-in-depth: strip KEPLER_TOKEN from the CLI environment so it
-            // is not baked into the config snapshot. The authoritative strip point
-            // is in the orchestrator's resolve_service_env_and_config (computed_env)
-            // and spawn_service (spec.environment), which cover both fresh loads
-            // and snapshot restores.
-            cli_env.remove("KEPLER_TOKEN");
-            cli_env.remove("KEPLER_SOCKET_PATH");
+            let cli_env = Self::fresh_cli_env(sys_env);
 
             // Read original file contents
             let contents = std::fs::read(&canonical_path).map_err(|e| {
@@ -397,32 +384,8 @@ impl ConfigActor {
             }
 
             // Parse config from the secure copy (baking with cli_env initially)
-            // Map error to show the original config path, not the internal copy
-            let mut config =
-                KeplerConfig::load(&copied_config_path, &cli_env).map_err(|e| match e {
-                    DaemonError::ConfigParse { source, .. } => DaemonError::ConfigParse {
-                        path: canonical_path.clone(),
-                        source,
-                    },
-                    other => other,
-                })?;
-
-            // Create the LuaEvaluator that the actor will own for its lifetime.
-            // This is the same evaluator later used by handle_lua_eval() for runtime conditions.
-            let evaluator = LuaEvaluator::new().map_err(|e| {
-                DaemonError::Internal(format!("Failed to create Lua evaluator: {}", e))
-            })?;
-            if let Some(ref code) = config.lua {
-                evaluator
-                    .load_inline(code)
-                    .map_err(|e| DaemonError::LuaError {
-                        path: canonical_path.clone(),
-                        message: format!("Error in lua: block: {}", e),
-                    })?;
-            }
-
-            // Resolve kepler.environment using the actor's evaluator
-            let resolved_kepler_env = Self::compute_kepler_env(&config, &cli_env, &evaluator)?;
+            let (mut config, evaluator, resolved_kepler_env) =
+                Self::parse_fresh_config(&copied_config_path, &canonical_path, &cli_env)?;
 
             // Bake default user into services based on CLI user
             if let Some((uid, gid)) = config_owner {
@@ -515,16 +478,7 @@ impl ConfigActor {
 
         // Resolve ACL from config, or create an empty ACL so the Lua VM is
         // always available for token authorizer compilation.
-        let resolved_acl = {
-            let mut acl = match config.kepler.as_ref().and_then(|k| k.acl.as_ref()) {
-                Some(acl_config) => crate::acl::ResolvedAcl::from_config(acl_config)
-                    .map_err(|e| DaemonError::Config(format!("ACL resolution failed: {}", e)))?,
-                None => crate::acl::ResolvedAcl::empty(),
-            };
-            acl.init_authorizers()
-                .map_err(|e| DaemonError::Config(format!("ACL initialization failed: {}", e)))?;
-            Some(acl)
-        };
+        let resolved_acl = Some(Self::resolve_acl(&config)?);
 
         let monitor_shutdown_token = std::sync::Arc::new(crate::monitor::MonitorShutdownToken::new());
         let handle = ConfigActorHandle::new(
@@ -2058,6 +2012,110 @@ impl ConfigActor {
                     .map(|raw| raw.restart.as_static().cloned().unwrap_or_default())
             });
         is_condition_met(state, dep_config, dep_restart.as_ref())
+    }
+
+    /// Build the CLI environment a fresh load bakes the config with.
+    fn fresh_cli_env(sys_env: Option<HashMap<String, String>>) -> HashMap<String, String> {
+        let mut cli_env = match sys_env {
+            Some(env) => env,
+            None => {
+                warn!("No sys_env provided and no snapshot exists; using empty environment");
+                HashMap::new()
+            }
+        };
+        // Defense-in-depth: strip KEPLER_TOKEN from the CLI environment so it
+        // is not baked into the config snapshot. The authoritative strip point
+        // is in the orchestrator's resolve_service_env_and_config (computed_env)
+        // and spawn_service (spec.environment), which cover both fresh loads
+        // and snapshot restores.
+        cli_env.remove("KEPLER_TOKEN");
+        cli_env.remove("KEPLER_SOCKET_PATH");
+        cli_env
+    }
+
+    /// Parse a config source and run the load-time checks of a fresh load:
+    /// YAML parsing and expansion, the `lua:` block, and `kepler.environment`.
+    ///
+    /// `load_path` is the file actually read; `source_path` is the user's
+    /// config path, reported in errors instead of an internal copy.
+    ///
+    /// Returns the parsed config, the evaluator holding the `lua:` block, and
+    /// the resolved kepler env.
+    fn parse_fresh_config(
+        load_path: &Path,
+        source_path: &Path,
+        cli_env: &HashMap<String, String>,
+    ) -> Result<(KeplerConfig, LuaEvaluator, HashMap<String, String>)> {
+        // Map error to show the original config path, not the internal copy
+        let config = KeplerConfig::load(load_path, cli_env).map_err(|e| match e {
+            DaemonError::ConfigParse { source, .. } => DaemonError::ConfigParse {
+                path: source_path.to_path_buf(),
+                source,
+            },
+            other => other,
+        })?;
+
+        // Create the LuaEvaluator that the actor will own for its lifetime.
+        // This is the same evaluator later used by handle_lua_eval() for runtime conditions.
+        let evaluator = LuaEvaluator::new().map_err(|e| {
+            DaemonError::Internal(format!("Failed to create Lua evaluator: {}", e))
+        })?;
+        if let Some(ref code) = config.lua {
+            evaluator
+                .load_inline(code)
+                .map_err(|e| DaemonError::LuaError {
+                    path: source_path.to_path_buf(),
+                    message: format!("Error in lua: block: {}", e),
+                })?;
+        }
+
+        // Resolve kepler.environment using the actor's evaluator
+        let resolved_kepler_env = Self::compute_kepler_env(&config, cli_env, &evaluator)?;
+
+        Ok((config, evaluator, resolved_kepler_env))
+    }
+
+    /// Resolve the config's ACL, or an empty ACL so the Lua VM is always
+    /// available for token authorizer compilation.
+    fn resolve_acl(config: &KeplerConfig) -> Result<crate::acl::ResolvedAcl> {
+        let mut acl = match config.kepler.as_ref().and_then(|k| k.acl.as_ref()) {
+            Some(acl_config) => crate::acl::ResolvedAcl::from_config(acl_config)
+                .map_err(|e| DaemonError::Config(format!("ACL resolution failed: {}", e)))?,
+            None => crate::acl::ResolvedAcl::empty(),
+        };
+        acl.init_authorizers()
+            .map_err(|e| DaemonError::Config(format!("ACL initialization failed: {}", e)))?;
+        Ok(acl)
+    }
+
+    /// Check that the config source would load fresh, without touching any
+    /// state: no state directory, no config copy, no actor.
+    ///
+    /// Runs the same parsing and checks as a fresh load in [`Self::create`],
+    /// and returns the parsed config so the caller can validate a request
+    /// (service names, dependency order) against it. Callers that reload a
+    /// config from disk run this before tearing down the loaded one, so that
+    /// a refused request has no side effect.
+    pub fn validate_source(
+        config_path: &Path,
+        sys_env: Option<HashMap<String, String>>,
+    ) -> Result<KeplerConfig> {
+        let canonical_path = std::fs::canonicalize(config_path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                DaemonError::ConfigNotFound(config_path.to_path_buf())
+            } else {
+                DaemonError::Internal(format!(
+                    "Failed to canonicalize '{}': {}",
+                    config_path.display(),
+                    e
+                ))
+            }
+        })?;
+        let cli_env = Self::fresh_cli_env(sys_env);
+        let (config, _evaluator, _kepler_env) =
+            Self::parse_fresh_config(&canonical_path, &canonical_path, &cli_env)?;
+        Self::resolve_acl(&config)?;
+        Ok(config)
     }
 
     /// Compute kepler_env based on AutostartConfig.

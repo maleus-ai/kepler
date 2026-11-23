@@ -546,3 +546,108 @@ async fn test_run_detach_wait_timeout() -> E2eResult<()> {
     harness.stop_daemon().await?;
     Ok(())
 }
+
+fn inspect_json(output: &kepler_e2e::CommandOutput) -> serde_json::Value {
+    output.assert_success();
+    serde_json::from_str(&output.stdout).unwrap()
+}
+
+/// Write a config whose `web` service appends a line to `starts` on each
+/// start, and start it with a `-D` flag and a `-e` override recorded.
+async fn start_web_with_flags(harness: &mut E2eHarness) -> E2eResult<(std::path::PathBuf, std::path::PathBuf)> {
+    let root = harness.temp_dir().path().to_path_buf();
+    let starts = root.join("starts");
+    let config = harness.create_test_config(&format!(
+        r#"
+services:
+  web:
+    command: [sh, -c, 'echo started >> {starts}; sleep 300']
+"#,
+        starts = starts.display()
+    ))?;
+    harness.start_daemon().await?;
+    harness
+        .run_cli(&["-f", config.to_str().unwrap(), "start", "-d", "--wait", "-D", "MODE=kept", "-e", "EXTRA=kept"])
+        .await?
+        .assert_success();
+    harness
+        .wait_for_file_content(&starts, "started", Duration::from_secs(10))
+        .await?;
+    Ok((config, starts))
+}
+
+/// Assert that `web` is still the process started by `start_web_with_flags`,
+/// with its `-D` flag and `-e` override still recorded.
+async fn assert_untouched(harness: &E2eHarness, config: &std::path::Path, starts: &std::path::Path) -> E2eResult<()> {
+    let config_str = config.to_str().unwrap();
+    // Leave time for a wrongly restarted service to show up.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    harness
+        .wait_for_service_status(config, "web", "running", Duration::from_secs(2))
+        .await?;
+    let starts = std::fs::read_to_string(starts).unwrap();
+    assert_eq!(starts.lines().count(), 1, "web must not have been restarted: {starts}");
+
+    let flags = inspect_json(&harness.run_cli(&["-f", config_str, "inspect", "--flags"]).await?)["flags"].clone();
+    assert_eq!(flags["MODE"], "kept", "recorded flags must be kept: {flags}");
+    assert!(flags.get("X").is_none(), "flags of the rejected command must not be recorded: {flags}");
+
+    let env = harness.run_cli(&["-f", config_str, "inspect", "--environment"]).await?;
+    env.assert_success();
+    assert!(env.stdout.contains("\"EXTRA\""), "recorded env overrides must be kept: {}", env.stdout);
+    Ok(())
+}
+
+/// A `run` naming an unknown service is rejected before anything happens:
+/// running services are not stopped and recorded flags are not cleared.
+#[tokio::test]
+async fn test_run_unknown_service_has_no_side_effect() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let (config, starts) = start_web_with_flags(&mut harness).await?;
+
+    let rejected = harness
+        .run_cli(&["-f", config.to_str().unwrap(), "run", "-d", "-D", "X=1", "missing"])
+        .await?;
+    assert!(!rejected.success(), "run of an unknown service must be rejected");
+    assert!(rejected.stderr_contains("missing"), "{}", rejected.stderr);
+
+    assert_untouched(&harness, &config, &starts).await?;
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// A `run` whose config no longer loads from disk is rejected before
+/// anything happens: the loaded config keeps running with its flags.
+#[tokio::test]
+async fn test_run_broken_config_has_no_side_effect() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let (config, starts) = start_web_with_flags(&mut harness).await?;
+
+    std::fs::write(&config, "services: [this is not a mapping\n").unwrap();
+    let rejected = harness
+        .run_cli(&["-f", config.to_str().unwrap(), "run", "-d", "-D", "X=1"])
+        .await?;
+    assert!(!rejected.success(), "run of a broken config must be rejected");
+
+    assert_untouched(&harness, &config, &starts).await?;
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Same for `recreate`: a config that no longer loads from disk leaves the
+/// loaded one running with its flags.
+#[tokio::test]
+async fn test_recreate_broken_config_has_no_side_effect() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let (config, starts) = start_web_with_flags(&mut harness).await?;
+
+    std::fs::write(&config, "services: [this is not a mapping\n").unwrap();
+    let rejected = harness
+        .run_cli(&["-f", config.to_str().unwrap(), "recreate", "-D", "X=1"])
+        .await?;
+    assert!(!rejected.success(), "recreate of a broken config must be rejected");
+
+    assert_untouched(&harness, &config, &starts).await?;
+    harness.stop_daemon().await?;
+    Ok(())
+}
