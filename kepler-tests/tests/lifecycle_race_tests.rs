@@ -59,11 +59,11 @@ fn write_config(temp_dir: &TempDir, name: &str) -> std::path::PathBuf {
 
 /// Whether `pid` is a live (non-zombie) process.
 fn is_alive(pid: u32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) else {
-        return false;
-    };
-    // The state follows the parenthesised command name, which may contain spaces.
-    stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().next()) != Some("Z")
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
+    let pid = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), false, ProcessRefreshKind::nothing());
+    sys.process(pid).is_some_and(|p| p.status() != ProcessStatus::Zombie)
 }
 
 /// Every service must be running, its recorded process still alive after `SETTLE`.
