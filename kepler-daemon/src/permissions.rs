@@ -33,22 +33,19 @@ pub const BASE_RIGHTS: &[&str] = &[
 /// Sub-rights — gate optional features within a request.
 /// Format: "base:feature"
 pub const SUB_RIGHTS: &[&str] = &[
-    "start:define",
     "start:env-override",
     "start:hardening",
     "start:no-deps",
-    "run:define",
     "run:env-override",
     "run:hardening",
     "run:no-deps",
     "run:start-clean",
     "stop:clean",
     "stop:signal",
-    "restart:define",
     "restart:env-override",
     "restart:inactive",
     "restart:no-deps",
-    "recreate:define",
+    "recreate:env-override",
     "recreate:hardening",
     "inspect:services",
     "inspect:environment",
@@ -126,10 +123,8 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
             base: "start",
             sub_rights: {
                 let mut s = vec![];
-                if define_flags.is_some() {
-                    s.push("start:define");
-                }
-                if override_envs.is_some() {
+                // `-e` and `-D` both inject caller-chosen values into config evaluation
+                if override_envs.is_some() || define_flags.is_some() {
                     s.push("start:env-override");
                 }
                 if hardening.is_some() {
@@ -152,10 +147,8 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
             base: "run",
             sub_rights: {
                 let mut s = vec![];
-                if define_flags.is_some() {
-                    s.push("run:define");
-                }
-                if override_envs.is_some() {
+                // `-e` and `-D` both inject caller-chosen values into config evaluation
+                if override_envs.is_some() || define_flags.is_some() {
                     s.push("run:env-override");
                 }
                 if hardening.is_some() {
@@ -195,13 +188,11 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
             base: "restart",
             sub_rights: {
                 let mut s = vec![];
-                if define_flags.is_some() {
-                    s.push("restart:define");
-                }
                 if !states.is_empty() {
                     s.push("restart:inactive");
                 }
-                if override_envs.is_some() {
+                // `-e` and `-D` both inject caller-chosen values into config evaluation
+                if override_envs.is_some() || define_flags.is_some() {
                     s.push("restart:env-override");
                 }
                 if *no_deps {
@@ -218,8 +209,9 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
             base: "recreate",
             sub_rights: {
                 let mut s = vec![];
+                // `-D` is the only caller-chosen override recreate accepts
                 if define_flags.is_some() {
-                    s.push("recreate:define");
+                    s.push("recreate:env-override");
                 }
                 if hardening.is_some() {
                     s.push("recreate:hardening");
