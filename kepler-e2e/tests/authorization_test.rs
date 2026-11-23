@@ -1731,6 +1731,67 @@ async fn test_token_service_can_stop_with_right() -> E2eResult<()> {
     Ok(())
 }
 
+/// Service token with `recreate` but no `recreate:env-override` is denied `recreate -D`.
+/// A token stays bound to its own rights even once it owns the config, so this
+/// check is the only thing keeping `-D` out of its reach.
+#[tokio::test]
+async fn test_token_recreate_without_env_override_denies_d_flag() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    let kepler_bin = harness.kepler_bin().to_str().unwrap().to_string();
+    let config_dir = harness.state_dir().join("test_configs");
+    std::fs::create_dir_all(&config_dir)?;
+    let config_path = config_dir.join("token_recreate_define.kepler.yaml");
+    let config_str = config_path.to_str().unwrap().to_string();
+    let result_file = harness.state_dir().join("token_recreate_define_result.txt");
+    let result_str = result_file.to_str().unwrap().to_string();
+
+    let config_content = format!(
+        r#"services:
+  controller:
+    command:
+      - "sh"
+      - "-c"
+      - |
+        '{kepler_bin}' -f '{config_str}' recreate -D MODE=x > '{result_str}' 2>&1
+        echo "EXIT_CODE=$?" >> '{result_str}'
+        sleep 300
+    permissions: [recreate]
+"#
+    );
+
+    std::fs::write(&config_path, &config_content)?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.run_cli(&["-f", &config_str, "start", "-d"]).await?;
+    output.assert_success();
+
+    harness
+        .wait_for_service_status(&config_path, "controller", "running", Duration::from_secs(15))
+        .await?;
+
+    assert!(
+        wait_for_file_content(&result_file, "EXIT_CODE=", Duration::from_secs(15)).await,
+        "Controller should write result file"
+    );
+
+    let content = std::fs::read_to_string(&result_file).unwrap();
+    assert!(
+        !content.contains("EXIT_CODE=0"),
+        "recreate -D should be denied without recreate:env-override. Result: {}",
+        content
+    );
+    assert!(
+        content.contains("recreate:env-override"),
+        "Should name the missing sub-right. Result: {}",
+        content
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
 /// Token authorizer Lua script can deny specific actions
 #[tokio::test]
 async fn test_token_authorizer_denies_action() -> E2eResult<()> {
