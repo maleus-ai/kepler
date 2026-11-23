@@ -1637,10 +1637,6 @@ impl ServiceOrchestrator {
                 }
             }
         }
-        if services_to_restart.is_empty() {
-            return Ok("No eligible services to restart".to_string());
-        }
-
         // Sort services by dependency graph (unless --no-deps, which uses user-specified order)
         let (mut start_order, mut stop_order) = if no_deps {
             // --no-deps: use user-specified order for start, reverse for stop
@@ -1664,6 +1660,23 @@ impl ServiceOrchestrator {
                 .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?,
         ));
 
+        // Apply -e/-D only once the request is validated: a rejected restart
+        // must leave the stored env and flags untouched. A restart with no
+        // eligible service still applies them, like `start` on running services:
+        // they describe the config of the next starts, not what currently runs.
+        if let Some(overrides) = override_envs {
+            handle.merge_kepler_env(overrides).await;
+        }
+
+        // Merge define flags into stored kepler_flags if provided
+        if let Some(flags) = define_flags {
+            handle.merge_kepler_flags(flags).await;
+        }
+
+        if services_to_restart.is_empty() {
+            return Ok("No eligible services to restart".to_string());
+        }
+
         // Claim all selected lifecycles before stopping any dependency. Terminal
         // services wait for a start; running services retain the restart contract.
         let mut lifecycles = HashMap::new();
@@ -1683,18 +1696,6 @@ impl ServiceOrchestrator {
         stop_order.retain(|name| matches!(lifecycles.get(name), Some(SelectedServiceLifecycle::Restart(_))));
         if start_order.is_empty() {
             return Ok("No eligible services to restart".to_string());
-        }
-
-        // Apply -e/-D only now that the restart is validated and its lifecycles
-        // are claimed: a rejected or no-op restart must leave the stored env and
-        // flags untouched, otherwise they would diverge from what actually runs.
-        if let Some(overrides) = override_envs {
-            handle.merge_kepler_env(overrides).await;
-        }
-
-        // Merge define flags into stored kepler_flags if provided
-        if let Some(flags) = define_flags {
-            handle.merge_kepler_flags(flags).await;
         }
 
         // Phase 1: Run pre_restart hooks and stop (reverse dependency order)

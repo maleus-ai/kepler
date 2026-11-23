@@ -320,7 +320,7 @@ kepler start -e DB_HOST=newhost
 kepler start -D MODE=debug
 ```
 
-See [CLI Reference — Define Flags](cli-reference.md#define-flags) for the full reference.
+See [CLI Reference — Define Flags](cli-reference.md#define-flags) for the full reference, including what the stored flags represent, when `-D` is recorded and how to read the values a running service was started with.
 
 ---
 

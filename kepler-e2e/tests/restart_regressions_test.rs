@@ -923,3 +923,66 @@ services:
     harness.stop_daemon().await?;
     Ok(())
 }
+
+/// A `start` or `restart` that has nothing to do still records `-D`: flags
+/// describe the config of the next starts. The value a running service was
+/// started with stays visible in its resolved environment.
+#[tokio::test]
+async fn noop_start_and_restart_apply_flags_for_next_starts() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config = harness.create_test_config(
+        r#"
+services:
+  web:
+    command: [sleep, '300']
+    environment:
+      - MODE=${{ kepler.flags.MODE or 'default' }}$
+"#,
+    )?;
+    let config_str = config.to_str().unwrap();
+    harness.start_daemon().await?;
+    harness
+        .run_cli(&["-f", config_str, "start", "-d", "--wait", "-D", "MODE=first"])
+        .await?
+        .assert_success();
+
+    // Already running: nothing starts, but the flag is recorded.
+    harness
+        .run_cli(&["-f", config_str, "start", "-d", "-D", "MODE=second"])
+        .await?
+        .assert_success();
+    assert_eq!(flags(&harness, &config).await?["MODE"], "second");
+    let inspect = harness
+        .run_cli(&["-f", config_str, "inspect", "web", "--environment"])
+        .await?;
+    inspect.assert_success();
+    let json: Value = serde_json::from_str(&inspect.stdout).unwrap();
+    assert_eq!(json["services"]["web"]["environment"]["MODE"], "first", "running service keeps the value it started with");
+
+    // No eligible service: nothing restarts, but the flag is recorded.
+    harness.stop_service(&config, "web").await?.assert_success();
+    let restart = harness
+        .run_cli(&["-f", config_str, "restart", "-D", "MODE=third"])
+        .await?;
+    restart.assert_success();
+    assert!(restart.stdout_contains("No eligible services") || restart.stderr_contains("No eligible services"));
+    assert_eq!(flags(&harness, &config).await?["MODE"], "third");
+
+    // The next start uses the recorded value.
+    harness.start_service(&config, "web").await?.assert_success();
+    harness
+        .wait_for_service_status(&config, "web", "running", Duration::from_secs(10))
+        .await?;
+    let inspect = harness
+        .run_cli(&["-f", config_str, "inspect", "web", "--environment"])
+        .await?;
+    let json: Value = serde_json::from_str(&inspect.stdout).unwrap();
+    assert_eq!(json["services"]["web"]["environment"]["MODE"], "third");
+
+    // recreate reloads the config from scratch: only its own -D survive.
+    harness.recreate_services(&config).await?.assert_success();
+    assert!(flags(&harness, &config).await?.get("MODE").is_none(), "recreate must drop previous flags");
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
