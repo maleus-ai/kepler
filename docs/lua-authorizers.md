@@ -97,6 +97,7 @@ Start service(s) for a config.
 | `no_deps` | `boolean` | Skip dependency waiting and `if:` conditions |
 | `hardening` | `string?` | Hardening level (`"none"`, `"no-root"`, `"strict"`) |
 | `override_envs` | `table<string, string>?` | Environment variable overrides |
+| `define_flags` | `table<string, string>?` | User-defined flags (`-D`), readable via `kepler.flags` |
 
 ### `stop`
 
@@ -118,6 +119,7 @@ Restart service(s).
 | `states` | `string[]` | Additional eligible terminal states: `stopped`, `exited`, `failed`, `killed`, or `all`. Requires `restart:inactive`; only previously initialized services are eligible |
 | `no_deps` | `boolean` | Skip dependency checks and ordering |
 | `override_envs` | `table<string, string>?` | Environment variable overrides |
+| `define_flags` | `table<string, string>?` | User-defined flags (`-D`), readable via `kepler.flags` |
 
 ### `recreate`
 
@@ -126,6 +128,20 @@ Stop, re-bake config snapshot, start.
 | Param | Type | Description |
 |-------|------|-------------|
 | `hardening` | `string?` | Hardening level (`"none"`, `"no-root"`, `"strict"`) |
+| `define_flags` | `table<string, string>?` | User-defined flags (`-D`), readable via `kepler.flags` |
+
+### `run`
+
+Run service(s) in ephemeral mode.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `services` | `string[]` | Services to run (empty table = all) |
+| `no_deps` | `boolean` | Skip dependency waiting and `if:` conditions |
+| `start_clean` | `boolean` | Wipe the state directory before loading |
+| `hardening` | `string?` | Hardening level (`"none"`, `"no-root"`, `"strict"`) |
+| `override_envs` | `table<string, string>?` | Environment variable overrides |
+| `define_flags` | `table<string, string>?` | User-defined flags (`-D`), readable via `kepler.flags` |
 
 ### `status`
 

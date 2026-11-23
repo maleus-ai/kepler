@@ -209,18 +209,22 @@ Rights are flat, explicit identifiers — there are no categories, no implicit c
 
 | Sub-right              | Base       | Grants                                                                                                  |
 | ---------------------- | ---------- | ------------------------------------------------------------------------------------------------------- |
+| `start:define`         | `start`    | Allow user-defined flags (`-D`) on start                                                                |
 | `start:env-override`   | `start`    | Allow environment variable overrides (`-e`) on start                                                    |
 | `start:hardening`      | `start`    | Allow `--hardening` flag on start                                                                       |
 | `start:no-deps`        | `start`    | Allow `--no-deps` flag on start                                                                         |
+| `run:define`           | `run`      | Allow user-defined flags (`-D`) on run                                                                  |
 | `run:env-override`     | `run`      | Allow environment variable overrides (`-e`) on run                                                      |
 | `run:hardening`        | `run`      | Allow `--hardening` flag on run                                                                         |
 | `run:no-deps`          | `run`      | Allow `--no-deps` flag on run                                                                           |
 | `run:start-clean`      | `run`      | Allow `--start-clean` flag on run (wipes logs and metrics)                                              |
 | `stop:clean`           | `stop`     | Allow `--clean` flag on stop                                                                            |
 | `stop:signal`          | `stop`     | Allow custom signal on stop                                                                             |
+| `restart:define`       | `restart`  | Allow user-defined flags (`-D`) on restart                                                              |
 | `restart:env-override` | `restart`  | Allow environment variable overrides on restart                                                         |
 | `restart:inactive`     | `restart`  | Allow `--states` to recover terminal services that have completed at least one startup                  |
 | `restart:no-deps`      | `restart`  | Allow `--no-deps` flag on restart                                                                       |
+| `recreate:define`      | `recreate` | Allow user-defined flags (`-D`) on recreate                                                             |
 | `recreate:hardening`   | `recreate` | Allow `--hardening` flag on recreate                                                                    |
 | `inspect:services`     | `inspect`  | Include services section in inspect output                                                              |
 | `inspect:environment`  | `inspect`  | Include environment (top-level and per-service) in inspect output                                       |

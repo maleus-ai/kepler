@@ -893,6 +893,33 @@ async fn test_acl_start_without_env_override_denies_e_flag() -> E2eResult<()> {
     Ok(())
 }
 
+/// User with `start` but not `start:define` is denied `-D KEY=VALUE`
+#[tokio::test]
+async fn test_acl_start_without_define_denies_d_flag() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_acl_start_subrights")?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "start", "-d"]).await?;
+    output.assert_success();
+    harness.wait_for_service_status(&config_path, "subrights-svc", "running", Duration::from_secs(10)).await?;
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "stop"]).await?;
+    output.assert_success();
+    harness.wait_for_service_status(&config_path, "subrights-svc", "stopped", Duration::from_secs(10)).await?;
+
+    // testuser2 starts with -D — denied
+    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "start", "-d", "-D", "MODE=x"]).await?;
+    assert!(!output.success(), "start -D should be denied without start:define sub-right");
+    assert!(
+        output.stderr_contains("start:define"),
+        "Should name the missing sub-right. stderr: {}", output.stderr
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
 /// User with `start` but not `start:no-deps` is denied `start --no-deps`
 #[tokio::test]
 async fn test_acl_start_without_no_deps_denies_no_deps_flag() -> E2eResult<()> {
@@ -948,6 +975,30 @@ async fn test_acl_restart_without_env_override_denies_e_flag() -> E2eResult<()> 
     Ok(())
 }
 
+/// User with `restart` but not `restart:define` is denied `restart -D`
+#[tokio::test]
+async fn test_acl_restart_without_define_denies_d_flag() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_acl_restart_subrights")?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "start", "-d"]).await?;
+    output.assert_success();
+    harness.wait_for_service_status(&config_path, "subrights-svc", "running", Duration::from_secs(10)).await?;
+
+    // testuser2 restarts with -D — denied
+    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "restart", "--wait", "-D", "MODE=x"]).await?;
+    assert!(!output.success(), "restart -D should be denied without restart:define sub-right");
+    assert!(
+        output.stderr_contains("restart:define"),
+        "Should name the missing sub-right. stderr: {}", output.stderr
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
 /// User with `restart` but not `restart:no-deps` is denied `restart --no-deps`
 #[tokio::test]
 async fn test_acl_restart_without_no_deps_denies_no_deps_flag() -> E2eResult<()> {
@@ -994,6 +1045,31 @@ async fn test_acl_recreate_without_hardening_denies_flag() -> E2eResult<()> {
     assert!(
         output.stderr_contains("sub-right") || output.stderr_contains("recreate:hardening") || output.stderr_contains("permission denied"),
         "Should mention sub-right denial. stderr: {}", output.stderr
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// User with `recreate` but not `recreate:define` is denied `recreate -D`.
+/// Recreate starts the services itself, so the `start` rights are never checked.
+#[tokio::test]
+async fn test_acl_recreate_without_define_denies_d_flag() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_acl_recreate_subrights")?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "start", "-d"]).await?;
+    output.assert_success();
+    harness.wait_for_service_status(&config_path, "subrights-svc", "running", Duration::from_secs(10)).await?;
+
+    // testuser2 recreates with -D — denied
+    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "recreate", "-D", "MODE=x"]).await?;
+    assert!(!output.success(), "recreate -D should be denied without recreate:define sub-right");
+    assert!(
+        output.stderr_contains("recreate:define"),
+        "Should name the missing sub-right. stderr: {}", output.stderr
     );
 
     harness.stop_daemon().await?;

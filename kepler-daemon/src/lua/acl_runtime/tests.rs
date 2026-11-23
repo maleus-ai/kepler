@@ -337,6 +337,46 @@ fn context_from_start_request() {
 }
 
 #[test]
+fn context_exposes_define_flags_on_every_launch_request() {
+    let flags = Some(HashMap::from([("MODE".to_string(), "x".to_string())]));
+    let requests = [
+        Request::Start {
+            config_path: "/test".into(), services: vec![], sys_env: None, no_deps: false,
+            override_envs: None, hardening: None, define_flags: flags.clone(), follow: false,
+        },
+        Request::Run {
+            config_path: "/test".into(), services: vec![], sys_env: None, no_deps: false,
+            override_envs: None, hardening: None, follow: false, start_clean: false,
+            define_flags: flags.clone(),
+        },
+        Request::Restart {
+            config_path: "/test".into(), services: vec![], sys_env: None, no_deps: false,
+            override_envs: None, define_flags: flags.clone(), states: vec![],
+        },
+        Request::Recreate {
+            config_path: "/test".into(), sys_env: None, hardening: None,
+            define_flags: flags.clone(),
+        },
+    ];
+    for req in &requests {
+        let ctx = build_authorizer_context(req, 1000, 1000, None, vec![], false).unwrap();
+        assert!(
+            matches!(ctx.params.get("define_flags"), Some(ParamValue::StringMap(m)) if m.get("MODE").map(String::as_str) == Some("x")),
+            "{} must expose define_flags", ctx.action
+        );
+    }
+}
+
+#[test]
+fn context_omits_define_flags_when_absent() {
+    let req = Request::Recreate {
+        config_path: "/test".into(), sys_env: None, hardening: None, define_flags: None,
+    };
+    let ctx = build_authorizer_context(&req, 1000, 1000, None, vec![], false).unwrap();
+    assert!(!ctx.params.contains_key("define_flags"));
+}
+
+#[test]
 fn context_status_all_configs_has_no_config_path() {
     // `Status { config_path: None }` is a rights-free request — no authorizer context.
     let req = Request::Status { config_path: None };

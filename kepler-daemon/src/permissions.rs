@@ -33,18 +33,22 @@ pub const BASE_RIGHTS: &[&str] = &[
 /// Sub-rights — gate optional features within a request.
 /// Format: "base:feature"
 pub const SUB_RIGHTS: &[&str] = &[
+    "start:define",
     "start:env-override",
     "start:hardening",
     "start:no-deps",
+    "run:define",
     "run:env-override",
     "run:hardening",
     "run:no-deps",
     "run:start-clean",
     "stop:clean",
     "stop:signal",
+    "restart:define",
     "restart:env-override",
     "restart:inactive",
     "restart:no-deps",
+    "recreate:define",
     "recreate:hardening",
     "inspect:services",
     "inspect:environment",
@@ -116,11 +120,15 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
             override_envs,
             hardening,
             no_deps,
+            define_flags,
             ..
         } => Some(RequiredRights {
             base: "start",
             sub_rights: {
                 let mut s = vec![];
+                if define_flags.is_some() {
+                    s.push("start:define");
+                }
                 if override_envs.is_some() {
                     s.push("start:env-override");
                 }
@@ -138,11 +146,15 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
             hardening,
             no_deps,
             start_clean,
+            define_flags,
             ..
         } => Some(RequiredRights {
             base: "run",
             sub_rights: {
                 let mut s = vec![];
+                if define_flags.is_some() {
+                    s.push("run:define");
+                }
                 if override_envs.is_some() {
                     s.push("run:env-override");
                 }
@@ -177,11 +189,15 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
             override_envs,
             no_deps,
             states,
+            define_flags,
             ..
         } => Some(RequiredRights {
             base: "restart",
             sub_rights: {
                 let mut s = vec![];
+                if define_flags.is_some() {
+                    s.push("restart:define");
+                }
                 if !states.is_empty() {
                     s.push("restart:inactive");
                 }
@@ -194,12 +210,21 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
                 s
             },
         }),
-        Request::Recreate { hardening, .. } => Some(RequiredRights {
+        Request::Recreate {
+            hardening,
+            define_flags,
+            ..
+        } => Some(RequiredRights {
             base: "recreate",
-            sub_rights: if hardening.is_some() {
-                vec!["recreate:hardening"]
-            } else {
-                vec![]
+            sub_rights: {
+                let mut s = vec![];
+                if define_flags.is_some() {
+                    s.push("recreate:define");
+                }
+                if hardening.is_some() {
+                    s.push("recreate:hardening");
+                }
+                s
             },
         }),
         Request::LogsStream { filter, sql, .. } => Some(RequiredRights {

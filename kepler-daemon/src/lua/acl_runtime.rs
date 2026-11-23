@@ -496,6 +496,7 @@ pub fn build_authorizer_context(
             no_deps,
             override_envs,
             hardening,
+            define_flags,
             ..
         } => {
             let mut params = HashMap::new();
@@ -506,6 +507,9 @@ pub fn build_authorizer_context(
             }
             if let Some(envs) = override_envs {
                 params.insert("override_envs".into(), ParamValue::StringMap(envs.clone()));
+            }
+            if let Some(flags) = define_flags {
+                params.insert("define_flags".into(), ParamValue::StringMap(flags.clone()));
             }
             ("start", params)
         }
@@ -528,6 +532,7 @@ pub fn build_authorizer_context(
             states,
             no_deps,
             override_envs,
+            define_flags,
             ..
         } => {
             let mut params = HashMap::new();
@@ -537,6 +542,9 @@ pub fn build_authorizer_context(
             if let Some(envs) = override_envs {
                 params.insert("override_envs".into(), ParamValue::StringMap(envs.clone()));
             }
+            if let Some(flags) = define_flags {
+                params.insert("define_flags".into(), ParamValue::StringMap(flags.clone()));
+            }
             ("restart", params)
         }
         Request::Run {
@@ -545,6 +553,7 @@ pub fn build_authorizer_context(
             override_envs,
             hardening,
             start_clean,
+            define_flags,
             ..
         } => {
             let mut params = HashMap::new();
@@ -557,12 +566,22 @@ pub fn build_authorizer_context(
             if let Some(envs) = override_envs {
                 params.insert("override_envs".into(), ParamValue::StringMap(envs.clone()));
             }
+            if let Some(flags) = define_flags {
+                params.insert("define_flags".into(), ParamValue::StringMap(flags.clone()));
+            }
             ("run", params)
         }
-        Request::Recreate { hardening, .. } => {
+        Request::Recreate {
+            hardening,
+            define_flags,
+            ..
+        } => {
             let mut params = HashMap::new();
             if let Some(h) = hardening {
                 params.insert("hardening".into(), ParamValue::String(h.clone()));
+            }
+            if let Some(flags) = define_flags {
+                params.insert("define_flags".into(), ParamValue::StringMap(flags.clone()));
             }
             ("recreate", params)
         }
