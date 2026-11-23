@@ -375,7 +375,7 @@ Each loaded config holds **one** set of flags, shared by all its services. It de
 
 #### When `-D` is recorded
 
-`start` and `restart` record their `-D` once the request is validated, before any service starts:
+`start`, `restart`, `run` and `recreate` record their `-D` once the request is validated, before any service starts:
 
 | Situation | Flags recorded? |
 | --- | --- |
@@ -383,8 +383,6 @@ Each loaded config holds **one** set of flags, shared by all its services. It de
 | Nothing to do: services already running (`start`), no eligible service (`restart`) | Yes — the values apply to the next starts |
 | The command is rejected: unknown service, `restart` of a service that has not completed its first startup | No — flags (and `-e` overrides) are left untouched |
 | A hook or the service fails after the start began | Yes — the start did run with these values |
-
-`run` and `recreate` work differently: they first stop the services and reload the config with an empty set of flags, then start it like `start` does. That reset happens **before** the request is validated, so a rejected `run` (e.g. unknown service) has already stopped the services and dropped the previously stored flags.
 
 #### Lifetime
 
