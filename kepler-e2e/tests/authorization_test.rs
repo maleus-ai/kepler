@@ -893,6 +893,33 @@ async fn test_acl_start_without_env_override_denies_e_flag() -> E2eResult<()> {
     Ok(())
 }
 
+/// User with `start` but not `start:flag-override` is denied `-D KEY=VALUE`
+#[tokio::test]
+async fn test_acl_start_without_flag_override_denies_d_flag() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_acl_start_subrights")?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "start", "-d"]).await?;
+    output.assert_success();
+    harness.wait_for_service_status(&config_path, "subrights-svc", "running", Duration::from_secs(10)).await?;
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "stop"]).await?;
+    output.assert_success();
+    harness.wait_for_service_status(&config_path, "subrights-svc", "stopped", Duration::from_secs(10)).await?;
+
+    // testuser2 starts with -D — denied
+    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "start", "-d", "-D", "MODE=x"]).await?;
+    assert!(!output.success(), "start -D should be denied without start:flag-override sub-right");
+    assert!(
+        output.stderr_contains("start:flag-override"),
+        "Should name the missing sub-right. stderr: {}", output.stderr
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
 /// User with `start` but not `start:no-deps` is denied `start --no-deps`
 #[tokio::test]
 async fn test_acl_start_without_no_deps_denies_no_deps_flag() -> E2eResult<()> {
@@ -948,6 +975,30 @@ async fn test_acl_restart_without_env_override_denies_e_flag() -> E2eResult<()> 
     Ok(())
 }
 
+/// User with `restart` but not `restart:flag-override` is denied `restart -D`
+#[tokio::test]
+async fn test_acl_restart_without_flag_override_denies_d_flag() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_acl_restart_subrights")?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "start", "-d"]).await?;
+    output.assert_success();
+    harness.wait_for_service_status(&config_path, "subrights-svc", "running", Duration::from_secs(10)).await?;
+
+    // testuser2 restarts with -D — denied
+    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "restart", "--wait", "-D", "MODE=x"]).await?;
+    assert!(!output.success(), "restart -D should be denied without restart:flag-override sub-right");
+    assert!(
+        output.stderr_contains("restart:flag-override"),
+        "Should name the missing sub-right. stderr: {}", output.stderr
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
 /// User with `restart` but not `restart:no-deps` is denied `restart --no-deps`
 #[tokio::test]
 async fn test_acl_restart_without_no_deps_denies_no_deps_flag() -> E2eResult<()> {
@@ -994,6 +1045,31 @@ async fn test_acl_recreate_without_hardening_denies_flag() -> E2eResult<()> {
     assert!(
         output.stderr_contains("sub-right") || output.stderr_contains("recreate:hardening") || output.stderr_contains("permission denied"),
         "Should mention sub-right denial. stderr: {}", output.stderr
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// User with `recreate` but not `recreate:flag-override` is denied `recreate -D`.
+/// Recreate starts the services itself, so the `start` rights are never checked.
+#[tokio::test]
+async fn test_acl_recreate_without_flag_override_denies_d_flag() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config_path = harness.load_config(TEST_MODULE, "test_acl_recreate_subrights")?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.run_cli_as_user("testuser1", &["-f", config_path.to_str().unwrap(), "start", "-d"]).await?;
+    output.assert_success();
+    harness.wait_for_service_status(&config_path, "subrights-svc", "running", Duration::from_secs(10)).await?;
+
+    // testuser2 recreates with -D — denied
+    let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "recreate", "-D", "MODE=x"]).await?;
+    assert!(!output.success(), "recreate -D should be denied without recreate:flag-override sub-right");
+    assert!(
+        output.stderr_contains("recreate:flag-override"),
+        "Should name the missing sub-right. stderr: {}", output.stderr
     );
 
     harness.stop_daemon().await?;
@@ -1648,6 +1724,67 @@ async fn test_token_service_can_stop_with_right() -> E2eResult<()> {
     assert!(
         content.contains("EXIT_CODE=0"),
         "stop should succeed with stop permission. Result: {}",
+        content
+    );
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// Service token with `recreate` but no `recreate:flag-override` is denied `recreate -D`.
+/// A token stays bound to its own rights even once it owns the config, so this
+/// check is the only thing keeping `-D` out of its reach.
+#[tokio::test]
+async fn test_token_recreate_without_flag_override_denies_d_flag() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+
+    let kepler_bin = harness.kepler_bin().to_str().unwrap().to_string();
+    let config_dir = harness.state_dir().join("test_configs");
+    std::fs::create_dir_all(&config_dir)?;
+    let config_path = config_dir.join("token_recreate_define.kepler.yaml");
+    let config_str = config_path.to_str().unwrap().to_string();
+    let result_file = harness.state_dir().join("token_recreate_define_result.txt");
+    let result_str = result_file.to_str().unwrap().to_string();
+
+    let config_content = format!(
+        r#"services:
+  controller:
+    command:
+      - "sh"
+      - "-c"
+      - |
+        '{kepler_bin}' -f '{config_str}' recreate -D MODE=x > '{result_str}' 2>&1
+        echo "EXIT_CODE=$?" >> '{result_str}'
+        sleep 300
+    permissions: [recreate]
+"#
+    );
+
+    std::fs::write(&config_path, &config_content)?;
+
+    harness.start_daemon().await?;
+
+    let output = harness.run_cli(&["-f", &config_str, "start", "-d"]).await?;
+    output.assert_success();
+
+    harness
+        .wait_for_service_status(&config_path, "controller", "running", Duration::from_secs(15))
+        .await?;
+
+    assert!(
+        wait_for_file_content(&result_file, "EXIT_CODE=", Duration::from_secs(15)).await,
+        "Controller should write result file"
+    );
+
+    let content = std::fs::read_to_string(&result_file).unwrap();
+    assert!(
+        !content.contains("EXIT_CODE=0"),
+        "recreate -D should be denied without recreate:flag-override. Result: {}",
+        content
+    );
+    assert!(
+        content.contains("recreate:flag-override"),
+        "Should name the missing sub-right. Result: {}",
         content
     );
 

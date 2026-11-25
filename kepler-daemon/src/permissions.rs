@@ -34,17 +34,21 @@ pub const BASE_RIGHTS: &[&str] = &[
 /// Format: "base:feature"
 pub const SUB_RIGHTS: &[&str] = &[
     "start:env-override",
+    "start:flag-override",
     "start:hardening",
     "start:no-deps",
     "run:env-override",
+    "run:flag-override",
     "run:hardening",
     "run:no-deps",
     "run:start-clean",
     "stop:clean",
     "stop:signal",
     "restart:env-override",
+    "restart:flag-override",
     "restart:inactive",
     "restart:no-deps",
+    "recreate:flag-override",
     "recreate:hardening",
     "inspect:services",
     "inspect:environment",
@@ -116,6 +120,7 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
             override_envs,
             hardening,
             no_deps,
+            define_flags,
             ..
         } => Some(RequiredRights {
             base: "start",
@@ -123,6 +128,9 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
                 let mut s = vec![];
                 if override_envs.is_some() {
                     s.push("start:env-override");
+                }
+                if define_flags.is_some() {
+                    s.push("start:flag-override");
                 }
                 if hardening.is_some() {
                     s.push("start:hardening");
@@ -138,6 +146,7 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
             hardening,
             no_deps,
             start_clean,
+            define_flags,
             ..
         } => Some(RequiredRights {
             base: "run",
@@ -145,6 +154,9 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
                 let mut s = vec![];
                 if override_envs.is_some() {
                     s.push("run:env-override");
+                }
+                if define_flags.is_some() {
+                    s.push("run:flag-override");
                 }
                 if hardening.is_some() {
                     s.push("run:hardening");
@@ -177,6 +189,7 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
             override_envs,
             no_deps,
             states,
+            define_flags,
             ..
         } => Some(RequiredRights {
             base: "restart",
@@ -188,18 +201,30 @@ pub fn required_rights(request: &Request) -> Option<RequiredRights> {
                 if override_envs.is_some() {
                     s.push("restart:env-override");
                 }
+                if define_flags.is_some() {
+                    s.push("restart:flag-override");
+                }
                 if *no_deps {
                     s.push("restart:no-deps");
                 }
                 s
             },
         }),
-        Request::Recreate { hardening, .. } => Some(RequiredRights {
+        Request::Recreate {
+            hardening,
+            define_flags,
+            ..
+        } => Some(RequiredRights {
             base: "recreate",
-            sub_rights: if hardening.is_some() {
-                vec!["recreate:hardening"]
-            } else {
-                vec![]
+            sub_rights: {
+                let mut s = vec![];
+                if define_flags.is_some() {
+                    s.push("recreate:flag-override");
+                }
+                if hardening.is_some() {
+                    s.push("recreate:hardening");
+                }
+                s
             },
         }),
         Request::LogsStream { filter, sql, .. } => Some(RequiredRights {

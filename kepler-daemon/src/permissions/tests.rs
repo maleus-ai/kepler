@@ -86,6 +86,60 @@ fn required_rights_start_with_all_flags() {
     assert!(rr.sub_rights.contains(&"start:no-deps"));
 }
 
+fn define_flags() -> Option<HashMap<String, String>> {
+    Some(HashMap::from([("MODE".to_string(), "x".to_string())]))
+}
+
+#[test]
+fn define_flags_require_flag_override_sub_right_on_every_launch_request() {
+    let start = Request::Start {
+        config_path: "/test".into(), services: vec![], sys_env: None, no_deps: false,
+        override_envs: None, hardening: None, define_flags: define_flags(), follow: false,
+    };
+    let run = Request::Run {
+        config_path: "/test".into(), services: vec![], sys_env: None, no_deps: false,
+        override_envs: None, hardening: None, follow: false, start_clean: false,
+        define_flags: define_flags(),
+    };
+    let restart = Request::Restart {
+        config_path: "/test".into(), services: vec![], sys_env: None, no_deps: false,
+        override_envs: None, define_flags: define_flags(), states: vec![],
+    };
+    let recreate = Request::Recreate {
+        config_path: "/test".into(), sys_env: None, hardening: None,
+        define_flags: define_flags(),
+    };
+
+    for (request, base, sub) in [
+        (&start, "start", "start:flag-override"),
+        (&run, "run", "run:flag-override"),
+        (&restart, "restart", "restart:flag-override"),
+        (&recreate, "recreate", "recreate:flag-override"),
+    ] {
+        let rr = required_rights(request).unwrap();
+        assert_eq!(rr.base, base);
+        assert_eq!(rr.sub_rights, vec![sub], "{base} with -D");
+
+        let base_only: HashSet<&'static str> = HashSet::from([intern_right(base).unwrap()]);
+        let err = check_rights(&base_only, request).unwrap_err();
+        assert!(err.contains(sub), "{base}: {err}");
+
+        let with_sub: HashSet<&'static str> =
+            HashSet::from([intern_right(base).unwrap(), intern_right(sub).unwrap()]);
+        assert!(check_rights(&with_sub, request).is_ok(), "{base} with {sub}");
+    }
+}
+
+#[test]
+fn recreate_without_define_flags_needs_no_sub_right() {
+    let recreate = Request::Recreate {
+        config_path: "/test".into(), sys_env: None, hardening: None, define_flags: None,
+    };
+    let rr = required_rights(&recreate).unwrap();
+    assert_eq!(rr.base, "recreate");
+    assert!(rr.sub_rights.is_empty());
+}
+
 #[test]
 fn required_rights_stop_basic() {
     let req = Request::Stop {
