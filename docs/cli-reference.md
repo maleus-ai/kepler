@@ -381,8 +381,10 @@ Each loaded config holds **one** set of flags, shared by all its services. It de
 | --- | --- |
 | The command starts or restarts services | Yes, before the first hook runs |
 | Nothing to do: services already running (`start`), no eligible service (`restart`) | Yes — the values apply to the next starts |
-| The command is rejected: unknown service, `restart` of a service that has not completed its first startup | No — flags (and `-e` overrides) are left untouched |
+| The command is rejected: unknown service, config that no longer loads (`run`, `recreate`), `restart` of a service that has not completed its first startup | No — flags (and `-e` overrides) are left untouched |
 | A hook or the service fails after the start began | Yes — the start did run with these values |
+
+`run` and `recreate` reload the config from disk, so they validate the request against the config **as it will be reloaded**: it must load, and every named service must exist in it. Only then do they stop the services and reset the flags (see below). A rejected `run` or `recreate` leaves the running services and the stored flags as they were.
 
 #### Lifetime
 
@@ -390,8 +392,8 @@ Each loaded config holds **one** set of flags, shared by all its services. It de
 | --- | --- |
 | `stop` | Kept |
 | `stop --clean` | Dropped with the config; the next `start` begins with an empty set |
-| `recreate` | Reset: only the `-D` passed to `recreate` remain |
-| `run` | Reset: only the `-D` passed to `run` remain; never persisted |
+| `recreate` | Reset once the request is validated: only the `-D` passed to `recreate` remain |
+| `run` | Reset once the request is validated: only the `-D` passed to `run` remain; never persisted |
 | Daemon restart | Restored from the snapshot when `autostart` is enabled; lost otherwise (the config is no longer loaded) |
 
 #### Reading flags
