@@ -91,7 +91,7 @@ fn define_flags() -> Option<HashMap<String, String>> {
 }
 
 #[test]
-fn define_flags_require_env_override_sub_right_on_every_launch_request() {
+fn define_flags_require_flag_override_sub_right_on_every_launch_request() {
     let start = Request::Start {
         config_path: "/test".into(), services: vec![], sys_env: None, no_deps: false,
         override_envs: None, hardening: None, define_flags: define_flags(), follow: false,
@@ -111,10 +111,10 @@ fn define_flags_require_env_override_sub_right_on_every_launch_request() {
     };
 
     for (request, base, sub) in [
-        (&start, "start", "start:env-override"),
-        (&run, "run", "run:env-override"),
-        (&restart, "restart", "restart:env-override"),
-        (&recreate, "recreate", "recreate:env-override"),
+        (&start, "start", "start:flag-override"),
+        (&run, "run", "run:flag-override"),
+        (&restart, "restart", "restart:flag-override"),
+        (&recreate, "recreate", "recreate:flag-override"),
     ] {
         let rr = required_rights(request).unwrap();
         assert_eq!(rr.base, base);

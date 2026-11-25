@@ -207,29 +207,32 @@ Rights are flat, explicit identifiers — there are no categories, no implicit c
 
 **Sub-rights:**
 
-| Sub-right              | Base       | Grants                                                                                                  |
-| ---------------------- | ---------- | ------------------------------------------------------------------------------------------------------- |
-| `start:env-override`   | `start`    | Allow environment variable overrides (`-e`) and user-defined flags (`-D`) on start                  |
-| `start:hardening`      | `start`    | Allow `--hardening` flag on start                                                                       |
-| `start:no-deps`        | `start`    | Allow `--no-deps` flag on start                                                                         |
-| `run:env-override`     | `run`      | Allow environment variable overrides (`-e`) and user-defined flags (`-D`) on run                    |
-| `run:hardening`        | `run`      | Allow `--hardening` flag on run                                                                         |
-| `run:no-deps`          | `run`      | Allow `--no-deps` flag on run                                                                           |
-| `run:start-clean`      | `run`      | Allow `--start-clean` flag on run (wipes logs and metrics)                                              |
-| `stop:clean`           | `stop`     | Allow `--clean` flag on stop                                                                            |
-| `stop:signal`          | `stop`     | Allow custom signal on stop                                                                             |
-| `restart:env-override` | `restart`  | Allow environment variable overrides (`-e`) and user-defined flags (`-D`) on restart                |
-| `restart:inactive`     | `restart`  | Allow `--states` to recover terminal services that have completed at least one startup                  |
-| `restart:no-deps`      | `restart`  | Allow `--no-deps` flag on restart                                                                       |
-| `recreate:env-override` | `recreate` | Allow user-defined flags (`-D`) on recreate                                                            |
-| `recreate:hardening`   | `recreate` | Allow `--hardening` flag on recreate                                                                    |
-| `inspect:services`     | `inspect`  | Include services section in inspect output                                                              |
-| `inspect:environment`  | `inspect`  | Include environment (top-level and per-service) in inspect output                                       |
-| `inspect:flags`        | `inspect`  | Include user-defined flags in inspect output                                                            |
-| `logs:search`          | `logs`     | Allow log filter expressions (DSL). See [Log Query Security](#log-query-security)                       |
-| `logs:search:sql`      | `logs`     | Allow raw SQL filter expressions. Requires `logs:search`. See [Log Query Security](#log-query-security) |
-| `monitor:search`       | `monitor`  | Allow monitor metric filter expressions (DSL). Same security model as `logs:search`                     |
-| `monitor:search:sql`   | `monitor`  | Allow raw SQL filter expressions on metrics. Requires `monitor:search`                                  |
+| Sub-right                | Base       | Grants                                                                                                  |
+| ------------------------ | ---------- | ------------------------------------------------------------------------------------------------------- |
+| `start:env-override`     | `start`    | Allow environment variable overrides (`-e`) on start                                                    |
+| `start:flag-override`    | `start`    | Allow user-defined flag overrides (`-D`) on start                                                       |
+| `start:hardening`        | `start`    | Allow `--hardening` flag on start                                                                       |
+| `start:no-deps`          | `start`    | Allow `--no-deps` flag on start                                                                         |
+| `run:env-override`       | `run`      | Allow environment variable overrides (`-e`) on run                                                      |
+| `run:flag-override`      | `run`      | Allow user-defined flag overrides (`-D`) on run                                                         |
+| `run:hardening`          | `run`      | Allow `--hardening` flag on run                                                                         |
+| `run:no-deps`            | `run`      | Allow `--no-deps` flag on run                                                                           |
+| `run:start-clean`        | `run`      | Allow `--start-clean` flag on run (wipes logs and metrics)                                              |
+| `stop:clean`             | `stop`     | Allow `--clean` flag on stop                                                                            |
+| `stop:signal`            | `stop`     | Allow custom signal on stop                                                                             |
+| `restart:env-override`   | `restart`  | Allow environment variable overrides (`-e`) on restart                                                  |
+| `restart:flag-override`  | `restart`  | Allow user-defined flag overrides (`-D`) on restart                                                     |
+| `restart:inactive`       | `restart`  | Allow `--states` to recover terminal services that have completed at least one startup                  |
+| `restart:no-deps`        | `restart`  | Allow `--no-deps` flag on restart                                                                       |
+| `recreate:flag-override` | `recreate` | Allow user-defined flag overrides (`-D`) on recreate                                                    |
+| `recreate:hardening`     | `recreate` | Allow `--hardening` flag on recreate                                                                    |
+| `inspect:services`       | `inspect`  | Include services section in inspect output                                                              |
+| `inspect:environment`    | `inspect`  | Include environment (top-level and per-service) in inspect output                                       |
+| `inspect:flags`          | `inspect`  | Include user-defined flags in inspect output                                                            |
+| `logs:search`            | `logs`     | Allow log filter expressions (DSL). See [Log Query Security](#log-query-security)                       |
+| `logs:search:sql`        | `logs`     | Allow raw SQL filter expressions. Requires `logs:search`. See [Log Query Security](#log-query-security) |
+| `monitor:search`         | `monitor`  | Allow monitor metric filter expressions (DSL). Same security model as `logs:search`                     |
+| `monitor:search:sql`     | `monitor`  | Allow raw SQL filter expressions on metrics. Requires `monitor:search`                                  |
 
 **Built-in alias:**
 

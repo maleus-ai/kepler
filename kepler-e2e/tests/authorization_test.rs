@@ -893,9 +893,9 @@ async fn test_acl_start_without_env_override_denies_e_flag() -> E2eResult<()> {
     Ok(())
 }
 
-/// User with `start` but not `start:env-override` is denied `-D KEY=VALUE`
+/// User with `start` but not `start:flag-override` is denied `-D KEY=VALUE`
 #[tokio::test]
-async fn test_acl_start_without_env_override_denies_d_flag() -> E2eResult<()> {
+async fn test_acl_start_without_flag_override_denies_d_flag() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_acl_start_subrights")?;
 
@@ -910,9 +910,9 @@ async fn test_acl_start_without_env_override_denies_d_flag() -> E2eResult<()> {
 
     // testuser2 starts with -D — denied
     let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "start", "-d", "-D", "MODE=x"]).await?;
-    assert!(!output.success(), "start -D should be denied without start:env-override sub-right");
+    assert!(!output.success(), "start -D should be denied without start:flag-override sub-right");
     assert!(
-        output.stderr_contains("start:env-override"),
+        output.stderr_contains("start:flag-override"),
         "Should name the missing sub-right. stderr: {}", output.stderr
     );
 
@@ -975,9 +975,9 @@ async fn test_acl_restart_without_env_override_denies_e_flag() -> E2eResult<()> 
     Ok(())
 }
 
-/// User with `restart` but not `restart:env-override` is denied `restart -D`
+/// User with `restart` but not `restart:flag-override` is denied `restart -D`
 #[tokio::test]
-async fn test_acl_restart_without_env_override_denies_d_flag() -> E2eResult<()> {
+async fn test_acl_restart_without_flag_override_denies_d_flag() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_acl_restart_subrights")?;
 
@@ -989,9 +989,9 @@ async fn test_acl_restart_without_env_override_denies_d_flag() -> E2eResult<()> 
 
     // testuser2 restarts with -D — denied
     let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "restart", "--wait", "-D", "MODE=x"]).await?;
-    assert!(!output.success(), "restart -D should be denied without restart:env-override sub-right");
+    assert!(!output.success(), "restart -D should be denied without restart:flag-override sub-right");
     assert!(
-        output.stderr_contains("restart:env-override"),
+        output.stderr_contains("restart:flag-override"),
         "Should name the missing sub-right. stderr: {}", output.stderr
     );
 
@@ -1051,10 +1051,10 @@ async fn test_acl_recreate_without_hardening_denies_flag() -> E2eResult<()> {
     Ok(())
 }
 
-/// User with `recreate` but not `recreate:env-override` is denied `recreate -D`.
+/// User with `recreate` but not `recreate:flag-override` is denied `recreate -D`.
 /// Recreate starts the services itself, so the `start` rights are never checked.
 #[tokio::test]
-async fn test_acl_recreate_without_env_override_denies_d_flag() -> E2eResult<()> {
+async fn test_acl_recreate_without_flag_override_denies_d_flag() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
     let config_path = harness.load_config(TEST_MODULE, "test_acl_recreate_subrights")?;
 
@@ -1066,9 +1066,9 @@ async fn test_acl_recreate_without_env_override_denies_d_flag() -> E2eResult<()>
 
     // testuser2 recreates with -D — denied
     let output = harness.run_cli_as_user("testuser2", &["-f", config_path.to_str().unwrap(), "recreate", "-D", "MODE=x"]).await?;
-    assert!(!output.success(), "recreate -D should be denied without recreate:env-override sub-right");
+    assert!(!output.success(), "recreate -D should be denied without recreate:flag-override sub-right");
     assert!(
-        output.stderr_contains("recreate:env-override"),
+        output.stderr_contains("recreate:flag-override"),
         "Should name the missing sub-right. stderr: {}", output.stderr
     );
 
@@ -1731,11 +1731,11 @@ async fn test_token_service_can_stop_with_right() -> E2eResult<()> {
     Ok(())
 }
 
-/// Service token with `recreate` but no `recreate:env-override` is denied `recreate -D`.
+/// Service token with `recreate` but no `recreate:flag-override` is denied `recreate -D`.
 /// A token stays bound to its own rights even once it owns the config, so this
 /// check is the only thing keeping `-D` out of its reach.
 #[tokio::test]
-async fn test_token_recreate_without_env_override_denies_d_flag() -> E2eResult<()> {
+async fn test_token_recreate_without_flag_override_denies_d_flag() -> E2eResult<()> {
     let mut harness = E2eHarness::new().await?;
 
     let kepler_bin = harness.kepler_bin().to_str().unwrap().to_string();
@@ -1779,11 +1779,11 @@ async fn test_token_recreate_without_env_override_denies_d_flag() -> E2eResult<(
     let content = std::fs::read_to_string(&result_file).unwrap();
     assert!(
         !content.contains("EXIT_CODE=0"),
-        "recreate -D should be denied without recreate:env-override. Result: {}",
+        "recreate -D should be denied without recreate:flag-override. Result: {}",
         content
     );
     assert!(
-        content.contains("recreate:env-override"),
+        content.contains("recreate:flag-override"),
         "Should name the missing sub-right. Result: {}",
         content
     );
