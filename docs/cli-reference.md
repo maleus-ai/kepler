@@ -362,9 +362,46 @@ services:
 
 - **Repeatable**: Use multiple `-D` flags to define multiple values
 - **String values**: All values are strings (use `tonumber(kepler.flags.PORT)` in Lua if needed)
-- **Merge semantics**: Re-invocation with the same key overwrites the previous value (same as `-e`)
-- **Persisted in snapshot**: Flags are saved in the config snapshot for `start`/`recreate`, so they survive daemon restarts. For `run` mode, flags are ephemeral
-- **Not inherited**: Flags do not appear in service process environments — use them to control config generation logic without polluting the runtime environment
+- **Not inherited**: Flags do not appear in service process environments — use them to control config generation logic without polluting the runtime environment. A flag reaches a process only if the config copies it into `environment`, as `PORT` above
+- **Available everywhere expressions are**: service fields, `if:` conditions, hooks and the `lua:` directive
+
+#### What the stored flags represent
+
+Each loaded config holds **one** set of flags, shared by all its services. It describes the values the **next service starts** will be evaluated with — not the values running services were started with.
+
+- **Read at service start**: A service's config is evaluated, with the flags stored at that moment, each time the service starts: `start`, `restart`, restart policies, file watching, autostart after a daemon restart. A running service keeps the values it was started with until its next start
+- **Merged, never removed**: `-D` adds or overwrites keys and leaves the others in place (same as `-e`). No command removes a single key: `recreate`, `run` and `stop --clean` start over from an empty set (see below)
+- **Not tied to a service**: `kepler restart -D MODE=x svc1` records `MODE=x` for the whole config, and every other service picks it up on its next start
+
+#### When `-D` is recorded
+
+`start`, `restart`, `run` and `recreate` record their `-D` once the request is validated, before any service starts:
+
+| Situation | Flags recorded? |
+| --- | --- |
+| The command starts or restarts services | Yes, before the first hook runs |
+| Nothing to do: services already running (`start`), no eligible service (`restart`) | Yes — the values apply to the next starts |
+| The command is rejected: unknown service, `restart` of a service that has not completed its first startup | No — flags (and `-e` overrides) are left untouched |
+| A hook or the service fails after the start began | Yes — the start did run with these values |
+
+#### Lifetime
+
+| Event | Effect on flags |
+| --- | --- |
+| `stop` | Kept |
+| `stop --clean` | Dropped with the config; the next `start` begins with an empty set |
+| `recreate` | Reset: only the `-D` passed to `recreate` remain |
+| `run` | Reset: only the `-D` passed to `run` remain; never persisted |
+| Daemon restart | Restored from the snapshot when `autostart` is enabled; lost otherwise (the config is no longer loaded) |
+
+#### Reading flags
+
+`kepler inspect --flags` shows the stored set, that is the values the **next** starts will use. A `start` that had nothing to do may have changed it, so it does not tell which values a running service was evaluated with. To know that:
+
+- read the service's resolved environment with `kepler inspect <service> --environment` (`services.<name>.environment`), when the config copies the flag into `environment`. It is set each time the service starts and is not affected by later `-D`. It is not persisted: after a daemon restart it stays empty until the service starts again
+- or have a hook publish the value it actually used, e.g. `echo "::output::mode=${MODE}"` as the last step of `pre_start`, and read it from `services.<name>.outputs.hooks`. Outputs are only written when the hook succeeds
+
+In both cases, check that the service is running: a failed start records the values it was attempted with.
 
 See [Inline Expressions — Kepler Context](variable-expansion.md#kepler-context) and [Lua Scripting — Kepler Context](lua-scripting.md#kepler-context) for details on accessing `kepler.flags` in expressions.
 
@@ -463,7 +500,7 @@ Gated by `inspect:flags` sub-right:
 
 | Field                             | Description                                                                             |
 | --------------------------------- | --------------------------------------------------------------------------------------- |
-| `flags`                           | User-defined flags set via `-D KEY=VALUE` at start time                                 |
+| `flags`                           | Stored define flags (`-D KEY=VALUE`): the values the next service starts will use. See [Reading flags](#reading-flags) |
 
 Individual output values longer than 512 characters are truncated with a `"... (truncated)"` suffix.
 

@@ -210,16 +210,6 @@ impl ServiceOrchestrator {
             log_store.set_log_notify(notify);
         }
 
-        // Merge override envs into stored kepler_env if provided
-        if let Some(overrides) = override_envs {
-            handle.merge_kepler_env(overrides).await;
-        }
-
-        // Merge define flags into stored kepler_flags if provided
-        if let Some(flags) = define_flags {
-            handle.merge_kepler_flags(flags).await;
-        }
-
         // Get config and determine services to start
         let config = handle
             .get_config()
@@ -236,6 +226,24 @@ impl ServiceOrchestrator {
         } else {
             (get_start_order(&config.services)?, false)
         };
+
+        // Create a shared Lua evaluator so the `global` table persists across
+        // all service starts in this config (enabling cross-service state sharing).
+        let shared_evaluator: SharedLuaEvaluator = Arc::new(tokio::sync::Mutex::new(
+            config.create_lua_evaluator()
+                .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?,
+        ));
+
+        // Apply -e/-D only once the request is validated: a rejected command
+        // must leave the stored env and flags untouched.
+        if let Some(overrides) = override_envs {
+            handle.merge_kepler_env(overrides).await;
+        }
+
+        // Merge define flags into stored kepler_flags if provided
+        if let Some(flags) = define_flags {
+            handle.merge_kepler_flags(flags).await;
+        }
 
         // Check if any services need starting.
         // A service needs starting if it's in a non-active state.
@@ -256,13 +264,6 @@ impl ServiceOrchestrator {
         if !any_need_starting {
             return Ok("All services already running".to_string());
         }
-
-        // Create a shared Lua evaluator so the `global` table persists across
-        // all service starts in this config (enabling cross-service state sharing).
-        let shared_evaluator: SharedLuaEvaluator = Arc::new(tokio::sync::Mutex::new(
-            config.create_lua_evaluator()
-                .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?,
-        ));
 
         let initialized = handle.is_config_initialized().await;
 
@@ -1598,16 +1599,6 @@ impl ServiceOrchestrator {
         let handle = self.registry.get(&config_path.to_path_buf())
             .ok_or_else(|| OrchestratorError::ConfigNotFound(config_path.display().to_string()))?;
 
-        // Merge override envs into stored kepler_env if provided
-        if let Some(overrides) = override_envs {
-            handle.merge_kepler_env(overrides).await;
-        }
-
-        // Merge define flags into stored kepler_flags if provided
-        if let Some(flags) = define_flags {
-            handle.merge_kepler_flags(flags).await;
-        }
-
         let config = handle
             .get_config()
             .await
@@ -1646,10 +1637,6 @@ impl ServiceOrchestrator {
                 }
             }
         }
-        if services_to_restart.is_empty() {
-            return Ok("No eligible services to restart".to_string());
-        }
-
         // Sort services by dependency graph (unless --no-deps, which uses user-specified order)
         let (mut start_order, mut stop_order) = if no_deps {
             // --no-deps: use user-specified order for start, reverse for stop
@@ -1672,6 +1659,23 @@ impl ServiceOrchestrator {
             config.create_lua_evaluator()
                 .map_err(|e| OrchestratorError::ConfigError(e.to_string()))?,
         ));
+
+        // Apply -e/-D only once the request is validated: a rejected restart
+        // must leave the stored env and flags untouched. A restart with no
+        // eligible service still applies them, like `start` on running services:
+        // they describe the config of the next starts, not what currently runs.
+        if let Some(overrides) = override_envs {
+            handle.merge_kepler_env(overrides).await;
+        }
+
+        // Merge define flags into stored kepler_flags if provided
+        if let Some(flags) = define_flags {
+            handle.merge_kepler_flags(flags).await;
+        }
+
+        if services_to_restart.is_empty() {
+            return Ok("No eligible services to restart".to_string());
+        }
 
         // Claim all selected lifecycles before stopping any dependency. Terminal
         // services wait for a start; running services retain the restart contract.

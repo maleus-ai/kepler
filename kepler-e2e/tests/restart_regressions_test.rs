@@ -848,3 +848,141 @@ services:
     harness.stop_daemon().await?;
     Ok(())
 }
+
+async fn flags(harness: &E2eHarness, config: &std::path::Path) -> E2eResult<Value> {
+    let output = harness
+        .run_cli(&["-f", config.to_str().unwrap(), "inspect", "--flags"])
+        .await?;
+    output.assert_success();
+    Ok(serde_json::from_str::<Value>(&output.stdout).unwrap()["flags"].clone())
+}
+
+/// A rejected restart must not apply its `-D` flags or `-e` overrides: the
+/// stored values would no longer match what the running build was made with.
+#[tokio::test]
+async fn rejected_restart_leaves_flags_and_env_untouched() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let root = harness.temp_dir().path().to_path_buf();
+    let config = harness.create_test_config(&format!(
+        r#"
+services:
+  web:
+    command: [sh, -c, 'echo "serving MOCK_API=$MOCK_API" >> {root}/serving; sleep 300']
+    environment:
+      - MOCK_API=${{{{ kepler.flags.MOCK_API or 'false' }}}}$
+    hooks:
+      pre_start:
+        run: |
+          echo "building MOCK_API=$MOCK_API" >> {root}/builds
+          while [ ! -f {root}/release ]; do sleep 0.02; done
+"#,
+        root = root.display()
+    ))?;
+    let config_str = config.to_str().unwrap();
+    harness.start_daemon().await?;
+
+    // First startup blocks in pre_start until released.
+    let mut first_start = harness.spawn_cli_background(&["-f", config_str, "start", "-d", "web"])?;
+    harness
+        .wait_for_file_content(&root.join("builds"), "building MOCK_API=false", Duration::from_secs(10))
+        .await?;
+
+    let rejected = harness
+        .run_cli(&["-f", config_str, "restart", "-D", "MOCK_API=true", "-e", "EXTRA=1", "web"])
+        .await?;
+    assert!(!rejected.success(), "restart during first startup must be rejected");
+    assert!(rejected.stderr_contains("has not completed its first startup"), "{}", rejected.stderr);
+
+    let unknown = harness
+        .run_cli(&["-f", config_str, "restart", "-D", "MOCK_API=true", "missing"])
+        .await?;
+    assert!(!unknown.success(), "restart of an unknown service must be rejected");
+
+    assert!(flags(&harness, &config).await?.get("MOCK_API").is_none(), "rejected restart must not set flags");
+
+    std::fs::write(root.join("release"), "go").unwrap();
+    assert!(tokio::task::spawn_blocking(move || first_start.wait()).await.unwrap()?.success());
+    harness
+        .wait_for_file_content(&root.join("serving"), "serving MOCK_API=false", Duration::from_secs(10))
+        .await?;
+    assert!(flags(&harness, &config).await?.get("MOCK_API").is_none());
+    let env = harness.run_cli(&["-f", config_str, "inspect", "--environment"]).await?;
+    env.assert_success();
+    assert!(!env.stdout.contains("\"EXTRA\""), "rejected restart must not set env overrides: {}", env.stdout);
+
+    // Once initialized, the same restart is accepted and applies the flag.
+    harness
+        .run_cli(&["-f", config_str, "restart", "-D", "MOCK_API=true", "web"])
+        .await?
+        .assert_success();
+    assert_eq!(flags(&harness, &config).await?["MOCK_API"], "true");
+    harness
+        .wait_for_file_content(&root.join("serving"), "serving MOCK_API=true", Duration::from_secs(10))
+        .await?;
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
+
+/// A `start` or `restart` that has nothing to do still records `-D`: flags
+/// describe the config of the next starts. The value a running service was
+/// started with stays visible in its resolved environment.
+#[tokio::test]
+async fn noop_start_and_restart_apply_flags_for_next_starts() -> E2eResult<()> {
+    let mut harness = E2eHarness::new().await?;
+    let config = harness.create_test_config(
+        r#"
+services:
+  web:
+    command: [sleep, '300']
+    environment:
+      - MODE=${{ kepler.flags.MODE or 'default' }}$
+"#,
+    )?;
+    let config_str = config.to_str().unwrap();
+    harness.start_daemon().await?;
+    harness
+        .run_cli(&["-f", config_str, "start", "-d", "--wait", "-D", "MODE=first"])
+        .await?
+        .assert_success();
+
+    // Already running: nothing starts, but the flag is recorded.
+    harness
+        .run_cli(&["-f", config_str, "start", "-d", "-D", "MODE=second"])
+        .await?
+        .assert_success();
+    assert_eq!(flags(&harness, &config).await?["MODE"], "second");
+    let inspect = harness
+        .run_cli(&["-f", config_str, "inspect", "web", "--environment"])
+        .await?;
+    inspect.assert_success();
+    let json: Value = serde_json::from_str(&inspect.stdout).unwrap();
+    assert_eq!(json["services"]["web"]["environment"]["MODE"], "first", "running service keeps the value it started with");
+
+    // No eligible service: nothing restarts, but the flag is recorded.
+    harness.stop_service(&config, "web").await?.assert_success();
+    let restart = harness
+        .run_cli(&["-f", config_str, "restart", "-D", "MODE=third"])
+        .await?;
+    restart.assert_success();
+    assert!(restart.stdout_contains("No eligible services") || restart.stderr_contains("No eligible services"));
+    assert_eq!(flags(&harness, &config).await?["MODE"], "third");
+
+    // The next start uses the recorded value.
+    harness.start_service(&config, "web").await?.assert_success();
+    harness
+        .wait_for_service_status(&config, "web", "running", Duration::from_secs(10))
+        .await?;
+    let inspect = harness
+        .run_cli(&["-f", config_str, "inspect", "web", "--environment"])
+        .await?;
+    let json: Value = serde_json::from_str(&inspect.stdout).unwrap();
+    assert_eq!(json["services"]["web"]["environment"]["MODE"], "third");
+
+    // recreate reloads the config from scratch: only its own -D survive.
+    harness.recreate_services(&config).await?.assert_success();
+    assert!(flags(&harness, &config).await?.get("MODE").is_none(), "recreate must drop previous flags");
+
+    harness.stop_daemon().await?;
+    Ok(())
+}
