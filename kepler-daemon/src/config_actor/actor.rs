@@ -807,7 +807,9 @@ impl ConfigActor {
                 let _ = reply.send(self.config_path.clone());
             }
             ConfigCommand::AllServicesStopped { reply } => {
-                let all_stopped = self.services.values().all(|s| !s.status.is_running());
+                // Any non-terminal status counts: a service still waiting or
+                // starting has a lifecycle in flight that a reload must stop.
+                let all_stopped = self.services.values().all(|s| !s.status.is_active());
                 let _ = reply.send(all_stopped);
             }
 
